@@ -768,6 +768,8 @@ program error_scenarios
         call scenario_open_reader_nrows_zero_rows()
     case ("open_writer_bad_path")
         call scenario_open_writer_bad_path()
+    case ("open_writer_empty_schema")
+        call scenario_open_writer_empty_schema()
     case ("write_string_matrix_exceeds_array_size")
         call scenario_write_string_matrix_exceeds_array_size()
     case ("write_string_exceeds_array_size")
@@ -852,6 +854,8 @@ program error_scenarios
         call scenario_qc_int64_strict_operators()
     case ("qc_int64_values_fractional_bound")
         call scenario_qc_int64_values_fractional_bound()
+    case ("qc_int64_bound_exact_via_real")
+        call scenario_qc_int64_bound_exact_via_real()
     case ("qc_warning_float64")
         call scenario_qc_warning_float64()
     case ("qc_warning_string")
@@ -8220,6 +8224,34 @@ contains
         print '(a)', "unexpectedly opened a bad path for writing without error"
     end subroutine scenario_open_writer_bad_path
 
+    !> A schema variable that was DECLARED and never built is the one shape `parquet_open_writer`
+    !! cannot make sense of, and it must say so rather than proceed.
+    !!
+    !! The guard fires on a schema that is neither parsed nor carrying any MAML text -- i.e.
+    !! nothing called `%init`/`%add_field`, nothing loaded a `.maml` file, and nothing populated
+    !! `%maml%lines` directly. That is exactly a default-initialized `type(parquet_schema)`, which
+    !! is what a caller has the moment they declare one and forget to fill it in, so the abort is
+    !! a plain user mistake rather than an internal invariant.
+    !!
+    !! **Without the guard this does not fail loudly**: `parquet_parse_maml` would be handed no
+    !! lines at all and the writer would go on to size its column arrays from an empty `%cinfo`,
+    !! producing a file with no columns while every call returned successfully. The message names
+    !! both ways out and the output file, per the writer-context convention.
+    !!
+    !! The control call comes first and uses the SAME writer variable with no schema at all, which
+    !! is a supported call: it proves the abort below is the empty schema and not the path, the
+    !! filename or the writer.
+    subroutine scenario_open_writer_empty_schema()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+
+        call parquet_open_writer(writer, "test_run/error_scenario_empty_schema_control.parquet")
+        call parquet_close_writer(writer)
+        print '(a)', "control: a schema-less writer opened and closed"
+        call parquet_open_writer(writer, "test_run/error_scenario_empty_schema.parquet", schema)
+        print '(a)', "unexpectedly opened a writer with a schema that was never built"
+    end subroutine scenario_open_writer_empty_schema
+
     !> parquet_write_string_column (scalar) checks a string's trimmed length
     !> against the schema's declared array_size and error stops if exceeded;
     !> parquet_write_string_matrix_column (this scenario) previously had no
@@ -8991,6 +9023,81 @@ contains
         call parquet_write_column(writer, "frac_ok", frac_ok)
         call parquet_close_writer(writer)
     end subroutine scenario_qc_int64_values_fractional_bound
+
+    !> The OTHER half of `qc_bound_as_int64`: the exact conversion and the range guard, neither of
+    !! which the sibling scenario above can reach.
+    !!
+    !! `qc_numeric_i64` takes its exact int64 bound from the declared TEXT first
+    !! (`parquet_qc_bound_as_int64_text`), which accepts an optional sign and digits and nothing
+    !! else -- so `10.0` is rejected by it even though the value is a whole number, and
+    !! `qc_bound_as_int64` is what recovers the exact bound by rounding. The scenario above reaches
+    !! that function only with a genuinely FRACTIONAL bound, where it returns at its very first
+    !! test; everything past that test needs a bound whose text is not a plain integer but whose
+    !! value is.
+    !!
+    !! **The four columns are the two answers the function can give, each with its control.**
+    !!
+    !! `mixed` declares a min PAST 2**53 written as a real (recovered exactly) beside a fractional
+    !! max (not recoverable) -- the only shape in which one bound is exact and the other is not,
+    !! which is the report arm that renders the minimum as an integer and the maximum as the real
+    !! it is. The magnitude is what makes the two answers tell each other apart: the real
+    !! formatter prints a bare integer only below 1e15, so an unrecovered bound of this size comes
+    !! out as `0.9007199E+16` while a recovered one comes out in full.
+    !!
+    !! `past53`/`at53` prove the recovered bound is what the COMPARISON used, not merely what the
+    !! message printed. Both declare `max: 9007199254740992.0`; `past53` holds 2**53 + 1, which
+    !! violates in int64 and does NOT violate once widened to real64 (the two are the same real),
+    !! so it must warn -- and `at53` holds 2**53 exactly, which violates under neither, so it must
+    !! stay silent. A checker that warned about every column could not pass both.
+    !!
+    !! `too_big` declares a bound beyond int64's range, which the range guard must decline rather
+    !! than convert: a conversion that ignored the range would wrap it and judge every value
+    !! against a nonsense bound while still warning about something.
+    !!
+    !! Every column is declared `float64` and written from `integer(int64)` values, because that is
+    !! the only way a non-integer bound and an int64 value meet at all -- an int32/int64 schema
+    !! type rejects such a bound outright at parse time.
+    subroutine scenario_qc_int64_bound_exact_via_real()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int64) :: mixed(2) = [5_int64, 200_int64]      !! below 2**53 and above 99.5: both violate.
+        !> Two rows each, like every other column here -- a writer holds one row count for the
+        !! whole file, so a one-row column would abort before qc ever ran.
+        integer(int64) :: past53(2) = [9007199254740993_int64, 9007199254740993_int64] !! 2**53 + 1.
+        integer(int64) :: at53(2) = [9007199254740992_int64, 9007199254740992_int64]   !! 2**53 exactly.
+        integer(int64) :: too_big(2) = [5_int64, 200_int64]     !! both below 1.0e20: both violate its min.
+
+        schema%maml%name = "qc_int64_bound_exact.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: qc_table", &
+            "fields:", &
+            "- name: mixed", &
+            "  data_type: float64", &
+            "  qc:", &
+            "    min: 9007199254740992.0", &
+            "    max: 99.5", &
+            "- name: past53", &
+            "  data_type: float64", &
+            "  qc:", &
+            "    max: 9007199254740992.0", &
+            "- name: at53", &
+            "  data_type: float64", &
+            "  qc:", &
+            "    max: 9007199254740992.0", &
+            "- name: too_big", &
+            "  data_type: float64", &
+            "  qc:", &
+            "    min: 1.0e20" ]
+
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_qc_int64_bound_exact.parquet", schema, qc=.true.)
+        call parquet_write_column(writer, "mixed", mixed)
+        call parquet_write_column(writer, "past53", past53)
+        call parquet_write_column(writer, "at53", at53)
+        call parquet_write_column(writer, "too_big", too_big)
+        call parquet_close_writer(writer)
+    end subroutine scenario_qc_int64_bound_exact_via_real
 
     !> Write-time qc has one checker per value kind, and float64's (qc_numeric_r64) was the only
     !> one never observed reporting a violation -- the existing scenarios cover int32, int64 and

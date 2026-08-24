@@ -243,6 +243,8 @@ contains
                 test_fortran_engine_ab_families), &
             new_unittest("engine: the Fortran engine matches C++ on every operation that is not a sort", &
                 test_fortran_engine_ab_operations), &
+            new_unittest("engine: the two engines agree on string, real and two-key rank queries", &
+                test_engine_ab_string_real_ts), &
             new_unittest("engine: the Fortran engine threads without changing its answer", &
                 test_fortran_engine_threading), &
             new_unittest("engine: the Fortran sort matches on degenerate input shapes", &
@@ -290,7 +292,9 @@ contains
             new_unittest("engine: Design B refines a sub-bucket that is itself oversized", &
                 test_engine_refine_two_levels), &
             new_unittest("the threaded real32 and logical extractions agree with the serial ones", &
-                test_tail_extraction_real32_logical) &
+                test_tail_extraction_real32_logical), &
+            new_unittest("the threaded date and time extractions agree with the serial ones", &
+                test_tail_extraction_date_time) &
             ]
     end subroutine collect_tests_parquet_sorting
     !
@@ -6064,6 +6068,52 @@ contains
         integer(int64) :: a, b
         logical :: fl, cl, fl_rev
         integer :: fc, cc
+        integer(int64) :: sweep_less, sweep_cmp !! the two batched hooks' answers over this fixture.
+        type(pf_sort_keys) :: empty_keys        !! never `%add`ed to, for the unusable-input arms.
+        !
+        ! ---- the two BATCHED comparator hooks, against an oracle that shares none of their code ----
+        !
+        ! `parquet_debug_sort_sweep_less`/`_compare` exist for bench/benchmark_sort_comparator.f90,
+        ! which needs the comparator's own cost rather than the cost of reaching it -- so they loop
+        ! inside `parquet_sorting` and nothing in the library calls them. That leaves them with no
+        ! caller a test run ever reaches, and their checksums are what the benchmark's C++/Fortran
+        ! comparison rests on: a sweep that walked the wrong pairs would make both arms of that
+        ! comparison meaningless while still printing a plausible number.
+        !
+        ! **The oracle is combinatorial, not a second sweep.** With `nreps = n - 1` the stride walk
+        ! (`stride = 1 + mod(rep, n - 1)`, then `j = i + stride` wrapped) visits each stride 1..n-1
+        ! once for every `i`, which is exactly every ordered pair `(i, j)` with `i /= j`, once. The
+        ! row order is STRICT and TOTAL -- that is what `sweep_pairs` asserts below, pair by pair --
+        ! so of each unordered pair exactly one direction is `less`, giving `n*(n-1)/2`; and
+        ! `sort_keys_compare` is antisymmetric, so the same walk sums to zero whatever the prefix.
+        ! Neither figure knows anything about the fixture, so a hook that dropped a stride, walked
+        ! `i` twice or wrapped wrongly cannot coincide with it.
+        if (n >= 2_int64) then
+            sweep_less = parquet_debug_sort_sweep_less(keys, n, n - 1_int64)
+            call check(error, sweep_less == n * (n - 1_int64) / 2_int64, &
+                label // ": the batched less-sweep must count each unordered pair exactly once")
+            if (allocated(error)) return
+            sweep_cmp = parquet_debug_sort_sweep_compare(keys, n, n - 1_int64, nkeys)
+            call check(error, sweep_cmp == 0_int64, &
+                label // ": the batched compare-sweep must sum to zero by antisymmetry")
+            if (allocated(error)) return
+        end if
+        ! Both unusable-input arms, since a hook that answered -1 unconditionally would satisfy
+        ! every assertion above by never running at all: an empty key set, and a row count with no
+        ! pair in it. The second is asked of the REAL key set, so it is the guard being tested and
+        ! not the emptiness.
+        call check(error, parquet_debug_sort_sweep_less(empty_keys, n, 1_int64) == -1_int64, &
+            label // ": the less-sweep must decline a key set nothing was added to")
+        if (allocated(error)) return
+        call check(error, parquet_debug_sort_sweep_compare(empty_keys, n, 1_int64, nkeys) == -1_int64, &
+            label // ": the compare-sweep must decline a key set nothing was added to")
+        if (allocated(error)) return
+        call check(error, parquet_debug_sort_sweep_less(keys, 1_int64, 1_int64) == -1_int64, &
+            label // ": the less-sweep must decline a single row, which has no pair to compare")
+        if (allocated(error)) return
+        call check(error, parquet_debug_sort_sweep_compare(keys, 1_int64, 1_int64, nkeys) == -1_int64, &
+            label // ": the compare-sweep must decline a single row too")
+        if (allocated(error)) return
         !
         do a = 1_int64, n
             do b = 1_int64, n
@@ -6941,6 +6991,223 @@ contains
         integer(int64) :: n !! threads resolved for the last Fortran-engine build.
         n = parquet_debug_sort_threads_used()
     end function fortran_threads_used
+    !
+    !> The A/B sweep for the key families the integer one cannot reach: STRING, REAL and a
+    !> TWO-key timestamp.
+    !!
+    !! **What this covers that `test_fortran_engine_ab_operations` does not.** That test drives the
+    !! whole operation set through an `integer(int32)` fixture, so on the C++ side it only ever
+    !! reaches the `case default` (SK_INT) arm of each one-shot dispatch in
+    !! src/parquet_sorting_oracle.f90, and only ever the single-key branch. Four dispatch arms and
+    !! one branch are therefore reachable from nowhere else in the suite:
+    !! `engine_one_shot_partial`'s SK_STR, `engine_one_shot_nth`'s SK_REAL and SK_STR,
+    !! `engine_one_shot_is_sorted`'s SK_STR, and the multi-key builder path of ALL THREE of
+    !! `oracle_nth`, `oracle_partial` and `oracle_is_sorted` -- which a `parquet_timestamp` is the
+    !! way in to, since it binds as two integer keys (`extract_ts`,
+    !! src/parquet_sorting_keys.f90) while `pf_nth_element` and `pf_partial_sort` have no
+    !! `pf_sort_keys` form at all.
+    !!
+    !! **A multi-key path is not the single-key one with a loop around it.** Each of those three
+    !! procedures shortcuts to a one-shot entry point at `size(keys) == 1` and otherwise builds a
+    !! C++ sort builder, feeds it key by key and checks the returned status -- a different entry
+    !! point, a different lifetime and an error arm that the shortcut does not have.
+    !!
+    !! **These arms differ from each other by one C++ entry point name**, which is precisely the
+    !! kind of difference that is invisible until something asks: a `case` wired to the int64 entry
+    !! point for a real key still returns a plausible rank, and would be caught by nothing here
+    !! except a comparison against the Fortran engine over the same data.
+    !!
+    !! Every fixture is duplicate-heavy for the reason stated at the head of this section: the tie
+    !! rules are what the two engines can disagree about while both remaining correctly sorted.
+    subroutine test_engine_ab_string_real_ts(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        !> Unordered, with a three-way tie on "pear" and a two-way one on "fig", so the index
+        !! tiebreaker decides several ranks rather than none.
+        character(len=6), parameter :: sv(9) = &
+            [character(len=6) :: "pear", "fig", "apple", "pear", "plum", "fig", "kiwi", "pear", "date"]
+        character(len=6), parameter :: sorted_sv(4) = &
+            [character(len=6) :: "apple", "date", "fig", "fig"]
+        real(real64), parameter :: rv(9) = &
+            [3.5_real64, -1.0_real64, 3.5_real64, 8.25_real64, 0.0_real64, &
+             -1.0_real64, 12.0_real64, 3.5_real64, 2.0_real64]
+        !> Six instants sharing ONE second, so the nanosecond -- the SECOND engine key -- decides
+        !! every rank. Two nanosecond values repeat, so the index tiebreaker decides two of them.
+        integer(int32), parameter :: tns(6) = [500, 100, 500, 300, 100, 700]
+        type(parquet_timestamp) :: tv(size(tns))
+        integer(int64) :: csec, fsec                        !! per-engine nth timestamp seconds.
+        integer(int32) :: cns, fns                          !! per-engine nth timestamp nanoseconds.
+        character(len=:), allocatable :: cs, fs             !! per-engine nth string value.
+        character(len=6), allocatable :: cps(:), fps(:)     !! per-engine partial-sorted strings.
+        real(real64) :: crv, frv                            !! per-engine nth real value.
+        type(parquet_timestamp) :: cts, fts                 !! per-engine nth timestamp.
+        integer(int64) :: ci, fi                            !! per-engine nth row index.
+        logical :: cok, fok                                 !! per-engine is_sorted answers.
+        type(parquet_timestamp), allocatable :: cpt(:), fpt(:) !! per-engine partial-sorted instants.
+        integer(int64), allocatable :: tperm(:)             !! puts `tv` in rank order for the sorted arm.
+        integer :: k
+        character(len=32) :: kstr
+        !
+        ! `set_raw` rather than `set`: the pair the engine actually extracts is (seconds,
+        ! nanoseconds), and setting it directly is what makes the fixture's shared second exact
+        ! rather than a consequence of civil-field arithmetic.
+        do k = 1, size(tv)
+            call tv(k)%set_raw(100_int64, tns(k))
+        end do
+        !
+        ! ---- nth on a STRING key: engine_one_shot_nth's SK_STR arm ----
+        ! Every rank, so the ties at ranks 3-4 ("fig") and 6-8 ("pear") are each asked about from
+        ! both sides rather than only in the middle.
+        do k = 1, size(sv)
+            write (kstr, "(i0)") k
+            call parquet_debug_use_fortran_sort_engine(.false.)
+            call pf_nth_element(sv, k, cs, ci)
+            call parquet_debug_use_fortran_sort_engine(.true.)
+            call pf_nth_element(sv, k, fs, fi)
+            call restore_engine_default()
+            call check(error, cs == fs, &
+                "string nth rank=" // trim(kstr) // ": the two engines returned different values")
+            if (allocated(error)) return
+            ! The INDEX too: under the index tiebreaker exactly one row holds each rank, so a
+            ! disagreement on the tied "fig"/"pear" rows is a real defect that values alone hide.
+            call check(error, ci == fi, &
+                "string nth rank=" // trim(kstr) // ": the two engines returned different row indices")
+            if (allocated(error)) return
+        end do
+        !
+        ! ---- nth on a REAL key: engine_one_shot_nth's SK_REAL arm ----
+        do k = 1, size(rv)
+            write (kstr, "(i0)") k
+            call parquet_debug_use_fortran_sort_engine(.false.)
+            call pf_nth_element(rv, k, crv, ci)
+            call parquet_debug_use_fortran_sort_engine(.true.)
+            call pf_nth_element(rv, k, frv, fi)
+            call restore_engine_default()
+            call check(error, crv == frv, &
+                "real nth rank=" // trim(kstr) // ": the two engines returned different values")
+            if (allocated(error)) return
+            call check(error, ci == fi, &
+                "real nth rank=" // trim(kstr) // ": the two engines returned different row indices")
+            if (allocated(error)) return
+        end do
+        !
+        ! ---- nth on a TWO-key timestamp: oracle_nth's builder path ----
+        ! The single-key shortcut above it (`size(keys) == 1`) is what every other nth call in the
+        ! suite takes, so this is the only thing that builds a C++ sort builder for a rank query at
+        ! all -- including the `status`/`idx` check that follows the build.
+        do k = 1, size(tv)
+            write (kstr, "(i0)") k
+            call parquet_debug_use_fortran_sort_engine(.false.)
+            call pf_nth_element(tv, k, cts, ci)
+            call parquet_debug_use_fortran_sort_engine(.true.)
+            call pf_nth_element(tv, k, fts, fi)
+            call restore_engine_default()
+            call cts%get_raw(csec, cns)
+            call fts%get_raw(fsec, fns)
+            call check(error, csec == fsec .and. cns == fns, &
+                "timestamp nth rank=" // trim(kstr) // ": the two engines returned different values")
+            if (allocated(error)) return
+            call check(error, ci == fi, &
+                "timestamp nth rank=" // trim(kstr) // ": the two engines returned different row indices")
+            if (allocated(error)) return
+        end do
+        ! Absolute, not just an A/B: with every row sharing a second, a chain that consulted only
+        ! the first key would return whichever row it happened to reach and both engines could
+        ! agree on it. Rank 1 must be the smallest nanosecond, which is row 5 (k*7 mod 5 = 0).
+        call check(error, fi > 0_int64, "the timestamp rank must resolve to a real row")
+        if (allocated(error)) return
+        call pf_nth_element(tv, 1, fts, fi)
+        call fts%get_raw(fsec, fns)
+        call check(error, fns == 100 .and. fi == 2_int64, &
+            "the timestamp nth must consult the SECOND key: rank 1 is row 2, the first ns=100 row")
+        if (allocated(error)) return
+        !
+        ! ---- partial sort on a STRING key: engine_one_shot_partial's SK_STR arm ----
+        do k = 1, 4
+            write (kstr, "(i0)") k
+            call parquet_debug_use_fortran_sort_engine(.false.)
+            call pf_partial_sort(sv, cps, k)
+            call parquet_debug_use_fortran_sort_engine(.true.)
+            call pf_partial_sort(sv, fps, k)
+            call restore_engine_default()
+            call check(error, size(cps) == size(fps), &
+                "string partial n=" // trim(kstr) // ": the two engines returned different lengths")
+            if (allocated(error)) return
+            call check(error, all(cps == fps), &
+                "string partial n=" // trim(kstr) // ": the Fortran engine disagreed with the C++ one")
+            if (allocated(error)) return
+        end do
+        ! Absolute, so that two engines agreeing on the wrong four strings cannot pass.
+        call check(error, all(fps == sorted_sv), &
+            "the first four strings in order must be apple, date, fig, fig")
+        if (allocated(error)) return
+        !
+        ! ---- is_sorted on a STRING key: engine_one_shot_is_sorted's SK_STR arm ----
+        ! Both answers, since a procedure that always says .true. passes a one-sided test.
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call pf_is_sorted(sv, cok)
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        call pf_is_sorted(sv, fok)
+        call restore_engine_default()
+        call check(error, (.not. cok) .and. (cok .eqv. fok), &
+            "is_sorted on unordered strings: both engines must answer .false.")
+        if (allocated(error)) return
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call pf_is_sorted(sorted_sv, cok)
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        call pf_is_sorted(sorted_sv, fok)
+        call restore_engine_default()
+        call check(error, cok .and. (cok .eqv. fok), &
+            "is_sorted on ordered strings WITH A TIE: both engines must answer .true.")
+        if (allocated(error)) return
+        !
+        ! ---- partial sort on a TWO-key timestamp: oracle_partial's builder path ----
+        do k = 1, 3
+            write (kstr, "(i0)") k
+            call parquet_debug_use_fortran_sort_engine(.false.)
+            call pf_partial_sort(tv, cpt, k)
+            call parquet_debug_use_fortran_sort_engine(.true.)
+            call pf_partial_sort(tv, fpt, k)
+            call restore_engine_default()
+            call check(error, size(cpt) == size(fpt), &
+                "timestamp partial n=" // trim(kstr) // ": the two engines returned different lengths")
+            if (allocated(error)) return
+            call cpt(k)%get_raw(csec, cns)
+            call fpt(k)%get_raw(fsec, fns)
+            call check(error, csec == fsec .and. cns == fns, &
+                "timestamp partial n=" // trim(kstr) // ": the two engines disagreed on entry " // trim(kstr))
+            if (allocated(error)) return
+        end do
+        ! Absolute, so that two engines agreeing on the wrong three instants cannot pass. Sorted by
+        ! nanosecond with the index tiebreaker, the first three rows are 2 (100), 5 (100), 4 (300).
+        call fpt(1)%get_raw(fsec, fns)
+        call check(error, fns == 100, "the earliest instant must be one of the two ns=100 rows")
+        if (allocated(error)) return
+        call fpt(3)%get_raw(fsec, fns)
+        call check(error, fns == 300, &
+            "the third instant must be ns=300: a chain ignoring the second key could not know that")
+        if (allocated(error)) return
+        !
+        ! ---- is_sorted on a TWO-key timestamp: oracle_is_sorted's builder path ----
+        ! Both answers again, and the ordered arm is the `tv` rows in rank order rather than a
+        ! second fixture, so the two arms differ only in their order.
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call pf_is_sorted(tv, cok)
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        call pf_is_sorted(tv, fok)
+        call restore_engine_default()
+        call check(error, (.not. cok) .and. (cok .eqv. fok), &
+            "is_sorted on unordered timestamps: both engines must answer .false.")
+        if (allocated(error)) return
+        call pf_argsort(tv, tperm)
+        call pf_permute(tv, tperm)
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call pf_is_sorted(tv, cok)
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        call pf_is_sorted(tv, fok)
+        call restore_engine_default()
+        call check(error, cok .and. (cok .eqv. fok), &
+            "is_sorted on the SAME timestamps once sorted: both engines must answer .true.")
+    end subroutine test_engine_ab_string_real_ts
     !
     subroutine test_fortran_engine_ab_operations(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
@@ -9102,5 +9369,81 @@ contains
         call check(error, all(gotn == refn), &
             "a threaded logical extraction must place the nulls exactly as the serial one does")
     end subroutine test_tail_extraction_real32_logical
+    !
+    !> The same tail check for the two element types whose extraction lives one tier UP.
+    !!
+    !! **Why this is a separate test from the one above rather than two more arms of it.** The six
+    !! intrinsic types extract in `src/parquet_argsort_kernel.f90`, the Arrow-free argsort tier;
+    !! `parquet_date` and `parquet_time` extract in `src/parquet_sorting_keys.f90`, which is what
+    !! `parquet_sorting` adds on top. `extract_date_par`/`extract_time_par` are therefore a second,
+    !! independent copy of the pre-fill-then-extract pattern -- with their own `tail_team` call, own
+    !! static schedules and own blanket fill -- and nothing in the tier below can exercise them.
+    !!
+    !! **`parquet_timestamp` is deliberately absent**: it binds as TWO integer keys and its
+    !! extraction has no threaded arm at all, so there is nothing here for it to test.
+    !!
+    !! The fixture carries nulls because a date's null state lives inside the element rather than in
+    !! a caller's mask, so the serial and threaded arms must agree about where the nulls land as well
+    !! as about the values -- and the validity pass is the one part of `extract_date` the threaded
+    !! arm does NOT take over, which is exactly the seam a wrong split would show up at.
+    subroutine test_tail_extraction_date_time(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer, parameter :: n = 4096
+        type(parquet_date) :: dv(n)
+        type(parquet_time) :: tv(n)
+        integer(int64), allocatable :: refd(:), gotd(:), reft(:), gott(:)
+        integer :: i, day, sec
+        ! **Preconditions, declared rather than assumed.** With the threaded branches preprocessed
+        ! out, or on a machine where an explicit threads= clamps back to 1, both arms below are the
+        ! same serial code and every assertion passes without testing anything.
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: extract_date_par and extract_time_par " // &
+            "(src/parquet_sorting_keys.f90) sit inside #ifdef _OPENMP, so both arms below " // &
+            "would run the same serial code and the equality would hold for the wrong reason")
+        return
+#else
+        if (omp_get_num_procs() < 2) then
+            call skip_test(error, "needs at least two processors: resolve_thread_count clamps " // &
+                "an explicit threads= to omp_get_num_procs(), so threads=4 resolves to 1 here " // &
+                "and no tail pass is threaded")
+            return
+        end if
+#endif
+        !
+        ! Neither ordered nor reverse-ordered, with ties every few rows and every eleventh element
+        ! left null, so an extraction that dropped, duplicated or misplaced a chunk cannot coincide
+        ! with the right answer.
+        do i = 1, n
+            if (mod(i, 11) == 0) cycle              ! left null: a default-initialized element IS null
+            day = 1 + mod(i * 7919, 28)
+            call dv(i)%set(2000 + mod(i * 31, 40), 1 + mod(i * 7, 12), day)
+            sec = mod(i * 7919, 86400)
+            call tv(i)%set(sec / 3600, mod(sec / 60, 60), mod(sec, 60))
+        end do
+        !
+        ! Restored BEFORE the first assertion: every `check` can return early, and a leaked floor
+        ! would silently rethread every later test in this suite.
+        call parquet_debug_set_sort_tail_min_rows(1_int64)
+        call pf_argsort(dv, gotd, threads=4)
+        call pf_argsort(tv, gott, threads=4)
+        call parquet_debug_set_sort_tail_min_rows(-1_int64)
+        !
+        call pf_argsort(dv, refd, threads=1)
+        call pf_argsort(tv, reft, threads=1)
+        !
+        call check(error, size(gotd) == n, "the forced-floor run must still return n indices")
+        if (allocated(error)) return
+        call check(error, all(gotd == refd), &
+            "a threaded parquet_date extraction must give the serial permutation exactly")
+        if (allocated(error)) return
+        call check(error, all(gott == reft), &
+            "a threaded parquet_time extraction must give the serial permutation exactly")
+        if (allocated(error)) return
+        ! Absolute, not just an A/B: both arms agreeing on a permutation that put the nulls in the
+        ! wrong place would still agree. Every eleventh row is null and nulls sort last by default,
+        ! so the final `n/11` entries of the permutation must be exactly the null rows.
+        call check(error, all([(mod(int(gotd(i), int32), 11) == 0, i = n - n / 11 + 1, n)]), &
+            "the threaded date sort must still place every null row in the trailing null tier")
+    end subroutine test_tail_extraction_date_time
     !
 end module test_sorting

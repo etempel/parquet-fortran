@@ -701,7 +701,9 @@ contains
             new_unittest("parquet_open_reader(nrows=) with a filter matching zero rows aborts", &
                 test_open_reader_nrows_zero_rows_aborts), &
             new_unittest("opening a writer at a bad path aborts", &
-                test_open_writer_bad_path_aborts) &
+                test_open_writer_bad_path_aborts), &
+            new_unittest("opening a writer with a schema that was never built aborts", &
+                test_open_writer_empty_schema_aborts) &
             ]
         p4 = [ &
             new_unittest("writing an over-length string into a fixed-size string matrix column aborts", &
@@ -6306,6 +6308,36 @@ contains
         call check_scenario_exit_status(error, "open_writer_bad_path", expect_abort=.true., &
             failure_message="opening a writer at a path under a nonexistent directory was expected to abort")
     end subroutine test_open_writer_bad_path_aborts
+
+    !> A `parquet_schema` that was declared and never built must be refused, not silently written
+    !> as a file with no columns at all.
+    !>
+    !> **Asserted by MESSAGE and with a CONTROL, because exit status alone proves neither half.**
+    !> The scenario opens and closes a schema-less writer first, so a failure here separates "the
+    !> empty schema was rejected" from "this path, this filename or this writer could not be
+    !> opened at all". And the required text is what tells the caller which of the two ways out
+    !> they have -- an abort with the wrong message would leave them looking at the filename.
+    subroutine test_open_writer_empty_schema_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat
+        logical :: found
+
+        call run_error_scenario("open_writer_empty_schema", exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat /= 0, &
+            "opening a writer with a schema that was never built was expected to abort")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, "control: a schema-less writer", found)
+        call check(error, found, &
+            "a writer with NO schema must open first, or the abort below says nothing about the schema")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, &
+            "parquet_open_writer: schema is empty -- build it with schema%init/%add_field", found)
+        call check(error, found, &
+            "the abort must name the empty schema and both ways of filling it in")
+    end subroutine test_open_writer_empty_schema_aborts
 
     !> parquet_write_string_matrix_column previously had no array_size check
     !> (unlike the scalar parquet_write_string_column), silently truncating

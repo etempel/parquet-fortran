@@ -88,6 +88,8 @@ contains
                 test_qc_warning_printed_for_numeric_violation), &
             new_unittest("qc=.true. WARNING for a fractional bound uses fractional formatting", &
                 test_qc_warning_printed_for_fractional_bound), &
+            new_unittest("a qc bound that is integral but not written as an integer is judged in " // &
+                "int64", test_qc_bound_recovered_exactly_from_real), &
             new_unittest("qc: a strict min:/max: operator excludes the boundary value", &
                 test_qc_int64_strict_operators), &
             new_unittest("qc: a fractional bound still checks int64 values, in real64", &
@@ -245,6 +247,8 @@ contains
                 "by streaming", test_streaming_get_chunk_size), &
             new_unittest("streaming row-group write: a chunk is converted to the schema's declared numeric " // &
                 "type, exactly as a whole-column write is", test_streaming_chunk_converts_to_schema_type), &
+            new_unittest("streaming row-group write: every source kind converts to every declared " // &
+                "numeric type", test_streaming_chunk_converts_every_source_kind), &
             new_unittest("closing a writer with nothing written keeps the schema and writes 0 rows", &
                 test_close_writer_no_columns_written), &
             new_unittest("a zero-length write registers its column for every declared type", &
@@ -1267,6 +1271,66 @@ contains
         call check(error, found_bound_text, &
             "expected the qc violation WARNING to include the fractionally-formatted bound '0.5'")
     end subroutine test_qc_warning_printed_for_fractional_bound
+
+    !> `qc_bound_as_int64` recovers an exact int64 bound from a real one, and DECLINES when it
+    !> cannot -- two answers, and each needs its own control.
+    !!
+    !! `qc_numeric_i64` takes its exact bound from the declared TEXT first, and that parser accepts
+    !! an optional sign and digits only -- so `9007199254740992.0` is rejected by it although the
+    !! value is a whole number, and `qc_bound_as_int64` is what recovers it. The only other
+    !! scenario reaching that function passes a genuinely fractional bound, where it returns at its
+    !! very first test; nothing else exercises its range guard or its conversion.
+    !!
+    !! **The bound is past 2**53 deliberately, and that is what makes the test discriminating
+    !! rather than decorative.** A first version used `min: 10.0`, and a mutation making the
+    !! recovery always fail did not fail it: `parquet_qc_format_real` itself prints an integral
+    !! value below 1e15 as a bare integer, so both answers rendered `min >= 10` and the message
+    !! could not tell them apart. Past 1e15 the real formatter switches to `g0.7`, so an
+    !! unrecovered bound prints as `0.9007199E+16` where a recovered one prints in full.
+    !!
+    !! **`past53`/`at53` then prove the recovered bound is what the COMPARISON used**, not merely
+    !! what the message printed. Both declare `max: 9007199254740992.0`; 2**53 + 1 violates it in
+    !! int64 and does not once widened to real64 (the two are the same real), so `past53` must warn
+    !! and `at53`, holding 2**53 exactly, must not. `too_big` is the range guard's own control: a
+    !! bound past int64's range must be declined and compared in real64, so it prints in exponent
+    !! form rather than as the wrapped integer a conversion ignoring the range would produce.
+    subroutine test_qc_bound_recovered_exactly_from_real(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: exitstat, cmdstat
+        character(len=:), allocatable :: out_file, err_file
+        logical :: found
+
+        call run_error_scenario("qc_int64_bound_exact_via_real", exitstat, cmdstat, out_file, err_file)
+
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat == 0, "a qc violation must warn, never error stop")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, &
+            "column 'mixed': declared min >= 9007199254740992, max <= 99.5", found)
+        call check(error, found, &
+            "min: 9007199254740992.0 must be recovered as that exact int64 bound and printed as " // &
+            "one, while the fractional max: 99.5 stays a real -- the mixed-exactness report arm")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, "column 'past53'", found)
+        call check(error, found, &
+            "2**53 + 1 violates max: 9007199254740992.0 in int64 and not in real64, so the " // &
+            "recovered bound must be what the comparison used")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, "column 'at53'", found)
+        call check(error, .not. found, &
+            "2**53 satisfies that same bound exactly, so this column must stay silent -- without " // &
+            "it the assertion above would pass against a checker that warned about everything")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, "column 'too_big': declared min >= 0.1", found)
+        call check(error, found, &
+            "a bound past int64's range must be DECLINED by the range guard and compared in " // &
+            "real64, so it prints in exponent form rather than as a wrapped integer")
+    end subroutine test_qc_bound_recovered_exactly_from_real
 
     !> An int64 qc bound is judged in int64, not after widening every value to real64: a value of
     !> 2**53 + 1 against `max: 2**53` violates, and must be reported as such even though the two
@@ -3489,13 +3553,38 @@ contains
         character(len=*), parameter :: out_file = "test_run/test_close_no_columns_written.parquet"
         integer(int64) :: nrows
         integer :: col_size
-        character(len=:), allocatable :: names(:), unit
+        character(len=:), allocatable :: names(:), unit, type_name
         integer(int32), allocatable :: back(:)
+        !> Every data_type the empty-close fallback has an arm for, and the type each must be
+        !! STORED as. **All nine are named on purpose.** `parquet_close_writer`'s fallback is a
+        !! `select case` over the declared type with one `parquet_write_<type>_column` call per
+        !! arm, so a schema naming only some of them leaves the rest of that switch unexercised --
+        !! and an arm calling the wrong writer produces a column of the wrong type in a file that
+        !! still has the right column count and still reads back as zero rows.
+        !!
+        !! **How much this discriminates differs by arm, and it is worth knowing which.** The
+        !! temporal, boolean and string arms are pinned exactly: pointing one of them at another
+        !! type's writer fails here (confirmed by mutation). The four NUMERIC arms are
+        !! interchangeable with each other and cannot be, because every `parquet_write_<numeric>_column`
+        !! coerces to the schema's declared type on its own -- so writing the empty `int32` array
+        !! into an `int64` column still stores int64. That is the library working as designed, not
+        !! a gap to close: what is asserted for those four is that each arm exists and produces its
+        !! declared type, which is what the fallback promises.
+        character(len=8), parameter :: empty_cols(9) = [character(len=8) :: &
+            "id", "count", "flux", "mass", "flag", "tag", "night", "clock", "when"]
+        character(len=9), parameter :: empty_types(9) = [character(len=9) :: &
+            "int32", "int64", "float32", "float64", "boolean", "string", "date", "time", "timestamp"]
+        integer :: k
 
         call schema%init(table="empty_close")
         call schema%add_field("id", "int32")
+        call schema%add_field("count", "int64")
+        call schema%add_field("flux", "float32")
         call schema%add_field("mass", "float64", unit="Msun")
+        call schema%add_field("flag", "boolean")
         call schema%add_field("tag", "string", array_size=6)
+        call schema%add_field("night", "date")
+        call schema%add_field("clock", "time[ms]")
         call schema%add_field("when", "timestamp[us]")
         call schema%add_field("vec", "int32", col_size=3)
         call schema%add_field("auto_vec", "int32", col_size=parquet_size_auto)
@@ -3510,13 +3599,30 @@ contains
         call parquet_get_col_size(reader, "auto_vec", col_size)
         allocate(back(0))
         call parquet_read_column(reader, "id", back)
-        call parquet_close_reader(reader)
 
         call check(error, nrows == 0_int64, "a writer closed with nothing written must produce a 0-row file")
-        if (allocated(error)) return
-        call check(error, size(names) == 6, &
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+        call check(error, size(names) == 11, &
             "every declared column must still be present -- not the 0-column file a schema-less writer gives")
-        if (allocated(error)) return
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+        ! The stored TYPE of each, not merely its presence: the column count above would be
+        ! satisfied by a fallback that wrote every empty column as int32.
+        do k = 1, size(empty_cols)
+            call parquet_get_column_type(reader, trim(empty_cols(k)), type_name)
+            call check(error, type_name == trim(empty_types(k)), "the empty-close fallback must store " // &
+                trim(empty_cols(k)) // " as " // trim(empty_types(k)) // ", not " // type_name)
+            if (allocated(error)) then
+                call parquet_close_reader(reader)
+                return
+            end if
+        end do
+        call parquet_close_reader(reader)
         call check(error, unit == "Msun", "the schema's column metadata must survive an empty close")
         if (allocated(error)) return
         call check(error, col_size == 1, "an unresolved col_size: auto must resolve to 1 on an empty close")
@@ -3699,6 +3805,173 @@ contains
         call check(error, all(wide_back == as_f64) .and. all(narrowed_back == int(f64_data, int32)), &
             "the whole-column and chunked write paths must produce the same values for one schema")
     end subroutine test_streaming_chunk_converts_to_schema_type
+
+    !> The rest of the chunked conversion matrix: every numeric SOURCE kind into every declared
+    !> target type.
+    !!
+    !! **Why this is a separate test rather than more columns on the one above.** That test
+    !! establishes the behaviour and its negative control, and it does so from an `int32` chunk
+    !! (plus one `float64`-to-`int32` narrowing). But the conversion is not one procedure with a
+    !! type switch: `parquet_write_numeric.f90` carries FOUR of them --
+    !! `parquet_append_as_schema_chunk_int32`/`_int64`/`_float32`/`_float64` -- one per source
+    !! kind, each with its own `select case` over the declared type and its own conversion
+    !! statements. An `int32` chunk therefore exercises exactly one of the four, and the arms of
+    !! the other three are reachable from nowhere else in the suite.
+    !!
+    !! **They differ from each other by a conversion, which is the failure this catches.** Three of
+    !! the twelve arms narrow through a checking helper that can abort
+    !! (`parquet_narrow_int64_to_int32`, `parquet_float64_to_int32`, `parquet_float64_to_int64`)
+    !! and the rest widen silently; an arm wired to the wrong helper, or to the wrong C++ append
+    !! entry point, still writes a file full of plausible numbers. Reading values back cannot
+    !! settle it on its own -- the read path converts too -- so each column's STORED type is
+    !! asserted with `parquet_get_column_type`, as in the test above.
+    !!
+    !! Values are exactly representable in every kind involved, `float32` included, so a wrong
+    !! conversion shows up as a wrong number rather than as a rounding difference.
+    subroutine test_streaming_chunk_converts_every_source_kind(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: out_file = "test_run/test_streaming_chunk_every_source.parquet"
+        !> One fixture per source kind, holding the same four values so every column below must
+        !! come back with the same numbers whatever route it took.
+        integer(int64), parameter :: i64_data(4) = [10_int64, -20_int64, 30_int64, -40_int64]
+        real(real32), parameter :: f32_data(4) = &
+            [10.0_real32, -20.0_real32, 30.0_real32, -40.0_real32]
+        real(real64), parameter :: f64_data(4) = &
+            [10.0_real64, -20.0_real64, 30.0_real64, -40.0_real64]
+        integer(int32) :: back_i32(4)
+        integer(int64) :: back_i64(4)
+        real(real32) :: back_f32(4)
+        real(real64) :: back_f64(4)
+        character(len=:), allocatable :: type_name
+        integer :: k
+        !> Every column, its declared type, and the source kind its chunk is written from. Kept as
+        !! one table so the sweep below cannot silently skip a pair.
+        character(len=10), parameter :: cols(11) = [character(len=10) :: &
+            "i64_to_i32", "i64_to_f32", "i64_to_f64", "i64_same  ", &
+            "f32_to_i32", "f32_to_i64", "f32_to_f64", "f32_same  ", &
+            "f64_to_i64", "f64_to_f32", "f64_same  "]
+        character(len=7), parameter :: decl(11) = [character(len=7) :: &
+            "int32  ", "float32", "float64", "int64  ", &
+            "int32  ", "int64  ", "float64", "float32", &
+            "int64  ", "float32", "float64"]
+
+        call schema%init(table="chunk_every_source_table")
+        do k = 1, size(cols)
+            call schema%add_field(trim(cols(k)), trim(decl(k)))
+        end do
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_new_row_group(writer, 4_int64)
+        ! The `*_same` columns are the negative controls, one per source kind: they take each
+        ! procedure's `case default` arm, so without them this test would pass against an
+        ! implementation that converted every chunk regardless of what the schema declared.
+        call parquet_write_column_chunk(writer, "i64_to_i32", i64_data)
+        call parquet_write_column_chunk(writer, "i64_to_f32", i64_data)
+        call parquet_write_column_chunk(writer, "i64_to_f64", i64_data)
+        call parquet_write_column_chunk(writer, "i64_same", i64_data)
+        call parquet_write_column_chunk(writer, "f32_to_i32", f32_data)
+        call parquet_write_column_chunk(writer, "f32_to_i64", f32_data)
+        call parquet_write_column_chunk(writer, "f32_to_f64", f32_data)
+        call parquet_write_column_chunk(writer, "f32_same", f32_data)
+        call parquet_write_column_chunk(writer, "f64_to_i64", f64_data)
+        call parquet_write_column_chunk(writer, "f64_to_f32", f64_data)
+        call parquet_write_column_chunk(writer, "f64_same", f64_data)
+        call parquet_finish_row_group(writer)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        ! The STORED type first, for every pair at once: it is what proves the conversion reached
+        ! the file rather than the reader.
+        do k = 1, size(cols)
+            call parquet_get_column_type(reader, trim(cols(k)), type_name)
+            call check(error, type_name == trim(decl(k)), "column " // trim(cols(k)) // &
+                " must be STORED as " // trim(decl(k)) // ", not " // type_name)
+            if (allocated(error)) then
+                call parquet_close_reader(reader)
+                return
+            end if
+        end do
+
+        call parquet_read_column(reader, "i64_to_i32", back_i32)
+        call check(error, all(back_i32 == int(i64_data, int32)), &
+            "an int64 chunk written to an int32 column must arrive narrowed")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+        call parquet_read_column(reader, "i64_to_f32", back_f32)
+        call check(error, all(back_f32 == real(i64_data, real32)), &
+            "an int64 chunk written to a float32 column must arrive as those values in float32")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+        call parquet_read_column(reader, "i64_to_f64", back_f64)
+        call check(error, all(back_f64 == real(i64_data, real64)), &
+            "an int64 chunk written to a float64 column must arrive as those values in float64")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+        call parquet_read_column(reader, "i64_same", back_i64)
+        call check(error, all(back_i64 == i64_data), &
+            "an int64 chunk written to an int64 column must still round-trip unchanged")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+
+        call parquet_read_column(reader, "f32_to_i32", back_i32)
+        call check(error, all(back_i32 == int(f32_data, int32)), &
+            "a float32 chunk written to an int32 column must arrive narrowed")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+        call parquet_read_column(reader, "f32_to_i64", back_i64)
+        call check(error, all(back_i64 == int(f32_data, int64)), &
+            "a float32 chunk written to an int64 column must arrive as those integers")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+        call parquet_read_column(reader, "f32_to_f64", back_f64)
+        call check(error, all(back_f64 == real(f32_data, real64)), &
+            "a float32 chunk written to a float64 column must arrive widened")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+        call parquet_read_column(reader, "f32_same", back_f32)
+        call check(error, all(back_f32 == f32_data), &
+            "a float32 chunk written to a float32 column must still round-trip unchanged")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+
+        call parquet_read_column(reader, "f64_to_i64", back_i64)
+        call check(error, all(back_i64 == int(f64_data, int64)), &
+            "a float64 chunk written to an int64 column must arrive as those integers")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+        call parquet_read_column(reader, "f64_to_f32", back_f32)
+        call check(error, all(back_f32 == real(f64_data, real32)), &
+            "a float64 chunk written to a float32 column must arrive narrowed to float32")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+        call parquet_read_column(reader, "f64_same", back_f64)
+        call parquet_close_reader(reader)
+        call check(error, all(back_f64 == f64_data), &
+            "a float64 chunk written to a float64 column must still round-trip unchanged")
+    end subroutine test_streaming_chunk_converts_every_source_kind
 
     subroutine test_streaming_write_schema_enforced_roundtrip(error)
         type(error_type), allocatable, intent(out) :: error

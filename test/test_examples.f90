@@ -370,7 +370,7 @@ contains
     !> they rewrite a loop for speed. The page prints `12.0` three times; if any of the three stops
     !> agreeing, the page's advice has become a correctness trap rather than a performance tip.
     !> The costs themselves are not asserted here — a timing assertion in a test suite is a flake,
-    !> and `tools/benchmark_colindex.sh` is what measures them.
+    !> and `bench/benchmark_colindex.sh` is what measures them.
     subroutine test_three_ways_example(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_table) :: t

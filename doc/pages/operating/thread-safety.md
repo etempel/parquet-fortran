@@ -128,7 +128,7 @@ call t%materialize_all()      ! reads the columns in parallel, internally
 Each thread drives its own reader, so nothing is shared and nothing needs a lock. This happens only
 when it is both safe and worth it: at least two columns to read, and more than one thread available.
 On a wide file this is several times faster than reading the columns one after another;
-`tools/benchmark_table.sh` measures it on your own hardware.
+`bench/benchmark_table.sh` measures it on your own hardware.
 
 **One large column is parallel too**, split across its **row groups** instead of its columns — so a
 `%get` or `%prefetch` of a single name is not serial just because there is only one of it:
@@ -164,7 +164,7 @@ exactly what a serial read would:
 Every one of them is faster than a serial read; they are ordered by how much serial work the
 transform leaves in front of the parallel part. The transformed cases fall short of the best case
 because that work is done once, before the parallel read begins — not because any of it is
-repeated. `tools/benchmark_table.sh` measures the ratios on your own machine (see CONTRIBUTING.md).
+repeated. `bench/benchmark_table.sh` measures the ratios on your own machine (see CONTRIBUTING.md).
 
 **Qc warnings are not duplicated by this.** A `qc_soft=.true.` violation prints at most once per
 column per reader, and each column is read by exactly one thread, so the parallel read prints
@@ -415,7 +415,7 @@ moment. `n` must be `>= 1`; values below that fail immediately with `error stop`
 (If you're developing `parquet-fortran` itself and want to measure how these two knobs actually
 affect write/read throughput on your own hardware, see
 [CONTRIBUTING.md](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/CONTRIBUTING.md#other-tools-helpers)'s
-`tools/benchmark_threads.sh` entry.)
+`bench/benchmark_threads.sh` entry.)
 ## A note on functions returning `character(len=:), allocatable`
 
 **No accessor in this library returns a `character(len=:), allocatable` function result.** Every one

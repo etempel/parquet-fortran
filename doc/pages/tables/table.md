@@ -135,7 +135,7 @@ Two more rules for a pointer you are holding:
   element count through the pointer, since the column's own row count is kept separately. See
   [String columns in a table](#string-columns-in-a-table).
 - **Arithmetic through the pointer costs what arithmetic over your own array costs.** Measured
-  with `tools/benchmark_table.sh`'s access mode, `z = xp + yp` through two `%col` pointers runs
+  with `bench/benchmark_table.sh`'s access mode, `z = xp + yp` through two `%col` pointers runs
   within 1% of the same expression over two allocatables. There is no pointer penalty to trade
   against the copy `%get` would have made.
 
@@ -158,7 +158,7 @@ it.
 - **You want an array that outlives the table, or survives a row-changing mutation.** A `%col`
   pointer does neither.
 
-`tools/benchmark_table.sh`'s access mode measures both on your own machine and column size.
+`bench/benchmark_table.sh`'s access mode measures both on your own machine and column size.
 
 ### Reading and writing a column's nulls alongside its values
 
@@ -591,7 +591,7 @@ call, and that lookup is **52–77% of what the call costs** — measured on fou
 three machines, which is why this is quoted as a range rather than a number. A handle resolves it
 once. A per-cell loop over a handle runs **several times** the name form's throughput, and so does
 a realistic four-column loop with arithmetic in the body; measure your own case with
-`tools/benchmark_table.sh` if the margin matters to you.
+`bench/benchmark_table.sh` if the margin matters to you.
 
 `t%column(j, c)` takes a 1-based position instead of a name, which is what makes a
 `do j = 1, t%ncols()` loop work. Both forms take `[found]`, and report a missing name or an
@@ -883,6 +883,6 @@ One topic a reader may expect on this page lives with the generator instead:
 The table keeps its own Fortran copy of each column it reads and releases the reader's decoded
 Arrow buffers as it goes, so a fully loaded table holds roughly one copy of the data rather than
 two — and a table whose columns were never touched holds nothing at all.
-`tools/benchmark_table.sh` measures this directly (see CONTRIBUTING.md); note that resident set
+`bench/benchmark_table.sh` measures this directly (see CONTRIBUTING.md); note that resident set
 size does **not** show it, because Arrow's memory pool keeps freed pages rather than returning
 them to the operating system.

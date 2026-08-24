@@ -156,7 +156,7 @@ the column- and row-changing calls. Write before the parallel region or after it
 
 **It costs about what writing the columns yourself costs.** `parquet_write_table` writes straight
 out of the table's store without copying, and a column that holds no nulls is written with no
-validity mask at all — the same call a hand-written loop would make. `tools/benchmark_table.sh`'s
+validity mask at all — the same call a hand-written loop would make. `bench/benchmark_table.sh`'s
 write mode measures the two against each other and reports them at parity.
 
 To write only some rows without changing the table, pass a mask:

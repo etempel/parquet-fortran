@@ -3641,7 +3641,7 @@ contains
 
     ! The two sweeps below must stay loop-for-loop identical to their C++ twins
     ! (`parquet_debug_sort_sweep_less_cpp` / `_compare_cpp`, src/parquet_wrapper.cpp). They exist so
-    ! app/benchmark_sort_comparator.f90 can time the COMPARATOR rather than the cost of reaching it,
+    ! bench/benchmark_sort_comparator.f90 can time the COMPARATOR rather than the cost of reaching it,
     ! and their agreeing checksums are what prove the two arms did the same work. Two details are
     ! load-bearing and neither is obvious:
     !

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Prints everything needed to identify a machine and its toolchain, for the
-# provenance section of a benchmarking report (see tools/benchmark_template.md).
+# provenance section of a benchmarking report (see bench/benchmark_template.md).
 #
 # Read-only: it inspects and prints, and builds nothing. Safe to run anywhere.
 #
@@ -32,7 +32,7 @@
 # SIMD, memory, every compiler on `PATH`, which compilers fpm will actually use, Arrow's version,
 # the already-exported `FPM_*` variables, and the load -- and with `--lto-probe` additionally link-
 # tests a minimal mixed Fortran/C++ program per toolchain in a few seconds. It builds nothing and is
-# safe to run anywhere. `tools/benchmark_template.md` is the template for a run on another machine:
+# safe to run anywhere. `bench/benchmark_template.md` is the template for a run on another machine:
 # copy it to a `feature_*.md` file, fill in the campaign, and the machine that runs it writes its
 # report back into that same file.
 # ---------------------------------------------------------------------------------------------
@@ -216,7 +216,7 @@ extern "C" int cxx_add(int a, int b) {
 }
 EOF
     # Pick the archiver the REAL build would use for this compiler family, so the probe's archive is
-    # built the same way tools/benchmark_stage7.sh builds the library's. Plain `ar` is the fallback
+    # built the same way bench/benchmark_stage7.sh builds the library's. Plain `ar` is the fallback
     # and is itself informative: on macOS it is Apple cctools ar, which has no LTO plugin, so a probe
     # that passes with it has demonstrated linking and NOT interprocedural optimisation.
     probe_archiver() {  # $1 = fortran compiler

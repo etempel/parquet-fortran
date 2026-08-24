@@ -120,13 +120,19 @@ fpm clean --all                 # and all dependencies
 fpm install --prefix my_path    # generate the executables
 ```
 
-**Every `app/*.f90` becomes an executable** (`fpm.toml` sets `auto-executables = true`). Only
-`run_parquet_fortran` (`app/program.f90`) ships in the fpm-published package —
-`tools/prep_fpm_publish.sh`'s `APP_KEEP` is an allow-list, so a new probe added here is stripped
-from a consumer's install automatically and needs no edit there. Everything else under `app/` is a
-maintainer benchmark or probe, described in its own header comment. Anything that needs more memory,
-disk or time than `fpm test` should ever attempt belongs there (plus a thin `tools/*.sh` wrapper),
-never under `test/`.
+**`app/` holds the one program that ships; `bench/` holds the rest.** `app/program.f90` builds
+`run_parquet_fortran` and is the only executable in the fpm-published package —
+`tools/prep_fpm_publish.sh`'s `APP_KEEP` is an allow-list, so anything else dropped into `app/` is
+stripped from a consumer's install automatically. Every benchmark and probe program lives in
+`bench/` beside the wrapper that drives it, described in its own header comment. Anything needing
+more memory, disk or time than `fpm test` should ever attempt belongs there, never under `test/`.
+
+`fpm.toml` reaches `bench/` through a single `[[executable]]` block: `auto-executables = true`
+scans `app/` only, and naming one `bench/` program registers that whole directory for
+auto-discovery. **A file placed in `bench/` is therefore compiled by fpm** — which is why the four
+standalone drivers that must be built by a bare compiler with forced flags
+(`tools/check_random_kernels.f90`, `tools/check_exp_key.f90`, `tools/check_argsort_standalone.f90`,
+`tools/benchmark_random_kernels.f90`) stay in `tools/`, outside any source-dir.
 
 **If `fpm test` behaves unexpectedly right after a source change** — a test seems to still run old
 code, or `error_scenarios` reports a scenario name as unrecognized even though it is clearly in
@@ -219,17 +225,26 @@ fixture regeneration is not possible as-is on a GCC-only Linux box without editi
 
 ### Other tools/ helpers
 
-**Every tool below is documented in its own header comment** — what it measures or checks, how to
-invoke it, what its environment variables mean, and how to read its output. Read that before running
-or changing one; this table exists only so you know what is there. Everything under `tools/` is
-maintainer-only and stripped from the fpm-published package unless noted, via
-`tools/prep_fpm_publish.sh`'s `TOOLS_KEEP` allow-list.
+The repository's own scripts live in **two directories, split by contract**:
+
+- **`tools/`** — everything something *automated* depends on: the checks and generators CI runs, plus
+  the release, packaging, coverage and mirroring workflow. Breaking one of these fails a pipeline or
+  blocks a release.
+- **`bench/`** — measurement and probing, run **only by hand**, usually during a campaign and often
+  on another machine. Nothing in CI touches `bench/`, so breaking something there is invisible until
+  someone runs it. It also holds the benchmark and probe *programs* themselves: `app/` contains only
+  `program.f90`, the one executable that ships.
+
+**Every tool is documented in its own header comment** — what it measures or checks, how to invoke
+it, what its environment variables mean, and how to read its output. Read that before running or
+changing one; the tables below exist only so you know what is there. Everything in both directories
+is maintainer-only and stripped from the fpm-published package unless marked **Consumer-facing**
+(`tools/prep_fpm_publish.sh` strips `bench/` whole and allow-lists `tools/`).
 
 The one to know before your first push is **`tools/run_lint_check.sh`**: it runs the same checks as
-`.gitlab-ci.yml`'s `lint` stage, needs nothing but `python3` and `bash`, and takes about ten
-seconds.
+`.gitlab-ci.yml`'s `lint` stage, needs nothing but `python3` and `bash`, and takes about ten seconds.
 
-**Checks and verification**
+#### `tools/` — checks and verification
 
 | tool | what it is for |
 |---|---|
@@ -239,23 +254,23 @@ seconds.
 | `check_doc_anchors.py` | Validates every `#anchor` link in this repository's `*.md` files. |
 | `check_module_footprints.sh` | What each entry module actually costs a consumer to compile against. |
 | `check_argsort_standalone.sh` | Compiles the argsort tier with a bare compiler and no Arrow at all. |
-| `check_random_kernels.sh` | Standalone-compiles `parquet_random` across compilers and both kernel arms. |
+| `check_random_kernels.sh` | Standalone-compiles `parquet_random` across compilers and both kernel arms, asserting they agree bit for bit. Timed by `bench/benchmark_random_kernels.sh`. |
 | `check_random_ubsan.sh` | UndefinedBehaviorSanitizer over those same standalone compiles. |
 | `check_exp_key.sh` | The same instrument for `parquet_expkey`'s frozen `-log(u)` transform. |
 | `check_philox_compliance.sh` | Sweeps the shipped Philox kernel against `philox_reference.py`. |
 | `check_downstream_maml_module.sh` | Protects the consumer-facing mode of `generate_parquet_maml.sh`. |
-| `check_arrow_release.sh` | Assertion form of a figure `benchmark_table.sh` only reports. |
-| `run_practrand.sh` | Runs the PractRand battery over one axis of `parquet_random`. |
 | `run_error_scenarios.sh` | Every error scenario, standalone — see above. |
 
-**Coverage**
+#### `tools/` — coverage
 
 | tool | what it is for |
 |---|---|
 | `coverage.sh` | Per-file and total `src/` Fortran line coverage, plus uncovered ranges. |
 | `coverage_cpp.sh` | The same for `src/parquet_wrapper.cpp`, as a separate pass — see [Continuous integration](#continuous-integration-gitlab-ci). |
 
-**Code generation** (output is committed; re-run and `--check` after editing a generator)
+#### `tools/` — code generation
+
+Output is committed; re-run the generator and its `--check` after editing one.
 
 | tool | what it is for |
 |---|---|
@@ -271,29 +286,7 @@ seconds.
 | `run_generate_fixtures.sh` | Builds and runs that generator. |
 | `generate_logo_svg.py` | Regenerates `doc/media/logo.*`. |
 
-**Benchmarks and probes** (all require `--profile release`; the wrappers pass it)
-
-| tool | what it is for |
-|---|---|
-| `benchmark_table.sh` | What the `parquet_table` layer costs against reading/writing columns directly. |
-| `benchmark_colindex.sh` | Where `parquet_table%get_element`'s per-cell cost goes. |
-| `benchmark_threads.sh` | How throughput scales with Arrow's internal thread-pool size. |
-| `benchmark_strings.sh` | What each `parquet_string_column` bulk operation costs. |
-| `benchmark_sort_engine.sh` | Baseline and regression harness for the sort engine. |
-| `benchmark_sort_ab.sh` | Is the Fortran engine at parity with the C++ reference? |
-| `benchmark_sort_comparator.sh` | What one comparison costs. |
-| `benchmark_sort_readtime.sh` | Where a read-time sort's time goes. |
-| `benchmark_random.sh` | `pf_random_*` against the intrinsic `random_number`. |
-| `benchmark_random_kernels.sh` | The two route (e) kernels against each other. |
-| `benchmark_perm_rounds.sh` | The proposed 24-round permutation against Fisher-Yates and the shipped kernel. |
-| `benchmark_stage7.sh` | Targeted micro-measurements over paths the library is optimising. |
-| `bench_resolve_ladder.py` | Compile-out ladder over `table_resolve` — attributing per-cell cost without timers. |
-| `check_s7_9.sh` | Whether replacing the float-to-integer integrality test pays on this machine. |
-| `test_large_scale.sh` | Manual large-scale check; never run by `fpm test` or CI. |
-| `test_random_large_fill.sh` | The same, for the bulk random fills. |
-| `benchmark_template.md` | The machine-agnostic run-sheet template. **Start here** for any cross-machine campaign. |
-
-**Environment, build and release**
+#### `tools/` — environment, build and release
 
 | tool | what it is for |
 |---|---|
@@ -307,7 +300,7 @@ seconds.
 | `mirror_to_github.sh` | Drives that rewrite and pushes the mirror. |
 | `fix_ford_page_links.sh` | Repoints `doc/pages/*.md` links FORD does not resolve in embedded markdown. |
 
-**Utilities and conversion**
+#### `tools/` — utilities and conversion
 
 | tool | what it is for |
 |---|---|
@@ -316,6 +309,33 @@ seconds.
 | `philox_reference.py` | An independent Philox model, for `check_philox_compliance.sh`. |
 | `count_lines.py` | Code/comment/blank line counts per source group. |
 | `count_tests.sh` | Unit tests per suite, read from source without building. |
+
+#### `bench/` — benchmarks and probes
+
+Run by hand only, never by CI. **All require `--profile release`**; the wrappers pass it. Each `.sh`
+drives a `.f90` program of the same name in the same directory.
+
+| tool | what it is for |
+|---|---|
+| `benchmark_table.sh` | What the `parquet_table` layer costs against reading/writing columns directly. |
+| `benchmark_colindex.sh` | Where `parquet_table%get_element`'s per-cell cost goes. |
+| `benchmark_threads.sh` | How throughput scales with Arrow's internal thread-pool size. |
+| `benchmark_strings.sh` | What each `parquet_string_column` bulk operation costs. |
+| `benchmark_sort_engine.sh` | Baseline and regression harness for the sort engine. |
+| `benchmark_sort_ab.sh` | Is the Fortran engine at parity with the C++ reference? |
+| `benchmark_sort_comparator.sh` | What one comparison costs. |
+| `benchmark_sort_readtime.sh` | Where a read-time sort's time goes. |
+| `benchmark_random.sh` | `pf_random_*` against the intrinsic `random_number`. |
+| `benchmark_random_kernels.sh` | Times the two route (e) kernels against each other. Its correctness twin is `tools/check_random_kernels.sh`; this one reports, that one asserts. |
+| `benchmark_perm_rounds.sh` | The proposed 24-round permutation against Fisher-Yates and the shipped kernel. |
+| `benchmark_stage7.sh` | Targeted micro-measurements over paths the library is optimising. |
+| `benchmark_arrow_release.sh` | Pins the Arrow-release figure `benchmark_table.sh` only reports, as an assertion. |
+| `bench_resolve_ladder.py` | Compile-out ladder over `table_resolve` — attributing per-cell cost without timers. |
+| `check_s7_9.sh` | Whether replacing the float-to-integer integrality test pays on this machine. |
+| `run_practrand.sh` | Runs the PractRand battery over one axis of `parquet_random`. |
+| `large_scale.sh` | Manual large-scale check — genuinely exceeding `huge(1)` rows. Never run by `fpm test` or CI. |
+| `random_large_fill.sh` | The same, for the bulk random fills. |
+| `benchmark_template.md` | The machine-agnostic run-sheet template. **Start here** for any cross-machine campaign. |
 
 ### Testing genuine OpenMP concurrency
 

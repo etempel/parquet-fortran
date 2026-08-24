@@ -449,7 +449,7 @@ observable from Fortran at all.
 - **How to guard it instead:** a benchmark comparison of `parquet_write_table` against a hand-written
   `parquet_write_column` loop over the same null-free data. They benchmark at parity today; a
   regression here shows up as the table path becoming materially slower, and nowhere else.
-  `app/benchmark_table.f90` is where that belongs.
+  `bench/benchmark_table.f90` is where that belongs.
 - **When adding a writer option**, the reviewable rule is simpler than any test: forward it *still
   absent* when the caller omitted it. Re-supplying a locally chosen default is the change that breaks
   this quietly, and it is visible in the diff as a `present()` test that did not need to be there.
@@ -544,7 +544,7 @@ the suite runs at a size where n²/2 offset writes is distinguishable from 2n.
 **Not testable in the suite.** A timing assertion at a size that would separate the two is far past
 what `fpm test` should attempt, and a timing test small enough to run would be flaky. The guard is
 the comment on `refill_string_store` saying *why* the shape is what it is, plus
-`tools/benchmark_table.sh`'s `sort` run, which builds a large string column and would simply stop
+`bench/benchmark_table.sh`'s `sort` run, which builds a large string column and would simply stop
 finishing.
 
 **What this forbids.** Do not rewrite either `set_all` string specific as a per-element loop over
@@ -655,9 +655,9 @@ memory in reverse: peak RSS is the right instrument here (these are ordinary For
 the question is the live high-water mark rather than what was returned to the OS), but a peak-memory
 assertion in a test suite that runs other tests concurrently measures the whole process, not this
 call. It belongs in a benchmark instead, and **it has since been measured there**:
-`app/benchmark_table.f90`'s `--mode=peakmem` builds one table, sorts it exactly once, and is run at
+`bench/benchmark_table.f90`'s `--mode=peakmem` builds one table, sorts it exactly once, and is run at
 `T = 1` and `T = max` in separate processes under an external timer, with
-`tools/benchmark_table.sh` driving the two points.
+`bench/benchmark_table.sh` driving the two points.
 
 **The bound holds with margin.** The transient measured **85.7 % of `(T-1)` column copies** in two
 configurations — 954 MiB against a predicted 1113 at 24 columns, 1431 against 1669 at 8 columns, the
@@ -880,7 +880,7 @@ buy. **The rule is about aliasing, not about sections**: same array, use the loo
 the section.
 
 **Test.** None, and none is proposed: the failure is a 5.5x slowdown, not a wrong answer, and a timing
-assertion in the unit suite would be flaky on a loaded machine. `tools/benchmark_strings.sh`'s `trim_all`
+assertion in the unit suite would be flaky on a loaded machine. `bench/benchmark_strings.sh`'s `trim_all`
 and `delete_by_mask` rows are where it would show, which is how it was found.
 
 **What this forbids.** Do not "modernise" either loop, and do not copy the pattern *into* a new in-place
@@ -976,7 +976,7 @@ was found only by a probe measuring wall time per element, and it presented as a
 work floor rather than as a missing clause.
 
 **Two rules follow.** `num_threads(nth)` is load-bearing on both fill sites and may not be dropped as
-redundant. And a timing claim about this path is checked with `app/probe_random_perm.f90
+redundant. And a timing claim about this path is checked with `bench/probe_random_perm.f90
 --mode=floor`, never inferred from the suite.
 
 **Test.** None in the suite, deliberately: the observable is wall time, and a timing assertion is the
@@ -1520,7 +1520,7 @@ in its own process.
 **Test.** Covered, by a maintainer check rather than a unit test — it needs its own process per
 measurement, which a test-drive suite cannot give it.
 
-- **Covered:** `tools/check_arrow_release.sh` drives `app/check_arrow_release.f90` over every
+- **Covered:** `bench/benchmark_arrow_release.sh` drives `bench/benchmark_arrow_release.f90` over every
   materialization path (`%materialize_all`, `%prefetch`, a single lazy `%get`, a slice, and
   `parquet_write_table(release=.true.)`) and **exits nonzero** if any of them leaves more than a
   tolerance of one copy of the data it just read in Arrow's pool. Documented in CONTRIBUTING.md's
@@ -2056,7 +2056,7 @@ covered at all and cannot be by a unit test.
 - **Not covered, and not a unit test:** the bit-scan invariant (iterate set bits, not all 64
   positions). Both forms are *correct*; only the cost differs, by 2.7x on a half-null width-16
   column. A rewrite to the naive form would pass every test above. **Proposed:** a case in
-  `app/benchmark_table.f90` reading a wide, half-null column, so the regression shows up in the
+  `bench/benchmark_table.f90` reading a wide, half-null column, so the regression shows up in the
   benchmark that is already run before a release rather than in a user's profile.
 - The **Q11 fallback** (a cached per-row "any element null" bit) is deliberately unbuilt; measurement
   is its only trigger, and the same benchmark case is what would supply it.
@@ -4272,7 +4272,7 @@ comparison count, same data — a **~39%** swing decided entirely by whether one
 only symptom is speed. Worse, it is invisible in the obvious place to look: `sort_row_less` *is*
 fully inlined into the sort's loops in both cases, so a check for "is the comparator inlined" that
 greps for a call to `sort_row_less` reports success while the damage sits one level down. And the
-comparator's own microbenchmark does **not** see it — `app/benchmark_sort_comparator.f90` measured
+comparator's own microbenchmark does **not** see it — `bench/benchmark_sort_comparator.f90` measured
 the Fortran comparator at 0.72–0.85x of C++ *with the split in place*, because a sweep's iterations
 are independent and the call overlaps with them, where a quicksort partition's next iteration
 depends on this comparison's branch.
@@ -4295,7 +4295,7 @@ nm <build>/.../src_parquet_argsort_engine.f90.o | grep -c 'sort_compare_key\.par
 ```
 
 It must read **0**. A nonzero count means the comparator no longer fits and the sort has lost
-roughly a third of its speed. `tools/benchmark_sort_ab.sh` is what confirms the size of the loss
+roughly a third of its speed. `bench/benchmark_sort_ab.sh` is what confirms the size of the loss
 once the symbol is seen. Note the budget is a property of the compiler and its version, so a future
 GCC may reintroduce the split without any source change — which is exactly why this is written down
 rather than left to whoever next reads a disappointing benchmark.
@@ -4891,7 +4891,7 @@ carries about 200 other bare `size(...)` calls, nearly all on arrays bounded by 
 asserting a 200-entry debt this check has not verified would be worse than leaving them; **whether
 any of those takes an unbounded caller array is an open question worth its own pass.**
 
-`tools/test_random_large_fill.sh` plus `app/test_random_large_fill.f90` are the end-to-end proof,
+`bench/random_large_fill.sh` plus `bench/random_large_fill.f90` are the end-to-end proof,
 run by hand. Two properties of its design are load-bearing rather than incidental: it compares each
 probed element against `pf_random32_at`/`pf_random_at` **at the same position**, so it verifies the
 contract rather than merely that something was written; and it warns on stderr when `ELEMENTS` is
@@ -5134,7 +5134,7 @@ too, but as a **hang** rather than a failure, since removing it destroys the rou
 the cycle-walk orbit never re-enters range.
 
 `test_perm_structural` (same file) is the second, and it is the **structural distinguisher this entry
-describes**, ported from `app/probe_random_feistel.f90 --mode=struct`. It reaches the shipped
+describes**, ported from `bench/probe_random_feistel.f90 --mode=struct`. It reaches the shipped
 permutation through the public API at **m = 1024**, where `a = b = 32` so `a*b = m` exactly and the
 cycle-walk never runs — which is what makes the public output the raw bijection on `Z_32 x Z_32` with
 no debug hook. Measured: shipped **1.82**, mutated to three rounds **8.74** (and the elevated relation
@@ -5157,7 +5157,7 @@ arm validates the four relations and their orientation. Without it, a test that 
 transposed the relations would pass on the shipped arm and mean nothing.
 
 **The round function's constants are analysed, and the analysis says the round count is what
-matters.** `app/probe_random_mix2.f90` sweeps five conventional multiplier pairs through the same
+matters.** `bench/probe_random_mix2.f90` sweeps five conventional multiplier pairs through the same
 distinguisher: all are clean at 4 rounds (|z| 0.79–1.85) and four of five are detected at 3. It also
 shows `perm_mix2`'s avalanche is at the sampling floor on every bit it reads, that it discards input
 bit 31 by the very mask this entry says is load-bearing (harmless while `m <= 2**62`), and — from

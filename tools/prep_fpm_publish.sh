@@ -24,7 +24,7 @@
 #      and every other file found in those directories is appended to REMOVE_PATHS. So a *new* file
 #      dropped into either one is excluded by default, without needing a REMOVE_PATHS edit. Both
 #      replaced strip-lists, where a forgotten entry silently shipped in the tarball -- exactly what
-#      happened to app/playground.f90 and app/demo_print_schema_info.f90 before this script tracked
+#      happened to bench/playground.f90 and bench/demo_print_schema_info.f90 before this script tracked
 #      them, and the same hazard tools/ carried for its 36 maintainer-only scripts until the
 #      inversion. The residual risk moves to the allow-lists themselves, where a *renamed* entry
 #      would silently stop matching and be stripped, so both are validated to exist up front.
@@ -85,6 +85,14 @@ REMOVE_PATHS=(
     .github
     docs.md
     test/fixtures
+    # bench/ is stripped WHOLE: nothing in it ever ships. Unlike app/ and tools/ below it needs no
+    # allow-list, because it has no consumer-facing member -- it holds this repository's benchmark
+    # and probe programs plus the wrappers that drive them, none of which mean anything outside a
+    # checkout. It must stay listed: a directory in NEITHER the root strip-list nor an allow-list
+    # would ship in full and silently, which is the exact failure the app/ and tools/ inversions
+    # below were written to end. The self-check at the bottom of this script asserts it is absent
+    # from the tarball.
+    bench
 )
 
 # app/ is an allow-list: only APP_KEEP survives; every other app/*.f90 file found on disk is

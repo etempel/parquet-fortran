@@ -1376,7 +1376,7 @@ module parquet_sorting
     w("        !!")
     w("        !! Its own procedure rather than an inline loop because it is one of the three")
     w("        !! whole-column serial loops that bound a threaded sort's end-to-end speedup, and")
-    w("        !! measuring it separately is how that was found. See `app/benchmark_sort_tail.f90`.")
+    w("        !! measuring it separately is how that was found. See `bench/benchmark_sort_tail.f90`.")
     w("        module subroutine fill_identity(perm, n, nthreads)")
     w("            integer(int64), intent(out) :: perm(:)  !! receives `1..n`.")
     w("            integer(int64), intent(in) :: n         !! elements to fill.")
@@ -2438,7 +2438,7 @@ def emit_engine_interfaces(w):
     w("        end function parquet_debug_sort_keys_compare")
     w("        !> Test-only sweep of `nreps` passes of `nrows` comparisons, returning a checksum.")
     w("        !!")
-    w("        !! For app/benchmark_sort_comparator.f90, which needs the comparator's own cost rather")
+    w("        !! For bench/benchmark_sort_comparator.f90, which needs the comparator's own cost rather")
     w("        !! than the cost of reaching it: at ~5 ns per comparison a per-call harness measures")
     w("        !! its own overhead. The C++ twin is `parquet_debug_sort_sweep_less_cpp` in")
     w("        !! src/parquet_wrapper.cpp and the two loops are deliberately identical, down to the")
@@ -3478,7 +3478,7 @@ contains
         allocate(perm(nrows))
         ! Resolved BEFORE any identity fill, so a fill can be threaded. It was one of three
         ! whole-column serial loops that together were 48% of a 64-thread end-to-end sort before
-        ! they were threaded -- see `app/benchmark_sort_tail.f90`, which sizes each one.
+        ! they were threaded -- see `bench/benchmark_sort_tail.f90`, which sizes each one.
         call resolve_thread_count(threads, nrows, nthreads)
         if (nrows < 2_int64) then
             ! Zero or one row: the identity IS the answer and no engine runs.

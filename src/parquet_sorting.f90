@@ -6426,7 +6426,7 @@ module parquet_sorting
         end function parquet_debug_sort_keys_compare
         !> Test-only sweep of `nreps` passes of `nrows` comparisons, returning a checksum.
         !!
-        !! For app/benchmark_sort_comparator.f90, which needs the comparator's own cost rather
+        !! For bench/benchmark_sort_comparator.f90, which needs the comparator's own cost rather
         !! than the cost of reaching it: at ~5 ns per comparison a per-call harness measures
         !! its own overhead. The C++ twin is `parquet_debug_sort_sweep_less_cpp` in
         !! src/parquet_wrapper.cpp and the two loops are deliberately identical, down to the

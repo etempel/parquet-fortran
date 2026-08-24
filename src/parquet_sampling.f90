@@ -1435,7 +1435,7 @@ contains
     !! limitation the string-column hook has and is worth stating: it can assert that
     !! `parquet_set_random_parallel_min_elements` changes the answer, and it cannot assert that the
     !! fill went on to honour that answer. The bit-identity of the 1-thread and N-thread results is
-    !! what the suite checks instead, and `app/probe_random_perm.f90 --mode=floor` is what shows the
+    !! what the suite checks instead, and `bench/probe_random_perm.f90 --mode=floor` is what shows the
     !! threading actually happens. See `feature_risks.md` Risk-111.
     integer function parquet_debug_random_bulk_threads(n, threads) result(nth)
         integer(int64), intent(in) :: n             !! elements a bulk call would produce

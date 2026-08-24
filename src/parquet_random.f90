@@ -1990,7 +1990,7 @@ contains
         ! `intent(out)` array undefined. Neither raises anything. A 2**31-element `real64` array is
         ! 17 GB, which is ordinary for the data this library exists to handle, and no unit test can
         ! reach it -- `check_fill_size_kind` in tools/check_source_conventions.py is what keeps this
-        ! from regressing, with tools/test_random_large_fill.sh as the end-to-end proof.
+        ! from regressing, with bench/random_large_fill.sh as the end-to-end proof.
         integer(int64) :: k, m
         m = size(v, kind=int64)
         if (m <= 0_int64) return                    ! a zero-sized fill is a defined no-op

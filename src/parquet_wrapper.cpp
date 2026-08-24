@@ -7601,7 +7601,7 @@ extern "C"
 	// timing would be a timing of the crossing. These do the whole sweep inside one call, so the
 	// crossing amortises to nothing and what is left is the comparator.
 	//
-	// app/benchmark_sort_comparator.f90 runs a Fortran loop of IDENTICAL shape against
+	// bench/benchmark_sort_comparator.f90 runs a Fortran loop of IDENTICAL shape against
 	// parquet_debug_sort_sweep_* in parquet_sorting, so the two arms differ only in whose comparator
 	// runs. Keep the two loops identical if either is touched -- their returned checksums must
 	// match, which is what proves they did the same work.
@@ -8443,7 +8443,7 @@ extern "C"
 	// Bytes currently held by Arrow's process-wide default memory pool.
 	//
 	// Diagnostic only, and deliberately NOT declared in src/parquet_bindings.f90: the one
-	// consumer is app/benchmark_table.f90, which declares its own local bind(C) interface for
+	// consumer is bench/benchmark_table.f90, which declares its own local bind(C) interface for
 	// it (the same convention the debug-only g_debug_* setters use). It exists because RSS
 	// cannot answer the question it answers -- Arrow's pool does not return freed pages to the
 	// OS, so a released column buffer keeps counting toward RSS while no longer counting here.
@@ -8455,7 +8455,7 @@ extern "C"
 	// allocations would land in the same number -- see the comment on
 	// scenario_filter_scoped_reads_no_whole_column in test/error_scenarios.f90, which explains why
 	// an earlier version of a check built on this counter had to move out of the ordinary test
-	// suite for exactly that reason. app/benchmark_table.f90 (a manual, never-fpm-test tool -- see
+	// suite for exactly that reason. bench/benchmark_table.f90 (a manual, never-fpm-test tool -- see
 	// CLAUDE.md's "Manual (never-fpm test) large-scale/benchmark tools") is this function's only
 	// caller, run single-process by a human, where the counter is meaningful.
 	int64_t parquet_get_arrow_bytes_allocated() // GCOVR_EXCL_START
@@ -12142,7 +12142,7 @@ extern "C"
 	// std::sorts), phase 1 (every merge round but the last) and phase 2 (the last round alone).
 	// Anything else answers 0. See g_debug_sort_phase_ns for why the last round is split out: it is
 	// the single-threaded tail whose share decides whether a co-ranked parallel merge earns its
-	// complexity, and app/benchmark_table.f90's --mode=argsort is what reads it.
+	// complexity, and bench/benchmark_table.f90's --mode=argsort is what reads it.
 	int64_t parquet_debug_get_sort_phase_ns(int phase)
 	{
 		if (phase < 0 || phase > 2) return 0;

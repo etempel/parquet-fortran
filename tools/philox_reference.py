@@ -2,7 +2,7 @@
 """An independent Philox4x32-10, written from the Random123 specification.
 
 This is the ORACLE half of `tools/check_philox_compliance.sh`. It reads blocks dumped by
-`app/probe_random_philox.f90` -- each one a `(key, stream, index)` coordinate and the four output
+`bench/probe_random_philox.f90` -- each one a `(key, stream, index)` coordinate and the four output
 words this library's shipped kernel produced for it -- and recomputes every one from the
 specification, in Python's arbitrary-precision integers where nothing can overflow.
 

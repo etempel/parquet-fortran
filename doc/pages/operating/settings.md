@@ -268,7 +268,7 @@ you named.
 
 Measured speedups for the operations this governs, for calibration: a modest gain on a small
 machine, rising to several times on a large one — larger columns gaining more than smaller ones on
-the same hardware. `tools/benchmark_strings.sh` measures it on yours (see CONTRIBUTING.md). The
+the same hardware. `bench/benchmark_strings.sh` measures it on yours (see CONTRIBUTING.md). The
 result is byte-identical at every thread count.
 
 `parquet_string_threads()` reports the resolved answer for the current context;
@@ -290,7 +290,7 @@ permutation. That is what makes threading admissible here as a setting at all. T
 covers `pf_random_resample`, whose element `k` is a pure function of `(seed, stream, k)`; it splits
 the draw axis rather than the element axis, and is equally bit-identical.
 
-How it scales, measured on a large many-core machine with `tools/benchmark_perm_rounds.sh` (see
+How it scales, measured on a large many-core machine with `bench/benchmark_perm_rounds.sh` (see
 CONTRIBUTING.md), as a factor over the one-thread cost:
 
 | threads | 2 | 4 | 8 | 16 | 32 | 64 |

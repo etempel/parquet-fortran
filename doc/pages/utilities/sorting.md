@@ -707,7 +707,7 @@ for turning the path off entirely.
 
 `pf_argsort` over scattered `real(real64)`, on a small machine, best of several rounds — the shape
 matters here rather than the absolute times, which are whatever your own hardware gives you.
-`tools/benchmark_sort_engine.sh` measures it there (see CONTRIBUTING.md):
+`bench/benchmark_sort_engine.sh` measures it there (see CONTRIBUTING.md):
 
 | rows | 8 threads against serial |
 |---|---|

@@ -641,7 +641,7 @@ What `random_number` cannot do at any speed is give you the same answer under a 
 schedule. That is what you are buying.
 
 **If the ratio matters to you, measure it on your own machine rather than trusting anyone's
-number.** `tools/benchmark_random.sh` in this repository drives exactly that comparison — bulk and
+number.** `bench/benchmark_random.sh` in this repository drives exactly that comparison — bulk and
 scalar, `real64` and `real32` — against the intrinsic. It is a maintainer tool rather than part of
 the installed package, so run it from a checkout.
 

@@ -1,10 +1,11 @@
 !===========================================
 ! Author: Elmo Tempel (elmo.tempel@ut.ee)
 !===========================================
-!> Driver for `tools/benchmark_random_kernels.sh`: times `parquet_random` in whichever route (e)
+!> Driver for `bench/benchmark_random_kernels.sh`: times `parquet_random` in whichever route (e)
 !> kernel it was compiled with, and emits a checksum so the two builds can be proved equivalent.
 !>
-!> **Not under `app/`**, for the same reason `tools/check_random_kernels.f90` is not: forcing the
+!> **Not under `app/` OR `bench/`**, for the same reason `tools/check_random_kernels.f90` is not --
+!> and note `bench/` is a source-dir in `fpm.toml`, so a file placed there IS built by fpm. Forcing the
 !> other kernel needs `-U__GFORTRAN__`, which also flips `src/parquet.f90`'s stringify branch, so
 !> the package will not build that way at all. Only a standalone compile of `parquet_random` and
 !> its one dependency works, and fpm cannot express that. Nothing builds this but its own wrapper.

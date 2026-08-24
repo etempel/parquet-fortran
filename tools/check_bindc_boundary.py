@@ -182,7 +182,7 @@ def join_continuations(text):
 # third spelling this file has to know about, alongside the two `result(...)` positions below.
 # It carries the result type in the header rather than in a declaration inside the body, so
 # without it such a function's result is unresolvable and gets reported as a mismatch that is
-# not one. Two hooks in app/benchmark_stage7.f90 are written that way, and they were invisible
+# not one. Two hooks in bench/benchmark_stage7.f90 are written that way, and they were invisible
 # until this checker started finding its sources by shape instead of from a hand-kept list.
 FORTRAN_BINDC_RE = re.compile(
     r"(?:(\w+\s*\([^)]*\))\s+)?"

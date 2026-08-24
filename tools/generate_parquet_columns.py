@@ -51,7 +51,7 @@ performed, only the two cross-submodule calls gone), or with the guards removed
 benchmark program: the question is what a call across a program-unit boundary costs, and a local
 copy in one file would be inlined, measuring the opposite. Without the flag the generator emits
 byte-identical output to what is committed, so `--check` and CI are unaffected; restore with `git
-checkout src/parquet_columns_access.f90`. `tools/benchmark_colindex.sh` refuses to run its non-
+checkout src/parquet_columns_access.f90`. `bench/benchmark_colindex.sh` refuses to run its non-
 default `GUARDS` values against an unscaffolded tree rather than silently building the shipped
 binary under another name.
 """

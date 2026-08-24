@@ -499,7 +499,7 @@ module parquet_argsort
         !!
         !! Its own procedure rather than an inline loop because it is one of the three
         !! whole-column serial loops that bound a threaded sort's end-to-end speedup, and
-        !! measuring it separately is how that was found. See `app/benchmark_sort_tail.f90`.
+        !! measuring it separately is how that was found. See `bench/benchmark_sort_tail.f90`.
         module subroutine fill_identity(perm, n, nthreads)
             integer(int64), intent(out) :: perm(:)  !! receives `1..n`.
             integer(int64), intent(in) :: n         !! elements to fill.

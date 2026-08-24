@@ -2779,7 +2779,7 @@ def check_fill_size_kind():
     there is 2**31 `real32` values, about 8.6 GB. That size is ordinary for the data this library
     exists to handle -- one draw per row of a three-billion-row table lands squarely in it. Coverage
     cannot see it either, because the line executes normally, just with a wrapped value. So this
-    static check is the cheap guard, and `tools/test_random_large_fill.sh` is the end-to-end proof
+    static check is the cheap guard, and `bench/random_large_fill.sh` is the end-to-end proof
     that has to be run by hand.
 
     **Scoped to `src/parquet_random.f90` and `src/parquet_sampling.f90` on purpose** (the bulk fills
@@ -3055,38 +3055,48 @@ def check_contributing_is_an_index():
     comment, where whoever changes the tool will see it. See CLAUDE.md, "CONTRIBUTING.md is
     project-wide workflow ONLY -- a tool's own detail goes in its header".
 
-    Three clauses, and the first two are what keep the index honest in both directions:
+    The repository's scripts live in TWO directories, split by contract -- `tools/` for anything
+    something automated depends on, `bench/` for measurement run only by hand -- and both are
+    indexed in the same section, one table per directory. This check walks both.
 
-    1. Every executable script under tools/ has exactly one row in the index table. Without this a
-       new tool is simply absent and nobody finds out -- tools/check_s7_9.sh was undocumented for
-       exactly that reason.
-    2. Every index row names a file that exists, so a deleted or renamed tool cannot leave a row
-       behind.
-    3. Inside the "Other tools/ helpers" section every tools/ mention is a table row, and elsewhere
-       in the file no single tools/ or app/ path is named more than MAX_PROSE_MENTIONS times. That
-       is what stops a paragraph about one tool growing back: a genuine workflow reference ("run
-       tools/run_lint_check.sh before pushing") is one or two mentions, an essay is many.
+    Three clauses, and the first two keep the index honest in both directions:
+
+    1. Every executable script under tools/ and bench/ has exactly one row in the index. Without
+       this a new tool is simply absent and nobody finds out -- bench/check_s7_9.sh was
+       undocumented for exactly that reason.
+    2. Every index row resolves to a file that exists in one of the two directories, so a deleted
+       or renamed tool cannot leave a row behind.
+    3. Inside the section every tools/ or bench/ mention is a table row, the section stays at most
+       a quarter prose, and elsewhere in the file no single path is named more than
+       MAX_PROSE_MENTIONS times. That is what stops a paragraph about one tool growing back: a
+       genuine workflow reference ("run tools/run_lint_check.sh before pushing") is one or two
+       mentions, an essay is many.
 
     Why it exists: that section had reached 909 lines, 64% of the whole file, and had drifted into
     contradicting two of the script headers it duplicated -- benchmark_table.sh's about which output
     line to read, and benchmark_sort_engine.sh's about which sort engine ships.
     """
     MAX_PROSE_MENTIONS = 3
+    DIRS = ("tools", "bench")
     path = REPO_ROOT / "CONTRIBUTING.md"
     if not path.exists():
         return ["CONTRIBUTING.md: missing -- this check needs updating"]
     lines = path.read_text(encoding="utf-8").splitlines()
 
-    tools_dir = REPO_ROOT / "tools"
     scripts = set()
-    for f in sorted(tools_dir.rglob("*")):
-        if not f.is_file():
-            continue
-        rel = f.relative_to(REPO_ROOT).as_posix()
-        if f.suffix in (".sh", ".py") or (f.suffix == "" and f.read_bytes()[:2] == b"#!"):
-            scripts.add(rel)
+    for d in DIRS:
+        base = REPO_ROOT / d
+        if not base.is_dir():
+            return ["%s/: missing -- this check needs updating" % d]
+        for f in sorted(base.rglob("*")):
+            if not f.is_file():
+                continue
+            rel = f.relative_to(REPO_ROOT).as_posix()
+            if f.suffix in (".sh", ".py") or (f.suffix == "" and f.read_bytes()[:2] == b"#!"):
+                scripts.add(rel)
+            elif f.suffix == ".md":
+                scripts.add(rel)          # a run-sheet template is a tool too
 
-    # The index is every markdown table row inside the "Other tools/ helpers" section.
     start = end = None
     for i, ln in enumerate(lines):
         if ln.startswith("### Other tools/ helpers"):
@@ -3099,10 +3109,18 @@ def check_contributing_is_an_index():
     if end is None:
         end = len(lines)
 
+    def resolve(name):
+        """An index row may name a tool bare or with its directory; resolve it to a real path."""
+        if "/" in name and name.split("/")[0] in DIRS:
+            return name
+        for d in DIRS:
+            if (REPO_ROOT / d / name).exists():
+                return "%s/%s" % (d, name)
+        return None
+
     problems = []
     indexed = {}
-    prose_lines = 0
-    body_lines = 0
+    prose_lines = body_lines = 0
     in_fence = False
     for i in range(start, end):
         ln = lines[i]
@@ -3111,20 +3129,24 @@ def check_contributing_is_an_index():
             continue
         if ln.startswith("|"):
             body_lines += 1
-            # Only the FIRST cell names the tool; later cells are description prose.
             first = ln.split("|")[1] if ln.count("|") >= 2 else ""
-            m = re.search(r"`(?:tools/)?([A-Za-z0-9_./-]+\.(?:sh|py|cpp|md)|nagfor_fpm_shim/nagfor)`", first)
+            m = re.search(r"`((?:tools/|bench/)?[A-Za-z0-9_./-]+\.(?:sh|py|cpp|md)|nagfor_fpm_shim/nagfor)`",
+                          first)
             if m:
-                rel = m.group(1)
-                rel = rel if rel.startswith("tools/") else "tools/" + rel
-                indexed.setdefault(rel, []).append(i + 1)
+                rel = resolve(m.group(1))
+                if rel is None:
+                    problems.append(
+                        "CONTRIBUTING.md:%d: index row names %s, which exists in neither %s"
+                        % (i + 1, m.group(1), " nor ".join(d + "/" for d in DIRS))
+                    )
+                else:
+                    indexed.setdefault(rel, []).append(i + 1)
             continue
         if not ln.strip() or ln.startswith("#") or in_fence:
             continue
         body_lines += 1
         prose_lines += 1
 
-    # The section must remain an INDEX, not an essay. A lead-in is fine; paragraphs are not.
     if body_lines and prose_lines * 4 > body_lines:
         problems.append(
             "CONTRIBUTING.md: the 'Other tools/ helpers' section is %d%% prose (%d of %d lines); it "
@@ -3152,7 +3174,7 @@ def check_contributing_is_an_index():
     for i, ln in enumerate(lines):
         if start <= i < end:
             continue
-        for h in re.findall(r"`((?:tools|app)/[A-Za-z0-9_./-]+\.(?:sh|py|cpp|f90|md))`", ln):
+        for h in re.findall(r"`((?:tools|bench|app)/[A-Za-z0-9_./-]+\.(?:sh|py|cpp|f90|md))`", ln):
             counts.setdefault(h, []).append(i + 1)
     for rel, where in sorted(counts.items()):
         if len(where) > MAX_PROSE_MENTIONS:

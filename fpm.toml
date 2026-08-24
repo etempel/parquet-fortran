@@ -14,6 +14,19 @@ name = "run_parquet_fortran"
 source-dir = "app"
 main = "program.f90"
 
+# bench/ holds every maintainer-only benchmark and probe program (app/ holds only the one
+# executable that ships -- see tools/prep_fpm_publish.sh's APP_KEEP). `auto-executables = true`
+# below scans app/ ONLY, so bench/ has to be named here to be built at all. ONE entry is enough:
+# declaring a source-dir registers that whole directory for auto-discovery, so the other programs
+# in bench/ are picked up without an entry each (measured against fpm 0.13.0 alpha -- a two-program
+# probe built the undeclared sibling too). If a future fpm drops that behaviour the symptom is
+# SILENT: the other bench/ programs simply stop being built, with no error. Check the executable
+# count after upgrading fpm -- `fpm build` should report one target per app/ and bench/ program.
+[[executable]]
+name = "benchmark_table"
+source-dir = "bench"
+main = "benchmark_table.f90"
+
 [dependencies]
 openmp = "*"
 

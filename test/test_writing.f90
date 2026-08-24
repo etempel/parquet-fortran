@@ -1998,7 +1998,7 @@ contains
     !> parquet_wrapper.cpp -- before any data is written), comparing a wide schema's estimate
     !> against a narrow one's, rather than by actually writing enough data to reach that target:
     !> doing that for a genuinely wide column would need writing/reading a file hundreds of MB in
-    !> size on every `fpm test` run. tools/test_large_scale.sh is the maintainer-runnable check
+    !> size on every `fpm test` run. bench/large_scale.sh is the maintainer-runnable check
     !> that exercises writing/reading data at real scale instead (see CONTRIBUTING.md).
     subroutine test_chunk_size_auto_sizing_wide_row(error)
         type(error_type), allocatable, intent(out) :: error
@@ -3165,7 +3165,7 @@ contains
     !>
     !> Why this exists as its own test: the integrality check is `src(i) /= anint(src(i))`, and
     !> replacing it is an open proposal (S7-9 -- `anint` costs a libm call per element on x86-64,
-    !> which `app/benchmark_stage7.f90 --only=s7-9` measures). Every candidate replacement is built
+    !> which `bench/benchmark_stage7.f90 --only=s7-9` measures). Every candidate replacement is built
     !> from a magnitude test and some form of round trip, i.e. several places a boundary can be got
     !> wrong by one. Every value below is a whole number that MUST be accepted, so a mistake shows
     !> up as a spurious "non-integral" abort rather than as a wrong value -- which no round-trip

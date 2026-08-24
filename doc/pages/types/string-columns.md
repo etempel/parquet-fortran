@@ -606,7 +606,7 @@ Five things decide how many threads an operation uses, and the first four all de
 **The result is byte-identical whatever the thread count** — same values, same offsets, same nulls.
 Threading here is purely a wall-clock control, never a change of answer. For calibration: a modest
 gain on a small machine, rising to several times on a large one, with larger columns gaining more
-than smaller ones on the same hardware. `tools/benchmark_strings.sh` measures it on yours (see
+than smaller ones on the same hardware. `bench/benchmark_strings.sh` measures it on yours (see
 CONTRIBUTING.md).
 
 ## Thread safety

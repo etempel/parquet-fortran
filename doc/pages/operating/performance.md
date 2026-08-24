@@ -132,7 +132,7 @@ is resolved: once per cell, once per loop, or not at all.
 On the shipped code a hoisted handle measured **several times** the name form's throughput on a
 per-cell loop, and about the same on a realistic four-column loop with arithmetic; the pointer form
 is a plain array read with no call at all and measured several times faster again.
-`tools/benchmark_colindex.sh` measures all three on your own machine (see CONTRIBUTING.md). See [A
+`bench/benchmark_colindex.sh` measures all three on your own machine (see CONTRIBUTING.md). See [A
 column handle](../tables/table.html#a-column-handle) for what a handle can do and the two traps to
 avoid — chiefly that making one is not free, so it belongs outside the loop, and that making one
 *reads* the column, so a metadata sweep should use the by-position queries instead.

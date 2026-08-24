@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# CORRECTNESS twin of bench/benchmark_random_kernels.sh: this script ASSERTS the two route (e)
+# kernels agree bit for bit and is run by CI; that one TIMES them against each other and is run
+# by hand. They share a name and a subject but not a contract, which is why they sit in
+# different directories (see CONTRIBUTING.md's "Other tools/ helpers").
 #
 # Build `parquet_random` BOTH ways -- with the route (e) 128-bit kernel and with the wrapping
 # kernel -- across several optimisation settings including LTO, and assert the contract holds in

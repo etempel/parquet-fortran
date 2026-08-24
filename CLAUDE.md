@@ -506,8 +506,8 @@ Working rules:
   reproduce a number quoted to three significant figures against a compiler and a machine they do
   not have, so a page carrying one is stating something it cannot support. **No compiler names, no
   machine descriptions, and no decimals on a ratio** — `"4.17x (gfortran) and 3.93x (ifx)"` becomes
-  `"several times"`. Name the tool that measures it instead (`tools/benchmark_table.sh`,
-  `tools/benchmark_random.sh`, `tools/benchmark_colindex.sh`, …) so a reader can get their own
+  `"several times"`. Name the tool that measures it instead (`bench/benchmark_table.sh`,
+  `bench/benchmark_random.sh`, `bench/benchmark_colindex.sh`, …) so a reader can get their own
   number. **Two things are NOT covered**, and stripping them makes the page worse: a **contract
   number** — a threshold, an acceptance rate, a documented bound, a growth factor, or a share with
   real cross-machine provenance — stays exact; and a **parity claim** ("peak memory is the same at
@@ -615,18 +615,18 @@ paid by every reader**, and every paragraph added to it is charged to all of the
 **A per-tool, per-script or per-file detail is not project-wide and does not belong there.** How one
 script is invoked, what its environment variables do, what its modes are, what its output columns
 mean, why one arm of one benchmark exists, what a figure measured on one machine — all of that goes
-in **that file's own header comment** (`tools/*.sh`, `tools/*.py`, `app/*.f90`, `src/*.f90`), next to
+in **that file's own header comment** (`tools/*.sh`, `tools/*.py`, `bench/*`, `src/*.f90`), next to
 the code it describes and in front of whoever is about to change it. This is already the convention
-rather than a new one: every program under `app/` and all but one script under `tools/` already
+rather than a new one: every program under `bench/` and all but one script under `tools/` already
 carry such a header, so moving a paragraph there is usually merging rather than writing.
 
 **The test is: would the person who invalidates this sentence be looking at this file when they do
 it?** If someone adds a mode to a benchmark, they are editing the benchmark — so a description of its
 modes kept anywhere else is a second copy waiting to go stale. That is not hypothetical. The "Other
 tools/ helpers" section had reached **909 lines, 64% of the whole file**, and by the time it was
-reviewed it disagreed with `tools/benchmark_table.sh`'s own header about which output line to read
+reviewed it disagreed with `bench/benchmark_table.sh`'s own header about which output line to read
 (the header said RSS, `CONTRIBUTING.md` said the Arrow pool counter — and only the second is right)
-and with `tools/benchmark_sort_engine.sh`'s about which sort engine ships. Both were found by moving
+and with `bench/benchmark_sort_engine.sh`'s about which sort engine ships. Both were found by moving
 the prose next to the code, not by review.
 
 Rules:
@@ -2562,7 +2562,7 @@ treating it as one.
   ifx are indifferent and nothing will warn if it is renamed back. Any *future* special binding on a
   large type — another defined assignment, a defined operator — needs an early-sorting name too.
 - **An unguarded `use omp_lib` is a compile failure, not a graceful fallback to serial.**
-  `app/probe_radix_parallel.f90` and `app/benchmark_sort_tail.f90` both had one. Both now guard the
+  `bench/probe_radix_parallel.f90` and `bench/benchmark_sort_tail.f90` both had one. Both now guard the
   `use` with `#ifdef _OPENMP` and supply serial shims for the `omp_*` functions they call under
   `#ifndef _OPENMP` (`omp_get_wtime` via `system_clock`, the rest returning 1/0). The `!$omp`
   directives themselves need no guarding — the preprocessor removes them. This is the same defect
@@ -2609,7 +2609,7 @@ still halved the temporal-validity figure, i.e. real interprocedural optimisatio
 is what `-ipo` needs; the archiver choice is a refinement. **A tooling warning is a claim like any
 other**: B spent two extra probe runs falsifying this one rather than letting it qualify a whole
 campaign's numbers, which was the right call and is the pattern to copy.
-`tools/benchmark_stage7.sh` selects the archiver for both compiler families and warns when it cannot
+`bench/benchmark_stage7.sh` selects the archiver for both compiler families and warns when it cannot
 find one; `tools/machine_report.sh` reports which archivers exist. **Check the archiver before
 reporting any LTO result, in either direction** — "LTO changes nothing here" is exactly what a
 disabled LTO build looks like.
@@ -2657,7 +2657,7 @@ shared filesystem**, so this always means: someone carries instructions to that 
 them by hand. Four rules make that repeatable, and they apply to *any* machine, not only the three
 listed above.
 
-- **Start from `tools/benchmark_template.md`.** It is the committed, machine-agnostic template:
+- **Start from `bench/benchmark_template.md`.** It is the committed, machine-agnostic template:
   what the instruction-writer must fill in, the steps the runner follows, the rules that apply to
   every run, and the report skeleton. Do not write a run sheet from scratch, and do not edit the
   template with one campaign's details.
@@ -2670,8 +2670,8 @@ listed above.
   happens once, when every copy is back**, reading them side by side; that is why each report must
   carry full provenance even when it feels redundant, and why a machine is not asked to compare
   itself against another.
-- **Everything the run EXECUTES belongs in the repository** — a program under `app/`, a wrapper
-  under `tools/` — so it travels by `git pull` and cannot drift between machines. Never paste code
+- **Everything the run EXECUTES belongs in the repository** — the program and its wrapper, both
+  under `bench/` — so it travels by `git pull` and cannot drift between machines. Never paste code
   into the instruction file for someone to copy. Whatever is being measured must be **committed and
   pushed first**, which inverts this file's usual "leave it uncommitted on `main`" rule; for a
   before/after comparison push both commits and have the same command run on each.
@@ -2724,7 +2724,7 @@ configurations must give each its own `FPM_BUILD_DIR` **outside** `build/`, or
 binary and report a false green.
 
 **That build-tree name must vary by COMPILER as well as by configuration, and an existing wrapper
-probably gets this wrong.** `tools/benchmark_stage7.sh` names its trees for the configuration alone
+probably gets this wrong.** `bench/benchmark_stage7.sh` names its trees for the configuration alone
 (`test_run/s7-plain`, `test_run/s7-lto`) regardless of `FPM_FC`, so running it a second time under a
 different Fortran compiler drops that compiler's `error_scenarios` binary into the *same* tree —
 fpm keeps the objects apart in its own per-compiler subdirectory, but the `find … | head -n 1`
@@ -2746,7 +2746,7 @@ probe, ask what the real build does that the probe does not — an archive, a mi
 particular linker — and either reproduce it or say plainly what the probe does not cover.
 
 **A wrapper must FAIL rather than degrade when it cannot engage the configuration it was asked
-for.** `tools/benchmark_stage7.sh` gates `-fuse-ld=lld` on `command -v ld.lld`, warns when it is
+for.** `bench/benchmark_stage7.sh` gates `-fuse-ld=lld` on `command -v ld.lld`, warns when it is
 absent, and continues — so on machine B, where the documented activation script does not put it on
 `PATH` (see the machine table above), the campaign's headline fix silently did nothing and the run
 reproduced the exact failure the fix existed to remove. A warning on stderr, hundreds of lines above
@@ -4234,15 +4234,29 @@ invalidates it — watch for these triggers:
 ### Manual (never-`fpm test`) large-scale/benchmark tools
 
 A user/maintainer-runnable check that needs more memory/disk/time than `fpm test`/CI should ever
-attempt (e.g. genuinely exceeding `huge(1)` rows, or a multi-GB benchmark file) goes under `app/`
-(an `auto-executables` fpm target — never auto-picked-up by `fpm test`, unlike anything under
-`test/`) plus a thin `tools/*.sh` wrapper with env-var config (matching this repo's other
-`tools/*.sh` scripts), never under `test/`. See `app/benchmark_threads.f90`/
-`tools/benchmark_threads.sh` and `app/test_large_scale.f90`/`tools/test_large_scale.sh` for the
+attempt (e.g. genuinely exceeding `huge(1)` rows, or a multi-GB benchmark file) goes under
+**`bench/`** — the program AND the thin `*.sh` wrapper that drives it, side by side, with env-var
+config — never under `test/`, and never under `app/`, which now holds only the one program that
+ships. `bench/` is an fpm source-dir, so a program there is built like any other executable and is
+still never auto-picked-up by `fpm test`, unlike anything under `test/`. See `bench/benchmark_threads.f90`/
+`bench/benchmark_threads.sh` and `bench/large_scale.f90`/`bench/large_scale.sh` for the
 established shape: CLI flags (`--key=value`) parsed via `get_command_argument` in the Fortran
 program; env vars read and forwarded as those flags by the shell wrapper
 (`NAME="${NAME:-default}"` then `fpm run <app> -- --key="$NAME"`); `set -euo pipefail`; `cd` to
-the repo root first. Document usage (parameters, defaults, example invocations) in
+the repo root first.
+
+**`bench/` is an fpm SOURCE-DIR, so a `.f90` dropped there is compiled by fpm — which is wrong for a
+STANDALONE driver.** `fpm.toml` names one `bench/` program in an `[[executable]]` block, and that
+registers the whole directory for auto-discovery (measured against fpm 0.13.0 alpha; if a future fpm
+drops that, the symptom is the other programs silently not being built, so check the target count
+after an upgrade). The consequence: a driver that must be compiled by a bare compiler with forced
+flags — because forcing the other arm of a `#ifdef` fork would not let the package build at all —
+cannot live in `bench/`. The four such drivers stay in `tools/` beside their wrappers'
+siblings: `check_random_kernels.f90`, `check_exp_key.f90`, `check_argsort_standalone.f90` and
+`benchmark_random_kernels.f90`. Each says so in its own header; the last is the one to notice,
+because its `.sh` wrapper *is* in `bench/`, so the pair is deliberately split.
+
+Document usage (parameters, defaults, example invocations) in
 CONTRIBUTING.md's "Other tools/ helpers" section, not README.md — this is a contributor/
 maintainer tool, not part of the public library API.
 
@@ -4277,7 +4291,7 @@ before being noticed:**
   figure **3.7x** too slow — from a flag the wrapper believed it had set. The tell is one command,
   `fpm build --profile release --show-model | grep -o 'fortran_compile_flags="[^"]*"'`, and a
   benchmark wrapper should **assert `-O` appears there and refuse otherwise**, exactly as it would
-  refuse any other configuration it cannot engage. `tools/benchmark_colindex.sh` does; the older
+  refuse any other configuration it cannot engage. `bench/benchmark_colindex.sh` does; the older
   wrappers do not. Recovery is to append the flag (`FPM_FFLAGS="${FPM_FFLAGS:-} -O3"`, appended
   never assigned) and say so in the report.
 
@@ -4316,7 +4330,7 @@ before being noticed:**
   than the thing timed and perturbs the code under study. The ladder inverts it: put each phase
   behind its own cpp macro, build one binary per rung, and time the whole operation with one phase
   removed at a time — **each rung's difference from the baseline is that phase's cost**, and no
-  timer goes near the hot path. `tools/bench_resolve_ladder.py` is the worked example (eight rungs
+  timer goes near the hot path. `bench/bench_resolve_ladder.py` is the worked example (eight rungs
   over `table_resolve`), and it settled in one afternoon a question three machines' worth of
   end-to-end measurement had left open: the name lookup is **52–77%** of a per-cell read on four
   toolchains, and every other phase is unresolvable.
@@ -4357,7 +4371,7 @@ before being noticed:**
   can be filed against the wrong binary with nothing to catch it — the same failure the "negative
   control" rule guards against in tests, one level down. Two cheap defences, and one campaign used
   both: the program prints the variant it was compiled with (`guard_variant()` in
-  `app/benchmark_colindex.f90`), and the run includes an arm the flag provably cannot affect. The
+  `bench/benchmark_colindex.f90`), and the run includes an arm the flag provably cannot affect. The
   second doubles as the cross-build floor above, and in one report it was what proved a macro had
   done what it claimed — the control stayed flat under one compiler and moved 16% under another,
   identifying the second as layout rather than measurement.
@@ -4451,7 +4465,7 @@ before being noticed:**
   of subprocesses — so the second arm is systematically penalised by whatever is still draining. This
   is not the same hazard as "the machine is busy": it is *ordered*, so it biases one arm rather than
   adding symmetric noise, and best-of-N rounds does **not** remove it. Measured with
-  `tools/benchmark_stage7.sh --both --test`, which reported LTO **22–30% slower**
+  `bench/benchmark_stage7.sh --both --test`, which reported LTO **22–30% slower**
   than plain (S7-5 85.59 → 111.00 ms); re-measuring the two arms alone, with no suite in between, put
   them within **0.5%** (85.10 vs 85.43). The first result would have been written up as a real
   regression. **Re-run any delta that would change a decision, with the arms measured back to back

@@ -580,7 +580,7 @@ contains
         allocate(perm(nrows))
         ! Resolved BEFORE any identity fill, so a fill can be threaded. It was one of three
         ! whole-column serial loops that together were 48% of a 64-thread end-to-end sort before
-        ! they were threaded -- see `app/benchmark_sort_tail.f90`, which sizes each one.
+        ! they were threaded -- see `bench/benchmark_sort_tail.f90`, which sizes each one.
         call resolve_thread_count(threads, nrows, nthreads)
         if (nrows < 2_int64) then
             ! Zero or one row: the identity IS the answer and no engine runs.

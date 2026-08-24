@@ -34,6 +34,7 @@ working rules).
 - [Documentation conventions](#documentation-conventions)
   - [New features require tests and docs](#new-features-require-tests-and-docs)
   - [Documentation structure](#documentation-structure)
+  - [CONTRIBUTING.md is project-wide workflow only](#contributingmd-is-project-wide-workflow-only--a-tools-own-detail-goes-in-its-header)
   - [A guide page describes the CURRENT state, never a former one](#a-guide-page-describes-the-current-state-never-a-former-one)
   - [Checking documentation links](#checking-documentation-links)
   - [FORD doc-comment conventions](#ford-doc-comment-conventions)
@@ -599,6 +600,50 @@ Working rules:
   coverage, API documentation) alongside the static license/language/fpm ones. These are
   GitLab-specific — `tools/prep_github_mirroring.sh` swaps them for a single GitHub Pages
   documentation badge when mirroring (see CONTRIBUTING.md's "Mirroring to GitHub").
+
+### CONTRIBUTING.md is project-wide workflow ONLY — a tool's own detail goes in its header
+
+`CONTRIBUTING.md` answers one question: *how do I work on this repository?* The conventions everyone
+follows, the build/test/lint/CI/release/publish workflow, and decisions with repository-wide
+consequences. It is read start to finish by someone who has just arrived, so **its length is a cost
+paid by every reader**, and every paragraph added to it is charged to all of them.
+
+**A per-tool, per-script or per-file detail is not project-wide and does not belong there.** How one
+script is invoked, what its environment variables do, what its modes are, what its output columns
+mean, why one arm of one benchmark exists, what a figure measured on one machine — all of that goes
+in **that file's own header comment** (`tools/*.sh`, `tools/*.py`, `app/*.f90`, `src/*.f90`), next to
+the code it describes and in front of whoever is about to change it. This is already the convention
+rather than a new one: every program under `app/` and all but one script under `tools/` already
+carry such a header, so moving a paragraph there is usually merging rather than writing.
+
+**The test is: would the person who invalidates this sentence be looking at this file when they do
+it?** If someone adds a mode to a benchmark, they are editing the benchmark — so a description of its
+modes kept anywhere else is a second copy waiting to go stale. That is not hypothetical. The "Other
+tools/ helpers" section had reached **909 lines, 64% of the whole file**, and by the time it was
+reviewed it disagreed with `tools/benchmark_table.sh`'s own header about which output line to read
+(the header said RSS, `CONTRIBUTING.md` said the Arrow pool counter — and only the second is right)
+and with `tools/benchmark_sort_engine.sh`'s about which sort engine ships. Both were found by moving
+the prose next to the code, not by review.
+
+Rules:
+
+- **A tool gets ONE row in the index table** — its name and a one-line purpose — and nothing more.
+  Never a paragraph, never a worked example, never a table of environment variables. A new tool
+  therefore needs no `CONTRIBUTING.md` edit beyond that row, and a tool whose behaviour changes needs
+  none at all. `check_contributing_is_an_index` (`tools/check_source_conventions.py`) enforces this:
+  it fails if a `tools/` or `app/` path is mentioned outside the index table and a small allow-list
+  of genuine workflow references.
+- **Never write out a count or a list the repository owns** (see
+  [Documentation structure](#documentation-structure)). Point at the source instead: "the
+  `new_testsuite(...)` array in `test/run_tester.f90`", not a copy of it. Six such facts had gone
+  stale at once before this rule existed, including a suite list that named 10 of 27, an executable
+  count that read 24 for 31, and "sixteen structural invariants" for 44.
+- **Before adding a paragraph, decide which of four files it belongs in**: this file (a rule for
+  future work anywhere), the tool's own header (how this tool works), `feature_*.md` (a campaign's
+  measurements), or `doc/pages/` (anything a *user* of the library needs). `CONTRIBUTING.md` is the
+  residue — what a contributor needs before they know which area they are working in.
+- **If you are explaining what a benchmark's output means, you are writing the script's header.**
+  That is the single most reliable signal that a paragraph is in the wrong file.
 
 ### A guide page describes the CURRENT state, never a former one
 
@@ -4246,7 +4291,7 @@ before being noticed:**
   `-O3`, with the total at 97.45 ms against 36.91 — and nothing in the output said which it was. The
   recovery is `FPM_CXXFLAGS="${FPM_CXXFLAGS:-} -O3"`, appended never assigned, because that variable
   carries Arrow's include paths. Add the assertion to any wrapper whose timed work reaches C++; a
-  wrapper measuring Arrow-free Fortran (`benchmark_random.sh`, `probe_isnan.sh`) does not need it and
+  wrapper measuring Arrow-free Fortran (`benchmark_random.sh`, `benchmark_random_kernels.sh`) does not need it and
   should not gain a gate it cannot fail meaningfully.
 
   **But "no `-O` in the flags" does NOT mean "unoptimised" — some compilers optimise by default, and

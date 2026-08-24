@@ -1,15 +1,140 @@
 #!/usr/bin/env bash
 # Benchmarks the parquet_table layer against reading/writing columns directly, on one synthetic
-# float64 file. See app/benchmark_table.f90 for what each mode actually times; this script only
-# decides the file size, generates the fixture once, and drives the six measurement runs.
+# float64 file. It drives app/benchmark_table.f90 through eight runs plus two sweeps -- a raw
+# reader baseline, a table open+materialize_all, a lazy open reading only TOUCH of the columns, a
+# slice-regime open covering one of SLICES equal row ranges, an access comparison, a write
+# comparison on a null-free table, the same on one where NULLFRAC of the rows are null, a sort run,
+# a peak-memory pair and an argsort thread sweep. A ninth mode, read_one, is not part of the
+# sequence and is run on its own (see below).
 #
-# The number worth watching is the RSS line in the `read` section: parquet_table keeps its own
-# Fortran copy of every column and frees the Arrow-side buffers as it materializes them, so a
-# fully materialized table should sit near ONE copy of the column data. Roughly two copies means
-# the release stopped happening (feature_table.md D3).
+# ALWAYS pass --profile release for anything measured here; the wrapper already does. See CLAUDE.md's
+# "Manual (never-`fpm test`) large-scale/benchmark tools" for why, and for the FPM_FFLAGS rules.
 #
-# Usage:
+# ---------------------------------------------------------------------------------------------
+# What each run measures, and how to read it
+# ---------------------------------------------------------------------------------------------
+#
+# access -- needs a fixture with at least two columns (NCOLS=2 or more) and reports two separate
+#   things. First, on already-materialized columns, what %get and %col themselves cost; the columns
+#   are prefetched before anything is timed, because opening is lazy and a %get on a cold column
+#   would otherwise decode the whole column from the file, measuring the decode rather than the
+#   copy. Second, and the reason the mode exists, the same z = x + y evaluated three ways: over
+#   plain allocatable arrays, over %col pointers, and over %col pointers the caller declared
+#   contiguous. Computing through a pointer is measurably slower than over arrays you own (roughly
+#   1.1x on bandwidth-bound columns, ~1.7x once they fit in cache), and the contiguous row is there
+#   to test the obvious explanation and refute it -- promising contiguity at the call site recovers
+#   nothing, so the gap is not %col's missing stride guarantee. The actionable figure is "passes
+#   before %get wins": %col skips a copy, so it is ahead until you have iterated over the same
+#   columns enough times for the slower arithmetic to give that saving back.
+#
+# write -- materializes the table before timing anything, for the same reason the access run
+#   prefetches: a parquet_write_table on a freshly opened table would decode every column as it
+#   wrote it, charging the whole read to the write path, while the hand-written loop that runs
+#   afterwards finds every column resident. The comparison still leans slightly towards the
+#   hand-written loop, which copies each column out with %get first where parquet_write_table
+#   writes from the store with no copy -- so parity in that output means the table path is
+#   genuinely no more expensive.
+#
+# write_nulls -- the counterpart to write. write measures the null-free path, where a column with
+#   no nulls is handed to the writer with no validity mask at all; write_nulls measures the case
+#   that shortcut cannot help, and splits it three ways: parquet_write_table, a hand-written loop
+#   building its mask a row at a time through %is_null, and the same loop handed a finished mask.
+#   The third is the floor -- writing with nulls and nothing else -- so the gap above it is mask
+#   construction, and parquet_write_table should sit at that floor because it walks the validity
+#   bitmap a word at a time. The per-row line is legitimately much slower: %is_null takes a column
+#   name, so every call repeats a lookup the library does once, and the public API offers no way to
+#   hoist it. It builds its null-carrying input itself (an untimed extra write plus read) rather
+#   than asking the fixture writer for one, because parquet_table exposes no way to mark a row null
+#   in memory.
+#
+# sort -- the only run that touches no file: it builds a table of SORT_SIZE_GB worth of float64
+#   columns plus one character column IN MEMORY, because what it measures is the cost of reordering
+#   an already-resident table, and reading a fixture first would only add a decode to both sides. It
+#   splits %sort_by into its two halves -- the permutation build (pf_argsort, in C++) and the
+#   per-column reindex loop -- which is the split worth watching, because on a many-core machine the
+#   second dominates: when the loop was still serial it measured 13.1 s against the permutation's
+#   1.9 s on a 100+ core server. Both halves are threaded now (the loop runs one column per thread,
+#   gated), so that ratio is the historical motivation rather than what a run today reports.
+#
+#   It then measures the reindex phase TWO ways, all columns validating the permutation against only
+#   the first one doing so. That comparison is also the only thing that would notice if
+#   %reindex_trusted silently stopped differing from %reindex -- the two figures would simply
+#   coincide, with every test still passing. The trailing "reference" block prices the two seen-set
+#   representations against each other; logical is what reindex used before the bit-packed set
+#   replaced it, so those lines say what that change was worth rather than what is still available.
+#
+# argsort -- also file-free, and answers a different question from sort: there the permutation build
+#   is a minority of %sort_by, but for a caller of raw-array pf_sort/pf_argsort it IS the whole
+#   operation. It runs pf_argsort at each of ARGSORT_THREADS over each of ARGSORT_NROWS, splitting
+#   the result into the per-chunk std::sorts and the merge that follows, and reporting the merge's
+#   last round separately -- that round is where a pairwise merge collapsed to a single thread, so
+#   it is the one the co-ranked merge exists to fix.
+#
+#   Each run measures BOTH merges, back to back in one process: once with the minimum segment size
+#   forced above the whole array, which leaves every pair unsegmented and so reproduces the pairwise
+#   merge exactly, and once with co-ranking in force. That is deliberate rather than convenient -- an
+#   earlier version compared a co-ranked build against a pairwise one measured on a different day,
+#   and the serial baseline alone had drifted 15% in between, which is larger than some of the
+#   effects being reported. Any before/after claim about this phase should come from one process,
+#   not two runs. Keep 1 first in ARGSORT_THREADS: it is the serial baseline, and it reports no
+#   phases at all, because the engine takes the plain std::sort path rather than chunking.
+#
+# peakmem -- answers a question none of the runs above can, and the reason it needs its own mode is
+#   worth knowing before anyone tries to fold it back into sort. A parallel row-structural mutation
+#   holds one transient column copy per thread instead of one in total; the library's answer to that
+#   is documentation plus the parquet_set_table_threads cap rather than a memory-derived limit, so
+#   the "at most doubles the table's peak" claim has to be measured rather than asserted. sort
+#   CANNOT measure it -- it builds a SECOND, standalone set of columns in order to time the reindex
+#   phase in isolation, and that second set, not the mutation, is what sets its process peak. Three
+#   different machines reported an RSS figure from that mode and all three had to discard it.
+#   --mode=peakmem builds one table, sorts it exactly once, and allocates nothing else.
+#
+#   The answer is the DIFFERENCE between the run's two points, PEAKMEM_THREADS="1 0" (serial, then
+#   automatic). Both build the identical table, so whatever separates their peaks is the mutation's
+#   transient, and the mode prints the predicted value -- (T-1) copies of one column -- beside it.
+#   The peak is read with /usr/bin/time wrapped around the benchmark binary via `fpm run --runner`,
+#   not around fpm, whose own compile and link peaks would dominate; the mode's two in-process RSS
+#   lines are context, not the answer, because the transient is gone before the program regains
+#   control. On an 8-core machine the transient measures about 86% of (T-1) copies, the shortfall
+#   being that the copies are not simultaneous -- each lives only between its column's allocation
+#   and its move_alloc, and schedule(dynamic) staggers when columns finish.
+#
+# lazy / slice -- read these against read_table: the open figure shows what an open costs when it
+#   reads nothing, and the two partial modes show that a program pays only for the columns and rows
+#   it asks for. A slice cannot be cheaper than one row group, so a fixture written with a single
+#   row group will show no slice saving -- the mode says so in its own output.
+#
+# raw baseline -- reads ONE ARRAY PER COLUMN and holds them all at once, matching what a table
+#   holds. Reusing a single buffer for every column instead would measure a different job and
+#   flatter the raw path -- the same pages get overwritten and stay warm, where the table touches
+#   the whole file's worth of distinct memory (worth ~15% of the raw-vs-table gap on a 0.4 GB
+#   8-column file).
+#
+# ---------------------------------------------------------------------------------------------
+# The number worth watching: "Arrow pool still holding", NOT RSS
+# ---------------------------------------------------------------------------------------------
+#
+# In the two read sections, watch "Arrow pool still holding". parquet_table keeps its own Fortran
+# copy of every column and releases the reader's decoded Arrow buffers as it goes, so a fully
+# materialized table should report ~0 MiB there while the raw baseline reports the whole file (on
+# top of its own Fortran copies -- roughly two copies resident). Roughly two copies for the table
+# means the release stopped happening.
+#
+# RESIDENT SET SIZE CANNOT ANSWER THIS QUESTION. Arrow's memory pool keeps freed pages rather than
+# returning them to the OS, so RSS stays high in both cases; the pool's own bytes_allocated() is
+# what distinguishes "released" from "still alive". The two read modes also run as separate
+# processes for the same reason. See CLAUDE.md's "Measuring whether Arrow memory was actually
+# freed: RSS cannot answer, the pool counter can".
+#
+# ---------------------------------------------------------------------------------------------
+# Usage
+# ---------------------------------------------------------------------------------------------
 #   tools/benchmark_table.sh
+#   TARGET_FILE_SIZE_GB=2.0 NCOLS=16 tools/benchmark_table.sh   # bigger file, more columns
+#   NCOLS=32 TOUCH=2 SLICES=8 tools/benchmark_table.sh          # 2 of 32 columns, an eighth of rows
+#   TEST_FILE=/tmp/bench.parquet tools/benchmark_table.sh       # keep the synthetic file
+#   SORT_SIZE_GB=3 NCOLS=24 tools/benchmark_table.sh            # sort run is sized on its own
+#   ARGSORT_NROWS="1000000 20000000" ARGSORT_THREADS="1 2 4 8 16 32 64" tools/benchmark_table.sh
 #
 # Config (env-overridable, matching this repo's other tools/*.sh scripts):
 #   TARGET_FILE_SIZE_GB=0.25  Approximate uncompressed (in-memory) size of the test file.
@@ -33,6 +158,39 @@
 #                              directory, deleted automatically when the script exits. Set this
 #                              to keep the file around afterward -- it is NOT deleted when
 #                              explicitly set, and its parent directory is created if needed.
+#
+# ---------------------------------------------------------------------------------------------
+# read_one: run on its own, and read its CONTROL before its timings
+# ---------------------------------------------------------------------------------------------
+#
+# read_one times reading a single whole column with Arrow's own use_threads on and off, which
+# answers a question no other mode does: whether Arrow already parallelises a single-column decode
+# internally. On an 8-core machine it does not -- 0.96x-1.02x across two column sizes -- which is
+# why splitting one column's read across row groups is still worth doing.
+#
+# ITS MOST IMPORTANT LINE IS THE CONTROL, NOT THE TIMINGS. "The two arms take the same time" and
+# "the flag never reached the reader" produce identical output, so the mode prints the use_threads
+# value each arm's reader actually resolved to (1 and 0) and says outright that the timings mean
+# nothing if those match. Copy that shape for any future A/B benchmark whose expected result is NO
+# DIFFERENCE: without a control, such a benchmark passes just as happily when it is measuring one
+# configuration against itself. The mode also uses a fresh reader per timed read (a reader caches
+# its decoded column, so a second read on one reader times a cache hit), one untimed warm-up read so
+# both arms see the same page-cache state, and alternating arms within each round.
+#
+#   fpm run benchmark_table --profile release -- \
+#       --mode=write_fixture --file=/tmp/pf_bench.parquet --size=4.0 --ncols=24
+#   fpm run benchmark_table --profile release -- --mode=read_one --file=/tmp/pf_bench.parquet
+#
+# The peak-memory pair can also be run on its own, which is usually what you want -- it is the only
+# part of the script whose answer is a difference between two processes, and the rest of the script
+# does not have to run for that difference to mean anything. Use a narrow table to make it bite:
+# the bound is tightest when the thread count approaches the column count.
+#
+#   for t in 1 0; do
+#       fpm run benchmark_table --profile release --runner "/usr/bin/time -l" -- \
+#           --mode=peakmem --size=4.0 --ncols=24 --threads="$t"
+#   done
+#   # GNU time (Linux) reports the same figure under -v rather than -l.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

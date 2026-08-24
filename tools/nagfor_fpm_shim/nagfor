@@ -63,6 +63,16 @@
 #    ever written for it. Measured 2026-08-20 with a bare `fpm test` under
 #    FPM_FC=nagfor and no profile flags: 1783 passed / 0 skipped by default,
 #    1768 / 15 under NAGFOR_OMP=0.
+#
+#    `fpm --verbose` WILL NOT SHOW THE FLAG, and that is expected rather than
+#    evidence it is absent. fpm prints the command line it constructs and then
+#    hands to `nagfor`; every rewrite this shim makes -- this addition, the
+#    `-Wl,` fixes, the deduplication -- happens afterwards, before exec'ing the
+#    real compiler, so none of it is visible in fpm's output by construction.
+#    `--show-model` has the same blind spot for the same reason. VERIFY BY
+#    BEHAVIOUR INSTEAD: run something that asserts threading. The
+#    `string_parallel` suite reports 9 passed / 0 skipped when the build really
+#    is threaded, and 1 / 8 under NAGFOR_OMP=0.
 
 # Resolve the real nagfor: first PATH entry whose nagfor is not this script.
 real_nagfor=""

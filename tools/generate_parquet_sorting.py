@@ -32,6 +32,17 @@ Usage:  tools/generate_parquet_sorting.py [--check] [--self-test]
   --check      regenerate into memory and compare with the committed files; exit 1 on any
                difference (so CI, or a reviewer, can prove the committed output is current).
   --self-test  verify the imported kind table still has the shape this script assumes.
+
+Regenerates the per-type blocks of the `parquet_sorting`
+module: `src/parquet_sorting.f90` (the module spec), `src/parquet_sorting_keys.f90`,
+`src/parquet_sorting_argsort.f90` and `src/parquet_sorting_permute.f90` -- roughly 75 near-
+identical procedures, since four operations over eleven element types in two permutation-index
+kinds is the same handful of statements repeated. Like the tables generator it imports its kind
+table from `tools/generate_parquet_columns.py` (the nine SCALAR rows) and declares locally only
+the three types that are not `parquet_column` storage kinds at all: `character(len=*)`,
+`parquet_string_column` and `parquet_column` itself. `--self-test` cross-checks the imported set,
+so a change over there fails here rather than silently changing what this module sorts; `--check`
+verifies the committed output as usual. Maintainer-only (stripped from the fpm-published package).
 """
 
 import argparse

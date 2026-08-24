@@ -1,6 +1,9 @@
-!=========================
-! Demo for schema%print_schema_info review
-!=========================
+!===========================================
+! Author: Elmo Tempel (elmo.tempel@ut.ee)
+!===========================================
+!
+!> Maintainer demo for reviewing `schema%print_schema_info`'s output by eye. No fixed contract and
+!! nothing asserts it -- it exists so a change to that procedure's formatting can be looked at.
 program demo_print_schema_info
     use parquet
     implicit none

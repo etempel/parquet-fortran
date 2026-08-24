@@ -33,6 +33,19 @@ Two windows are also READ rather than merely preserved. The `components` window 
 assignment per component is emitted into `clone_extra` (so %clone carries the user's own state
 without them having to remember) and one reset into `init_extra` (so every constructor starts from
 a known value). Anything the parser declines to handle is reported, by name, and left to the user.
+
+Turns a Role-A MAML (one under `table_types/`) into a named
+`parquet_table` extension type with one accessor per declared column -- see Generated table types
+(doc/pages/utilities/generated-tables.md) for the user-facing story. This project's own
+`table_types/maml_example4.maml` generates `src/parquet_table_example.f90` (module
+`parquet_table_example`, type `parquet_table_test`), which ships with the library as a worked
+example -- nothing else in the library uses it -- and is exercised by the `table_codegen` test
+suite; regenerate it with `tools/generate_user_table_code.py` and commit the result. Unlike the
+two generators below it is consumer-facing (like `tools/generate_parquet_maml.sh`) and ships in
+the fpm-published package, so a downstream project can copy it. `--self-test` runs its own tests,
+including a cross-check that its baked-in list of reserved `parquet_table` binding names still
+matches `src/parquet_tables.f90` -- so adding a type-bound procedure to `parquet_table` fails the
+lint stage until that list is updated.
 """
 
 import argparse

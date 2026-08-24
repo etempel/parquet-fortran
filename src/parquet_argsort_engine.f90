@@ -158,7 +158,7 @@ submodule (parquet_argsort) parquet_argsort_engine
     ! disassembly shows two `ieee_arithmetic_mp_for_ieee_is_nan_k8_` PLT calls per comparison, fired
     ! only on real keys -- exactly the shape of the f64-specific penalty machine B measured (+3.45 ns
     ! over its own i64 arm). gfortran inlines the same intrinsic to a native compare, so machine A
-    ! never saw it. `app/probe_isnan.f90` on machine B, ifx 2026.1.1, ns per test above a bare `<`:
+    ! never saw it. Measured on machine B, ifx 2026.1.1, ns per test above a bare `<`:
     !
     !     ieee_is_nan  +2.479      x /= x  +0.034      integer bit test  +0.003
     !

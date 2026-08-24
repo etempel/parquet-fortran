@@ -35,6 +35,40 @@
 #   ROUNDS=5        Rounds per arm; the best is kept.
 #
 # Bash 3.2 compatible (two of the three machines are macOS).
+# ---------------------------------------------------------------------------------------------
+# Times `parquet_random`'s two route (e) kernels against each
+# other on one compiler -- the 128-bit kernel (`#ifdef PF_INT128`) and the wrapping kernel (`#else`)
+# -- driving `tools/benchmark_random_kernels.f90`. Like `tools/check_random_kernels.sh`, and for the
+# same reason, it cannot go through fpm and its driver is not under `app/`: forcing the other kernel
+# needs `-U__GFORTRAN__`, which also flips `src/parquet.f90`'s stringify branch, so the package will
+# not build that way at all. Only a standalone compile of `parquet_random` works -- which it does
+# because that module reaches nothing but `iso_fortran_env` and two leaves of its own
+# (`parquet_expkey`, `parquet_ziggurat`). `check_parquet_random_stays_leaf` is what enforces it, and
+# the rule it enforces is the transitive one: every project module `parquet_random` reaches must
+# itself reach nothing but compiler-supplied modules.
+#
+# Two gates decide whether it reports anything, and both exist because their failure mode is a
+# plausible-looking number rather than an error. The vacuity guard requires the two halves to report
+# different kernel names -- if `-U__GFORTRAN__` ever stops defeating the allowlist, this would build
+# the same kernel twice and print a perfectly reasonable 1.00x. The checksum gate requires the two
+# halves to agree bit for bit, which they must, being the same algorithm by different arithmetic;
+# gfortran is known to miscompile the wrapping kernel under LTO (`feature_risks.md` Risk-101), and a
+# timing from a miscompiled arm is a timing for something that is not this library. LTO is therefore
+# not the default `OPT`, and a disagreeing run is refused outright rather than printed with a
+# warning.
+#
+# Measured on machine B, gfortran 15.2.1 at fpm's release flags, checksums identical throughout: the
+# wrapping kernel is 1.58x faster than the shipped `int128` one on the `real64` bulk fill, 1.57x on
+# `real32` and 1.93x on the scalar path (1.5-2.0x across `-O2`, `-O3` and `-O3 -funroll-loops`). The
+# mechanism is visible in the object code and is not the multiply -- both arms emit the same 20
+# `imul` in `random_block`, so the fork header's "the optimiser narrows it straight back to a native
+# multiply" holds. What the `int128` arm adds is 20 `shrd` instructions extracting halves across a
+# register pair whose upper 64 bits are provably zero, and 230 instructions against 167.
+#
+#     tools/benchmark_random_kernels.sh
+#     OPT=-O2 tools/benchmark_random_kernels.sh
+#     FC=ifx tools/benchmark_random_kernels.sh     # ships wrapping already; reports one arm and says so
+# ---------------------------------------------------------------------------------------------
 set -u
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

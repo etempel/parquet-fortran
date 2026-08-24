@@ -24,9 +24,9 @@ before_script:
   # fpm.toml uses the `[features]` table and the feature-list form of `[profiles]`, both of which
   # fpm 0.13.0 introduced, so this pin is what lets CI build the manifest the project is actually
   # developed against -- README.md's Prerequisites states the same 0.13.0 floor for consumers.
-  # It also replaces an earlier `pipx install fpm` (which gave 0.12.0) plus a
-  # tools/prep_gitlab_fpm_toml.sh step that stripped both tables from the CI checkout to get past
-  # the manifest parse; neither is needed once fpm understands them. When moving to a newer fpm,
+  # It replaces an earlier `pipx install fpm` (which gave 0.12.0) plus a strip step that removed
+  # both tables from the CI checkout to get past the manifest parse; neither is needed once fpm
+  # understands them. When moving to a newer fpm,
   # change the version in the URL and the filename together.
   - wget -nv -O /usr/local/bin/fpm https://github.com/fortran-lang/fpm/releases/download/v0.13.0/fpm-0.13.0-linux-x86_64-gcc-12
   - chmod +x /usr/local/bin/fpm

@@ -32,6 +32,27 @@
 # The activation script ends by spawning an interactive subshell, which exits immediately when
 # sourced non-interactively -- so the second line is required, and without it `gfortran` is the
 # system 11.5.0, which is below this project's floor and miscompiles it.
+# ---------------------------------------------------------------------------------------------
+# Runs UndefinedBehaviorSanitizer over the same standalone compile, on
+# both arms of the same fork. It answers a different question from its sibling: that one asks
+# whether the two kernels agree, this one asks whether either is undefined. The distinction is the
+# whole point -- a kernel can produce every correct value while resting on signed overflow the
+# optimiser is entitled to reason from, which is exactly what `feature_risks.md` (feature_risks.md)
+# Risk-94 records happening here, where a wrapping multiply measured correct and the compiler still
+# used its undefinedness to delete a branch two functions away. A `-ftrapv` build cannot substitute:
+# whether a site is instrumented there depends on optimisation level and inlining, and a site whose
+# result is dead is optimised away before instrumentation while staying available to the optimiser
+# as a range assumption. A clean run means the shipped (`int128`) arm reports nothing and the
+# forced-wrapping arm reports exactly the six documented deliberate sites -- `random_block`'s two
+# `#else` multiplies and `mulhilo64`'s four partial products. Anything outside those two procedures
+# is a real finding; its first run produced six, in the bulk fills (Risk-112). It needs a 64-bit
+# `libubsan`, which on machine B means gcc-toolset-15 rather than 14, and it is a machine-B-only
+# instrument -- MacPorts gcc15 ships no `libubsan` and flang rejects `-fsanitize` for Fortran.
+# Maintainer-only (stripped from the fpm-published package).
+#
+#     tools/check_random_ubsan.sh                   # both arms
+#     FC=ifx tools/check_random_ubsan.sh            # ifx ships the wrapping arm
+# ---------------------------------------------------------------------------------------------
 
 set -u
 

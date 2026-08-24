@@ -62,6 +62,21 @@ is why every anchor in this file survived the change untouched; every emitted ve
 did not. Same rule as above: the mapping is `int_at()` below, and reversing it is an edit there
 plus a regeneration -- never an edit to the table.
 --------------------------------------------------------------------------------------------
+
+Regenerates `test/test_random_vectors.f90` -- the golden
+vectors that freeze `parquet_random`'s bit contract (see Random numbers
+(doc/pages/utilities/random.md)). It is the odd one out among the generators: its output is test
+data rather than library source, and it is derived from an arbitrary-precision Python model of the
+contract rather than from any Fortran run, because a table read back out of the implementation
+could only ever confirm that the implementation agrees with itself. `--self-test` re-derives every
+published anchor -- the three Random123 known-answer vectors, the `mix64` checksum, the wide-width
+oracle value and the stable rows of the reference tables -- and refuses to regenerate anything if
+one of them fails; that is what makes the emitted table evidence rather than mere self-
+consistency, so run it before trusting a regeneration. `--check` verifies the committed output as
+usual. Never hand-edit a vector: a contract change is an edit to the oracle in the script plus a
+regeneration, and every value it emits is permanent (changing one is a major-version event,
+visible only through `pf_random_algorithm`). Maintainer-only (stripped from the fpm-published
+package).
 """
 
 import argparse

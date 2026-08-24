@@ -10,6 +10,13 @@
 #
 # Usage:
 #   tools/count_tests.sh
+# ---------------------------------------------------------------------------------------------
+# Counts test-drive unit tests per suite directly from source (no build or
+# run required): it reads `test/run_tester.f90`'s `new_testsuite(...)` registrations, locates each
+# suite's `collect_tests_parquet_*` subroutine, and counts the `new_unittest(...)` entries inside it
+# -- cross-checked against an actual `fpm test run_tester` run's PASSED/FAILED line count.
+# Maintainer-only (stripped from the fpm-published package, see `tools/prep_fpm_publish.sh`).
+# ---------------------------------------------------------------------------------------------
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

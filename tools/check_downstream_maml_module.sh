@@ -47,6 +47,31 @@
 #                   compiler whose .mod files are under build/, since .mod format is per-compiler.
 #
 # bash 3.2 only (macOS ships 3.2): no associative arrays, no mapfile, no ${var,,}.
+# ---------------------------------------------------------------------------------------------
+# Protects the other mode of
+# `tools/generate_parquet_maml.sh`. That script has two: `base`, which emits
+# `src/parquet_maml_base.f90` for this repository and is checked on every pipeline run (`base
+# --check`, in the `lint` stage), and the no-argument mode a downstream project uses on its own
+# schemas -- see "Embedding your own MAML schemas in your own project"
+# (doc/pages/utilities/embedding-maml-schemas.md). The two do not emit the same text: base mode
+# emits no `use` statement at all, while downstream mode imports four names from `parquet`
+# (`parquet_schema`, `parquet_load_maml_file`, `parquet_parse_maml`, `parquet_validate_user_maml`),
+# calls `parquet_parse_maml` in every accessor, and carries a whole `set_maml` body. Rename any of
+# those four and `base --check`, `fpm test` and the lint stage all stay green while every downstream
+# project's next regeneration fails to compile -- this library would have no way to know it had
+# broken them. The script builds a throwaway downstream project in a temporary directory (nothing is
+# written inside this repository), generates from it and compiles the result against the library's
+# own `.mod` files. It compiles rather than runs, which is what makes it cheap enough for every
+# pipeline: no linking, no Arrow link line, no dependency resolve. Its five checks also cover the
+# generator's own refusals -- a duplicate `.maml` filename, `--check` drift in both directions,
+# `--module=<name>` -- and one of them is a deliberate negative control that renames an imported
+# name and requires the compile to fail, so a run that had silently stopped compiling anything
+# cannot report success. It runs in CI's `test` job rather than `lint`, because it needs a Fortran
+# compiler and a built library and the lint image has neither.
+#
+#     tools/check_downstream_maml_module.sh          # builds the library first if needed
+#     FC=ifx tools/check_downstream_maml_module.sh   # follows FPM_FC when FC is unset
+# ---------------------------------------------------------------------------------------------
 set -u
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

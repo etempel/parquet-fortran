@@ -121,6 +121,106 @@ Usage:
     tools/check_source_conventions.py --list     # print what each check covers, then exit
 
 Exits nonzero and prints one line per violation, each naming file:line and what to do instead.
+
+Enforces sixteen structural invariants that no compiler and no
+runtime test can see -- each one's violation compiles cleanly, passes the whole suite, and fails
+somewhere else entirely. Each names the feature_risks.md (feature_risks.md) entry it protects, in
+its own docstring and in the message it prints:
+
+  * `parquet_table` must gain no allocatable component. The type is finalizable, and this project
+    has three confirmed compiler bugs in exactly the `intent(out)`/`FINAL` machinery on exactly this
+    type, so new table state goes on `parquet_table_cache` instead (see New `parquet_table` state
+    goes on the CACHE (CLAUDE.md#new-parquet_table-state-goes-on-the-cache--never-as-an-allocatable-
+    component-of-the-type)).
+  * Every pointer a table accessor hands out must be reached through `self%cache`. Pointing at
+    `self` directly makes the caller's table need the `target` attribute, and `target` is a
+    requirement on the caller -- so the library still compiles, every test still passes, and only a
+    user's program corrupts memory.
+  * The generated files must carry the doc-comments and `! GCOVR_EXCL_LINE` markers their generators
+    are supposed to emit. The generators' own `--check` modes compare the committed file against the
+    generator, so a template that drops a convention produces output that matches perfectly and is
+    wrong in every kind it emits at once.
+  * A schema-less `parquet_write_table` must declare `col_size:`/`array_size:` as `auto`, never a
+    measured value. Declaring `auto` is what makes the generated schema unable to get a size wrong,
+    since the writer resolves both from the data. A round-trip test cannot see a change here: the
+    sidecar MAML is emitted at close, after the writer has resolved the real numbers, so it still
+    looks correct.
+  * Every procedure that calls `check_row_group_valid` must also call `check_reader_no_sort`. A sort
+    permutation destroys row-group locality, so a row-group-scoped read that forgets the guard
+    returns the right number of rows and the wrong ones. Pairing the two turns "did we guard all ~19
+    sites?" into something mechanical, and it extends itself -- a new row-group-scoped read
+    validates its row group as a matter of course.
+  * `print_stat`'s columns must match the table documenting them in `doc/pages/io/reading.md`. That
+    table is the format's only contract: exactly one assertion in the whole suite touches the output
+    text, so a renamed column breaks no test. The two had already drifted when this check was added.
+  * `parquet_print_settings`'s rows must all be named in `doc/pages/operating/settings.md`. Same
+    reasoning as `print_stat` above. Rows are matched by the shape of the call rather than against a
+    list of helper names, because the list version went blind twice as new row helpers were added --
+    the second time reporting three of five new rows as documented when the check simply could not
+    see them.
+  * Every `cfg_*` setting must be read somewhere other than where it is written. A setting nothing
+    consults still round-trips through its own getter and still reports the right factory value,
+    while doing nothing at all (Risk-41 (feature_risks.md)). This catches "nothing reads it"; the
+    observed-effect tests in `test/test_settings.f90` catch "reads it wrongly".
+  * Nothing in `src/` writes to a unit directly outside the three emit channels. Routing every
+    message through `parquet_emit_info`/`_warning`/`_error_context` is what makes `verbosity` and
+    `message_stream` apply everywhere. A print written the old way still appears at default
+    settings, so the suite stays green and only users who changed a setting are affected.
+  * The row-group sizing arithmetic must exist once. Its two callers serve different writers (a
+    whole-table write and the streaming path's estimate), so a re-inlined copy takes the built-in
+    constant instead of the setting: `parquet_set_target_row_group_bytes` then governs one kind of
+    write and not the other, with every row correct, the row-group count wrong, and nothing failing
+    (Risk-43 (feature_risks.md)).
+  * `src/` must hold exactly one C++ translation unit. Every process-global in `parquet_wrapper.cpp`
+    is a file-scope `static`, so a second `.cpp` would silently get its own copy of each -- breaking
+    both the `parquet_debug_*` test overrides and the settings mirrored from `parquet_settings`. Not
+    a ban on splitting the file: it is CLAUDE.md's TU-split note (CLAUDE.md#if-
+    srcparquet_wrappercpp-is-ever-split-into-multiple-translation-units) firing at the moment
+    somebody does.
+  * Every setting must have an environment variable. `parquet_settings_from_env` is the only way a
+    setting can be exercised without recompiling, and a knob it forgets is unreachable that way with
+    nothing to say so. The knob list is taken from `parquet_print_settings`' own printed rows,
+    shared with the documentation check above, so a new setting fails both at once rather than
+    needing two lists remembered separately.
+  * An `allocate` extent taken from `size(...)` must ask for `kind=int64`. A default-kind `size()`
+    wraps above 2³¹ elements, and in an allocate extent that is worse than the short fill it causes
+    elsewhere, because the loop that follows usually gets its bound right: ten sites in the
+    generated table accessors read `allocate(arr(size(rows)))` on one line and `do k = 1, size(rows,
+    kind=int64)` on the next, so a slice past 2³¹ rows would have allocated a zero-length array and
+    then written the full count into it. Element assignment does not reallocate, so that is an out-
+    of-bounds write on a valid call rather than a wrong answer -- unlike the sibling `arr = p`
+    shape, where intrinsic assignment to an allocatable resizes and hides the mistake. Matched by
+    shape with no exemption list, since `kind=int64` costs nothing even where the extent is provably
+    small (Risk-105 (feature_risks.md)).
+  * No per-element helper in `parquet_wrapper.cpp` may take an Arrow array by `const
+    std::shared_ptr<arrow::Array> &`. A `shared_ptr` parameter looks free and is not: every
+    `std::static_pointer_cast` inside such a helper builds a new one, i.e. an atomic increment and
+    decrement, and in a helper called once per row that becomes the dominant cost of the whole
+    operation -- `real_family_value_at` measured at 13.6 ns per row to read one double that way
+    against 1.8 ns with a raw pointer, when the clause evaluation it serves was 75-93% of the cost
+    of installing a row filter. Nothing fails when this is undone: every answer stays identical and
+    the suite stays green, only the clock moves. Matched by shape (an array parameter next to an
+    element index), so it cannot go blind to the next helper added.
+  * Every scenario `test/error_scenarios.f90` dispatches on must be named in
+    `tools/run_error_scenarios.sh`. That array is what CI runs and what `prime_error_scenarios` pre-
+    runs in parallel, but nothing proved the reverse direction: a scenario added to the `select
+    case` and driven from a test, yet never listed, is invisible to the script and silently loses
+    its priming -- it just falls back to spawning on demand, so nothing fails and nothing says
+    anything. Names are derived by shape from the `select case` itself, and an empty result is a
+    failure, so the check cannot go blind the way an enumerated list would.
+  * Every `omp_*` reference in `src/` and `test/` must sit inside `#ifdef _OPENMP`. A build without
+    OpenMP compiles the `!$omp` directives away -- they are comments -- but not the ordinary Fortran
+    around them, so an unguarded `use omp_lib`, `omp_get_thread_num()` or `omp_lock_kind` is an
+    undeclared name and the file stops compiling. Nothing in the ordinary fleet can see it: fpm's
+    `openmp = "*"` metapackage supplies `-fopenmp` for gfortran and ifx, so `_OPENMP` is defined in
+    CI and in every local `fpm test`, and only a toolchain the metapackage does not cover reaches
+    the other arm. It has bitten twice -- once in `src/`, once in a threading test that left its
+    file uncompilable serially for two days with every check green. Note a runtime `skip_test` guard
+    does not cover this: skipping is a decision made after the file has already had to compile.
+Run it after touching the table layer or a generator template (it is also part of
+`tools/run_lint_check.sh` and CI's `lint` stage):
+
+    tools/check_source_conventions.py
 """
 import re
 import sys
@@ -3087,6 +3187,122 @@ def check_openmp_calls_are_guarded():
     return problems
 
 
+def check_contributing_is_an_index():
+    """CONTRIBUTING.md names each tool ONCE, in its index table -- never in a paragraph.
+
+    CONTRIBUTING.md is project-wide workflow; how one tool works belongs in that tool's own header
+    comment, where whoever changes the tool will see it. See CLAUDE.md, "CONTRIBUTING.md is
+    project-wide workflow ONLY -- a tool's own detail goes in its header".
+
+    Three clauses, and the first two are what keep the index honest in both directions:
+
+    1. Every executable script under tools/ has exactly one row in the index table. Without this a
+       new tool is simply absent and nobody finds out -- tools/check_s7_9.sh was undocumented for
+       exactly that reason.
+    2. Every index row names a file that exists, so a deleted or renamed tool cannot leave a row
+       behind.
+    3. Inside the "Other tools/ helpers" section every tools/ mention is a table row, and elsewhere
+       in the file no single tools/ or app/ path is named more than MAX_PROSE_MENTIONS times. That
+       is what stops a paragraph about one tool growing back: a genuine workflow reference ("run
+       tools/run_lint_check.sh before pushing") is one or two mentions, an essay is many.
+
+    Why it exists: that section had reached 909 lines, 64% of the whole file, and had drifted into
+    contradicting two of the script headers it duplicated -- benchmark_table.sh's about which output
+    line to read, and benchmark_sort_engine.sh's about which sort engine ships.
+    """
+    MAX_PROSE_MENTIONS = 3
+    path = REPO_ROOT / "CONTRIBUTING.md"
+    if not path.exists():
+        return ["CONTRIBUTING.md: missing -- this check needs updating"]
+    lines = path.read_text(encoding="utf-8").splitlines()
+
+    tools_dir = REPO_ROOT / "tools"
+    scripts = set()
+    for f in sorted(tools_dir.rglob("*")):
+        if not f.is_file():
+            continue
+        rel = f.relative_to(REPO_ROOT).as_posix()
+        if f.suffix in (".sh", ".py") or (f.suffix == "" and f.read_bytes()[:2] == b"#!"):
+            scripts.add(rel)
+
+    # The index is every markdown table row inside the "Other tools/ helpers" section.
+    start = end = None
+    for i, ln in enumerate(lines):
+        if ln.startswith("### Other tools/ helpers"):
+            start = i
+        elif start is not None and ln.startswith("### ") and i > start:
+            end = i
+            break
+    if start is None:
+        return ["CONTRIBUTING.md: no '### Other tools/ helpers' section -- this check needs updating"]
+    if end is None:
+        end = len(lines)
+
+    problems = []
+    indexed = {}
+    prose_lines = 0
+    body_lines = 0
+    in_fence = False
+    for i in range(start, end):
+        ln = lines[i]
+        if ln.lstrip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if ln.startswith("|"):
+            body_lines += 1
+            # Only the FIRST cell names the tool; later cells are description prose.
+            first = ln.split("|")[1] if ln.count("|") >= 2 else ""
+            m = re.search(r"`(?:tools/)?([A-Za-z0-9_./-]+\.(?:sh|py|cpp|md)|nagfor_fpm_shim/nagfor)`", first)
+            if m:
+                rel = m.group(1)
+                rel = rel if rel.startswith("tools/") else "tools/" + rel
+                indexed.setdefault(rel, []).append(i + 1)
+            continue
+        if not ln.strip() or ln.startswith("#") or in_fence:
+            continue
+        body_lines += 1
+        prose_lines += 1
+
+    # The section must remain an INDEX, not an essay. A lead-in is fine; paragraphs are not.
+    if body_lines and prose_lines * 4 > body_lines:
+        problems.append(
+            "CONTRIBUTING.md: the 'Other tools/ helpers' section is %d%% prose (%d of %d lines); it "
+            "must stay an index -- move per-tool detail into that tool's own header (CLAUDE.md)"
+            % (round(100 * prose_lines / body_lines), prose_lines, body_lines)
+        )
+
+    for rel, where in sorted(indexed.items()):
+        if len(where) > 1:
+            problems.append(
+                "CONTRIBUTING.md: %s has %d index rows (lines %s); it must have exactly one"
+                % (rel, len(where), ", ".join(str(w) for w in where))
+            )
+        if not (REPO_ROOT / rel).exists():
+            problems.append(
+                "CONTRIBUTING.md:%d: index row names %s, which does not exist" % (where[0], rel)
+            )
+
+    for rel in sorted(scripts - set(indexed)):
+        problems.append(
+            "%s: no row in CONTRIBUTING.md's tools index -- add one line naming what it is for" % rel
+        )
+
+    counts = {}
+    for i, ln in enumerate(lines):
+        if start <= i < end:
+            continue
+        for h in re.findall(r"`((?:tools|app)/[A-Za-z0-9_./-]+\.(?:sh|py|cpp|f90|md))`", ln):
+            counts.setdefault(h, []).append(i + 1)
+    for rel, where in sorted(counts.items()):
+        if len(where) > MAX_PROSE_MENTIONS:
+            problems.append(
+                "CONTRIBUTING.md: %s is named %d times outside the index (lines %s); at most %d "
+                "workflow references are allowed -- move the detail into its own header"
+                % (rel, len(where), ", ".join(str(w) for w in where), MAX_PROSE_MENTIONS)
+            )
+    return problems
+
+
 CHECKS = (
     ("threads= is forwarded to every callee that takes it", check_threads_are_forwarded),
     ("omp_* references are guarded by #ifdef _OPENMP", check_openmp_calls_are_guarded),
@@ -3135,6 +3351,7 @@ CHECKS = (
     ("parquet_random takes array lengths as int64", check_fill_size_kind),
     ("allocate extents from size() use int64", check_allocate_extent_kind),
     ("noinline directives carry both spellings", check_noinline_directives_are_paired),
+    ("CONTRIBUTING.md names each tool once, in its index", check_contributing_is_an_index),
 )
 
 

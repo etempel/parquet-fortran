@@ -34,6 +34,34 @@
 #                              retained column, which would be orders of magnitude larger.
 #   TEST_FILE                 Path for the synthetic test file. Default: a fresh mktemp -d
 #                              directory, deleted automatically on exit. Set this to keep the file.
+# ---------------------------------------------------------------------------------------------
+# Is the assertion form of the figure the benchmark above only
+# reports. It drives `app/check_arrow_release.f90` over every `parquet_table` materialization path
+# -- `%materialize_all`, `%prefetch`, a single lazy `%get`, a slice, and
+# `parquet_write_table(release=.true.)` -- and exits nonzero if any of them still holds more than
+# `TOLERANCE` of one copy of the data it just read in Arrow's pool. That failure is otherwise
+# completely silent: a path that forgets to release leaves the values correct and every test
+# passing, with the table quietly holding two copies of every column (feature_risks.md
+# (feature_risks.md) Risk-1).
+#
+# Three things about it are load-bearing rather than incidental:
+#
+#   * Each mode runs in its own process. A baseline and the path under test measured in one process
+#     report the high-water mark of the pair, which makes whichever ran second look like it retained
+#     memory it had already released.
+#   * The `control` run goes first and asserts the counter MOVES, by reading a column through a plain
+#     reader (which caches it) and checking the pool grew. Without it, a measurement that silently
+#     reported zero -- a different Arrow build, a pool that is not the default one -- would print PASS
+#     for every path and mean nothing.
+#   * `materialize_all` and `prefetch` run again under `OMP_NUM_THREADS=1`. The internally-parallel
+#     `%prefetch` gives each thread its own reader and closes it at the end of the region, and closing
+#     a reader frees whatever it cached whether or not the release ran -- so the parallel path passes
+#     even with every `parquet_release_column` call deleted. Verified by deleting them: the parallel
+#     run reported 0.0 of one copy and the serial run 1.0.
+#     tools/check_arrow_release.sh
+#     # Bigger file, tighter tolerance:
+#     TARGET_FILE_SIZE_GB=0.5 NCOLS=16 TOLERANCE=0.005 tools/check_arrow_release.sh
+# ---------------------------------------------------------------------------------------------
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

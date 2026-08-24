@@ -30,6 +30,30 @@ Usage:  tools/generate_parquet_columns.py [--check]
 
   --check  regenerate into memory and compare with the committed files; exit 1 on any
            difference (so CI, or a reviewer, can prove the committed output is current).
+
+Regenerates the per-kind blocks of the `parquet_columns`
+foundation module: `src/parquet_columns.f90` (the module spec), `src/parquet_columns_access.f90`
+and `src/parquet_columns_mutate.f90`. Its output is committed, exactly like
+`tools/generate_parquet_maml.sh`'s, so nothing is generated at build time and the fpm build stays
+dependency-free. Re-run it after editing the kind table at the top of the script -- for example
+when a new column kind is added -- and commit the regenerated files;
+`tools/generate_parquet_columns.py --check` re-derives the output and fails if the committed files
+have drifted, which is the cheap way to catch a forgotten regeneration. The other four
+`parquet_columns_*.f90` files (`util`, `validity`, `structural`, `string`) are hand-written and
+the script never touches them. Maintainer-only (stripped from the fpm-published package, see
+`tools/prep_fpm_publish.sh`).
+
+It also takes `--bench-guards`, which is for measurement branches only and never for `main`: it
+wraps `get_at`/`set_at`'s two guard calls in cpp `#ifdef`s so one source tree can be built three
+ways -- as shipped, with the comparisons inlined (`-DPF_BENCH_INLINE_GUARDS`, every check still
+performed, only the two cross-submodule calls gone), or with the guards removed
+(`-DPF_BENCH_NO_GUARDS`). It exists because that measurement cannot be replicated inside a
+benchmark program: the question is what a call across a program-unit boundary costs, and a local
+copy in one file would be inlined, measuring the opposite. Without the flag the generator emits
+byte-identical output to what is committed, so `--check` and CI are unaffected; restore with `git
+checkout src/parquet_columns_access.f90`. `tools/benchmark_colindex.sh` refuses to run its non-
+default `GUARDS` values against an unscaffolded tree rather than silently building the shipped
+binary under another name.
 """
 
 import argparse

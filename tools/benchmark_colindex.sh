@@ -38,6 +38,64 @@
 # wrapper must FAIL rather than degrade when it cannot engage the configuration it was asked
 # for"). The program prints which variant it was actually compiled with, as a second, independent
 # check on the same thing.
+# ---------------------------------------------------------------------------------------------
+# Answers one question: where does `parquet_table%get_element`'s per-
+# cell cost actually go, and is an index- or handle-based accessor worth building? It drives
+# `app/benchmark_colindex.f90` over seven modes (`baseline`, `decompose`, `getat`, `vector`, `loop`,
+# `rowfinal`, `handle`) and is the screening half of the campaign described in
+# `feature_benchmark_colindex.md`.
+#
+# `--mode=handle` is the one that measures the SHIPPED feature rather than screening for it: it
+# times `parquet_table_col` against `%get_element` on the same column, including the regression
+# control (`%get_element` became a caller of the handle's own body, so it must not have got slower),
+# the cost of re-fetching a handle per cell, the two creation forms, the staleness guard, a
+# realistic 4-column loop both ways, and reading one element of a vector row against materialising
+# the whole row. Its `parquet_column%get_at` arm is untouched by anything the campaign varies and so
+# doubles as a control across builds and commits.
+#
+# Its central trick is that it needs no change to the library, which is what makes it runnable
+# before anything is prototyped. It builds a standalone `parquet_column` and times `col%get_at(i,
+# v)` on it -- the real library procedure across the real module boundary, not a replica -- then
+# reads the two differences that matter: `%get_element` minus `%get_at` is everything the table
+# layer adds, and so an upper bound on what any index or handle could ever remove; `%get_at` minus a
+# `%col` pointer read is the whole cost of the two guard calls inside the column layer. A small
+# first difference kills the feature before a line of it is written.
+#
+# Two things it does that are worth copying into any future accessor benchmark. It reproduces two
+# independently measured anchors (a `%col` pointer read at ~0.93 ns and `%get_element` at ~24 ns on
+# a 4-column table) before any other row is quoted, because a benchmark that replicates library call
+# shapes is untested code until one of its rows matches a figure measured elsewhere. And its vector
+# mode isolates the per-call `allocate` by running the same `%get_at` twice, once into a reused
+# buffer and once into a freshly allocated one -- the first version of that arm wrapped
+# `allocate`/`deallocate` around a couple of local stores, which gfortran elided outright, and it
+# reported exactly the pointer-read figure while appearing to measure something.
+#
+#     tools/benchmark_colindex.sh                       # every mode
+#     tools/benchmark_colindex.sh --mode=decompose      # just the central one
+#     NROWS=200000 NCOLS=128 ROUNDS=7 tools/benchmark_colindex.sh --mode=baseline
+# `LADDER=<PF_BENCH_NO_*>` selects a stage-0b compile-out ladder rung -- one phase of
+# `table_resolve` removed, so `%get_element` can be timed with it gone and the difference attributed
+# to that phase. It needs `tools/bench_resolve_ladder.py --apply` first (measurement branches only;
+# `--list` prints the rungs, `--check` reports whether a tree is scaffolded, and there is no
+# `--revert` because `git checkout src/parquet_tables_query.f90` already does it exactly). The
+# wrapper refuses `LADDER=` against an unscaffolded tree, and the program prints the rung it was
+# compiled as. Two rungs deliberately change answers -- `NO_LOOKUP` resolves a slot by hashing one
+# byte of the name and `NO_ROWINDEX_CMP` drops the automatic row-index column -- so checksums are
+# not comparable across rungs, only timings are, and nothing from a scaffolded tree is ever
+# committed. The ladder exists because phase timers cannot be used on a per-element path: the whole
+# call is ~37 ns and a `steady_clock::now()` pair costs 20-25 ns.
+#
+# `GUARDS=shipped|inline|none` selects which variant of `parquet_column%get_at`'s guards is compiled
+# in, which is how the call is measured apart from the check. The two non-default values require the
+# source to have been regenerated with `tools/generate_parquet_columns.py --bench-guards` first -- a
+# measurement-branch-only step that wraps those guards in cpp `#ifdef`s -- and the script fails
+# rather than degrading when that scaffolding is absent, since building the shipped binary under
+# another name would report a null result that looks like a finding. Build trees go to
+# `test_run/colindex-<guards>-<compiler>/`, with the compiler in the name deliberately: naming a
+# tree for the configuration alone lets a second toolchain's binary land in the first one's
+# directory. Maintainer-only (stripped from the fpm-published package, see
+# `tools/prep_fpm_publish.sh`).
+# ---------------------------------------------------------------------------------------------
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

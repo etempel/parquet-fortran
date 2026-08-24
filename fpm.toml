@@ -38,11 +38,10 @@ test = false
 
 [features]
 #
-# NOTE: this table and the feature-list form of `[profiles]` below are fpm 0.13.0-alpha
-# constructs. The newest fpm RELEASE (0.12.0, what `pipx install fpm` installs) cannot parse
-# either, so GitLab CI strips both from its own checkout first -- see
-# tools/prep_gitlab_fpm_toml.sh, called from .gitlab-ci.yml's before_script. Adding another
-# alpha-only key here is fine, but check whether that script needs to strip it too.
+# NOTE: this table and the feature-list form of `[profiles]` below need fpm 0.13.0 or newer,
+# which is the floor README.md's Prerequisites states and the version .gitlab-ci.yml installs
+# directly. Adding another 0.13.0-only key here is fine; anyone pinned to an older fpm has to
+# strip both tables from their own checkout by hand.
 
 # standard
 nagfor.flags = "-f2018 -nan -colour -w=unused -Warn=unkind_real_literal -Warn=double_real_literal -Warn=subnormal"

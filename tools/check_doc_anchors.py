@@ -51,6 +51,14 @@ Scans every *.md file in the repository root plus every *.md file under
 doc/pages/ (recursively). Exits nonzero and prints one line per
 unresolved link if any anchor doesn't match a heading in its target file,
 or any relative link's target file does not exist.
+
+Validates every `#anchor` link in this repository's `*.md` files --
+same-file and cross-file -- against the anchors GitHub would actually generate for each file's
+headings (using GitHub's real slugging rules, including the `-1`/`-2` suffixing for repeated
+headings), and exits nonzero if any link doesn't resolve. Run it after editing headings or anchor
+links in README.md/CONTRIBUTING.md:
+
+    tools/check_doc_anchors.py
 """
 import re
 import sys

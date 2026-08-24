@@ -57,6 +57,38 @@
 # Exits 0 only if every IEEE-conforming configuration reproduces EXPECTED_FP below. A new expected
 # value may only be adopted deliberately: it is the frozen contract, and changing it changes every
 # weighted permutation this library has ever produced.
+# ---------------------------------------------------------------------------------------------
+# Is the same idea for a different contract: it standalone-compiles
+# `src/parquet_expkey.f90` -- the frozen `-log(u)` transform behind `pf_weighted_permutation` --
+# across seven gfortran settings, four ifx ones and six flang ones, and requires every build to
+# reproduce one fingerprint. It exists because a weighted permutation is decided by the order of
+# `-log(u)/w`, so a single differing key changes which items are drawn, silently, and only a cross-
+# BUILD comparison can see that; a unit test runs in one build by construction. It is not
+# hypothetical: an earlier design note concluded FMA contraction was harmless on the strength of
+# four builds that never enabled FMA, and `gfortran -O3 -march=native` duly changed the answer. It
+# has since caught the same class a second time: the rounding barrier had been a `noinline`
+# directive pair rather than a `volatile` local, and flang 22.1.8 -- which ignores both spellings --
+# inlined it and fused, moving the fingerprint under `-march=native`. Run it under any compiler
+# newly added to the fleet before trusting that build. That is also why `parquet_expkey` is a leaf
+# module depending on `iso_fortran_env` alone -- the same property `parquet_random` has and for the
+# same reason, so that neither check can be disabled by an import added somewhere else. Anything
+# needing more than `iso_fortran_env` belongs in `parquet_sampling`, which is where the weighted
+# draw lives and which is deliberately compiled by neither script. Nothing is excluded: fast-math is
+# swept like everything else, including gfortran `-Ofast`/`-ffast-math` and ifx's own no-flag
+# defaults, so a failure in any arm is a real finding rather than a known exposure. That was not
+# always so -- both were once recorded as unfixable, on the diagnosis that fast-math computes
+# `(m-1)/(m+1)` by reciprocal approximation. The diagnosis was wrong: `-prec-div` does not fix it,
+# `-no-fma` does not fix it, and `-assume protect_parens` does, so the transformation was
+# reassociation of `e = big + (small - logm)` -- a large term plus a tiny correction, held apart
+# only by parentheses that fast-math may ignore. Barriering that subtraction brought every
+# configuration into line and repaired gfortran `-Ofast`, which had been silently wrong.
+# `pf_weighted_permutation` still re-derives the transform at run time, now as a backstop for a
+# compiler or flag combination nobody has swept rather than for fast-math specifically.
+#
+#     tools/check_exp_key.sh                        # gfortran, nine settings on x86 (eight elsewhere)
+#     FC=ifx tools/check_exp_key.sh                 # ifx, seven settings incl. its own defaults and -Ofast
+#     FC=flang tools/check_exp_key.sh               # flang, eight settings (no -mfma; its driver has none)
+# ---------------------------------------------------------------------------------------------
 set -u
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

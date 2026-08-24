@@ -28,6 +28,17 @@ on its own, not combined, so no group's size inflates another's. Pass
 explicit paths (files or directories) to instead report a single
 independent summary over just those paths, e.g.:
     tools/count_lines.py src/parquet_wrapper.cpp
+
+Reports code/comment/blank line counts, a convenience for repository
+metrics. With no arguments it prints four independent summaries -- `src/` (the library), `test/`
+(the test suite), `app/` (the manual programs) and `tools/` (this tooling) -- each totalled on its
+own so no group inflates another, followed by a cross-group table repeating the four totals and
+adding the repository-wide one (the single number the independent summaries deliberately
+withhold). Pass explicit files or directories for a single summary over just those, with no cross-
+group table. It understands Fortran, C++ and Python/shell comment syntax, with one deliberate
+simplification: only `#` marks a comment in a script, so a Python docstring counts as code
+(treating triple-quoted strings as comments would misreport the generators here, whose emitted
+Fortran lives in exactly such strings).
 """
 import sys
 from pathlib import Path

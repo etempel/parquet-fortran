@@ -27,6 +27,15 @@
 # could not read the compiler's own bitcode and produced 8087 undefined
 # references, which looks like a defect in this project and is not.
 #
+# ---------------------------------------------------------------------------------------------
+# Prints everything needed to identify a machine and its toolchain -- CPU,
+# SIMD, memory, every compiler on `PATH`, which compilers fpm will actually use, Arrow's version,
+# the already-exported `FPM_*` variables, and the load -- and with `--lto-probe` additionally link-
+# tests a minimal mixed Fortran/C++ program per toolchain in a few seconds. It builds nothing and is
+# safe to run anywhere. `tools/benchmark_template.md` is the template for a run on another machine:
+# copy it to a `feature_*.md` file, fill in the campaign, and the machine that runs it writes its
+# report back into that same file.
+# ---------------------------------------------------------------------------------------------
 set -uo pipefail
 cd "$(dirname "$0")/.."
 

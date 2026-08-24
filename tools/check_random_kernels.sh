@@ -48,6 +48,33 @@
 #
 # Exits nonzero on any UNLISTED mismatch, on a listed arm that unexpectedly passes, on a build that
 # fails, or if the two kernels cannot be told apart. Exits zero when only listed exposures fail.
+# ---------------------------------------------------------------------------------------------
+# Standalone-compiles `src/parquet_random.f90` across six
+# optimisation settings including LTO, and checks the golden vectors and the strict reference in
+# each. It exists because two things this project relies on are otherwise untested: nothing else
+# builds anything with `-flto`/`-ipo` (fpm's release profile is `-O3 -funroll-loops`), and the
+# `#else` arm of that module's route (e) fork -- the wrapping-arithmetic kernel that ships wherever
+# the compiler has no 128-bit integer kind, i.e. ifx -- is compiled by no other check at all,
+# because every other compiler in the fleet takes the protected arm. By default it builds both
+# kernels, forcing the second with `-U__GFORTRAN__` (or `-U__flang__`); it asserts that the two
+# builds really did differ, so that a `-U` flag which quietly stopped working cannot leave it
+# checking one kernel twice and reporting green. It follows `FPM_FC` when `FC` is unset, and refuses
+# a gfortran below the project's floor of 13 rather than reporting that compiler's own
+# miscompilations as findings. Two arms -- the forced wrapping kernel at `-O3 -flto` and `-Ofast
+# -flto` on gfortran -- are listed as known exposures and reported as `XFAIL` instead of failing the
+# run, because gfortran never ships that kernel and miscompiles it under LTO (Risk-101
+# (feature_risks.md)); the list is checked in both directions, so a listed arm that passes is a hard
+# error rather than a silent weakening, and it is not a place to park an inconvenient failure -- an
+# entry needs a configuration this library does not ship and a risk-register entry behind it. This
+# cannot be an `fpm test` arm: `-U__GFORTRAN__` also flips `src/parquet.f90`'s stringify branch, so
+# the package will not compile with it, and a standalone compile of the one module is the only form
+# that works.
+#
+#     tools/check_random_kernels.sh                 # both kernels, six settings each
+#     tools/check_random_kernels.sh --quick         # only the LTO/IPO setting
+#     tools/check_random_kernels.sh --shipped-only  # only the kernel this compiler ships (what CI runs)
+#     FC=ifx tools/check_random_kernels.sh          # ifx ships the wrapping kernel; nothing to force
+# ---------------------------------------------------------------------------------------------
 
 set -uo pipefail
 

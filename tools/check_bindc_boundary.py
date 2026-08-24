@@ -44,6 +44,16 @@ Usage:
 
 Exits nonzero and prints one line per mismatch (missing C++ definition, arity mismatch, base-type
 mismatch, by-value-vs-by-reference mismatch, or return-type mismatch) if any is found.
+
+Cross-checks every Fortran `bind(C)` interface
+(`src/parquet_bindings.f90`, plus the debug-hook interfaces in
+`test/error_scenarios.f90`/`test/test_temporal.f90`) against its C++ `extern "C"` definition in
+`src/parquet_wrapper.cpp`, verifying arity, base type, by-value-vs-by-reference, and (for
+functions) return type all agree -- a `bind(C)` interface has no compile-time link to the C++ side
+it describes, so a kind mismatch there compiles cleanly on both sides and corrupts memory silently
+at runtime instead of failing to build. Run it after touching either side of that boundary:
+
+    tools/check_bindc_boundary.py
 """
 import re
 import sys

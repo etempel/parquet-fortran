@@ -38,6 +38,29 @@
 #   FC=<compiler>   Fortran compiler to use (default: $FPM_FC, else gfortran).
 #
 # bash 3.2 only (macOS ships 3.2): no associative arrays, no mapfile, no ${var,,}.
+# ---------------------------------------------------------------------------------------------
+# Is the same instrument again, one tier up: it compiles the
+# whole argsort tier -- `src/parquet_settings_base.f90`, `src/parquet_argsort.f90` and its engine
+# and kernel submodules -- plus `tools/check_argsort_standalone.f90`, with a bare compiler, no fpm,
+# no dependency resolver and no Arrow anywhere on the system, then runs it. What it protects is the
+# property `parquet_argsort` exists for: its Fortran graph reaches nothing but the settings leaf, so
+# `use parquet_argsort` and `use parquet_sampling` compile no C++ and cross no `bind(C)` boundary.
+# That property has one failure mode -- someone adds a `use` line for a convenience, the graph
+# acquires `parquet_bindings`, and every consumer of the tier starts compiling the wrapper -- and
+# neither `fpm build` nor `fpm test` can see it happen, because the library obviously has Arrow. The
+# precedent is not hypothetical: when the weighted draw first acquired `use parquet_sorting`, every
+# configuration in `check_random_kernels.sh` died on a missing `.mod` while the whole suite stayed
+# green, and nothing else noticed. Compile ORDER is load-bearing (a module spec before its
+# submodules) precisely because there is no resolver to repair it. If it ever fails, adding the
+# missing module to its `SRC` list is the wrong fix -- that makes the check pass while destroying
+# what it measures; move whatever needed the import up into `parquet_sorting` instead. Its static
+# counterpart, `check_parquet_argsort_stays_arrow_free` in `tools/check_source_conventions.py`,
+# enforces the same rule by reading the source; this one enforces it by refusing to build. Runs in
+# CI's `test` job beside the two checks above.
+#
+#     tools/check_argsort_standalone.sh             # -O0/-O2/-O3, four cases each
+#     FC=nagfor tools/check_argsort_standalone.sh   # follows FPM_FC when FC is unset
+# ---------------------------------------------------------------------------------------------
 set -u
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

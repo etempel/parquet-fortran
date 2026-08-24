@@ -79,6 +79,26 @@ bits, and the base strip -- the only one needing special handling -- lands on in
   zig_f(i)  `f(zig_w(i))`, the height of the curve at the layer's outer edge, used by the wedge
             test.  zig_f(0) = 1 by convention -- layer 0 never runs the wedge test, and the value
             1 is what makes layer 1's test span the full height up to the peak.
+
+Regenerates `src/parquet_ziggurat.f90` -- the 771 layer
+constants behind `pf_random_normal_at` and `%normal`. It exists because those constants are the
+unique solution of one equation rather than a table anyone chose: 256 regions of equal area under
+`exp(-x*x/2)`, closing exactly at the peak, which fixes `R` and `V` and everything derived from
+them. A pasted table can be transcribed with one digit wrong and still look entirely plausible --
+every value near its neighbours, the algorithm still terminating, the distribution off by an
+amount no casual test would see -- so `--self-test` checks the property (equal areas to 1e-12,
+closure at the peak, the published `R = 3.6541528853610088` and `V = 0.00492867323399`, monotonic
+widths, and an immediate-acceptance rate in the 0.98-0.995 a correct 256-layer table gives) rather
+than the digits. Two traps worth knowing if you re-derive it. The closure residual decreases in
+`R`, because `V = R*f(R) + tail(R)` falls as `R` grows, so a larger tail means smaller steps and a
+stack that runs out of layers below the peak. And every number is computed in `decimal`, never in
+`float` -- the first version of this script used `math.exp`/`log`/`sqrt`/`erfc` and emitted a
+different table on CI than on the machine that committed it, because a one-ulp change in `R` moves
+254 of the 255 widths and libm is not identical between glibc versions (`feature_risks.md`
+Risk-130). `--self-test` re-derives the whole table at a higher working precision and requires
+identical doubles, which is the check that has power against that; the property checks all passed
+on the broken version. `--check` verifies the committed output as usual. Maintainer-only (stripped
+from the fpm-published package).
 """
 
 import argparse

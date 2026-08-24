@@ -85,6 +85,20 @@
 # Detected per shell: bash exposes BASH_SOURCE, zsh exposes ZSH_EVAL_CONTEXT
 # (which contains ":file" only while sourcing). Anything else falls through to
 # "sourced", since a false negative here costs only a missing hint.
+# ---------------------------------------------------------------------------------------------
+# Is the odd one out here: it is sourced, not executed, and installs an opt-in
+# `fpm` wrapper that builds `--profile release` with link-time optimisation (see Building with link-
+# time optimisation (#building-with-link-time-optimisation)). Running it instead prints how to
+# activate it plus a dry run of what it would select on this machine, so it is safe to invoke to
+# find out what it does.
+#
+# Which machine a measurement was taken on is part of the result. CLAUDE.md's "The three machines
+# available for testing" lists the three reference machines, what each one isolates (one pair
+# differs only in architecture, another only in compiler), how to activate either toolchain on the
+# multi-compiler one, and two hazards there that silently invalidate a run -- a `gfortran` below
+# this project's minimum, and an exported `-ffree-line-length-none`. Read it before quoting a figure
+# from anywhere but your own machine.
+# ---------------------------------------------------------------------------------------------
 _pf_executed=0
 if [ -n "${BASH_SOURCE:-}" ]; then
     [ "${BASH_SOURCE[0]}" = "$0" ] && _pf_executed=1

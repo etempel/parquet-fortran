@@ -25,6 +25,27 @@
 #                             to keep the file around afterward (e.g. to inspect it, or reuse it
 #                             across separate write-only/read-only runs) -- it is NOT deleted
 #                             when explicitly set, and its parent directory is created if needed.
+# ---------------------------------------------------------------------------------------------
+# Measures how write and read throughput scale with Arrow's internal
+# thread-pool size (`parquet_set_arrow_threads`), sweeping a log-spaced set of thread counts and
+# driving `app/benchmark_threads.f90` (a maintainer-only fpm executable, not part of the public
+# library) once per (mode, thread-count) data point. The synthetic file's schema is 5 scalar columns
+# (int32/int64/float32/float64/boolean), replicated `NMULT` times (`i32_1`, `i32_2`, ..., `i64_1`,
+# ...) so the file has `5*NMULT` columns -- threading benefits more from many columns than from few.
+# `MAX_STEPS`, `TARGET_FILE_SIZE_GB`, `NMULT` and `TEST_FILE` are its own env-overridable config; by
+# default the synthetic test file is written under a fresh `mktemp -d` directory and deleted when
+# the script exits -- set `TEST_FILE` to give it a path of your own choosing instead, which also
+# keeps the file around afterward for inspection or reuse:
+#
+#     # Defaults: MAX_STEPS thread-count steps, a small TARGET_FILE_SIZE_GB, in a fresh mktemp -d file:
+#     tools/benchmark_threads.sh
+#     # Fewer thread-count steps, against a larger synthetic file:
+#     MAX_STEPS=6 TARGET_FILE_SIZE_GB=4.0 tools/benchmark_threads.sh
+#     # More replicated columns (5*NMULT total), against a larger synthetic file:
+#     NMULT=20 TARGET_FILE_SIZE_GB=4.0 tools/benchmark_threads.sh
+#     # Keep the synthetic file at a path of your own choosing instead of a temp dir that gets deleted:
+#     TEST_FILE=/tmp/benchmark.parquet TARGET_FILE_SIZE_GB=4.0 tools/benchmark_threads.sh
+# ---------------------------------------------------------------------------------------------
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -46,8 +67,7 @@ fi
 echo "Detected cores: $total_cores (up to $MAX_STEPS steps, target size ${TARGET_FILE_SIZE_GB}GB, nmult=${NMULT})" >&2
 
 # Log-spaced thread-count list from 1..total_cores, capped at MAX_STEPS distinct steps
-# (duplicates collapsed after rounding -- see CONTRIBUTING.md's benchmark_threads entry for
-# a worked example). Avoids bash4-only associative arrays/negative indices throughout this
+# (duplicates collapsed after rounding -- worked example in the header block above). Avoids bash4-only associative arrays/negative indices throughout this
 # script since macOS ships bash 3.2 by default (see tools/coverage.sh's own note on this).
 core_list=($(python3 - "$total_cores" "$MAX_STEPS" <<'PY'
 import math

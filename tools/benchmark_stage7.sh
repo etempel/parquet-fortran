@@ -44,6 +44,46 @@
 # at all, which is why gcc-ar is chosen when available. fpm takes FPM_AR, so this
 # script sets it for the LTO build only; the plain build keeps fpm's own choice.
 #
+# ---------------------------------------------------------------------------------------------
+# Runs a set of targeted micro-measurements over paths this library's
+# optimisation work needs numbers for, and -- this is why it exists rather than being a throwaway
+# script -- prints the toolchain provenance ahead of them: compiler and version, Arrow version, core
+# count, git commit, and whether the working tree was dirty. A performance number from this project
+# is only meaningful with that attached, because the same change has measured 1.84x under one
+# toolchain and parity under another (see CLAUDE.md's "The three machines available for testing").
+#
+# It drives `app/benchmark_stage7.f90`, which covers several independent items selectable with
+# `--only=`; run with no selection it measures all of them. The one worth knowing about on its own
+# is `s7-2`, which times the write-side numeric range-check-and-convert loops in three shapes -- the
+# fused loop the library has today, and two split forms that separate the check from the conversion
+# so both halves can vectorise -- across six sizes spanning the cache hierarchy. It answers whether
+# splitting that loop would pay on a given target, which is a property of the compiler and the
+# vector width rather than of this project, and therefore has to be measured per machine rather than
+# reasoned about.
+#
+#     # everything, on the current build
+#     tools/benchmark_stage7.sh
+#     # one item only
+#     tools/benchmark_stage7.sh --only=s7-2
+#     # with and without link-time optimisation, one after the other (-ipo for ifx, -flto otherwise)
+#     tools/benchmark_stage7.sh --both
+#     # ...and additionally run the whole test suite under each build configuration
+#     tools/benchmark_stage7.sh --both --test
+# `--test` is slow but is not optional when measuring LTO: a faster build that fails the suite is
+# not a result, and this project has four documented ifx codegen bugs that appear only at `-O1` and
+# above, which an interprocedural build makes more rather than less likely to surface.
+#
+# Link-time optimisation is not part of any fpm profile. `--profile release` supplies `-O3
+# -Wimplicit-interface -fPIC -fmax-errors=1 -funroll-loops -fcoarray=single` and nothing more, so
+# `-flto` (or `-ipo` on ifx) has to be added explicitly -- the script appends it to the three
+# `FPM_*FLAGS` variables, which fpm adds to the profile flags rather than replacing them. On ifx it
+# additionally sets `FPM_AR=xiar`: fpm archives the static library with plain `ar`, and under `-ipo`
+# that produces an archive the linker cannot optimise across, so the build either fails or silently
+# does no interprocedural optimisation at all.
+#
+# `FPM_FC`/`FPM_CXX`/`FPM_*FLAGS` are read from the environment and appended to, never replaced --
+# on every machine this project is built on they already carry Arrow's include and link paths.
+# ---------------------------------------------------------------------------------------------
 set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p test_run

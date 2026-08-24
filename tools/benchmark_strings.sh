@@ -16,6 +16,30 @@
 #                     least disturbed by everything else on the machine.
 #   NULL_EVERY=7     Stride of the null elements in the second run.
 #   NULLS=both       Which runs to do: "no", "yes", or "both".
+# ---------------------------------------------------------------------------------------------
+# Times every `parquet_string_column` bulk operation -- `reindex`,
+# `gather`, `delete_by_mask`, `trim_all`, `clone`, `slice`, `append_column`, `to_character`,
+# `view_all`, `build_from` and a per-element `length` loop -- on one synthetic in-memory column, so
+# an optimisation to that type is measured rather than argued. It touches no file. Two runs by
+# default, null-free and null-containing, since several operations have a separate validity pass
+# whose cost appears only in the second.
+#
+# Each operation is best-of-`ROUNDS`, every round starting from a fresh `%clone()` of the same
+# source column so no round inherits another's page state or allocation. The throughput column is
+# payload-equivalent -- the source column's byte count over the elapsed time -- and compares rows
+# against each other only; it is not a claim about bytes moved, since `gather` selects half the rows
+# and `to_character` writes a wider padded result than it reads.
+#
+#     tools/benchmark_strings.sh
+#     NROWS=20000000 LEN=48 ROUNDS=5 tools/benchmark_strings.sh
+#     NULLS=no tools/benchmark_strings.sh                          # skip the null-containing run
+# Config: `NROWS` (default 4000000), `LEN` (24, the mean element length -- lengths vary
+# deterministically around it), `ROUNDS` (3), `NULL_EVERY` (7), `NULLS` (`both`, or `no`/`yes`).
+#
+# The app also takes `--threads=N`, which caps `parquet_set_string_threads` for the run -- a sweep
+# over `1 2 4 8` is how the internally-threaded operations' scaling is measured, and it is the only
+# way to see the serial path and the threaded path of the same operation side by side.
+# ---------------------------------------------------------------------------------------------
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

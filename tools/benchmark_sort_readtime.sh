@@ -67,6 +67,51 @@
 #                             0 disables it and the output is the phase table alone. Capped at the
 #                             number of payload columns the sort does not name (4, or 3 at KEYS=2).
 #   KEEP=0                   1 leaves the fixtures under test_run/ for a re-run.
+# ---------------------------------------------------------------------------------------------
+# answers a different question again: where a read-time sort
+# spends its time. It drives `app/benchmark_sort_readtime.f90`, which opens a reader with `sort_by=`
+# and reads the C++ phase counters around each stage of the install -- the key bind, the repeat
+# bind, the copy-out to Fortran, the `arrow::Int64Array` build and the `arrow::compute::Take` loop
+# -- so the shares are measured rather than inferred. It exists because those shares had previously
+# been derived from a measurement taken before the sort was routed to the Fortran engine, and a
+# derived share is not a measurement; see `feature_sort.md`'s P13 for what it found.
+#
+# Two things about reading its output. `engine+open` is DERIVED, being the wall clock minus the five
+# C++ phases, so it holds `pf_argsort`, the reader open itself and the allocation between them --
+# `benchmark_sort_engine.sh` is what measures the engine, and this row must not be quoted as an
+# engine figure. And read `take` against the `column(s) taken` count in each heading: the Take loop
+# runs once per column in the reader's cache, and a sort may only be installed before any column is
+# read, so that cache holds the sort's own key columns and nothing else. `KEYS=2` is the arm that
+# shows the scaling; there is deliberately no prefetch arm, because prefetch-then-sort is not a
+# reachable shape.
+#
+# | variable | default | meaning |
+# |---|---|---|
+# | `SIZES` | `1000000,20000000` | row counts, comma-separated. The fixture is ~56 bytes/row on disk. |
+# | `REPS` | `3` | timed opens per figure. The best total is kept, with that run's own phases -- a per-phase minimum would sum to a total nothing measured. |
+# | `KEY` | `both` | `int64` / `string` / `both`. The string key is the interesting one: `Take` on a variable-length column rebuilds offsets and copies the payload. |
+# | `KEYS` | `1` | sort keys per run; `2` adds a second key and doubles the Take loop. |
+# | `READS` | `0` | payload columns read after the open, which switches on the workflow arm below. `0` prints the phase table alone. |
+# | `KEEP` | `0` | `1` leaves the fixtures under `test_run/` for a re-run. |
+# `READS=N` is the arm that sizes the `Take`, and the phase table alone cannot. A share of the open
+# is not what deferring the key's `Take` would recover: a program opens once and then reads, and
+# reordering a key column is wasted work only when the caller never reads that key. `READS=N` times
+# open-plus-`N`-payload-reads in both shapes -- key never read, and key read afterwards -- and
+# prints `take` as a share of each total. The first row is the ceiling on any deferral design; the
+# second is zero by construction and is measured anyway, because it is what shows the key comes back
+# out of the cache rather than being decoded a second time. The payload columns it reads are never
+# sort keys, so the "key not read" shape really does not read one, and the arm asserts the key came
+# back sorted before printing anything.
+#
+# Read the ceiling against both `READS` and `SIZES`: it falls as the caller reads more columns (the
+# workflow grows while the `Take` does not) and rises with `n` (the gather falls out of cache). On
+# one machine it spans 6.4% to 49.1% across that grid, so a single figure from it means nothing
+# without both coordinates attached.
+#
+#     tools/benchmark_sort_readtime.sh
+#     SIZES=20000000 KEY=string KEYS=2 tools/benchmark_sort_readtime.sh
+#     READS=1 SIZES=1000000,20000000 tools/benchmark_sort_readtime.sh   # the workflow arm
+# ---------------------------------------------------------------------------------------------
 set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

@@ -73,6 +73,36 @@
 #
 # Output is one joined table on stdout; the raw per-engine logs are left under test_run/ for the
 # report. Redirect stdout to a file and return that file.
+# ---------------------------------------------------------------------------------------------
+# is the one to reach for when the question is "is the Fortran sort
+# engine faster than the C++ one on this machine?". It runs `benchmark_sort_engine.sh
+# --mode=argsort` twice -- `ENGINE=cpp` then `ENGINE=fortran`, same build, same data, same seed --
+# and joins the two tables into one so the per-arm ratio is read off directly instead of by eye
+# across two logs. It refuses to print the table at all if the two arms' checksums disagree, since
+# the two engines return identical permutations by contract and a mismatch means either they do not
+# or the arms did not see the same data.
+#
+# It sources nothing and chooses no compiler -- it measures whatever the shell it was invoked from
+# is set up to build. On a machine carrying more than one toolchain, activate one, run it, then
+# activate the other in a fresh shell and run it again; the build trees and log files are named
+# after the compiler, so the two runs do not collide. It prints a provenance block describing that
+# shell (compiler, every `FPM_*` variable, commit, load) rather than asking for one separately,
+# because a provenance block collected in a different shell than the one that built the binary is
+# not provenance.
+#
+# It refuses exactly one thing: a `gfortran` below 13. That is the only way to get this environment
+# wrong silently -- such a compiler builds the library cleanly and miscompiles it (see Prerequisites
+# (README.md#prerequisites)) -- whereas a missing Arrow announces itself as `'arrow/api.h' file not
+# found` and a missing compiler as a build error. With `--test` it runs the full suite as a
+# correctness gate before any timing. It reports the load and does not wait on it -- say what the
+# load was in the report rather than leaving it to be inferred, and note that a figure taken
+# straight after a suite is worth re-taking if it would change a decision, since an ordered penalty
+# biases one arm rather than adding symmetric noise and best-of-N does not remove it.
+#
+#     tools/benchmark_sort_ab.sh                                    # whatever this shell builds
+#     tools/benchmark_sort_ab.sh --test                             # with the correctness gate first
+#     SIZES=1000000,50000000 tools/benchmark_sort_ab.sh
+# ---------------------------------------------------------------------------------------------
 set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

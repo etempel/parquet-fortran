@@ -11,6 +11,24 @@
 # Everything configurable is below and can be overridden from the environment.
 #
 # Exit codes: 0 all modes ran, 1 a mode failed (including a failed replica gate), 2 terminated early.
+# ---------------------------------------------------------------------------------------------
+# Prices the proposed 24-round + parity permutation of
+# `feature_random_feistel_A.md` against Fisher-Yates and against the shipped 4-round kernel, over
+# `app/probe_random_perm_rounds.f90`. Three modes, and they answer different questions: `whole`
+# builds a complete permutation, where Fisher-Yates is the faster algorithm; `subset` draws `n` of
+# `m`, where the Feistel wins by whatever factor `m/n` happens to be, because Fisher-Yates has to
+# shuffle the whole population and the Feistel reads `n` elements; and `scalar` measures single-
+# element random access, which Fisher-Yates cannot do at all. Sweep `m` rather than taking one size
+# -- Fisher-Yates degrades with the population (its random access misses cache) while the Feistel's
+# cost is flat, so the two cross over, and a single size mischaracterises the comparison. The probe
+# gates its own replica of the kernel against `pf_random_perm_at` and `pf_random_permutation` before
+# timing anything, and the wrapper refuses to run if the requested profile produced no `-O` flag
+# rather than reporting an `-O0` run as a release one. Maintainer-only.
+#
+#     tools/benchmark_perm_rounds.sh                          # every mode, default sweep
+#     MODES=whole WHOLE_SIZES="1000 1000000" tools/benchmark_perm_rounds.sh
+#     ROUNDS=16 tools/benchmark_perm_rounds.sh                # price a different proposal
+# ---------------------------------------------------------------------------------------------
 
 set -uo pipefail
 

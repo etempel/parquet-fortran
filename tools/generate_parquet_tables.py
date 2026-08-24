@@ -35,6 +35,15 @@ Usage:  tools/generate_parquet_tables.py [--check]
 
   --check  regenerate into memory and compare with the committed files; exit 1 on any
            difference (so CI, or a reviewer, can prove the committed output is current).
+
+Regenerates the per-kind blocks of the `parquet_tables` table
+layer: `src/parquet_tables.f90` (the module spec), `src/parquet_tables_access.f90`,
+`src/parquet_tables_addcol.f90` and `src/parquet_tables_materialize.f90`. It imports its kind
+table from `tools/generate_parquet_columns.py` rather than keeping a second copy, so a new column
+kind is declared in exactly one place and the two layers cannot drift apart. Output is committed
+and `--check` verifies it, exactly as for the columns generator. The other four
+`parquet_tables_*.f90` files (`lifecycle`, `query`, `read`, `write`) are hand-written and the
+script never touches them. Maintainer-only (stripped from the fpm-published package).
 """
 
 import argparse

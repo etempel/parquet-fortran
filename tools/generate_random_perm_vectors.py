@@ -29,6 +29,21 @@ Usage:
     python3 tools/generate_random_perm_vectors.py                # emit Fortran declarations
     python3 tools/generate_random_perm_vectors.py --self-test    # validate the model, emit nothing
     python3 tools/generate_random_perm_vectors.py --check        # assert test/ still carries them
+
+Is its sibling for the PERMUTATION contract, and differs
+in two ways worth knowing. Its vectors are pasted inline into `test_perm_golden` rather than
+written to a generated file, so `--check` re-derives them and asserts the literals are still in
+`test/test_random.f90` -- without it they can only drift silently, and a golden vector that has
+drifted from its oracle is worse than none, because it still passes while freezing whatever the
+library did on the day someone regenerated it. And its `--self-test` reproduces the previous
+published contract (`feistel-mix2-4/zaxzb/v1`) from the same parameterised model, at four rounds
+with the parity correction and the exact path switched off: a model that cannot reproduce the
+kernel it replaced is not evidence about the kernel that replaced it, and that check is what would
+catch an error introduced while changing the round count -- which is exactly when new vectors get
+regenerated. It shares Philox and the integer rejection rule with
+`generate_random_golden_vectors.py` by importing them, deliberately, because the exact path spends
+a `pf_random_int_at` draw on its rank and a second transcription of that rule is a second thing
+that can drift. Maintainer-only (stripped from the fpm-published package).
 """
 
 import math

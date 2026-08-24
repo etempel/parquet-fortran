@@ -14,6 +14,38 @@
 #
 # This is a maintainer tool and is never run by `fpm test` or by CI: a deep run takes hours, and a
 # battery that emits marginal p-values by design is a flaky test waiting to happen.
+# ---------------------------------------------------------------------------------------------
+# Runs the PractRand (https://sourceforge.net/projects/pracrand/) battery
+# against `parquet_random`, one axis at a time, feeding it from `app/probe_random_philox`'s sibling
+# `app/probe_random_practrand`. It is not a way to check that Philox is a good generator -- that is
+# published, and `test_kat_vectors` establishes bit-exactness to it far more sharply than any
+# battery could, since a wrong constant would still be a strong mixing function and would very
+# likely pass. What it reaches is the part the literature says nothing about: this library's own
+# mapping from `(seed, stream, draw)` onto the cipher's key and counter words, and the constructions
+# built on top of it. Hence the axes, ordered most-informative first: `stream` (the loop the guide
+# tells users to write), `seedwalk` (seeds at Hamming distance 1, emulating PractRand's own
+# `-ttseed64 -walk_greycode`, which cannot be aimed at an external RNG through `stdin`), `seed`,
+# `key`, `perm` (the modular Feistel, 32-bit words) and `draw` (the sequential counter walk
+# published results already cover, so a wiring check rather than a finding).
+#
+# It runs a known-weak generator through the identical pipe first and aborts if that does not fail,
+# verifies `RNG_test` identifies itself as PractRand rather than merely being executable, and judges
+# each run on the final result block only -- an anomaly at an interim length that is gone by the end
+# is the signature of noise, since a real bias accumulates as the length doubles. PractRand ships
+# only MSVC binaries, so it must be built once (`cd "$PRACTRAND_DIR/unix" && make`). Every parameter
+# is in the script's own CONFIGURATION block.
+#
+#     tools/run_practrand.sh                                    # defaults: 6 axes x 3 seeds, 1GB each
+#     AXES="stream seedwalk" TLMAX=1TB tools/run_practrand.sh   # the deep run worth leaving overnight
+# Maintainer-only, and deliberately never in CI: a deep run takes hours, and a battery that emits
+# marginal p-values by design is a flaky test waiting to happen.
+#
+# The forced half currently fails on gfortran under LTO, and that is expected -- see
+# `feature_risks.md` (feature_risks.md) Risk-101. It is a gfortran bug affecting a kernel gfortran
+# never ships (gfortran takes the protected arm and is clean; ifx ships the wrapping arm and is
+# clean at every setting measured, including `-ipo`), so CI runs `--shipped-only` rather than going
+# permanently red on it. Maintainer-only (stripped from the fpm-published package).
+# ---------------------------------------------------------------------------------------------
 
 set -euo pipefail
 

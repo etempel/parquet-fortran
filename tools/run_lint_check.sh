@@ -22,6 +22,30 @@
 # so a check added only to CI would pass here and then fail the pipeline, and
 # one added only here would give false confidence. The list is kept in the same
 # order the CI job runs them.
+# ---------------------------------------------------------------------------------------------
+# Runs the same checks as `.gitlab-ci.yml`'s `lint` stage, locally --
+# `tools/check_bindc_boundary.py`, `tools/check_doc_anchors.py`,
+# `tools/check_source_conventions.py`, the five generated-file `--check` calls
+# (`generate_parquet_columns.py`, `generate_parquet_tables.py`, `generate_parquet_sorting.py`,
+# `generate_parquet_ziggurat.py`, `generate_parquet_maml.sh base`), `generate_user_table_code.py`'s
+# own `--self-test` plus the `--check` for this project's committed generated table type, and
+# `generate_random_golden_vectors.py`'s, `generate_random_perm_vectors.py`'s and
+# `generate_parquet_ziggurat.py`'s `--self-test` and `--check`. It needs nothing but `python3` and
+# `bash` -- no fpm, no gfortran, no Arrow -- and takes about ten seconds, so it is worth running
+# before every push. Most of that is three checks doing real arithmetic rather than pattern
+# matching: `check_source_conventions.py` walks every source file, and the ziggurat and golden-
+# vector generators re-derive their contracts from scratch (the ziggurat's twice, at two working
+# precisions -- see Risk-130 for why that second derivation is the check with power):
+#
+#     tools/run_lint_check.sh              # run every check, then list any that failed
+#     tools/run_lint_check.sh --fail-fast  # stop at the first failure, like CI does
+# By default it runs every check even after one fails and lists the failures together at the end,
+# which differs deliberately from CI (whose `script:` stops at the first nonzero command): locally
+# it is more useful to see every problem in one pass. The verdict is the same either way -- it exits
+# nonzero if anything failed. Its `CHECKS` list is kept in sync with the CI job by hand, so a check
+# added to one must be added to the other; nothing enforces it. Maintainer-only (stripped from the
+# fpm-published package, see `tools/prep_fpm_publish.sh`).
+# ---------------------------------------------------------------------------------------------
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

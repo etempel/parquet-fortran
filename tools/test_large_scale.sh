@@ -26,6 +26,27 @@
 #
 # To reproduce "row count itself over huge(1_int32)" (needs a large-memory machine):
 #   NROWS=3000000000 MAX_SIZE_GB=64 tools/test_large_scale.sh
+# ---------------------------------------------------------------------------------------------
+# Is a manual, user-runnable check (never run by `fpm test`/CI) that
+# this library genuinely reads/writes columns correctly beyond `huge(1_int32)` (2,147,483,647) rows
+# -- the scale no automated test in this repository ever attempts, since doing so needs a machine
+# with substantial memory and disk. It drives `app/test_large_scale.f90` (a maintainer/user-only fpm
+# executable, not part of the public library) through 13 cases (7 scalar types plus 6 vector-column
+# cases, one per type), one at a time, each checking `parquet_get_nrows` and a full read-back
+# against the true data. Set the `RUN_VECTOR_CASES` compile-time parameter at the top of
+# `app/test_large_scale.f90` to `.false.` and rebuild to skip the 6 vector cases and run only the 7
+# scalar ones. `NROWS`, `NELEM`, and `MAX_SIZE_GB` are its env-overridable config -- `NROWS` sets
+# the row count for every case (default a small, cheap `1000`), `NELEM` sets the vector cases'
+# `col_size` (default `2`), and `MAX_SIZE_GB` (default `8`) skips any case whose estimated
+# uncompressed size would exceed it instead of letting an oversized value exhaust memory/disk.
+# Progress is printed per case (`Running test X of 13: ...` / `Finished test X of 13: ... -- PASSED
+# (12.345s)` / `Skipped test X of 13: ...`, or `of 7` when `RUN_VECTOR_CASES = .false.`):
+#
+#     tools/test_large_scale.sh
+#     # Row count itself beyond huge(1_int32) (needs a large-memory machine); the vector cases here
+#     # (NROWS * NELEM = 6 billion) still round-trip fine via row-group auto-sizing:
+#     NROWS=3000000000 MAX_SIZE_GB=120 tools/test_large_scale.sh
+# ---------------------------------------------------------------------------------------------
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

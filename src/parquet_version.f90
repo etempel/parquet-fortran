@@ -50,7 +50,7 @@ module parquet_version
     !> The hand-maintained release string, "vX.Y.Z (date)". Kept in step with VERSION.txt by the
     !! release checklist in CONTRIBUTING.md; parquet_get_version compares the two and remarks when
     !! they disagree, which is how a build that skipped fpm's macro substitution announces itself.
-    character(len=*), parameter :: cversion = "v1.5.0 (2026-08-08)" !! version info
+    character(len=*), parameter :: cversion = "v2.0.0 (2026-08-24)" !! version info
 #ifndef RELEASE_VERSION
 #  define RELEASE_VERSION 0.1
 #endif

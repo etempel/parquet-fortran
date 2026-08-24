@@ -436,9 +436,19 @@ feature (see "New features require tests and docs" above).
 **`[Unreleased]` is written for someone upgrading from the last release, not as a development
 log.** Everything in it is read against `[1.0.0]` (or whatever the newest published section is),
 so an entry only earns its place if it describes a difference a reader of that release would
-actually see. Four rules follow, and they apply to every future entry — not just when someone
+actually see. Six rules follow, and they apply to every future entry — not just when someone
 asks for a cleanup:
 
+- **State WHAT changed, never WHY — and keep it to a line or two.** An entry is an inventory item:
+  the feature added, the behaviour changed, the bug fixed. Nothing else. No rationale, no
+  measurement, no design discussion, no account of what it replaced, what the alternative was, or
+  what it cost to build. That reasoning is worth writing down and it has a home — the **code comment
+  beside the code** it explains, a `doc/pages/` page when a *user* has to act on it, or this file
+  when it is a project-wide rule — and the changelog is none of them. A reader opens it to decide
+  whether to upgrade and what will differ when they do; every explanatory sentence buries that under
+  something they did not ask for. **The test: would this sentence still be here if the change had
+  been obvious?** If yes, it is justification, and it goes. A bullet that has grown past two or three
+  lines has almost always failed this test rather than genuinely needing the room.
 - **`### Changed` and `### Fixed` are for functionality that is in the RELEASED version.** A fix
   or behavior change to something that is itself still sitting in `[Unreleased]` is invisible to
   every user — there is no released behavior for it to differ from — so it does not get its own
@@ -460,6 +470,14 @@ asks for a cleanup:
   reorganizations explicitly marked "no functional change", tooling that changes nothing a
   consumer of the library can observe. A genuinely new contributor-facing tool wired into CI can
   have one short line; its subsequent tweaks cannot.
+- **Every minor change in a release shares ONE bullet — one for the whole section, not one per
+  subsection — placed last, under `### Fixed`: "Many other minor fixes and improvements."** A small
+  fix, a tightened message, a widened argument kind, a new overload of something already listed, a
+  contributor-facing tool, a documentation correction — none of these earns a line of its own, and a
+  reader upgrading does not scan for them. That bullet is one line and **is never expanded into a
+  sub-list**: the moment it starts enumerating, it has become the development log this section
+  exists not to be. If a change genuinely needs the reader to know about it by name, it is not minor
+  and belongs in a bullet of its own; that judgement is the only thing this rule asks for.
 - **One `### Added`/`### Changed`/`### Fixed` per release section, in that order.** Appending a
   second `### Added` after `### Fixed` is easy to do by accident when adding an entry to a long
   section, and it silently splits the list a reader is trying to read as one.

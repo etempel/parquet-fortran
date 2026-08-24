@@ -119,13 +119,18 @@ See [Error handling](doc/pages/operating/error-handling.md) and [Limitations](#l
 
 The code compiles successfully with the following compilers and libraries. It might compile with previous or later versions as well but this is not tested.
 
-- Fortran compiler:
-    - Intel Fortran (ifx) v2026.1.0 and v2026.1.1 — confirmed manually outside CI; not exercised by the GitLab CI pipeline itself (gfortran only, see below).
-    - Gfortran v15.2.0 (development), v13 (CI)
-    - **Minimum gfortran: 13.** Older versions (e.g. Ubuntu 22.04's default compiler)
-      miscompile part of the schema-building API — see
+- Fortran compiler — the test suite is run against four. Only **gfortran** is exercised by the
+  GitLab CI pipeline; the other three are confirmed by hand.
+    - **Gfortran** v15.2.0 (development), v13 (CI). **Minimum 13** — older versions (e.g. Ubuntu
+      22.04's default compiler) miscompile part of the schema-building API; see
       [Troubleshooting](doc/pages/operating/troubleshooting.md) if you hit a spurious
       "column not found" abort.
+    - **Intel Fortran (ifx)** v2026.1.0 and v2026.1.1.
+    - **NAG Fortran (nagfor)** v7.2. Set `FPM_CC`/`FPM_CXX` yourself (see
+      [Environment variables](#environment-variables)), since the NAG family implies no C++
+      compiler. fpm's OpenMP probe does not fit NAG's flag spelling, so the OpenMP flag reaches
+      only the link line — add `-openmp` to `FPM_FFLAGS` to compile the threaded paths in.
+    - **LLVM flang** v22.1.8.
 - FPM ([Fortran Package Manager](https://fpm.fortran-lang.org/)) — **minimum 0.13.0.**
   This project's `fpm.toml` uses the `[features]` table and the feature-list form of
   `[profiles]`, both introduced in that release; fpm 0.12.0 cannot parse the manifest at

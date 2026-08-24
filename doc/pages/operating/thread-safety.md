@@ -323,7 +323,17 @@ which automatically supplies the right compiler-specific OpenMP flag (`-fopenmp`
 `-qopenmp` for ifx, ...) for the whole build — this project's dependency and your own project's
 sources alike, since fpm computes one consistent flag set across the full resolved dependency graph.
 You do not need to pass an OpenMP flag manually via `FPM_FFLAGS` for this library's own
-concurrency-related code paths to run multi-threaded. If you call into this library concurrently
+concurrency-related code paths to run multi-threaded.
+
+**That holds for gfortran and ifx; NAG and flang each need something from you.** Under NAG, fpm's
+own probe for the compile-side flag does not fit that compiler's spelling, so the flag reaches only
+the link line — add `-openmp` to `FPM_FFLAGS` yourself. Under flang, fpm contributes no OpenMP flag
+at all, and the flang installations this library is tested against ship no `omp_lib` module either;
+every `!$omp` block is then compiled out and the library runs its serial paths, which give the same
+answers on one thread. Check `fpm build --show-model` if you are unsure which of the two you have —
+it prints the flag set fpm actually computed.
+
+If you call into this library concurrently
 from your own `!$omp parallel` regions and want to be certain OpenMP is active for your own sources
 too, you can add the same dependency to your own `fpm.toml`:
 ```toml

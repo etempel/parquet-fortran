@@ -5,7 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.0.0] - 2026-08-24
+
+**Toolchain floor:** gfortran ≥ 13 (13 on CI; 15.2.0 the primary development target), and —
+confirmed by hand rather than by CI — Intel Fortran (ifx) 2026.1.0/2026.1.1, NAG Fortran 7.2, and
+LLVM flang 22.1.8 (serial builds only). Also fpm ≥ 0.13.0, a C++20-capable C++ compiler, and
+Arrow/Parquet C++ ≥ 24.0.0 (validated locally against 25.0.0). See
+[Prerequisites](README.md#prerequisites) for the full detail.
+
+**SemVer scope:** the promise covers the whole `use parquet` surface — every public
+type/procedure/constant reachable that way, including a public type's own type-bound procedures and
+operators — and, new in this release, each advertised entry module *in its own right*
+(`parquet_io`, `parquet_tables`, `parquet_columns`, `parquet_strings`, `parquet_temporal`,
+`parquet_sorting`, `parquet_argsort`, `parquet_sampling`, `parquet_random`, `parquet_settings`,
+`parquet_version`, `parquet_maml_base`), since a module offered as an entry point has to stay usable
+through that import alone. `parquet_core`, `parquet_bindings` and every `*_base`/`*_engine`/
+`*_kernel` module are explicitly outside it.
+
+**Compatibility:** three source-incompatible changes and two behaviour changes, each listed under
+Changed — `parquet_set_max_threads` is renamed, `sample_seed=` widens to `integer(int64)`, and
+`parquet_get_version(v, mode=)` is removed; a file written without an explicit `compression=` now
+uses zstd rather than snappy, and a schema field declaring no `qc: miss:` no longer means "no Nulls
+allowed". Parquet files written by 1.0.0 are read unchanged.
 
 ### Added
 
@@ -181,4 +202,5 @@ compatible with.
   size (`parquet_set_max_threads`).
 - Support for embedding your own MAML schemas into a downstream project.
 
+[2.0.0]: https://github.com/etempel/parquet-fortran/releases/tag/v2.0.0
 [1.0.0]: https://github.com/etempel/parquet-fortran/releases/tag/v1.0.0

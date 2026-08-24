@@ -77,6 +77,12 @@ working rules).
   - [The three machines available for testing](#the-three-machines-available-for-testing)
   - [Writing benchmarking instructions for another machine](#writing-benchmarking-instructions-for-another-machine)
   - [Compiler & language gotchas](#compiler--language-gotchas)
+    - [General Fortran & language gotchas](#general-fortran--language-gotchas)
+    - [gfortran-specific gotchas](#gfortran-specific-gotchas)
+    - [ifx-specific gotchas](#ifx-specific-gotchas)
+    - [flang-specific gotchas](#flang-specific-gotchas)
+    - [nagfor-specific gotchas](#nagfor-specific-gotchas)
+    - [C++ side (`src/parquet_wrapper.cpp`) gotchas](#c-side-srcparquet_wrappercpp-gotchas)
   - [NAG's "explicitly imported but not used" warnings: most are FALSE POSITIVES](#nags-explicitly-imported-but-not-used-warnings-most-are-false-positives)
   - [Arrow's own type singletons have thread-unsafe lazy state on first concurrent use](#arrows-own-type-singletons-have-thread-unsafe-lazy-state-on-first-concurrent-use)
   - [gcovr <7.1 cannot parse gcov output for a 10,000+ line file](#gcovr-71-cannot-parse-gcov-output-for-a-10000-line-file)
@@ -321,9 +327,7 @@ reasons, and both are easy to get wrong in the direction of "add the flag to be 
   `fpm build --show-model | grep -o 'fortran_compile_flags="[^"]*"'`, which shows `-fopenmp` even
   when `FPM_FFLAGS` carries nothing but `-I` paths; confirm end-to-end by running
   `error_scenarios concurrent_calls_into_shared_reader` from a build with no `-fopenmp` anywhere,
-  which still aborts (exit 134) because several threads really do enter the reader at once. An
-  earlier version of this section prescribed `FPM_FFLAGS="-fopenmp" fpm test`; that was redundant,
-  and `.gitlab-ci.yml` has had the same redundant flag removed.
+  which still aborts (exit 134) because several threads really do enter the reader at once.
   **This holds for gfortran and ifx, and NOT for flang** — on fpm 0.13.0 alpha the metapackage
   contributes no `-fopenmp` at all under `FPM_FC=flang-mp-22`, which the same `--show-model` command
   shows directly (the flags line carries only `-cpp` and the `-I` paths, where gfortran's carries
@@ -354,11 +358,9 @@ reasons, and both are easy to get wrong in the direction of "add the flag to be 
   on one that exports `FPM_FFLAGS`, and `fpm test --profile debug` is what turns it on — including
   on a machine that exports `FPM_FFLAGS`, which does not lose the debug flags.**
 
-  An earlier version of this section said `FPM_FFLAGS` "REPLACES, it does not add" and attributed
-  the missing flags to it. The advice that followed was right and is unchanged; the reason was
-  wrong, and wrong in a way that matters — it implied a `--profile release` measurement taken on a
-  machine that exports `FPM_FFLAGS` was built at `-O0` and should be discarded. It was not. Re-check
-  the table above against a newer fpm before assuming it still holds.
+  Re-check the table above against a newer fpm before assuming it still holds. Note the corollary
+  that is easy to get backwards: a `--profile release` measurement taken on a machine that exports
+  `FPM_FFLAGS` is **not** an `-O0` measurement and must not be discarded as one.
 
 Setting `FPM_CXXFLAGS`/`FPM_LDFLAGS` to CI's values has the same replacing behaviour on the C++
 half, which on a dev machine is where Arrow's include and library paths come from — the build then
@@ -780,22 +782,13 @@ instead — expect it to be very noisy (several thousand warnings), dominated by
   roughly N** — and a large chunk of the entries are FORD's own unnamed `'unknown'` placeholders,
   which name no entity at all and cannot be acted on even in principle.
 
-**The one category that is genuinely load-bearing is `Unknown entity`,** which is the
-use-association accessibility limitation documented under "FORD config gotchas" and stands at
-**126** as of 2026-08-24, across **ten** modules — **measured**, and it corrects a figure this file
-carried for two days. The previous entry said 113 across nine and was *derived* rather than measured
-(no FORD on the machine that made the change): the derivation reasoned about what left the facade
-but never counted `parquet_version`'s own four re-exports, so it under-reported by exactly that
-group. The lesson is the one the note already gave and which was not followed — re-derive with the
-command below rather than quoting the stored number. **It is stable only in the sense that it moves
-for a reason** — it rises by one for each name any module re-exports or hides with an accessibility
+**The one category that is genuinely load-bearing is `Unknown entity`,** the use-association
+accessibility limitation documented under "FORD config gotchas". **Never quote a stored figure for
+it — re-derive.** It rises by one for each name any module re-exports or hides with an accessibility
 statement naming a **use-associated** name, which is the expected cost of keeping a sibling module's
-plumbing out of a user's namespace, and a rise of exactly that size is not a regression. It was 23
-before the typed accessor tier added nine such names at once, 38 before the module restructuring,
-and 115 after it — because the rule that every entry module re-exports the settings it reads means
-every one of those re-exports is a use-associated `public ::`. **Do not read a jump of that size as
-a regression without breaking it down per module first**; re-derive rather than trusting the figure
-above:
+plumbing out of a user's namespace, so a rise of exactly that size is not a regression. Restructuring
+that gives several entry modules their own settings re-exports moves it by dozens at once, entirely
+legitimately. **Do not read a jump as a regression without breaking it down per module first:**
 
 ```bash
 ford --warn docs.md 2>&1 | tr '\n' ' ' | tr -s ' ' | sed 's/Warning: Unknown entity/\n&/g' \
@@ -899,88 +892,27 @@ Keep new code to the same standard:
   fix without first checking a newer FORD release against upstream issue
   (https://github.com/Fortran-FOSS-Programmers/ford/issues/738).
 - **FORD 7.0.13 cannot resolve a `use`-association accessibility statement** — an
-  `Unknown entity '<name>' with attribute '<public|private>' in module '<m>'` warning, **126** of
-  them as of 2026-08-24 and the one FORD number worth tracking across a change (measured with the
-  command above, not derived). Ten modules
-  contribute, and the per-module census is what to compare across a change rather than the total:
+  `Unknown entity '<name>' with attribute '<public|private>' in module '<m>'` warning, and the one
+  FORD number worth tracking across a change. **Compare the PER-MODULE census, not the total**, and
+  derive both with the command above rather than quoting a stored figure; a census written down here
+  went stale twice and was once *derived* rather than measured, under-reporting a whole module's
+  group.
 
-  | module | attribute | names |
-  |---|---|---|
-  | `parquet_sorting` | public | 31 |
-  | `parquet_settings` | public | 25 |
-  | `parquet` | private | 19 |
-  | `parquet_core` | public | 14 |
-  | `parquet_argsort` | public | 12 |
-  | `parquet_io` | private | 10 |
-  | `parquet_strings` | public | 6 |
-  | `parquet_version` | public | 4 |
-  | `parquet_sampling` | public | 4 |
-  | `parquet_tables` | public | 1 |
+  **What it keys on is USE-ASSOCIATION, and nothing else.** A module re-exports or hides a name it
+  imported, and FORD cannot follow that; a name *defined* in the module itself never warns. The
+  sharpest illustration is a pair of settings accessors on the **same** `public ::` statement, where
+  the getter warns and the setter does not, purely because the getter lives in
+  `parquet_settings_base` and the setter in `parquet_settings`. So the count is driven by two
+  deliberate rules — every entry module re-exports the settings knobs its own code reads (see
+  "Nested submodule tree"), and both facades hide the cross-module plumbing Fortran has no package
+  scope for. Neither has a spelling that avoids the warning, and the alternatives are a narrow
+  import that cannot configure itself and a public namespace full of internals.
 
-  Re-derived 2026-08-24 with the command above. The previous census read 118 across the same ten
-  modules; **three rows moved and only two of the eight new warnings are attributable to that
-  round's change** (row 30 hid `parquet_push_settings_to_cpp` and `parquet_validity_block_bits` in
-  the facades). The rest was drift that had accumulated unnoticed, which is the reason this note
-  says to re-derive rather than quote.
-
-  **Five of those eight groups exist because of one rule** — a module re-exports, getter and setter
-  both, every settings knob its own code reads (see "Nested submodule tree"). Every such re-export
-  is a `public ::` naming a use-associated name, so it warns; there is no spelling that does not,
-  and the alternative is a narrow import that cannot configure itself. The `parquet_io` group is the
-  second facade's `private ::` list, the same case as `parquet`'s and for the same reason.
-
-  The three original groups, whose detail is still worth having because it shows exactly what the
-  warning keys on:
-  **14 `public ::`** re-exports in `parquet_core.f90` (`parquet_date`/`parquet_time`/
-  `parquet_timestamp` and the eight `parquet_unit_*`/`parquet_ns_*` constants from
-  `parquet_temporal`; `parquet_string`/`parquet_string_column` from `parquet_strings`;
-  `parquet_maml_file` from `parquet_maml_base`), which FORD silently drops from that module's
-  generated page; and **19 `private ::`** names in the `parquet` facade (measured 2026-08-24; it
-  read 15 until row 30, which added the last two) — nine names from
-  `parquet_settings`/`parquet_columns` (`parquet_valid_compressions`,
-  `parquet_resolve_writer_compression`, the three `parquet_emit_*` output channels,
-  `parquet_output_is_suppressed`, `parquet_clamp_to_affinity`, `parquet_push_settings_to_cpp` and
-  `parquet_validity_block_bits`), the `parquet_column_any_null` the table's read accessors use, and
-  the **nine** `parquet_column_*`
-  generics of the typed accessor tier (`_get_at`, `_set_at`, `_get_elem`, `_set_elem`, `_data_ptr`,
-  `_string_column`, `_is_null`, `_set_null`, `_clear_null`) — which are the facade's only way to
-  keep those names out of the namespace `use parquet` hands a user, so they cannot be removed.
-  Note the count is of *names*, not of `private ::` statements: one statement may list several, and
-  `src/parquet.f90` carries 11 statements for those 19 names. It used to carry three more names
-  (`c_int` and the two `parquet_get_*_version` bindings, imported for the version procedure the
-  facade no longer holds) plus `private :: cversion`, which warned about nothing — `cversion` was
-  *defined* in the facade rather than use-associated, which is exactly the distinction this warning
-  is about, and the settings setters below make the same point on a line that is still there.
-  The third group is **4 `public ::`** re-exports in `parquet_settings`
-  (`parquet_get_string_threads`, `parquet_output_is_suppressed`, `parquet_get_random_threads` and
-  `parquet_get_random_parallel_min_elements`, all four defined in
-  `parquet_settings_base`), and it is worth knowing about mainly because it shows **the rule is not
-  about the facade at all** — an earlier version of this note said the number "rises by one for each
-  name a future `private ::` in the facade hides", which is too narrow. Any module that re-exports or
-  hides a **use-associated** name with an accessibility statement adds one per name, wherever it sits
-  in the tree.
-  **This number rises by one for each such name**, which is
-  the expected cost of keeping a sibling module's internal plumbing out of the public namespace —
-  a rise of exactly that size is not a regression, and is exactly what took this figure from the
-  23 recorded here before the typed accessor tier added its nine names at once, from 32 to 34
-  when the read-ordering guards added their two, from 36 to 38 when `parquet_random`'s two
-  settings getters were re-exported, and from 38 to 115 when the module restructuring gave every
-  entry module its own settings re-exports and added the `parquet_io` facade. That last step is also the sharpest available illustration of
-  what the warning keys on: their matching **setters** (`parquet_set_random_threads`,
-  `parquet_set_random_parallel_min_elements`) sit on the *same* `public ::` statements and warn
-  about nothing, because they are defined in `parquet_settings` itself while only the getters live
-  in `parquet_settings_base`. Use-association is the whole trigger — the same distinction
-  `private :: cversion` makes in the facade. **Confirmed not
-  fixable from
-  source**: for the `public ::` group, neither adding a `!>` doc-comment directly on the line, nor
-  an explicit `use ..., only: name1, name2` import list (already how these modules are imported),
-  nor a bare unrestricted `use` with no `only:` at all changes anything — all three were tried
-  against FORD 7.0.13 and the count stayed at 14 every time. The underlying symbols are not lost
-  from the generated site — the three temporal types get their own `type/parquet_date.html`-style
-  pages and the constants render on `module/parquet_temporal.html`/`module/parquet_strings.html`/
-  `module/parquet_maml_base.html` — they just don't appear as belonging to `parquet_core` on that
-  module's own generated page. Re-test against a newer FORD release before attempting either
-  source-side fix again.
+  **Confirmed not fixable from source**: neither a `!>` doc-comment on the line, nor an explicit
+  `use ..., only:` list, nor a bare unrestricted `use` changes anything — all three were tried
+  against FORD 7.0.13. Nothing is lost from the generated site either; the symbols get their own
+  type and module pages, they just do not appear as belonging to the re-exporting module on its own
+  page. Re-test against a newer FORD before attempting a source-side fix again.
 - **The `parquet` facade's re-exports do not appear on `module/parquet.html` either, and that is
   the accepted cost of S10.** The facade re-exports its siblings with *bare* `use` statements
   (no `public ::` list), which produces no warning at all — but FORD equally does not list the
@@ -2177,10 +2109,6 @@ that has not been appended to. The price of the growth half is that an appended-
 up to 1.5x the storage its rows need. `feature_risks.md` **Risk-67** records the consequence that
 matters most — `size(storage)` is `cap`, not `nrows`, so every read must be bounded by `1:nrows`.
 
-**An earlier version of this section said the opposite** — exact-fit everywhere, no headroom, and
-`%append` in a loop O(k²) — and it was true when written; `ensure_capacity` came later. The advice
-below did not change, and is worth keeping for a different reason than the one originally given.
-
 **When the final row count is known before the pieces are, `init` the column once at full size and
 `%paste` each piece into place.** Not because appending is quadratic — it is not — but because
 `%paste` avoids the intermediate copies altogether rather than merely amortising them, and it
@@ -2534,7 +2462,7 @@ which reads like a missing dependency rather than a flag mistake. Append when a 
 gfortran + g++, **`-ipo`** (not `-flto`) for ifx + icpx, and `-flto` for `flang-mp-22` +
 `clang++-mp-22` on machine C.
 
-**That is NOT the same as "the library links", and an earlier version of this note said it was.**
+**That is NOT the same as "the library links".**
 Machine B's `--lto-probe` passed while the real `-ipo` build of this library failed with the 8087
 undefined references described above. The probe links objects **directly**; the actual failure
 mechanism is a static ARCHIVE of bitcode objects being read by the system linker, which the probe
@@ -2796,178 +2724,80 @@ applied to the harness instead of the source.
 
 ### Compiler & language gotchas
 
+Split six ways: the compiler-independent rules first, then one group per compiler in the fleet, then
+the C++ half. **File a new gotcha by which compiler exhibits it** — a rule that binds regardless of
+compiler goes in the general group even when one compiler is what exposed it, and a rule that exists
+because of one compiler's codegen goes in that compiler's group even when the fix is portable.
+
+#### General Fortran & language gotchas
+
+Compiler-independent rules. Anything specific to one compiler is in its own section below —
+[gfortran](#gfortran-specific-gotchas), [ifx](#ifx-specific-gotchas), [flang](#flang-specific-gotchas),
+[nagfor](#nagfor-specific-gotchas) — and the C++ half is in
+[C++ side](#c-side-srcparquet_wrappercpp-gotchas).
+
 - **132-column line limit is enforced — do not reintroduce `-ffree-line-length-none`.**
   `src/*.f90` and `test/*.f90` are held strictly within the standard 132-column free-form limit,
   including comments (both whole-line and trailing end-of-line) — a comment pushing a line past
-  132 columns is a violation just like code would be. `.gitlab-ci.yml`'s `FPM_FFLAGS` does not
-  pass `-ffree-line-length-none`, so a line over 132 columns fails CI on older gfortran (and is a
-  style violation regardless of compiler). When a line runs long, wrap it with `&` continuations
-  (code/strings) or split it across multiple `!`-prefixed comment lines — don't reach for the
-  compiler flag again, and don't add per-file/per-line suppressions.
-- **Minimum gfortran is 13; don't work around compiler bugs in source.** gfortran ≤ 11
-  miscompiles the optional allocatable-`character` argument in `schema%add_col_qc` /
-  `schema%set_col_qc` (corrupted column name → a spurious "column not found" abort at
-  runtime — see README.md's Prerequisites). That's the reason for the version floor; don't
-  refactor otherwise-correct source to accommodate an old compiler.
-- **Never give a FINALIZABLE derived type to OpenMP's `private()` — declare it in a `block`
-  inside the loop body instead.** gfortran does not reliably default-initialize a `private` copy
-  of such a type, so a pointer component starts as garbage and the *first* thing that finalizes
-  it — including the implicit finalization of an `intent(out)` dummy on entry to an "open"
-  procedure — frees an undefined pointer and the process dies inside the allocator, with a
-  backtrace pointing at malloc rather than at any of this library's own code. Confirmed with
-  `parquet_table` (`private(t)` + `parquet_open_table`), and **reproducible with
-  `OMP_NUM_THREADS=1`, which is what rules out a data race** and identifies it as initialization.
-  The working form declares the variable where it is used, so ordinary block-scope
-  initialization and finalization apply:
-
-  ```fortran
-  !$omp parallel do default(shared) private(rg) reduction(+:total)
-  do rg = 1, n
-      block
-          type(parquet_table) :: mine     ! NOT private(mine)
-          ...
-      end block
-  end do
-  ```
-
-  This applies to every finalizable type this library exposes (`parquet_table`, `parquet_reader`,
-  `parquet_writer`), and to any future one — so a per-thread instance of any of them belongs in a
-  `block`, and any example or guide page showing `private(<that type>)` is wrong and should be
-  corrected on sight. **The HANDLE types are deliberately not in that list**: none of
-  `parquet_table_row`, `parquet_table_col` and `parquet_string` has a finalizer, which is what keeps
-  them usable in a `private()` clause — so removing a finalizer is one way to take a type *out* of
-  this rule, and `parquet_string` is the worked example of doing exactly that, since a non-owning
-  handle's finalizer frees nothing and is unobservable on every path (see its own type body for the
-  full reasoning, and do not restore it), and
-  adding one to either handle would put it back in.
-- **ifx forbids the `block` form the previous bullet prescribes, for any type that has
-  ALLOCATABLE COMPONENTS — and is perfectly happy with `private()`. The two compilers forbid
-  opposite shapes, so a type in that class can use neither, and needs a shared per-thread array
-  instead.** ifx 2026.1 emits privatization scaffolding (`<TYPE>.omp.mold_ctor` →
-  `for_alloc_private` → `do_alloc_copy` → `copy_src_xdesc_to_dest_xdesc`) for such a type declared
-  in a `block` lexically nested in a parallel region, and it segfaults on every thread entering the
-  region — 100% reproducible with 2 threads, independent of team size, so not a race, with a
-  backtrace naming no library code. The working shape is the one in `materialize_marked_parallel`
-  (`src/parquet_tables_read.f90`): allocate an array of the type **before** the region, one slot per
-  thread, and index it by `omp_get_thread_num() + 1`, so no instance is constructed inside the
-  construct at all. Passing an element on to an `optional, intent(inout)` dummy is fine.
-
-  **Two conditions narrow this, and both will exonerate a broken shape if you reproduce
-  carelessly.** It needs `-O1`+ (at `-O0` it runs clean, so `fpm build --profile debug` cannot see
-  it — the same "only at `-O1`+" signature as the automatic-length-character ICE further down this
-  section). And it needs the type to come from a **separately compiled module**: the identical type
-  defined in the same file as its user does not crash, so a single-file reproducer will say the
-  shape is fine when it is not.
-
-  **The allocatable components are the whole trigger — FINALIZABILITY IS NOT REQUIRED, and reading
-  it as though it were is what let the shape back in.** An earlier wording of this bullet said
-  "any finalizable type that has allocatable components"; `materialize_column_parallel` then
-  declared a block-local `type(parquet_column) :: chunk`, and `parquet_column` has no `FINAL` at
-  all — it crashed exactly as described, on every full `fpm test` under ifx. So the class is: **any
-  derived type with an allocatable component.** `parquet_reader`, `parquet_writer`,
-  `parquet_schema`, `parquet_column` and `parquet_string_column` are all in it today.
-
-  **A type with no allocatable components is exempt, which is why `parquet_table` is still safe
-  block-local** — it is five scalars and a pointer by deliberate design (see "New
-  `parquet_table` state goes on the CACHE"), and that design is now load-bearing for ifx too: the
-  first allocatable component added to it would make every block-local per-thread table in user
-  code start crashing. That is very likely what the `parquet_schema`-component segfault recorded
-  in that section actually was. See `feature_risks.md` Risk-45.
-
-  **Diagnosing it takes one command**, and it is worth running before concluding a compiler is at
-  fault at all: `nm <object> | grep -E "for_alloc_private|mold_ctor"`. If the scaffolding is absent,
-  the source under test *cannot* produce that backtrace, and the binary that crashed is stale —
-  see "Stale `fpm` build cache" below. A per-compiler `#ifdef` bail-out was once added to
-  `parallel_prefetch_ok` on the strength of a stale-binary result, disabling the internally-parallel
-  prefetch under ifx for a crash the committed code had already fixed.
+  132 columns is a violation just like code would be. When a line runs long, wrap it with `&`
+  continuations (code/strings) or split it across multiple `!`-prefixed comment lines — don't reach
+  for the compiler flag again, and don't add per-file/per-line suppressions.
 - **Every `submodule (parquet) name` file needs its own `implicit none`** (right after the
   `submodule` line, before `contains`) — a submodule's `implicit none` is *not* inherited from
-  the ancestor module; confirmed with a minimal repro where gfortran silently accepted an
-  undeclared variable in a submodule lacking it, even under `-Wall`. Contained procedures
-  *within* a module/submodule do inherit their host's `implicit none` via ordinary host
-  association, so it does not need repeating inside each individual function/subroutine — one
-  `implicit none` per submodule file is sufficient.
-- **Test for NaN with `ieee_is_nan`, not `x /= x`.** Use `use ieee_arithmetic, only: ieee_is_nan`
-  and `ieee_is_nan(x)` rather than the classic self-comparison idiom — the latter is correct
-  (NaN is the only value never equal to itself) but triggers gfortran's `-Wcompare-reals`
-  warning. See `parquet_metadata_maml.f90`'s `parquet_qc_numeric_bound` for the pattern.
-  This does not apply to the *other* `-Wcompare-reals` sites in this codebase (e.g.
-  `value == anint(value)` in `parquet_write_numeric.f90`/`parquet_metadata_maml.f90`, testing
-  whether a float is exactly integral) — those are exact-equality checks with no arithmetic
-  drift and no equivalent NaN-style idiom, so their warning is left as an accepted false
-  positive rather than "fixed" into something worse (e.g. an epsilon comparison).
-
-  **`src/parquet_argsort_engine.f90` is a deliberate, measured EXCEPTION and uses `x /= x`
-  throughout — do not "correct" it.** Its header states the case at length: `ieee_is_nan` cost ifx
-  ~2.5 ns per test on the sort's hot comparison path, where the test sits inside a dependency chain
-  rather than in isolation. Two things a future reader should take from it rather than re-deriving
-  them. The general lesson is that **a microbenchmark of an isolated operation does not predict its
-  cost inside a dependency chain** — the probe that motivated the change was right about
-  `ieee_is_nan` and wrong about its replacement. And the warning this convention exists to avoid does
-  not actually appear: `fpm build --profile debug` (which does carry `-Wall -Wextra`, checked)
-  compiles that file with **zero** diagnostics on gfortran 15.2, so `-Wcompare-reals` evidently does
-  not fire on a SELF-comparison there, whatever it does for two distinct operands. If some other
-  compiler does warn, suppress or accept it rather than restoring `ieee_is_nan`.
+  the ancestor module. Contained procedures *within* a module/submodule do inherit their host's
+  `implicit none` via ordinary host association, so it does not need repeating inside each
+  individual function/subroutine — one `implicit none` per submodule file is sufficient.
 - **`sign(1.0, x)` is NOT a portable test for a NEGATIVE ZERO — use the sign bit.** F2018 16.9.180
   makes `SIGN(A, B)` with a zero `B` **processor-dependent**: a processor that does not distinguish
-  negative zero returns `|A|`, so `sign(1.0_real64, -0.0_real64)` is entitled to be `+1.0`. Confirmed
-  three ways on this project: gfortran 15.2 and flang 22.1.8 both distinguish it, **ifx does not**,
-  and the idiom therefore reported a *correct* merge as broken on one compiler out of three
-  (`test_fortran_engine_ab_operations`, whose tie fixture separates its two inputs solely by the sign
-  bit of a zero). The portable form asks the question directly:
+  negative zero returns `|A|`, so `sign(1.0_real64, -0.0_real64)` is entitled to be `+1.0`. gfortran
+  and flang distinguish it, **ifx does not**, so the idiom reported a *correct* merge as broken on
+  one compiler out of three. The portable form asks the question directly:
 
   ```fortran
   neg = (x == 0.0_real64) .and. transfer(x, 0_int64) < 0_int64
   ```
 
   `ieee_is_negative` from `ieee_arithmetic` is equally correct if the module is already imported.
-  **Two adjacent traps worth knowing while you are here.** The sign of a negative zero in a
-  *constant expression* is a second, independent risk — gfortran and flang preserve it through a
-  `parameter`, but building the value at runtime costs nothing and rules the question out, which is
-  what that test now does. And a fixture whose whole discriminating power is one bit **must assert
-  its own precondition first**: without it, a compiler that loses the sign produces a failure message
-  blaming the code under test, which is exactly how this one presented.
+  Two adjacent traps: the sign of a negative zero in a *constant expression* is a second,
+  independent risk, so build the value at runtime, which costs nothing and rules the question out;
+  and a fixture whose whole discriminating power is one bit **must assert its own precondition
+  first**, or a compiler that loses the sign produces a failure message blaming the code under test.
 - **A function returning an unallocated `allocatable` cannot yield an unallocated LHS via
-  `x = func()`.** Verified on gfortran 15.2: intrinsic assignment from an unallocated allocatable
-  function result leaves the LHS *allocated* (an empty string/array), even for a fresh target.
-  So an API cannot signal "absent" purely by returning an unallocated result — provide an explicit
-  flag/sentinel instead (this is why `parquet_strings`' `allow_null` returns `""`, guarded by
-  `is_null()`).
+  `x = func()`.** Intrinsic assignment from an unallocated allocatable function result leaves the
+  LHS *allocated* (an empty string/array), even for a fresh target. So an API cannot signal "absent"
+  purely by returning an unallocated result — provide an explicit flag/sentinel instead (this is why
+  `parquet_strings`' `allow_null` returns `""`, guarded by `is_null()`).
 - **Never blank a deferred-length allocatable character ARRAY with `arr = ""` — assign element by
   element.** Intrinsic assignment to an allocatable reallocates it whenever the RHS's length
   differs, and that rule applies to a whole-array assignment from a scalar too: `arr = ""` keeps
   the shape but reallocates every element to **length zero**. A later `arr(i) = name` then writes
   the declared width into a zero-length allocation, so the names come back blank *and* the heap is
   corrupted. **gfortran keeps the length and hides both symptoms; ifx follows the standard and
-  shows them** — as blank strings in an error message ("column '' … for internal name ''"),
-  followed some tests later by `free(): invalid next size (fast)` in unrelated code, which reads
-  like a completely different bug. `parse_read_maml_remap` (`src/parquet_tables_maml.f90`) is the
-  worked example; it blanks with an explicit `do i = 1, count` loop, because an array *element* is
-  not itself an allocatable variable and so only blank-pads. The same hazard does **not** apply to
-  a deferred-length allocatable *scalar* (`suffix = ""` is the intended idiom and is everywhere in
-  `parquet_metadata.f90`), nor to an array assignment whose RHS carries the right length already
-  (`values_c = pack(values, mask)` in `parquet_write_string.f90`).
+  shows them** — as blank strings in an error message, followed some tests later by
+  `free(): invalid next size (fast)` in unrelated code, which reads like a completely different bug.
+  `parse_read_maml_remap` (`src/parquet_tables_maml.f90`) is the worked example; it blanks with an
+  explicit `do i = 1, count` loop, because an array *element* is not itself an allocatable variable
+  and so only blank-pads. The hazard does **not** apply to a deferred-length allocatable *scalar*
+  (`suffix = ""` is the intended idiom), nor to an array assignment whose RHS carries the right
+  length already (`values_c = pack(values, mask)` in `parquet_write_string.f90`).
 - **A list-directed `read(text, *, iostat=ios) n` is NOT a strict parse, and silently accepts a
-  wrong value.** Verified on gfortran 15.2: it rejects `"5abc"` and `"3.9"` (`iostat` 5010) and `""`
-  (`iostat` -1) as you would hope — but it accepts **`"5 6"` with `iostat == 0`, yielding 5**. So
-  parsing any caller-supplied text this way (an environment variable, a config line, a command-line
-  argument) turns a typo or a shell variable that expanded to two words into a plausible wrong value
-  applied silently, which is far worse than a clean failure. Parse strictly by hand instead: trim,
-  allow one optional `+`/`-`, require at least one digit and **nothing else** to the end of the
-  string, and only then let `read` do the conversion. `env_int64` (`src/parquet_settings.f90`) is
-  the worked example, and `settings_env_two_numbers` (`test/error_scenarios.f90`) is the regression
-  test that stops the lax form coming back.
+  wrong value.** It rejects `"5abc"` and `"3.9"` (`iostat` 5010) and `""` (`iostat` -1) as you would
+  hope — but it accepts **`"5 6"` with `iostat == 0`, yielding 5**. So parsing any caller-supplied
+  text this way (an environment variable, a config line, a command-line argument) turns a typo or a
+  shell variable that expanded to two words into a plausible wrong value applied silently, which is
+  far worse than a clean failure. Parse strictly by hand instead: trim, allow one optional `+`/`-`,
+  require at least one digit and **nothing else** to the end of the string, and only then let `read`
+  do the conversion. `env_int64` (`src/parquet_settings.f90`) is the worked example, and
+  `settings_env_two_numbers` (`test/error_scenarios.f90`) is the regression test.
 - **A compiler that WRAPS an overflowing integer expression may still use the overflow's
   undefinedness to delete a branch somewhere else — "it wraps" is not "it is safe".** These are two
   different claims and this project conflated them once, at the cost of a silent wrong answer.
   `parquet_random`'s integer draw needed `hi - lo + 1` as an unsigned 64-bit pattern; that overflows
-  above `2**63`, and ifx 2026.1.1 was measured wrapping it faithfully, so it shipped as a documented
-  wrapping site. ifx does wrap it — and, because `hi >= lo` holds by construction, also concludes
-  that absent overflow the result must be positive, and therefore **deletes the `if (s < 0)` branch
-  two functions away** that handles exactly the wide-width case. The draw then took the narrow-width
-  path and returned a plausible, uniform-looking, wrong value still inside `[lo, hi]`. Reproduced at
-  `-O2` on the default profile; invisible to the golden vectors on the other compiler, to
-  containment and to chi-square.
+  above `2**63`, and ifx was measured wrapping it faithfully, so it shipped as a documented wrapping
+  site. ifx does wrap it — and, because `hi >= lo` holds by construction, also concludes that absent
+  overflow the result must be positive, and therefore **deletes the `if (s < 0)` branch two
+  functions away** that handles exactly the wide-width case. The draw then took the narrow-width
+  path and returned a plausible, uniform-looking, wrong value still inside `[lo, hi]`.
 
   **So: a wrapping measurement is evidence about one expression's result, never about an inference
   the optimiser may draw wherever that value flows** — and a branch on the result's *sign* is the
@@ -2976,62 +2806,9 @@ applied to the harness instead of the source.
   `src/parquet_random.f90`), which leaves no undefinedness to reason from. Where an overflowing site
   is genuinely kept for speed, it must be guarded by a comparison against an independent
   overflow-free implementation, because nothing else will notice. See `feature_risks.md` Risk-94.
-
-- **`std::abort()` is not safe to call from many threads at once — it can hang the process
-  forever.** glibc's `abort()` takes an internal lock, so when several threads reach it together
-  they pile up on that lock and nothing ever terminates. Measured on machine B under ifx at
-  `-O0 -check all`: the `concurrent_calls_into_shared_writer` error scenario left **192 threads**
-  parked in `futex_wait_queue`, every stack reading `__lll_lock_wait_private <- abort <- …
-  <- __kmp_invoke_microtask`. It survived `SIGTERM` — the Fortran runtimes install a traceback
-  handler for it and a wedged process cannot run that either — and needed `SIGKILL`. The same
-  configuration also produced an occasional `SIGSEGV` in that path, and neither outcome is
-  reproducible on demand: both need enough threads to arrive together, so 12 sequential and 24
-  concurrent isolated runs all terminated cleanly while a loaded full-suite run hung.
-
-  **This matters here because the concurrency guard is MEANT to be hit from many threads** — that
-  is the misuse it exists to catch. The fix in `src/parquet_wrapper.cpp` is
-  `claim_fatal_path_or_park()` plus `fatal_exit()`: an atomic claim so exactly one thread reports,
-  and `std::_Exit(134)` instead of `abort()` — a bare `exit_group` syscall, no lock, no `atexit`
-  handler, well defined from any thread inside or outside a parallel region. 134 is what a shell
-  reports for a SIGABRT death, so nothing that observes the exit status can tell the difference.
-  Coverage is unaffected: `_Exit` skips the gcov flush exactly as `abort()` did, so every
-  `GCOVR_EXCL` marker resting on that mechanism stays correct. **Any new fatal path must go through
-  those two helpers rather than calling `abort()`/`exit()` directly.** See `feature_risks.md`
-  Risk-99.
-
-- **`-128_int8` trips gfortran's range check** (it parses `128` then negates). Build the high bit
-  with `ibset(0_int8, 7)` in constant expressions. Also: an array-constructor implied-do index
-  (`[(f(b), b=0,7)]`) has no implicit type under `implicit none` — list the elements explicitly.
 - **`transfer(source, mold, size)` into a longer target leaves the trailing bytes undefined**, not
   blank-padded. To place a short string into a longer fixed-length slot, assign normally (which
   blank-pads); reserve `transfer` for exact-size byte moves.
-- **A CHARACTER TEMPORARY built inside a loop may never be reclaimed until the procedure returns, so
-  a long loop dies of stack exhaustion far from its cause.** Confirmed on flang 22.1.8: every
-  `call sub("%" // what // ": ...")` in a loop gets its own stack slot, about 90 bytes a call, and
-  the frame grows monotonically. `check_rows_consistent` (`test/test_table_parallel.f90`) makes about
-  `NROW * (3 + 2*VW)` such calls -- 19 per row at this fixture's width -- and **SIGSEGV'd at
-  roughly row 4500**, which is the ~7.7 MB those 85000 calls account for on macOS's 8 MB default
-  stack, needing 32–40 MB to finish. gfortran reclaims per iteration and is unaffected.
-
-  **The symptom names nothing useful.** The fault lands in the *callee's* prologue — here
-  test-drive's own `check_logical` — as `EXC_BAD_ACCESS (code=2)` at a guard-page address, with a
-  backtrace that cannot unwind because the stack is gone. It reads as a crash in the library or the
-  test framework, and it was recorded in this file as an "unexplained and undiagnosed" race for some
-  time before anyone measured it.
-
-  **Diagnosis is three cheap steps, in this order**: raise the stack (`ulimit -s 65520`) and see if
-  it passes; scale the fixture down and see if the requirement scales with it; then print the
-  iteration counter to find where it dies. `code=2` at a `0x7ff7...` address is the tell — that is a
-  write to the guard page, not a bad pointer. Note `-fno-stack-arrays` does **not** help, because
-  these are expression temporaries rather than automatic arrays.
-
-  **The fix is to hoist, never to raise the limit.** Build each message once above the loop into a
-  `character(len=:), allocatable` and pass the variable; the temporary then does not exist. That
-  needs no flag, no `ulimit`, no shrinking of a fixture whose size is usually load-bearing (here
-  `NROW` is what clears the parallel work floor), and it is faster everywhere. **Apply it whenever a
-  loop of more than a few thousand iterations passes a concatenated or otherwise constructed
-  `character` expression to a procedure** — the same shape hides in any assertion helper called
-  per row.
 - **A PER-ELEMENT `transfer` into a `character(len=1)` array allocates a temporary each time, and
   SEQUENCE ASSOCIATION is the way out.** `dst(a:b) = transfer(str(lo:hi), dst, n)` is the obvious way
   to copy a `character(len=*)` scalar's bytes into a packed `character(len=1), allocatable` payload,
@@ -3166,37 +2943,6 @@ applied to the harness instead of the source.
   `feature_risks.md` Risk-70. **Do not reach for the whole-array elemental call as an alternative
   fix** — measured after the change, `call arr%set_unix(vals, unit)` was **3.2x slower** than the
   indexed loop it would replace, so the win is in the dummy's intent, not in the call shape.
-- **The CONVERSE also costs, and on ifx it costs far more: passing a non-polymorphic `type(T)`
-  actual to a `class(T)` dummy in another compilation unit makes ifx BUILD the class descriptor,
-  in the caller's prologue, on every call.** One type-descriptor record per allocatable component
-  of `T`, emitted unconditionally ahead of any branch — for `parquet_column` that is 21 records and
-  178 stores, **~35 ns per call**, and it was 78% of what a per-cell table read cost. The bullet
-  above is about a polymorphic dummy being *initialised*; this is about a non-polymorphic actual
-  being *converted*, and the two are independent. The fix is to put the implementation behind a
-  `type(T)` dummy and leave the type-bound binding as a one-line forwarder — a `class` actual
-  passed to a `type` dummy is free, so only that direction works. Fully written up, with the
-  maintenance rules and the one-command `objdump` check, under
-  [`parquet_column`'s TYPED accessor tier](#parquet_columns-typed-accessor-tier-never-reach-storage-through-a-binding)
-  — read that before adding an accessor or a helper to `parquet_column`. **gfortran does not emit
-  the block but still gained 1.23-1.32x from the same change**, so this is not an ifx-only
-  workaround.
-- **The previous bullet's "resets every component for free" is the documented standard behavior,
-  but this project has one confirmed, empirically-reproduced counterexample — don't treat it as an
-  absolute guarantee for a correctness-critical `logical` component.** `parquet_table` (finalizable,
-  `FINAL :: table_finalize`) has an `intent(out)`-reopened `open_table_impl`/`parquet_new_table`
-  where one component, `detached`, was found (via direct thread-tagged instrumentation, gfortran
-  13/14, reproduced identically in both the real GitLab CI image and a from-scratch local
-  Docker rebuild of it) to sometimes still read back `.true.` immediately after a fresh
-  `intent(out)` reopen of a variable that had previously been detached (e.g. by a prior
-  `%sort_by` call) — with no concurrency involved and every other component (`regime`/`row_lo`/
-  `row_hi`/`row_count`/`cache`) behaving correctly. `detached` was the one component in both
-  procedures that relied *solely* on the implicit default-initializer reset, unlike every sibling
-  component, which is explicitly reassigned in the body regardless. Fixed by adding an explicit
-  `table%detached = .false.` as the first executable statement of both `open_table_impl` and
-  `parquet_new_table` (`parquet_tables_lifecycle.f90`) — do not remove it on the assumption that
-  `intent(out)`'s implicit reset alone is sufficient, and apply the same explicit-reset treatment
-  to any new scalar `logical`/default-initialized component added to a finalizable type's
-  `intent(out)`-entry procedure, rather than trusting the implicit reset for it.
 - **A component and its parent cannot both be actual arguments of one call.** Passing `t%cache` and
   `t%cache%reader` to the same procedure argument-associates two dummies with overlapping storage,
   which Fortran forbids as soon as either is defined (F2018 15.5.2.13) and which compilers optimise
@@ -3242,10 +2988,9 @@ applied to the harness instead of the source.
   -- a bare string comparison, i.e. it short-circuits -- and **33.9 ns under ifx**, which is a string
   comparison plus very nearly a second complete `table_find` (ifx prices one at 31.4 ns). So ifx
   performs **two full name lookups per accessor where one is needed**, on every value accessor in
-  the table layer, worth **27% of a per-cell read**. An earlier note in this project recorded that
-  gfortran short-circuits at `-O2` but not at `-O0` and concluded it was "harmless in production";
-  that conclusion was gfortran-specific and is wrong for ifx. **Nest the test rather than relying on
-  the optimiser** whenever the second operand is more than a comparison:
+  the table layer, worth **27% of a per-cell read**. Whether the optimiser short-circuits is
+  compiler-specific, so measuring it on one compiler settles nothing. **Nest the test rather than
+  relying on the optimiser** whenever the second operand is more than a comparison:
 
   ```fortran
   if (cheap_test) then
@@ -3254,35 +2999,6 @@ applied to the harness instead of the source.
       end if
   end if
   ```
-- **A `pointer`-typed intermediate component defeats `-fcheck=bounds`'s trust in a freshly
-  unallocated LHS on intrinsic assignment.** `table_clone` (`parquet_tables_clone.f90`) used to do
-  `out%cache%rg_bounds = self%cache%rg_bounds` to copy an allocatable 2-D array, relying on F2003+
-  automatic reallocation (assigning to an allocatable should reallocate it to match the RHS shape).
-  Under `-fcheck=bounds` (fpm's own default debug profile — NOT enabled by `FPM_FFLAGS="--coverage"`
-  in `.gitlab-ci.yml`, which is why this only ever surfaced via a Docker/local `fpm test` run using
-  fpm's plain default profile, never in the real CI job itself), this raised a spurious "Array bound
-  mismatch for dimension 1 of array 'out' (0/2)" even though `out%cache%rg_bounds` was genuinely,
-  freshly unallocated — `cache` being reached through a `pointer` component rather than a plain
-  allocatable one is what confuses the bounds check here. Fixed by replacing the assignment with an
-  explicit `allocate(out%cache%rg_bounds(size(self%cache%rg_bounds,1), size(self%cache%rg_bounds,2)))`
-  followed by an element-wise `out%cache%rg_bounds(:,:) = self%cache%rg_bounds(:,:)`. If a future
-  `%clone`-style deep copy adds another allocatable array reached through a `pointer` intermediate,
-  prefer this explicit allocate-then-copy shape over a bare intrinsic assignment from the start,
-  rather than rediscovering the same spurious bounds-check failure.
-
-  **The same shape carrying a deferred-length `character` array is worse than a bounds-check
-  complaint — it has been seen to segfault outright, and only on CI's compiler.** `clone_new_cache`
-  (same file) used to copy the file-metadata snapshot with
-  `out%cache%meta_keys = self%cache%meta_keys`, where automatic reallocation has to establish the
-  deferred LENGTH as well as the shape, through the same `pointer` intermediate. That crashed
-  inside libc's allocator on GitLab CI's (older, Ubuntu-packaged) gfortran — backtrace naming
-  `clone_new_cache` with two `???` libc frames under it and nothing else — while running clean on
-  gfortran 15.2 locally, under `-fcheck=all`, and under `--coverage -fopenmp`. **A clean local run
-  proves nothing about this class of bug**; the fix is the same explicit
-  `allocate(character(len=len(src)) :: dst(size(src)))` plus an element-wise loop (element-wise
-  because a whole-array `dst = src` is itself the reallocation hazard described further up this
-  section). Reach for that shape from the start for any deferred-length `character` array component
-  behind a pointer, and do not restore the plain assignment on the strength of a green local run.
 - **cpp runs over every source file, so `/*` anywhere — including inside a Fortran comment —
   breaks the build.** `fpm.toml` declares `[preprocess.cpp]`, which applies to *all* sources, not
   just `.F90` ones. Writing a glob like `tools/*.sh` in a comment opens a C block comment and the
@@ -3296,18 +3012,188 @@ applied to the harness instead of the source.
   accessor name collides with the component it reports (`%nrows()` over an `nrows` component), rename
   the **component** — it is private implementation detail — and keep the short binding name, which is
   the public surface. Renaming the binding instead pushes an internal detail into the API.
+- **`-ftrapv` traps only the WRAPPING arm of `src/parquet_random.f90`, which is the one arm no
+  compiler in this fleet ships by default.** Measured 2026-08-20 on machine A, gfortran 15.2, over a
+  wide-range `pf_random_int_at` sweep, forcing each arm of the route (e) fork in turn:
+
+  | arm | who ships it | `-ftrapv` at `-O0`/`-O2`/`-O3` |
+  |---|---|---|
+  | `PF_INT128` | gfortran, flang | **passes** |
+  | `PF_SAFE64` | nagfor | **passes** |
+  | wrapping (`#else`) | ifx | **SIGABRT (134)** at every level |
+
+  All three return the identical checksum, so they are bit-exact and only the undefined behaviour
+  differs, so **a gfortran build of this library is `-ftrapv`-clean**, and so is a nagfor one —
+  which is the same property `-C=intovf` exercises from the other side.
+  **The sharper lesson is the converse: a `-ftrapv` build that does NOT abort is not evidence that a
+  site is safe.** Whether a given overflow is instrumented depends on optimisation level and
+  inlining context, and a site whose result is *dead* — such as a loop's final unused index update —
+  is typically optimised away before instrumentation, so it traps nothing while remaining fully
+  available to the optimiser as a range assumption. Use the cross-implementation agreement sweep to
+  answer that question, never a trapping build.
+
+  **UBSan answers it properly, and is a machine-B-only instrument** (gcc-toolset-15 has the x86-64
+  `libubsan`; MacPorts gcc15 ships none, and flang rejects `-fsanitize` for Fortran). **Run it with
+  `tools/check_random_ubsan.sh`**, which drives both arms of the fork — UBSan on a gfortran build
+  alone only ever exercises the `int128` arm. **What it found on its first run is the reason to keep
+  running it**: the two forced arms reported exactly the documented deliberate sites, while the
+  ordinary suite build reported **six further, undocumented signed-overflow sites** in the bulk
+  fills, where `base + k - 1_int64` forms `huge + 1` at the boundary the suite deliberately tests.
+  Every value was correct; only UBSan could see it, and `-ftrapv` had never flagged any of them.
+  See `feature_risks.md` Risk-112.
+
+#### gfortran-specific gotchas
+
+- **Minimum gfortran is 13; don't work around compiler bugs in source.** gfortran ≤ 11
+  miscompiles the optional allocatable-`character` argument in `schema%add_col_qc` /
+  `schema%set_col_qc` (corrupted column name → a spurious "column not found" abort at
+  runtime — see README.md's Prerequisites). That's the reason for the version floor; don't
+  refactor otherwise-correct source to accommodate an old compiler.
+- **Never write a function that returns `character(len=:), allocatable`** — the project-wide
+  convention this forces is stated under
+  [General Fortran & language gotchas](#general-fortran--language-gotchas); the *cause* is a
+  gfortran codegen bug, and ifx independently rejects the automatic-length variant.
+- **Never give a FINALIZABLE derived type to OpenMP's `private()` — declare it in a `block`
+  inside the loop body instead.** gfortran does not reliably default-initialize a `private` copy
+  of such a type, so a pointer component starts as garbage and the *first* thing that finalizes
+  it — including the implicit finalization of an `intent(out)` dummy on entry to an "open"
+  procedure — frees an undefined pointer and the process dies inside the allocator, with a
+  backtrace pointing at malloc rather than at any of this library's own code. **Reproducible with
+  `OMP_NUM_THREADS=1`, which is what rules out a data race** and identifies it as initialization.
+  The working form declares the variable where it is used, so ordinary block-scope initialization
+  and finalization apply:
+
+  ```fortran
+  !$omp parallel do default(shared) private(rg) reduction(+:total)
+  do rg = 1, n
+      block
+          type(parquet_table) :: mine     ! NOT private(mine)
+          ...
+      end block
+  end do
+  ```
+
+  This applies to every finalizable type this library exposes (`parquet_table`, `parquet_reader`,
+  `parquet_writer`), and to any future one, so any example or guide page showing
+  `private(<that type>)` is wrong and should be corrected on sight. **The HANDLE types are
+  deliberately not in that list**: none of `parquet_table_row`, `parquet_table_col` and
+  `parquet_string` has a finalizer, which is what keeps them usable in a `private()` clause — so
+  removing a finalizer is one way to take a type *out* of this rule.
+  **Note ifx forbids exactly the shape this prescribes** for a type with allocatable components;
+  see [ifx-specific gotchas](#ifx-specific-gotchas) for the shape that satisfies both.
+- **Test for NaN with `ieee_is_nan`, not `x /= x`**, because the self-comparison idiom triggers
+  `-Wcompare-reals`. See `parquet_metadata_maml.f90`'s `parquet_qc_numeric_bound`. This does not
+  apply to the other `-Wcompare-reals` sites here (`value == anint(value)`, testing whether a float
+  is exactly integral) — those are exact-equality checks with no equivalent NaN-style idiom, and
+  their warning is an accepted false positive rather than something to "fix" into an epsilon
+  comparison. **`src/parquet_argsort_engine.f90` is a deliberate, measured EXCEPTION and uses
+  `x /= x` throughout — do not "correct" it**: `ieee_is_nan` cost ifx ~2.5 ns per test on the sort's
+  hot comparison path. Its header states the case, and the general lesson with it — **a
+  microbenchmark of an isolated operation does not predict its cost inside a dependency chain**.
+- **`-128_int8` trips gfortran's range check** (it parses `128` then negates). Build the high bit
+  with `ibset(0_int8, 7)` in constant expressions. Also: an array-constructor implied-do index
+  (`[(f(b), b=0,7)]`) has no implicit type under `implicit none` — list the elements explicitly.
+- **`intent(out)`'s implicit reset is the documented standard behavior, but this project has one
+  confirmed counterexample — don't treat it as an absolute guarantee for a correctness-critical
+  `logical` component.** `parquet_table`'s `detached` was found (gfortran 13/14) to sometimes still
+  read back `.true.` immediately after a fresh `intent(out)` reopen of a variable that had
+  previously been detached, with no concurrency involved and every other component behaving
+  correctly. It was the one component relying *solely* on the implicit default-initializer reset.
+  Fixed with an explicit `table%detached = .false.` as the first executable statement of
+  `open_table_impl` and `parquet_new_table` (`parquet_tables_lifecycle.f90`) — do not remove it, and
+  apply the same explicit reset to any new scalar `logical` component of a finalizable type.
+- **A `pointer`-typed intermediate component defeats `-fcheck=bounds`'s trust in a freshly
+  unallocated LHS on intrinsic assignment.** `out%cache%rg_bounds = self%cache%rg_bounds`, relying
+  on F2003 automatic reallocation, raised a spurious "Array bound mismatch" even though the LHS was
+  genuinely unallocated — reaching it through a `pointer` component rather than a plain allocatable
+  one is what confuses the check. Use an explicit `allocate(...)` plus an element-wise copy instead.
+
+  **The same shape carrying a deferred-length `character` array is worse — it has been seen to
+  segfault outright, and only on CI's compiler**, because automatic reallocation must establish the
+  deferred LENGTH as well as the shape. It ran clean on gfortran 15.2 locally under `-fcheck=all`
+  and under `--coverage -fopenmp`, so **a clean local run proves nothing about this class of bug**.
+  Use `allocate(character(len=len(src)) :: dst(size(src)))` plus an element-wise loop — element-wise
+  because a whole-array `dst = src` is itself the reallocation hazard described under the general
+  gotchas. Reach for that shape from the start, and do not restore the plain assignment on the
+  strength of a green local run.
 - **A private procedure contained directly in a module, whose only callers are that module's
   submodules, compiles cleanly and then fails at LINK time** with `undefined symbol`. gfortran does
-  not emit it (it also reports `-Wunused-function` for it, which is the early warning). This is
-  invisible to per-file compilation and only appears when something actually links, so it can survive
-  a long way into a change. Fix: declare the procedure's interface in the module and implement it in a
-  submodule, exactly as `parquet_core.f90` already does for its shared private helpers (see
-  `src/parquet_columns_util.f90` for a file created solely to hold such helpers). Prefer that shape
-  from the start for any helper a submodule will call.
-- **The "no `character`-returning function" rule above extends to an *automatic*-length result,
-  not just a deferred-length one, when the length is a specification expression over
-  host-associated variables — that shape is an ifx internal compiler error.** ifx 2026.1.1
-  segfaults (ICE, and the source line it names is meaningless) on:
+  not emit it (it also reports `-Wunused-function`, which is the early warning). This is invisible
+  to per-file compilation and only appears when something links, so it can survive a long way into a
+  change. Fix: declare the procedure's interface in the module and implement it in a submodule, as
+  `parquet_core.f90` already does for its shared private helpers (see `src/parquet_columns_util.f90`,
+  a file created solely to hold such helpers). Prefer that shape from the start for any helper a
+  submodule will call.
+- **gfortran 15.2 ICEs under `-flto` when a SUBMODULE calls a module-level PROCEDURE POINTER**, so
+  such a call must live in the owning module's own `contains` and be reached through a relay. The
+  failure is `internal compiler error: in write_symbol, at lto-streamer-out.cc:3086`, during
+  `IPA pass: modref`. Twenty lines reproduce it: a module declaring
+  `procedure(i_p), pointer, save :: p => null()` and a submodule whose body is `call p(x)`.
+
+  **`-flto` is the only flag that matters** (it ICEs at `-O0` through `-O3` alike); `save`,
+  `=> null()` and accessibility make no difference. **Copying the pointer to a local does NOT help**
+  — the ICE follows any call derived from the module-level pointer — and a submodule of a *different*
+  module that merely use-associates it fails identically, so it is not about the owning module.
+  **A bare reference is not always safe either**: `associated(p)` alone compiles, but passing it as
+  an actual argument reproduces the ICE, so the rule is that no submodule names the pointer at all.
+  That is why `parquet_argsort`'s seven `oracle_*` relays fold the `check_oracle` test in rather than
+  leaving it at the call site, and why **the relays must be PUBLIC** — a private module-contained
+  procedure whose only callers are its own submodules does not link (previous bullet), and the usual
+  fix for *that* is exactly what reintroduces this ICE.
+
+  **Nothing in CI or in a plain `fpm test` builds with `-flto`**, so a reintroduced call would
+  compile, pass every test and sit in the tree until someone asked for a release build.
+  `check_no_submodule_oracle_pointer_call` (`tools/check_source_conventions.py`) is what makes it
+  visible; it also fails if the relays disappear, since without them every submodule call is legal
+  again.
+
+#### ifx-specific gotchas
+
+- **ifx forbids the `block` form gfortran's `private()` rule prescribes, for any type that has
+  ALLOCATABLE COMPONENTS — and is perfectly happy with `private()`. The two compilers forbid
+  opposite shapes, so a type in that class can use neither, and needs a shared per-thread array
+  instead.** ifx emits privatization scaffolding (`<TYPE>.omp.mold_ctor` → `for_alloc_private` →
+  `do_alloc_copy` → `copy_src_xdesc_to_dest_xdesc`) for such a type declared in a `block` lexically
+  nested in a parallel region, and segfaults on every thread entering the region — 100% reproducible
+  with 2 threads, independent of team size, so not a race, with a backtrace naming no library code.
+  The working shape is the one in `materialize_marked_parallel` (`src/parquet_tables_read.f90`):
+  allocate an array of the type **before** the region, one slot per thread, and index it by
+  `omp_get_thread_num() + 1`, so no instance is constructed inside the construct at all. Passing an
+  element on to an `optional, intent(inout)` dummy is fine.
+
+  **Two conditions narrow this, and both will exonerate a broken shape if you reproduce
+  carelessly.** It needs `-O1`+ (at `-O0` it runs clean, so `fpm build --profile debug` cannot see
+  it). And it needs the type to come from a **separately compiled module** — the identical type
+  defined in the same file as its user does not crash, so a single-file reproducer will say the
+  shape is fine when it is not.
+
+  **The allocatable components are the whole trigger — FINALIZABILITY IS NOT REQUIRED.** The class
+  is *any derived type with an allocatable component*: `parquet_reader`, `parquet_writer`,
+  `parquet_schema`, `parquet_column` and `parquet_string_column` are all in it today. A type with
+  none is exempt, which is why `parquet_table` is still safe block-local — five scalars and a
+  pointer by deliberate design (see "New `parquet_table` state goes on the CACHE"), a design now
+  load-bearing for ifx too, since the first allocatable component added to it would make every
+  block-local per-thread table in user code start crashing. See `feature_risks.md` Risk-45.
+
+  **Diagnosing it takes one command**, worth running before concluding a compiler is at fault at
+  all: `nm <object> | grep -E "for_alloc_private|mold_ctor"`. If the scaffolding is absent, the
+  source under test *cannot* produce that backtrace and the binary that crashed is stale — see
+  "Stale `fpm` build cache".
+- **Passing a non-polymorphic `type(T)` actual to a `class(T)` dummy in another compilation unit
+  makes ifx BUILD the class descriptor, in the caller's prologue, on every call.** One
+  type-descriptor record per allocatable component of `T`, emitted unconditionally ahead of any
+  branch — for `parquet_column` that is 21 records and 178 stores, **~35 ns per call**, and it was
+  78% of what a per-cell table read cost. This is the converse of the polymorphic-`intent(out)`
+  cost under the general gotchas, and independent of it. The fix is to put the implementation
+  behind a `type(T)` dummy and leave the type-bound binding as a one-line forwarder — a `class`
+  actual passed to a `type` dummy is free, so only that direction works. Fully written up, with the
+  maintenance rules and the one-command `objdump` check, under
+  [`parquet_column`'s TYPED accessor tier](#parquet_columns-typed-accessor-tier-never-reach-storage-through-a-binding).
+  **gfortran does not emit the block but still gained 1.23-1.32x from the same change**, so this is
+  not an ifx-only workaround.
+- **An *automatic*-length `character` result whose length is a specification expression over
+  host-associated variables is an ifx internal compiler error.** ifx segfaults (and the source line
+  it names is meaningless) on:
 
   ```fortran
   submodule (m) sm
@@ -3327,78 +3213,128 @@ applied to the harness instead of the source.
   end submodule sm
   ```
 
-  Every one of these conditions is required, confirmed by bisecting each away independently:
-  `-O1` or higher (at `-O0` it compiles clean, which is why `fpm build --profile debug` succeeds
-  while a plain `fpm build` fails — an easy signal to misread as a flaky build); the call coming
-  from a **sibling** contained procedure rather than from the module procedure's own statements;
-  and the whole construct sitting inside a `submodule`'s `module procedure` body rather than a
-  plain `program`/`contains`. Recursion is **not** required. gfortran compiles and runs the same
-  code correctly at `-O2`, so this will not show up in CI. Fix it the same way the bullet above
-  forces for its own (unrelated, gfortran) reason — a subroutine with an `intent(out)` allocatable
-  `character` argument — or, where the body is a one-liner, drop the helper and write the
-  expression at the call sites. `tok_text` (`src/parquet_read_filter.f90`) is the worked example.
+  Every condition is required, confirmed by bisecting each away independently: `-O1` or higher (at
+  `-O0` it compiles clean, which is why `fpm build --profile debug` succeeds while a plain
+  `fpm build` fails — easy to misread as a flaky build); the call coming from a **sibling** contained
+  procedure rather than from the module procedure's own statements; and the whole construct sitting
+  inside a `submodule`'s `module procedure` body. Recursion is **not** required, and gfortran
+  compiles the same code correctly at `-O2`, so this will not show up in CI. Fix it the way the
+  general character-function rule already forces — a subroutine with an `intent(out)` allocatable
+  `character` argument — or drop the helper and write the expression at the call sites.
+  `tok_text` (`src/parquet_read_filter.f90`) is the worked example.
 - **Never interpolate unbounded caller-supplied text into an `error stop` message — cap it to a
-  short preview.** ifx 2026.1.1's `ERROR STOP` runtime corrupts the heap once the composed message
-  reaches **8192 bytes** (confirmed with a minimal standalone repro: 8191 bytes aborts cleanly,
-  8192 crashes every time). This bites hardest exactly where it is least expected: a "value too
-  long" guard that reports the offending value verbatim is *guaranteed* to build a huge message on
-  the one input that triggers it, turning a clean abort into a crash and an error-scenario test
-  into a confusing stderr-mismatch failure. `parquet_filter_add` (`src/parquet_core.f90`) is the
-  pattern to copy — at most the first 100 characters of the rule, plus `"..."` when truncated.
-  Apply the same cap to any new message embedding a rule, a MAML line, a filename, or any other
-  value whose length the caller controls; it is better behaviour regardless of compiler, since a
-  multi-kilobyte error message is unreadable anyway.
-- **ifx rejects a default structure constructor (`type_name()`) when the type has a component
-  whose OWN type has private components declared in a different module — even when that
-  component isn't touched by the constructor and was already cleared beforehand.** gfortran
-  accepts this without complaint; ifx (confirmed on the Intel compiler active in the qmost
-  environment) rejects it with `error #6053: Structure constructor may not have components with
-  the PRIVATE attribute`, naming the *outer* type even though the private components belong to
-  the nested one. `parquet_table_column` (`parquet_tables.f90`) has a `values` component of type
-  `parquet_column`, whose own components are private to `parquet_columns.f90` — so
-  `parquet_table_column()` used to reset a slot's metadata fields (after `%clear()`-ing `values`
-  itself on the preceding line) fails under ifx despite `values` never being named. Fix: replace
-  the default structure constructor with an explicit field-by-field reset of the type's own
-  metadata components (matching their declared defaults), leaving the private-dependent component
-  untouched (already handled separately, e.g. by `%clear()`). `table_drop_column`
-  (`parquet_tables_mutate.f90`) is the worked example. Any future default structure constructor on
-  a type that embeds a component from another module's private-component type needs the same
-  treatment.
+  short preview.** ifx's `ERROR STOP` runtime corrupts the heap once the composed message reaches
+  **8192 bytes** (8191 aborts cleanly; 8192 crashes every time). This bites hardest where it is
+  least expected: a "value too long" guard that reports the offending value verbatim is *guaranteed*
+  to build a huge message on the one input that triggers it, turning a clean abort into a crash and
+  an error-scenario test into a confusing stderr mismatch. `parquet_filter_add`
+  (`src/parquet_core.f90`) is the pattern to copy — at most the first 100 characters, plus `"..."`
+  when truncated. Apply the same cap to any message embedding a rule, a MAML line, a filename or
+  anything else whose length the caller controls; a multi-kilobyte error message is unreadable
+  anyway.
+- **ifx rejects a default structure constructor (`type_name()`) when the type has a component whose
+  OWN type has private components declared in a different module** — even when that component is
+  not touched by the constructor and was cleared beforehand. gfortran accepts it; ifx reports
+  `error #6053: Structure constructor may not have components with the PRIVATE attribute`, naming
+  the *outer* type. `parquet_table_column` (`parquet_tables.f90`) has a `values` component of type
+  `parquet_column`, whose components are private to `parquet_columns.f90`. Fix: replace the default
+  constructor with an explicit field-by-field reset of the type's own components, leaving the
+  private-dependent one untouched (handled separately, e.g. by `%clear()`). `table_drop_column`
+  (`parquet_tables_mutate.f90`) is the worked example.
 
-- **gfortran 15.2 ICEs under `-flto` when a SUBMODULE calls a module-level PROCEDURE POINTER**, so
-  a call like that must live in the owning module's own `contains` and be reached through a relay.
-  The failure is `internal compiler error: in write_symbol, at lto-streamer-out.cc:3086`, during
-  `IPA pass: modref`, pointing at the `end procedure` line. Twenty lines reproduce it: a module
-  declaring `procedure(i_p), pointer, save :: p => null()` and a submodule whose body is `call p(x)`.
+#### flang-specific gotchas
 
-  **Every ingredient was bisected, and most of the plausible ones are irrelevant:** `-flto` is the
-  only flag that matters (it ICEs at `-O0` through `-O3` alike), and `save`, `=> null()` and
-  accessibility all make no difference. Two results shape the fix. **Copying the pointer to a local
-  and calling that does NOT help** — the ICE follows any call derived from the module-level pointer.
-  And **a submodule of a DIFFERENT module that merely use-associates the pointer fails identically**,
-  so it is not about the owning module at all. Calling from the owning module's `contains` is clean.
+flang builds here are **serial only** and `--profile release` does not link — see
+[The three machines available for testing](#the-three-machines-available-for-testing) for both.
 
-  **A bare reference is not always safe either**: `associated(p)` alone in a submodule compiles, but
-  passing `associated(p)` as an actual argument reproduces the ICE. So the rule is that no submodule
-  names the pointer at all — which is why `parquet_argsort`'s seven `oracle_*` relays fold the
-  `check_oracle` association test in rather than leaving it at the call site.
+- **A CHARACTER TEMPORARY built inside a loop may never be reclaimed until the procedure returns, so
+  a long loop dies of stack exhaustion far from its cause.** Every `call sub("%" // what // ": ...")`
+  in a loop gets its own stack slot, about 90 bytes a call, and the frame grows monotonically.
+  `check_rows_consistent` (`test/test_table_parallel.f90`) makes about 19 such calls per row and
+  **SIGSEGV'd at roughly row 4500** — the ~7.7 MB those 85000 calls account for on macOS's 8 MB
+  default stack, needing 32–40 MB to finish. gfortran reclaims per iteration and is unaffected.
 
-  **The relays must be PUBLIC, including the two only their own module's submodule calls.** gfortran
-  does not emit a private module-contained procedure whose only callers are that module's submodules
-  (see the `undefined symbol` bullet elsewhere in this section), so those two link-failed under
-  `--profile release`; and the usual fix for *that* shape — declare the interface and implement it in
-  a submodule — is exactly what reintroduces this ICE.
+  **The symptom names nothing useful.** The fault lands in the *callee's* prologue as
+  `EXC_BAD_ACCESS (code=2)` at a guard-page address, with a backtrace that cannot unwind because the
+  stack is gone, so it reads as a crash in the library or the test framework.
 
-  **Nothing in CI or in a plain `fpm test` builds with `-flto`**, so a reintroduced call would
-  compile, pass every test and sit in the tree until someone next asked for a release build.
-  `check_no_submodule_oracle_pointer_call` (`tools/check_source_conventions.py`) is what makes it
-  visible; it also fails if the relays themselves disappear, since without them the whole workaround
-  has been undone and every submodule call would be legal again.
-- **A TEMPLATE cannot go in `src/parquet_wrapper.cpp` without its own `extern "C++"` block.** The
-  whole file sits inside one enormous `extern "C" { … }`, and a template declared there fails with
+  **Diagnosis is three cheap steps, in this order**: raise the stack (`ulimit -s 65520`) and see if
+  it passes; scale the fixture down and see if the requirement scales with it; then print the
+  iteration counter to find where it dies. `code=2` at a `0x7ff7...` address is the tell — a write
+  to the guard page, not a bad pointer. `-fno-stack-arrays` does **not** help, because these are
+  expression temporaries rather than automatic arrays.
+
+  **The fix is to hoist, never to raise the limit.** Build each message once above the loop into a
+  `character(len=:), allocatable` and pass the variable; the temporary then does not exist. **Apply
+  it whenever a loop of more than a few thousand iterations passes a concatenated or otherwise
+  constructed `character` expression to a procedure** — the same shape hides in any assertion helper
+  called per row.
+
+#### nagfor-specific gotchas
+
+nagfor needs `FPM_CC`/`FPM_CXX` set explicitly and a shim to get OpenMP onto the compile line; its
+warning output needs its own triage, and both are covered in
+[NAG's "explicitly imported but not used" warnings](#nags-explicitly-imported-but-not-used-warnings-most-are-false-positives).
+
+- **nagfor UNMASKS the IEEE traps by default (`-ieee=stop`), for the WHOLE process — so anything
+  this library links may not RAISE a flag, however harmlessly.** Two confirmed instances, both fatal
+  on data containing nothing exceptional. **`arrow::compute::MinMax` raises `FE_INVALID` on every
+  non-empty floating-point array**, benignly and independently of the values (a one-element array
+  raises it, and so does an all-Null one; a length-0 array and an integer array do not) — so
+  `parquet_close_reader(print_stat=.true.)` on a reader that had touched a float column died in
+  Arrow with *"Arithmetic exception: Floating invalid operation"*. And **`anint(NaN)` and `int(NaN)`
+  trap in Fortran**, turning the write path's "is this value integral?" test into a crash naming
+  nothing, in place of an `error stop` naming the column. Comparisons (`<`, `/=`), `abs()` and
+  `ieee_is_nan` are all quiet on a NaN on both sides of the language.
+
+  So: **test with `ieee_is_nan` FIRST, as its own statement** (Fortran does not short-circuit, so
+  `ieee_is_nan(v) .or. v /= anint(v)` still evaluates the `anint` and still traps), and mask the
+  traps around a foreign call *known* to raise, with `feholdexcept` + `feclearexcept` +
+  **`fesetenv`** — never `feupdateenv`, which re-raises on the way out and traps in the caller you
+  were protecting. Scope such a guard to the one call: a file-wide guard would swallow a genuine FP
+  fault in this library's own code, which is what a caller who unmasked the traps wants to see.
+  `-ieee=full` makes a NAG build survive but disables the check for the user's code too, so it is a
+  diagnosis, not the fix. gfortran, ifx and flang mask the traps, so **only a nagfor run can see any
+  of this**. See `feature_risks.md` Risk-124.
+- **nagfor 7.2 mis-evaluates the most-negative int64 CONSTANT combined with a runtime value, and
+  gets overflow guards wrong in BOTH directions.** With `INT64_MIN = ibset(0_int64, 63)` as a
+  parameter, `v < INT64_MIN - delta` answers `.true.` for `v = 19920, delta = -4`, and
+  `INT64_MIN/scale` comes back with the **wrong sign**; `mod()` divides the same way. **Form the
+  bound from `huge` instead; a local copy is NOT a fix** — the optimiser propagates the constant
+  back, so the copy is correct at `-O0` and wrong at `-O2`+ once the guard sits in a module
+  procedure, which is how a "fixed" guard still aborted under `--profile release` while a plain
+  `fpm test` stayed green. **Printing the expression shows the right value** — only a comparison or
+  a stored result reveals it, so a debugging session goes looking in the wrong place. The int32
+  equivalent is unaffected, and so are gfortran, ifx and flang.
+
+  **The same defect also cancels a common `ieor(., 2**63)` from BOTH sides of a relational**, which
+  is invalid because XOR with the sign bit reverses the order it maps: the textbook unsigned
+  comparison `ieor(a, K) < ieor(b, K)` collapses to the signed `a < b`, its exact inverse for a pair
+  straddling `2**63`. That is a **wrong answer**, not a guard misfiring — it broke 13 of the 38
+  golden integer vectors in `parquet_random`, returning different, in-range, uniform-looking draws.
+  Write the rule out instead: `(a < b) .neqv. ((a < 0) .neqv. (b < 0))`. A most-negative constant
+  used only inside `ieor` whose result is **stored** rather than compared — `SORT_SIGN_BIT` in the
+  sort's radix keys — is safe, and safe for that reason alone. See `feature_risks.md` Risk-125.
+- **A compile-time fork needs a check that RUNS under every compiler that selects an arm.**
+  `tools/check_random_kernels.sh` could not run under nagfor at all (it hardcoded gfortran's `-cpp`;
+  NAG spells it `-fpp`), so the one arm nagfor ships had only ever been verified by a gfortran
+  forced onto it — an arm verified against codegen that never runs it.
+
+#### C++ side (`src/parquet_wrapper.cpp`) gotchas
+
+- **`src/parquet_wrapper.cpp` is NOT compiled with `-fopenmp`, so it cannot call any `omp_*`
+  function at all.** `.gitlab-ci.yml` sets `FPM_CXXFLAGS: "-std=c++20 --coverage"` and a dev machine
+  sets whatever Arrow needs — neither adds it, and `fpm.toml`'s `openmp = "*"` metapackage covers the
+  Fortran half. **So anything on the C++ side that needs an OpenMP answer must have it resolved in
+  Fortran and passed across the `bind(C)` boundary as an ordinary value.** The threaded sort works
+  exactly that way: `pf_sort_threads` asks `omp_get_max_threads()`/`omp_in_parallel()` in Fortran and
+  hands C++ a plain integer count, so the wrapper receives a number and never a policy. Do not add an
+  "auto" sentinel to a `bind(C)` signature for the C++ side to interpret — it cannot.
+- **A TEMPLATE cannot go in this file without its own `extern "C++"` block.** The whole file sits
+  inside one enormous `extern "C" { … }`, and a template declared there fails with
   `error: templates must have C++ linkage` — a message that points at the template rather than at
-  the linkage specification a thousand lines above it. Linkage specifications nest, so the fix is to
-  wrap just that declaration:
+  the linkage specification a thousand lines above it. Linkage specifications nest, so wrap just
+  that declaration:
 
   ```cpp
   extern "C++" {
@@ -3410,104 +3346,22 @@ applied to the harness instead of the source.
   Taking a `std::function` instead works equally well when the call happens once per chunk rather
   than once per element; prefer the template plus `extern "C++"` when the callable is on a hot path.
   `sort_spawn` is the worked example.
-- **`src/parquet_wrapper.cpp` is NOT compiled with `-fopenmp`, so it cannot call any `omp_*`
-  function at all.** `.gitlab-ci.yml` sets `FPM_CXXFLAGS: "-std=c++20 --coverage"` and a dev machine
-  sets whatever Arrow needs — neither adds it, and `fpm.toml`'s `openmp = "*"` metapackage covers the
-  Fortran half. **So anything on the C++ side that needs an OpenMP answer must have it resolved in
-  Fortran and passed across the `bind(C)` boundary as an ordinary value.** M4's threaded sort works
-  exactly that way: `pf_sort_threads` asks `omp_get_max_threads()`/`omp_in_parallel()` in Fortran and
-  hands C++ a plain integer count, so `parquet_wrapper.cpp` receives a number and never a policy.
-  Do not add an "auto" sentinel to a `bind(C)` signature for the C++ side to interpret — it cannot.
-- **`-ftrapv` traps only the WRAPPING arm of `src/parquet_random.f90`, which is the one arm no
-  compiler in this fleet ships by default.** Measured 2026-08-20 on machine A, gfortran 15.2, over a
-  wide-range `pf_random_int_at` sweep, forcing each arm of the route (e) fork in turn:
+- **`std::abort()` is not safe to call from many threads at once — it can hang the process
+  forever.** glibc's `abort()` takes an internal lock, so when several threads reach it together they
+  pile up on that lock and nothing ever terminates. Measured under ifx at `-O0 -check all`: the
+  `concurrent_calls_into_shared_writer` scenario left **192 threads** parked in `futex_wait_queue`,
+  every stack reading `__lll_lock_wait_private <- abort <- … <- __kmp_invoke_microtask`. It survived
+  `SIGTERM` and needed `SIGKILL`. Neither that nor the occasional `SIGSEGV` in the same path is
+  reproducible on demand — both need enough threads to arrive together.
 
-  | arm | who ships it | `-ftrapv` at `-O0`/`-O2`/`-O3` |
-  |---|---|---|
-  | `PF_INT128` | gfortran, flang | **passes** |
-  | `PF_SAFE64` | nagfor | **passes** |
-  | wrapping (`#else`) | ifx | **SIGABRT (134)** at every level |
-
-  All three return the identical checksum, so they are bit-exact and only the undefined behaviour
-  differs. An earlier version of this note said `-ftrapv` "cannot be used to build this project" and
-  named `mulhilo64`'s partial products as overflowing "on both arms"; both statements predate route
-  (e) covering `mulhilo64` and the addition of the nagfor arm, and neither is true now.
-  **A gfortran build of this library is therefore `-ftrapv`-clean**, and so is a nagfor one — which
-  is the same property `-C=intovf` exercises from the other side (see the NAG section).
-  **The sharper lesson is the converse, and it has already misled once here: a `-ftrapv` build that
-  does NOT abort is not evidence that a site is safe.** Whether a given overflow is instrumented
-  depends on optimisation level and inlining context, and a site whose result is *dead* — such as a
-  loop's final unused index update — is typically optimised away before instrumentation, so it traps
-  nothing while remaining fully available to the optimiser as a range assumption. Use the
-  cross-implementation agreement sweep to answer that question, never a trapping build.
-  **UBSan is the tool that answers it properly, and it is now available on machine B** — the gap this
-  note used to record is closed. `/opt/fortran/activate_gcc.sh` now selects **gcc-toolset-15**, whose
-  `libubsan` is present for x86-64, so `-fsanitize=undefined` links and runs. Machines A and C still
-  cannot (MacPorts gcc15 ships no `libubsan`, and flang rejects `-fsanitize` for Fortran), so this is
-  a machine-B-only instrument.
-
-  **Run it with `tools/check_random_ubsan.sh`**, which drives both arms of the route (e) fork —
-  UBSan on a gfortran build alone only ever exercises the `int128` arm, so the wrapping arm needs
-  the same `-U__GFORTRAN__` forcing `tools/check_random_kernels.sh` uses. **What it found on its
-  first run is the reason to keep running it**: the wrapping arm reports exactly the six documented
-  deliberate sites (`random_block`'s two `#else` multiplies, `mulhilo64`'s four partial products)
-  and the shipped arm reports nothing — but the ordinary suite build reported **six further,
-  undocumented signed-overflow sites** in the bulk fills, where `base + k - 1_int64` forms `huge + 1`
-  at the boundary the suite deliberately tests. Every value was correct; only UBSan could see it.
-  See `feature_risks.md` Risk-112, and note that a `-ftrapv` build had never flagged any of them.
-
-- **nagfor UNMASKS the IEEE traps by default (`-ieee=stop`), for the WHOLE process — so anything
-  this library links may not RAISE a flag, however harmlessly.** Two confirmed instances, both fatal
-  on data containing nothing exceptional. **`arrow::compute::MinMax` raises `FE_INVALID` on every
-  non-empty floating-point array**, benignly and independently of the values (a one-element array
-  raises it, and so does an array whose every element is Null; a length-0 array and an integer array
-  do not) — so `parquet_close_reader(print_stat=.true.)` on a reader that had touched a
-  float32/float64 column died in Arrow with *"Arithmetic exception: Floating invalid operation"*.
-  And **`anint(NaN)` and `int(NaN)` trap in Fortran**, which turned the write path's "is this value
-  integral?" test into a crash naming nothing, in place of an `error stop` naming the column.
-  Comparisons (`<`, `/=`), `abs()` and `ieee_is_nan` are all quiet on a NaN, on both sides of the
-  language — clang emits the quiet `ucomisd`, so this file's own float comparisons
-  (`eval_filter_clause`, `screen_row_groups`) are safe. So: **test with `ieee_is_nan` FIRST, as its
-  own statement** (Fortran does not short-circuit, so `ieee_is_nan(v) .or. v /= anint(v)` still
-  evaluates the `anint` and still traps), and mask the traps around a foreign call that is *known*
-  to raise, with `feholdexcept` + `feclearexcept` + **`fesetenv`** — never `feupdateenv`, which
-  re-raises on the way out and traps in the caller you were protecting. Scope such a guard to the
-  one call: a file-wide or `bind(C)`-wide guard would swallow a genuine FP fault in this library's
-  own code, which is what a caller who unmasked the traps is trying to see. `-ieee=full` makes a NAG
-  build survive, but it disables the check for the user's code too and still prints
-  `Warning: Floating invalid operation occurred` at exit, so it is a diagnosis, not the fix.
-  gfortran, ifx and flang mask the traps, so **only a nagfor run can see any of this**. See
-  `feature_risks.md` Risk-124.
-
-- **nagfor 7.2 mis-evaluates the most-negative int64 CONSTANT combined with a runtime value, and
-  gets overflow guards wrong in BOTH directions.** With `INT64_MIN = ibset(0_int64, 63)` as a
-  parameter, `v < INT64_MIN - delta` answers `.true.` for `v = 19920, delta = -4`, and
-  `INT64_MIN/scale` comes back with the **wrong sign** (`+9223372036` for `scale = 1e9`); `mod()`
-  divides the same way. **Form the bound from `huge` instead; a local copy is NOT a fix** — the
-  optimiser propagates the constant back, so the copy is correct at `-O0` and wrong at `-O2`+ once
-  the guard sits in a module procedure, which is how a "fixed" guard still aborted on `date + 4`
-  under `--profile release` while a plain `fpm test` stayed green. Measured correct at every level:
-  equality (`n == INT64_MIN`), a bare constant comparison, plain assignment, a copy compared bare,
-  and a fully folded all-constant expression. **Printing the expression
-  shows the right value** — only a comparison or a stored result reveals it, so a debugging session
-  goes looking in the wrong place. Both failure directions had shipped in `src/parquet_temporal.f90`:
-  a guard that stopped firing (`%to_unix` wrapping silently past int64 instead of aborting) and one
-  that started firing on ordinary input (`date + 4` aborting as "out of range" for a 2024 date). The
-  int32 equivalent is unaffected, and so are gfortran, ifx and flang.
-  **The same defect also cancels a common `ieor(., 2**63)` from BOTH sides of a relational**, which
-  is invalid because XOR with the sign bit reverses the order it maps: the textbook unsigned
-  comparison `ieor(a, K) < ieor(b, K)` collapses to the signed `a < b`, its exact inverse for a pair
-  straddling `2**63`. That is not a guard misfiring but a **wrong answer** — it broke 13 of the 38
-  golden integer vectors in `parquet_random`, returning different, in-range, uniform-looking draws.
-  Write the rule out instead (`(a < b) .neqv. ((a < 0) .neqv. (b < 0))`); copying the constant to a
-  local also works and was rejected, because it holds only while the optimiser declines to propagate
-  the copy. A most-negative constant used only inside `ieor` whose result is **stored** rather than
-  compared — `SORT_SIGN_BIT` in the sort's radix keys — is safe, and safe for that reason alone.
-  **And the tooling lesson, which is the expensive half:** `tools/check_random_kernels.sh` could not
-  run under nagfor at all (it hardcoded gfortran's `-cpp`; NAG spells it `-fpp` and rejects `-cpp`),
-  so the one arm nagfor ships had only ever been verified by a gfortran forced onto it — a compile-
-  time fork needs a check that runs under **every compiler that selects an arm**, or an arm is being
-  verified against codegen that never runs it. See `feature_risks.md` Risk-125.
+  **This matters here because the concurrency guard is MEANT to be hit from many threads.** The fix
+  is `claim_fatal_path_or_park()` plus `fatal_exit()`: an atomic claim so exactly one thread reports,
+  and `std::_Exit(134)` instead of `abort()` — a bare `exit_group` syscall, no lock, no `atexit`
+  handler, well defined from any thread inside or outside a parallel region. 134 is what a shell
+  reports for a SIGABRT death, so nothing observing the exit status can tell the difference, and
+  `_Exit` skips the gcov flush exactly as `abort()` did, so every `GCOVR_EXCL` marker resting on that
+  mechanism stays correct. **Any new fatal path must go through those two helpers rather than calling
+  `abort()`/`exit()` directly.** See `feature_risks.md` Risk-99.
 
 ### NAG's "explicitly imported but not used" warnings: most are FALSE POSITIVES
 
@@ -3572,15 +3426,13 @@ and `src/parquet_columns.f90` all carry flagged imports and all are emitted by a
 edit the generator's template text and re-run it with `--check`, per
 [Some `src/*.f90` files are generated](#some-srcf90-files-are-generated--edit-the-generator-never-the-output).
 
-**What the numbers look like when this is in hand:** the 2026-08-20 sweep took 171 flagged imports
-to **84**, and the 84 that remain are all in the two false-positive classes above (79 host
-association, 4 OpenMP-only, 1 restored by the global check). **That residue is the healthy state,
-not a backlog** — it cannot be driven to zero without giving twelve-odd descendant submodules their
-own `use` statements, which would duplicate their parents' lists and is a change to the tree's
-deliberate design, not a lint fix. The same two causes, plus ordinary interface conformance (a dummy
-a particular implementation does not need), account for most of the ~320 "Unused dummy variable" and
-~70 "Unused local variable" warnings, so those are likewise not a to-do list. Re-derive the count
-rather than trusting this figure.
+**A residue of flagged imports is the healthy state, not a backlog.** After a sweep, what remains is
+all in the two false-positive classes above, and it cannot be driven to zero without giving a dozen
+descendant submodules their own `use` statements — duplicating their parents' lists, which is a
+change to the tree's deliberate design rather than a lint fix. The same two causes, plus ordinary
+interface conformance (a dummy a particular implementation does not need), account for most of the
+"Unused dummy variable" and "Unused local variable" warnings, so those are likewise not a to-do
+list.
 
 **Its other diagnostic classes need the same triage, and four of them are correct-by-design here.**
 `fpm.toml`'s `nagfor` feature turns on `-info` and several `-Warn=` categories, so a NAG run also
@@ -3616,26 +3468,25 @@ says an A/B equality is not evidence without. Likewise a discarded `setenv` retu
 assertion after it is made against an environment nobody set.
 
 **`-thread_safe` is the noisiest of them and needs a scope-based triage, not a read-through.**
-The `nag` profile passes `-thread_safe`, which reports every assignment to a variable from an outer
-scope — **291 of them across `src/`**. Almost all are correct, and the discriminator is the scope
-the message names, not the file:
+The `nag` profile passes it, and it reports every assignment to a variable from an outer scope —
+several hundred across `src/`. Almost all are correct, and the discriminator is the scope the
+message names, not the file:
 
 - **A PROCEDURE scope** (`from scope LEX_FILTER_EXPR`, `from scope SCHEMA_ADD_FIELD`) is a contained
   procedure writing its host's locals — the recursive-descent parser advancing `pos`, `push_token`
   appending to the token arrays. Host locals are per-invocation, so there is nothing shared to race
-  on. About 29 of them, all fine.
+  on. All fine.
 - **No scope named at all** (`SELF cannot be C_LOC argument`, `SELF cannot be INTENT(INOUT) actual
-  arg`) is NAG objecting to a *dummy* being passed on, not to shared state. 185 of them, all fine.
-- **A MODULE scope is the only class worth reading**, and there are 77. They are process-global by
-  design and split three ways: the `cfg_*` settings knobs (34, and being global is the entire
-  premise of [`parquet_settings`](#a-new-process-global-parameter-goes-in-parquet_settings-and-a-design-doc-must-say-so)),
-  the `parquet_debug_*` overrides and counters (~40, which
-  [have to be globals](#a-fortran-side-debug-hook-has-to-be-public-so-prefer-a-c-one)), and exactly
-  **two genuine runtime counters**: `seed_call_counter` in `parquet_random` and
-  `affinity_clamp_claims` in `parquet_settings_base` (written by `parquet_clamp_to_affinity`). The
-  second was `thread_clamp_claims` in `parquet_argsort` until the affinity clamp became shared: four
-  resolvers across three tiers now reach it, and a once-per-PROCESS claim has to live where all four
-  can see it. Re-derive this list rather than trusting it — it has moved twice.
+  arg`) is NAG objecting to a *dummy* being passed on, not to shared state. All fine, and the
+  largest class.
+- **A MODULE scope is the only class worth reading.** These are process-global by design and split
+  three ways: the `cfg_*` settings knobs (being global is the entire premise of
+  [`parquet_settings`](#a-new-process-global-parameter-goes-in-parquet_settings-and-a-design-doc-must-say-so)),
+  the `parquet_debug_*` overrides and counters (which
+  [have to be globals](#a-fortran-side-debug-hook-has-to-be-public-so-prefer-a-c-one)), and a small
+  number of genuine runtime counters — `seed_call_counter` in `parquet_random` and
+  `affinity_clamp_claims` in `parquet_settings_base` today. Re-derive that last list rather than
+  trusting it; it has moved twice.
 
 **No amount of guarding silences it** — the check is static and has no notion of an atomic, a
 critical region or a lock, so it fires on a correctly-synchronised global exactly as loudly as on an
@@ -3670,132 +3521,61 @@ the only profile that checks anything at runtime.
   `-ftrapv` on gfortran is a *different* question and still aborts, because gfortran takes the
   int128 arm and `-ftrapv` instruments elsewhere — see
   [Compiler & language gotchas](#compiler--language-gotchas).
-  **An earlier version of this note said the opposite** — that `-C=intovf` was excluded from
-  `nagdeb`, that it should be passed explicitly, and that an intermittent `reading` segfault under
-  it was "the overflow instrumentation not being thread-safe". All three were wrong. The flag was
-  never excludable from a `-C=all` profile; the `reading` failure had a cause **in this repository**
-  (a non-short-circuiting `.and.` comparing two array sections of different extent — see the
-  worked example below); and the segfault was that same abort reported from several threads at once,
-  which is the `abort()`-from-many-threads hazard documented under "Compiler & language gotchas",
-  not an overflow problem. **The general lesson is the expensive one: a flag blamed for a failure is
-  a hypothesis, and "it passes without the flag" is exactly what a real defect that only a checked
-  build can see looks like.**
-  **ifx deliberately keeps the wrapping arm**: the overflow-free spelling is not free, measured at
-  **1.67x** on `pf_random_at` under nagfor (8.82 → 21.49 ns on machine A) and 1.94x on a gfortran
-  build forced onto that arm. Correctness is identical on all three arms and asserted bit-for-bit
-  by `tools/check_random_kernels.sh`, so the split trades only speed against the ability to run a
-  checking build. **ifx is unmeasured for this** — it is machine B only, and CLAUDE.md records ifx
-  paying 2.05x where gfortran paid 1.31x on a related limb spelling, so do not assume 1.67x
-  carries over if that arm is ever reconsidered.
-- **`-C=undefined` carries THREE independent nagfor 7.2 defects plus ONE documented limitation**,
-  none a finding about this code, and each is revealed only when the one in front of it is cleared
-  — so a clean-looking result under it means nothing until the whole build *and* the whole suite
-  pass. **The three defects are compile-time and are fixed here**, so the project now builds
-  cleanly under it; **the limitation is a runtime miscompilation of every `bind(C)` call**, and is
-  why the option is still excluded from `nagdeb`.
-  **(a)** `Panic: Cannot find scope id 0`, an ICE that fires when compiling **any submodule of a
-  separately compiled module that declares a `FINAL` binding bound to a SEPARATE MODULE
-  PROCEDURE**. An *empty* submodule is enough; 15 lines in two files reproduce it
-  (`feature_nag_ice_scope_id.md`). **Fixed** by keeping every `FINAL` target **module-contained**
-  (`writer_lock_release`, `writer_finalize`, `reader_finalize` in `parquet_core`'s own `contains`;
-  `table_finalize` in a `contains` section `tools/generate_parquet_tables.py` now emits). **A new
-  finalizer must follow that rule** — moving one into a submodule silently reintroduces the ICE for
-  every sibling submodule.
-  **(b)** Invalid C for the implicit finalization of an **array** whose element type has a
-  **finalizable component** — the generated pointer difference mixes the element-struct pointer
-  with `Char *`. Reproduces in 27 lines: a type with a `FINAL`, used as a *component* of a second
-  type, an array of which is finalized. All three parts are required (a scalar compiles, an array
-  of the finalizable type *directly* compiles, no `final` compiles), and finalization is confirmed
-  as the trigger in both directions — `save` on the local array compiles, an `intent(out)` dummy
-  array fails at the procedure header instead. **Fixed** by deleting the two redundant finalizers
-  this library had: `parquet_string`'s (a non-owning handle whose finalizer nulled a borrowed
-  pointer) and `parquet_string_column`'s (three `deallocate` calls on allocatable components, which
-  F2018 9.7.3.2 already deallocates). Both type bodies now carry the reasoning; **do not add either
-  back**. The remaining four finalizers release C++ handles and OpenMP locks and must stay.
-  **(c)** Invalid C for a **pointer-valued function result used directly as an actual argument**
-  (`assigning to 'Char *' from incompatible type '__NAGf90_ChDope1'`); 16 lines reproduce it, and
-  the character in the message is a red herring — no character argument is involved. **Fixed** in
-  `test/test_table_codegen.f90` by binding each accessor form to a local pointer before the call,
-  which is what every other column in that file already did. Allocatable and explicit-shape
-  function results are unaffected.
-  **(d)** **Not fixed, not fixable — and, unlike (a)-(c), DOCUMENTED: nagfor miscompiles EVERY
-  `bind(C)` call under `-C=undefined`, inserting a spurious extra argument after the first, and
-  the manual says it will** — "`-C=undefined` … is not compatible with calling C code via a
-  BIND(C) interface"; "the whole program must be Fortran code and compiled the same way"
-  (`man nagfor`, found only AFTER the full diagnosis — read an option's own manual section before
-  diagnosing its behaviour). What stays report-worthy is that the violation is SILENTLY ACCEPTED —
-  no diagnostic at compile or run time — while the module-level half of the same restriction is a
-  fatal compile error ("Incompatible option setting for module M (was not compiled with the
-  -C=undefined option)"). Twenty lines reproduce it,
-  with a plain-Fortran control in the same program: the `bind(C)` call prints `a=11 b=0 c=22` where
-  the control prints `a=11 b=22 c=33`. **`nagfor -S` emits the generated C and shows the cause
-  outright**: NAG interleaves a definedness-map pointer after *every* argument and appends a hidden
-  length per map — its `-C=undefined` instrumentation ABI — into a `bind(C)` call whose callee has
-  the plain C signature, so `three(11L, 22L, 33L)` becomes
-  `three(11L, (Char *)0, 22L, (Char *)0, 33L, (Char *)0, 1, 1, 1)`. Every argument shape behaves the
-  same (assumed-size, explicit-shape, by-reference scalar, all-`value`), and **only argument 1
-  survives** — which is why the symptoms look like data corruption rather than a broken call: a
-  handle still arrives. **The C/C++ side is irrelevant**, measured across six callee compilers
-  (Apple clang 21, `gcc-mp-15`, `clang-mp-22` as C; Apple clang++, `g++-mp-15`, `clang++-mp-22` as
-  C++), all identical, and across nagfor's own `-Wc=` back-end too. Standalone report:
-  `feature_nag_bindc_undefined.md`.
-  **One cause, both runtime symptoms**: the writer's compression codec reaching C++ as garbage,
-  and `extended_qc_range_violation_warns` appearing to hang — it is not hung, its rule count `n`
-  arrives as a ~4.4e9 pointer value and the C++ loop runs billions of iterations (a `sample(1)`
-  stack sits entirely in `std::vector<std::string>::push_back` under `struct_path_exists`; an lldb
-  probe at the callee's entry shows `name_len` as 0 where Fortran passed 64).
+  **A flag blamed for a failure is a hypothesis, and "it passes without the flag" is exactly what a
+  real defect that only a checked build can see looks like** — an intermittent `reading` segfault
+  was blamed on this flag's instrumentation and turned out to be a non-short-circuiting `.and.`
+  comparing two array sections of different extent, reported from several threads at once.
+  **ifx deliberately keeps the wrapping arm**: the overflow-free spelling costs about 1.7x on
+  `pf_random_at` under nagfor and 1.9x on a gfortran build forced onto that arm. Correctness is
+  identical on all three arms and asserted bit-for-bit by `tools/check_random_kernels.sh`, so the
+  split trades only speed against the ability to run a checking build.
+- **`-C=undefined` is a build-clean, RUN-BROKEN option here, and is excluded from `nagdeb` for
+  that reason.** nagfor miscompiles **every `bind(C)` call** under it — its instrumentation ABI
+  interleaves a definedness-map pointer after every argument and appends a hidden length per map,
+  into a call whose callee has the plain C signature, so only argument 1 survives and the rest
+  arrive as garbage. **The manual says so** ("not compatible with calling C code via a BIND(C)
+  interface"; "the whole program must be Fortran code and compiled the same way") — read an
+  option's own manual section before diagnosing its behaviour. What makes it worth recording is
+  that the violation is **silently accepted**, with no diagnostic at compile or run time, while the
+  module-level half of the same restriction is a fatal compile error. Symptoms look like data
+  corruption rather than a broken call, because a handle still arrives.
 
-  **No workaround exists, and the candidates were investigated to closure (2026-08-20)** — this
-  library reaches Arrow only across `bind(C)`. **Per-file exclusion** (compiling
-  `parquet_bindings.f90`, or any other subset, without the flag) is impossible: the option is
-  stamped into every `.mod`, a mismatched `use` is a fatal compile error in BOTH directions
-  ("Incompatible option setting for module ... (was not compiled with the -C=undefined option)"),
-  and the augmented call is generated at the CALL SITE anyway — the interfaces in
-  `parquet_bindings.f90` are only declarations — so the exclusion would have to spread over the
-  whole use-graph. **Teaching the C side the instrumented ABI** is mechanically possible and was
-  demonstrated (an augmented-signature callee — map pointer after every argument, trailing
-  lengths — receives every value correctly), and is rejected for three measured reasons: the
-  CALLEE is expected to maintain the per-byte definedness maps, so an `intent(out)` value written
-  by C still aborts as undefined on the Fortran side (the map wants an exact `'O'`/`'-'`
-  per-object byte pattern, visible in `nagfor -S` output); `type(c_ptr)` itself changes
-  representation to a two-field `{addr, map}` struct, reshaping every handle argument; and it
-  means generating ~200 shims against an undocumented, disclaimed, version-specific internal ABI
-  whose every mistake is exactly the silent corruption the option exists to catch. There is also
-  **no report-and-continue runtime mode** (`NAGFORTRAN_RUNTIME_OPTIONS` offers nothing for it), so
-  a partial run survives only until the first `bind(C)` call or deliberately-undefined byte.
+  **No workaround exists and the candidates were investigated to closure**: per-file exclusion is
+  impossible (the option is stamped into every `.mod`, and the augmented call is generated at the
+  *call site* anyway), and teaching the C side the instrumented ABI would mean ~200 shims against
+  an undocumented, version-specific internal ABI whose every mistake is exactly the silent
+  corruption the option exists to catch.
 
-  **What DOES run under it: the all-Fortran suites.** With every Fortran file uniformly
-  instrumented the Fortran-to-Fortran ABI is consistent, and a suite whose runtime paths never
-  execute a `bind(C)` call runs genuinely: `fpm test run_tester --flag "-C=undefined" -- random`
-  passes completely, as do `random_perm` and `random_weighted` — a real undefined-variable check
-  over the random/sampling/expkey family, cheap to re-run, and it found nothing as of 2026-08-20.
-  Do not expect to widen it: `columns` aborts inside `ensure_capacity`
-  (`parquet_columns_mutate.f90`) on the value bytes of null rows, which are unspecified BY DESIGN
-  (`%init`'s documented contract) — the checker and the design disagree, and per "Coverage tooling
-  never drives design" the design wins — and `sorting` turns out to hide a file round-trip, dying
-  with the codec-mojibake signature. A bare `--flag` run applies no `nagfor`-feature flags, so
-  there is no `-openmp` and OpenMP-asserting tests skip; the flag pair itself is compatible
-  (tested standalone).
+  **What DOES run under it: the all-Fortran suites.** A suite whose runtime paths never execute a
+  `bind(C)` call runs genuinely — `fpm test run_tester --flag "-C=undefined" -- random` passes, as
+  do `random_perm` and `random_weighted`, giving a real undefined-variable check over the
+  random/sampling/expkey family. Do not expect to widen it: `columns` aborts on the value bytes of
+  null rows, which are unspecified **by design** (`%init`'s documented contract — the checker and
+  the design disagree, and per "Coverage tooling never drives design" the design wins), and
+  `sorting` hides a file round-trip.
 
-  **So `-C=undefined` is a build-clean, run-broken option here**, and `-C=all` does **not** imply
-  it, so none of this touches the `nagdeb` set. The three fixes were kept because each is an
-  improvement on its own terms — two redundant finalizers removed, and a test file made internally
-  consistent — not because the option became usable.
+  **Three compile-time nagfor defects were found and fixed while getting the build clean under it,
+  and two of the fixes are rules that must not be reverted.** (a) An ICE (`Panic: Cannot find scope
+  id 0`) when compiling any submodule of a module declaring a `FINAL` bound to a **separate module
+  procedure** — so **every `FINAL` target must stay module-contained**, and moving one into a
+  submodule silently reintroduces the ICE for every sibling submodule. (b) Invalid C for the
+  implicit finalization of an **array whose element type has a finalizable component** — fixed by
+  deleting this library's two redundant finalizers, `parquet_string`'s (a non-owning handle) and
+  `parquet_string_column`'s (deallocations F2018 9.7.3.2 already performs); **do not add either
+  back**, and note the remaining four release C++ handles and OpenMP locks and must stay. (c)
+  Invalid C for a pointer-valued function result used directly as an actual argument — bind it to
+  a local pointer first.
 
-**`-C=dangling` and `-C=calls` are BOTH in the set, and the one-word source change that let them
-in must not be reverted.** An earlier version of this section said to drop `-C=dangling`, that it
-"needs `-C=calls` alongside it", and later that `-C=calls` was a second trigger that had to stay
-out. All three claims are wrong, and the way they were wrong is worth keeping: **there is one
-defect, and neither check is the ingredient.** What matters is the `target` attribute on an
-`optional`, assumed-size dummy receiving an **absent** actual. The twelve
+**`-C=dangling` and `-C=calls` are BOTH in the set, and the one-word source change that let them in
+must not be reverted.** Neither check is the ingredient: what matters is the `target` attribute on
+an `optional`, assumed-size dummy receiving an **absent** actual. The twelve
 `write_<type>[_chunk]_flat` workers declared `logical, intent(in), optional, target :: valid(*)`;
-dropping `target` from those twelve dummies removes every crash and hang under **either check and
-under both together** — measured at 1783/0 with the full `nagdeb` set, against 243 of 824 error
-scenarios dying with the attribute restored. It costs one `logical` array copy on the unmasked
-path, since `vmask` can no longer point straight at the caller's mask; the full reasoning is in the
-banner comment above the workers in `src/parquet_write_numeric.f90`. **Do not give that dummy
-`target` back**, and do not read a green run as evidence that it would now be safe — both checks
-are in the set only because it is absent.
+dropping `target` from those twelve dummies removes every crash and hang under either check and
+under both together. It costs one `logical` array copy on the unmasked path, since `vmask` can no
+longer point straight at the caller's mask; the full reasoning is in the banner comment above the
+workers in `src/parquet_write_numeric.f90`. **Do not give that dummy `target` back**, and do not
+read a green run as evidence that it would now be safe — both checks are in the set only because it
+is absent.
 
 **The methodological lesson is sharper than the fix: a minimal reproducer for a CODEGEN bug is
 evidence about the reproducer.** The 19-line one said "either check alone runs", so the obvious
@@ -3843,22 +3623,17 @@ Get the real one from a backtrace (`lldb -b -o "breakpoint set -n __NAGf90_rtcra
 then `thread backtrace all`), or re-run with `OMP_NUM_THREADS=1`, which also stops the runtime
 error message being interleaved with another thread's output mid-line.
 
-**A NAG run needs `--verbose` and its own build tree; `-openmp` it now gets by itself.**
+**A NAG run needs `--verbose` and its own build tree; `-openmp` it gets by itself.**
 `fpm test --verbose --flag "-colour -w=unused"` with `FPM_BUILD_DIR` set somewhere under
 `test_run/` is the shape to use — `-w=unused` clears the noise this section's first half is about
 so the rest is readable. **`tools/nagfor_fpm_shim/nagfor` supplies `-openmp` on every invocation**
 (fpm cannot: its compile-side probe fails on `-fPIC`, so fpm only ever puts the flag on the link
-line), which is what takes the suite from 1768 passed / 15 skipped to **1783 passed / 0 skipped** —
-without it every threading test skips and a green NAG run says nothing at all about the parallel
-paths. Both figures are current, measured 2026-08-20 with `fpm test` under `FPM_FC=nagfor` and no
-profile flags at all: **1783/0 by default, and 1768/15 under `NAGFOR_OMP=0`**, which is
-the shim's opt-out and the only supported way to get a serial NAG build now (`NAGFOR_OMP=1` is the
-default and need not be set; only the literal value `0` opts out). **That opt-out is a master
-switch: at `0` the shim STRIPS an `-openmp` anything else passed, not merely declines to add one**,
-so it cannot be silently overridden by a profile or a `--flag` that supplies the option and then
-report a serial arm that never ran. Confirmed both ways on the `string_parallel` suite under
-`--profile nagdeb`: 9 passed / 0 skipped by default, 1 / 8 under `NAGFOR_OMP=0`. Passing `-openmp`
-yourself is harmless — the shim deduplicates it, as it must anyway for fpm's doubled link flag.
+line), which is what stops every threading test skipping — without it a green NAG run says nothing
+at all about the parallel paths. `NAGFOR_OMP=0` is the shim's opt-out and the only supported way to
+get a serial NAG build; it is a **master switch** that STRIPS an `-openmp` anything else passed
+rather than merely declining to add one, so a profile or `--flag` cannot silently override it and
+then report a serial arm that never ran. Passing `-openmp` yourself is harmless — the shim
+deduplicates it, as it must anyway for fpm's doubled link flag.
 
 **`fpm --verbose` does NOT show the flag, and never will — do not read that as it being absent.**
 fpm prints the command it constructs and then invokes `nagfor`, which on `PATH` is the shim; every
@@ -4732,9 +4507,7 @@ provoke it. **This is NOT avoided by running `fpm test` without `-fopenmp`** —
 the `openmp = "*"` metapackage, which supplies the OpenMP flag across the whole resolved dependency
 graph, so `_OPENMP` is defined and every `#ifdef _OPENMP` guard is compiled in even for a bare
 `fpm build` with `FPM_FFLAGS` unset entirely (verified directly with a minimal standalone fpm
-project). An earlier version of this note claimed the opposite — that a plain `fpm test` compiles
-such a check out, so the suite would pass locally and fail only in CI — and that has not been true
-since the metapackage was adopted. The rule that follows is simply to
+project). The rule that follows is to
 prefer a guard keyed on something more precise than "am I in a parallel region" — see
 `unsafe_first_touch` (`parquet_tables_read.f90`), which records at open time *which thread* created
 an object and refuses only when the object could actually be shared, so a thread-private object used

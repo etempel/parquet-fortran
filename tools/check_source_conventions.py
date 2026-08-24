@@ -43,7 +43,7 @@ That is what makes them worth a static check rather than a test:
      rows. `check_row_group_valid` is what makes a procedure row-group-scoped, so requiring the two
      calls to travel together makes "did we guard all ~19 of them?" mechanical, and self-extending.
 
-  6. print_stat's columns match its documentation (feature_risks.md Risk-5).
+  6. print_stat's columns match its documentation.
      `doc/pages/io/reading.md` documents the reader's stats table column by column, and that table is
      the only contract the format has -- exactly one assertion in the whole suite touches the output
      text, so a renamed or added column breaks no test. The two had already drifted when this check
@@ -660,7 +660,7 @@ def check_row_group_reads_guard_against_sort():
 
 
 def check_print_stat_columns_documented():
-    """feature_risks.md Risk-5 -- print_stat's column set and its documentation must agree.
+    """print_stat's column set and its documentation must agree.
 
     `parquet_reader_print_stat`'s output is documented column by column in
     `doc/pages/io/reading.md`, and that table is the only contract it has: the format is otherwise
@@ -672,6 +672,11 @@ def check_print_stat_columns_documented():
     Comparing the two SETS rather than asserting the printed header line is deliberate: the header
     is padded to each column's widest cell, so its exact text depends on the data, and a test that
     matched it literally would be brittle in a way that teaches people to delete it.
+
+    `parquet_table`'s own `%print_stat` is deliberately out of scope, and must stay out: it was not
+    modelled on the reader's, and its test asserts BEHAVIOUR (a lazy table stays lazy, `all=.true.`
+    still reads nothing) rather than text. A change that started asserting its exact output would
+    import the fragility this check exists to contain.
     """
     problems = []
     cpp = SRC / "parquet_wrapper.cpp"
@@ -711,11 +716,11 @@ def check_print_stat_columns_documented():
     for column in missing:
         problems.append(
             "doc/pages/io/reading.md: print_stat prints a `%s` column that the documentation does not "
-            "describe -- add a row for it (feature_risks.md Risk-5)" % column)
+            "describe -- add a row for it" % column)
     for column in extra:
         problems.append(
             "doc/pages/io/reading.md: the documentation describes a `%s` column that print_stat does "
-            "not print -- it was renamed or removed (feature_risks.md Risk-5)" % column)
+            "not print -- it was renamed or removed" % column)
     return problems
 
 

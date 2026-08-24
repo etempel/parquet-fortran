@@ -24,6 +24,29 @@
 !! it anyway on machine B — but a split would remove the possibility on every platform. Do not
 !! separate them for tidiness.
 !!
+!! **`sort_compare_key` and `sort_tier_of` must keep FITTING GCC's default inlining budget, and
+!! nothing fails when they stop.** Past the budget GCC splits `sort_compare_key` into a
+!! `sort_compare_key.part.0` clone, inlines a cheap prologue and leaves the body out of line, so the
+!! hot path takes a call on every comparison — on the critical path of a dependent branch chain.
+!! Every answer stays identical and only speed moves: measured on machine A, gfortran 15.2,
+!! `--profile release`, the serial `f64` argsort ran at 1.28x the C++ engine without the split and
+!! 0.91x with it, a ~39% swing decided entirely by whether one procedure fit. Two places it hides:
+!! `sort_row_less` is fully inlined either way, so grepping for a call to *it* reports success while
+!! the damage sits one level down; and `bench/benchmark_sort_comparator.f90` does not see it either,
+!! because a sweep's iterations are independent and the call overlaps with them where a partition's
+!! next iteration depends on this comparison's branch. **So anything added to either procedure must
+!! be paid for by taking something else out** — a new tier, a new key family arm written inline
+!! rather than behind a call (as `compare_bytes` already is), a validity scheme needing more than one
+!! test, or a branch hoisted "for clarity" can each cross the threshold, and all of them look free.
+!! The check is one command against a release build, and it must read 0:
+!!
+!! ```
+!! nm <build>/.../src_parquet_argsort_engine.f90.o | grep -c 'sort_compare_key\.part'
+!! ```
+!!
+!! `bench/benchmark_sort_ab.sh` sizes the loss once the symbol is seen. The budget is a property of
+!! the compiler and its version, so a future GCC may reintroduce the split with no source change.
+!!
 !! **Why a submodule rather than a module.** `sort_key_buf` is private to `parquet_sorting`, so a
 !! standalone module could not see the type these procedures exist to compare.
 !!

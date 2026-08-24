@@ -213,8 +213,20 @@ to read *before editing an area*, not a to-do list, and it is where the reasonin
 non-obvious invariant lives when that reasoning is too long for a code comment and too specific for
 this file.
 
-Four rules govern it, and all four are easy to break by treating it as an ordinary document:
+Five rules govern it, and all five are easy to break by treating it as an ordinary document:
 
+- **Only MAJOR risks, and by preference the ones the tests do not fully cover.** *Major* means the
+  failure a future change causes is a **wrong answer, lost or corrupted data, a stale pointer, a
+  hang, or a broken frozen contract** — something a user of the library would suffer. That is the
+  admission test, and most things that feel worth writing down fail it. A **cost** does not qualify,
+  however large and however silent: a 7x slowdown ships a correct library, and its home is the
+  source comment beside the code, or this file when the lesson is project-wide. Neither does a
+  **loud** failure — one that breaks a test, aborts, or fails the lint stage announces itself, which
+  is the opposite of what this register is for. Neither does a property of the **test harness**, the
+  build or the benchmarking method; those belong here in CLAUDE.md. Where a rejected entry carries
+  something genuinely worth keeping (a one-command check, a measurement that justifies a constant),
+  **move it to the code rather than dropping it** — `src/parquet_argsort_engine.f90`'s header
+  carries the comparator inlining-budget check for exactly that reason.
 - **Every risk is `Risk-N`, and the number is permanent.** Numbering runs from `Risk-1` upward
   across the whole file, independent of which section the entry sits in. Moving an entry between
   sections **never** renumbers it, so a reference from this file, from `feature_table.md`, from
@@ -229,7 +241,9 @@ Four rules govern it, and all four are easy to break by treating it as an ordina
   a rule for the next contributor, a trap not visible in the code, or a test whose *design* has to
   be copied rather than merely kept passing. An entry that has become "this works and is tested" is
   deleted outright; the test is the record at that point, and a register that accumulates solved
-  problems stops being read.
+  problems stops being read. **Prune whenever you are in the file anyway**, rather than waiting for
+  a cleanup round: the register is only read if it is short enough to read, and every entry that
+  does not earn its place is charged to everyone who opens it.
 - **A verdict is checked against the suite, never inferred.** Before marking anything "proposed",
   grep the tests for what actually asserts it — several entries once marked proposed turned out to
   be covered already. Before marking one "covered", name the test.
@@ -3030,8 +3044,8 @@ applied to the harness instead of the source.
   **The rule is about aliasing, not about sections** — same array, use the loop; different arrays,
   use the section, where it is a single `memcpy` and is worth having. This is why a threaded rebuild
   that writes into fresh buffers wins twice over: it removes the race *and* the aliasing. See
-  `feature_risks.md` Risk-63, and `compact_all_serial`/`delete_by_mask_serial`
-  (`src/parquet_strings.f90`), whose loops carry a comment saying they may not be tidied up.
+  `compact_all_serial`/`delete_by_mask_serial` (`src/parquet_strings.f90`), whose loops carry a
+  comment saying they may not be tidied up.
 - **Intrinsic assignment to or from a FINALIZABLE type runs the finalizer — twice per iteration in
   the obvious loop.** `dest(i) = obj%make(i)` finalizes `dest(i)` before overwriting it *and*
   finalizes the function result afterwards, so a loop that only needs to set a couple of components
@@ -4532,7 +4546,7 @@ loop needs the pointer, not a share of the ownership.
 - **Nothing fails when it comes back.** Every answer stays identical and the whole suite stays green;
   only a benchmark notices. `tools/check_source_conventions.py`'s `check_no_per_element_shared_ptr`
   is what actually guards it, matching by *shape* (an array parameter beside an element index) so it
-  cannot go blind to the next helper added. See `feature_risks.md` Risk-59.
+  cannot go blind to the next helper added.
 - **It hides from a profile that samples by function name**, because the atomics are attributed to a
   helper that was already expected to be hot.
 - **The plausible-looking explanation was wrong**, which is the part worth copying. The same loop

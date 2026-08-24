@@ -33,26 +33,34 @@ Four sections, and **a risk keeps its number when it moves between them**:
 the whole document; moving one between sections (a proposal getting written, a covered property
 regressing) **never** renumbers it, so a reference from `CLAUDE.md`, `feature_table.md`,
 `tools/check_source_conventions.py` or a code comment stays valid for good. **A new risk takes the
-next unused number — `Risk-106` today — and goes in "1. New risks"** until it has been triaged.
-Numbers of deleted entries are not reused, so a stale reference resolves to nothing rather than to
-the wrong risk.
+next unused number and goes in "1. New risks"** until it has been triaged. That number is one above
+the highest in the [Index](#index), which is the authority — do not copy it into prose here, because
+this paragraph carried a stale one for months and a stale one causes a collision. Numbers of deleted
+entries are not reused, so a stale reference resolves to nothing rather than to the wrong risk.
 
-**Counts today: 63 covered, 1 proposed, 16 not testable.** An empty section 2 is the healthy
-state rather than a finished one — it means every risk currently identified as testable has its
-test — so the entry sitting there is a to-do, not a milestone. Nine entries are covered by
-something other than a unit test, deliberately: Risk-1 by a
-maintainer check under `app/` with a `tools/*.sh` wrapper (it measures memory, so it needs its own
-process per measurement), and Risk-2, Risk-4, Risk-5, Risk-12, Risk-13, Risk-19, Risk-43 and Risk-44 by static
+**How many entries are in each section is answered by the [Index](#index), not written out here.**
+An empty section 2 is the healthy state rather than a finished one — it means every risk currently
+identified as testable has its test — so anything sitting there is a to-do, not a milestone. A few
+entries are covered by something other than a unit test, deliberately: Risk-1 by a maintainer
+benchmark under `bench/` with its own `.sh` wrapper (it measures memory, so it needs its own process
+per measurement), and Risk-2, Risk-4, Risk-12, Risk-13, Risk-19, Risk-43 and Risk-44 by static
 checks in `tools/check_source_conventions.py`, which is the right tool for an invariant about what the code
 does *not* do.
 
-**Section 4 is pruned, not archived.** A covered entry earns its place only by still forbidding
-something: a rule for the next contributor, a trap that is not visible in the code, a test whose
-*design* has to be copied rather than merely kept passing. An entry that has become "this works and
-is tested" is deleted outright — the test is the record at that point, and a risk register that
-accumulates solved problems stops being read. One entry was removed on exactly those grounds when
-this structure was introduced (the `extra: sort:` `nulls_first`/`nulls_last` token: tested, with
-nothing left that could break silently).
+**A risk earns its place by being MAJOR, wherever it sits.** Major means the failure is a wrong
+answer, lost or corrupted data, a stale pointer, a hang, or a broken frozen contract — something a
+user would suffer. A cost, a slower build, a noisier log or a brittle test assertion is not a risk
+for this file however real it is: it belongs in the source comment beside the code, or in
+`CLAUDE.md` if it is a project-wide rule. And a major risk that is **fully covered** stays only
+while it still forbids something a future change could do — a rule for the next contributor, a trap
+not visible in the code, a test whose *design* has to be copied rather than merely kept passing.
+Once an entry has become "this works and is tested", it is deleted outright: the test is the record
+at that point, and a register that accumulates solved problems stops being read. Seven entries were
+removed on exactly these grounds in the 2026-08-24 pruning: four costs, two properties of the test
+harness rather than of the library, and one whose failure was a broken test assertion — after the
+earlier removal of the `extra: sort:` `nulls_first`/`nulls_last` token when this structure was
+introduced. Where such an entry carried something still worth having, it moved to the code: the
+comparator's inlining-budget check now lives in `src/parquet_argsort_engine.f90`'s header.
 
 **This file is tracked and committed**, unlike the other `feature_*.md` documents in the repo root,
 which are git-ignored scratch design memory (`.gitignore` carries an explicit `!feature_risks.md`
@@ -70,12 +78,10 @@ something a reader is expected to have.
 | [Risk-2](#risk-2--the-schema-less-write-rests-on-three-properties-that-look-incidental) | The schema-less write rests on three properties that look incidental | 4 — covered |
 | [Risk-3](#risk-3--the-screen-and-the-evaluator-can-drift-apart) | The screen and the evaluator can drift apart | 4 — covered |
 | [Risk-4](#risk-4--the-sort-guards-are-one-line-each-from-returning-physically-ordered-data) | The sort guards are one line each from returning physically ordered data | 4 — covered |
-| [Risk-5](#risk-5--print_stat-format-churn) | `print_stat` format churn | 4 — covered |
 | [Risk-6](#risk-6--the-concurrency-guards-must-keep-agreeing-and-one-of-them-protects-a-wrong-answer) | The concurrency guards must keep agreeing, and one of them protects a wrong ANSWER | 4 — covered |
 | [Risk-7](#risk-7--a-half-applied-mutation-is-unrecoverable) | A half-applied mutation is unrecoverable | 3 — not testable |
 | [Risk-8](#risk-8--the-table-write-must-stay-the-same-calls-as-a-hand-written-write) | The table write must stay the same calls as a hand-written write | 3 — not testable |
 | [Risk-9](#risk-9--statistics-that-are-present-but-wrong) | Statistics that are present but wrong | 3 — not testable |
-| [Risk-10](#risk-10--memory-two-paths-deliberately-read-whole-columns) | Memory: two paths deliberately read whole columns | 3 — not testable |
 | [Risk-11](#risk-11--a-col-pointer-is-dangling-after-a-row-structural-mutation) | A `%col` pointer is dangling after a row-structural mutation | 4 — covered |
 | [Risk-12](#risk-12--the-no-target-property-is-easy-to-lose-with-no-diagnostic) | The no-`target` property is easy to lose, with no diagnostic | 4 — covered |
 | [Risk-13](#risk-13--new-table-state-must-go-on-the-cache-never-on-parquet_table-itself) | New table state must go on the cache, never on `parquet_table` itself | 4 — covered |
@@ -116,7 +122,6 @@ something a reader is expected to have.
 | [Risk-48](#risk-48--a-row-permutation-handed-to-a-caller-goes-stale-with-nothing-to-notice) | A row permutation handed to a caller goes stale, with nothing to notice | 3 — not testable |
 | [Risk-49](#risk-49--a-co-ranked-merge-that-never-co-ranks-is-invisible) | A co-ranked merge that never co-ranks is invisible | 4 — covered |
 | [Risk-50](#risk-50--a-co-rank-off-by-one-produces-a-non-permutation-that-nothing-on-the-raw-path-validates) | A co-rank off-by-one produces a non-permutation that nothing on the raw path validates | 4 — covered |
-| [Risk-51](#risk-51--a-pre-run-error-scenario-result-can-be-consumed-as-this-runs-answer) | A pre-run error-scenario result can be consumed as this run's answer | 3 — not testable |
 | [Risk-52](#risk-52--an-ab-equality-cannot-see-a-defect-the-two-paths-share) | An A/B equality cannot see a defect the two paths share | 4 — covered |
 | [Risk-53](#risk-53--a-parallel-mutation-gate-that-never-engages-passes-every-correctness-test) | A parallel mutation gate that never engages passes every correctness test | 4 — covered |
 | [Risk-54](#risk-54--the-parallel-rewrites-memory-cost-is-bounded-by-documentation-and-nothing-else) | The parallel rewrite's memory cost is bounded by documentation and nothing else | 3 — not testable |
@@ -124,11 +129,9 @@ something a reader is expected to have.
 | [Risk-56](#risk-56--a-per-thread-reader-that-writes-shared-cache-state-races-silently) | A per-thread reader that writes shared cache state races silently | 3 — not testable |
 | [Risk-57](#risk-57--a-row-group-split-column-read-allocates-its-validity-bitmap-on-first-null-from-any-thread) | A row-group-split column read allocates its validity bitmap on first null, from any thread | 3 — not testable |
 | [Risk-58](#risk-58--an-adopted-transform-is-shared-state-and-only-its-preconditions-stand-between-it-and-a-wrong-row-set) | An adopted transform is shared state, and only its preconditions stand between it and a wrong row set | 4 — covered |
-| [Risk-59](#risk-59--a-shared_ptr-parameter-on-a-per-element-helper-costs-7x-and-fails-nothing) | A `shared_ptr` parameter on a per-element helper costs 7x and fails nothing | 3 — not testable |
 | [Risk-60](#risk-60--a-per-element-allocatable-character-round-trip-in-a-bulk-string-operation-costs-4x-and-fails-nothing) | A per-element allocatable-character round trip in a bulk string operation costs 4x and fails nothing | 4 — covered |
 | [Risk-61](#risk-61--a-validity-split-that-is-not-byte-aligned-loses-nulls-and-no-end-to-end-test-can-be-relied-on-to-see-it) | A validity split that is not byte-aligned loses nulls, and no end-to-end test can be relied on to see it | 4 — covered |
 | [Risk-62](#risk-62--a-validity-run-copied-byte-wise-silently-mis-places-nulls-when-its-alignment-precondition-is-wrong) | A validity run copied byte-wise silently mis-places nulls when its alignment precondition is wrong | 4 — covered |
-| [Risk-63](#risk-63--replacing-an-in-place-compactions-byte-loop-with-an-array-section-costs-a-heap-temporary-per-element) | Replacing an in-place compaction's byte loop with an array section costs a heap temporary per element | 3 — not testable |
 | [Risk-64](#risk-64--two-threads-pasting-adjacent-row-groups-share-a-validity-bitmap-block-and-lose-a-null) | Two threads pasting adjacent row groups share a validity bitmap block and lose a null | 4 — covered |
 | [Risk-65](#risk-65--a-guard-claimed-after-the-state-it-protects-is-a-guard-that-loses-the-race) | A guard claimed after the state it protects is a guard that loses the race | 4 — covered |
 | [Risk-67](#risk-67--an-unbounded-read-of-a-parquet_column-storage-array-returns-uninitialised-slack) | An unbounded read of a `parquet_column` storage array returns uninitialised slack | 4 — covered |
@@ -152,13 +155,11 @@ something a reader is expected to have.
 | [Risk-85](#risk-85--the-in-code-schema-builder-now-owns-both-parsing-and-validating-its-own-text) | The in-code schema builder now owns both parsing and validating its own text | 4 — covered |
 | [Risk-86](#risk-86--a-defective-quicksort-still-returns-a-correctly-sorted-answer) | A defective quicksort still returns a correctly sorted answer | 4 — covered |
 | [Risk-87](#risk-87--the-counting-sorts-range-check-cannot-be-written-the-way-c-writes-it) | The counting sort's range check cannot be written the way C++ writes it | 4 — covered |
-| [Risk-88](#risk-88--the-sort-comparator-silently-loses-a-third-of-its-speed-if-it-outgrows-an-inlining-budget) | The sort comparator silently loses a third of its speed if it outgrows an inlining budget | 3 — not testable |
 | [Risk-89](#risk-89--the-radix-path-is-a-third-expression-of-the-ordering-and-a-wrong-answer-there-is-silent) | The radix path is a third expression of the ordering, and a wrong answer there is silent | 4 — covered |
 | [Risk-133](#risk-133--a-missing-domain-tag-puts-a-generic-back-in-another-generics-word-space-silently) | A missing domain tag puts a generic back in another generic's word space, silently | 2 — proposed |
 | [Risk-90](#risk-90--the-narrow-integer-bias-is-safe-in-exactly-one-direction-and-its-guard-cannot-be-tested) | The narrow-integer bias is safe in exactly ONE direction, and its guard cannot be tested | 3 — not testable |
 | [Risk-91](#risk-91--sort_radix_refine_strings-reads-one-array-while-permuting-another-and-nothing-diagnoses-passing-the-same-one) | `sort_radix_refine_strings` reads one array while permuting another, and nothing diagnoses passing the same one | 3 — not testable |
 | [Risk-92](#risk-92--the-last-radix-pass-leaves-the-row-array-stale-and-only-the-string-exclusion-makes-that-safe) | The last radix pass leaves the row array STALE, and only the string exclusion makes that safe | 4 — covered |
-| [Risk-93](#risk-93--the-test-log-names-a-different-test-from-the-one-that-is-stuck) | The test log names a DIFFERENT test from the one that is stuck | 3 — not testable |
 | [Risk-94](#risk-94--a-compiler-may-use-an-overflowing-expressions-undefinedness-to-delete-a-branch-somewhere-else) | A compiler may use an overflowing expression's undefinedness to delete a branch somewhere else | 4 — covered |
 | [Risk-95](#risk-95--parquet_randoms-remaining-wrapping-sites-rest-on-one-test-and-nothing-else) | `parquet_random`'s remaining wrapping sites rest on one test and nothing else | 4 — covered |
 | [Risk-96](#risk-96--a-wide-width-integer-draw-can-be-silently-non-uniform-while-every-obvious-test-passes) | A wide-width integer draw can be silently non-uniform while every obvious test passes | 4 — covered |
@@ -184,6 +185,11 @@ something a reader is expected to have.
 | [Risk-116](#risk-116--the-parity-correction-is-one-branch-and-removing-it-loses-half-of-s_m-with-nothing-failing) | The parity correction is one branch, and removing it loses HALF of `S_m` with nothing failing | 4 — covered |
 | [Risk-117](#risk-117--a-permutation-test-sited-at-an-even-square-or-using-only-marginal-statistics-proves-nothing) | A permutation test sited at an even square, or using only marginal statistics, proves nothing | 4 — covered |
 | [Risk-118](#risk-118--a-chi-square-threshold-chosen-at-one-ensemble-size-is-not-a-threshold) | A chi-square threshold chosen at ONE ensemble size is not a threshold | 4 — covered |
+| [Risk-119](#risk-119--a-weighted-segment-tree-maintained-by-subtraction-stops-being-a-permutation) | A weighted segment tree maintained by SUBTRACTION stops being a permutation | 4 — covered |
+| [Risk-120](#risk-120--a-frozen-transform-that-depends-on-libm-or-on-fma-is-not-frozen) | A frozen transform that depends on libm, or on FMA, is not frozen | 4 — covered |
+| [Risk-121](#risk-121--privated-on-a-weighted-sampler-gives-every-thread-a-tree-of-garbage) | `private(d)` on a weighted sampler gives every thread a tree of garbage | 4 — covered |
+| [Risk-122](#risk-122--a-sentinel-key-for-zero-weight-items-returns-them-in-index-order-not-random-order) | A sentinel key for zero-weight items returns them in INDEX order, not random order | 4 — covered |
+| [Risk-123](#risk-123--two-families-over-one-coordinate-space-couple-in-the-rarest-cell-and-every-marginal-stays-clean) | Two families over one coordinate space couple in the rarest cell, and every marginal stays clean | 4 — covered |
 | [Risk-124](#risk-124--this-library-may-not-raise-an-ieee-flag-in-a-caller-whose-traps-are-unmasked) | This library may not RAISE an IEEE flag in a caller whose traps are unmasked | 4 — covered |
 | [Risk-125](#risk-125--the-most-negative-int64-constant-in-a-runtime-expression-is-wrong-under-nagfor) | The most-negative int64 CONSTANT in a runtime expression is wrong under nagfor | 4 — covered |
 | [Risk-126](#risk-126--a-squeeze-that-accepts-outside-the-acceptance-region-biases-the-draw-invisibly) | A SQUEEZE that accepts outside the acceptance region biases the draw invisibly | 4 — covered |
@@ -202,9 +208,10 @@ something a reader is expected to have.
 ## 1. New risks
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
-decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-135**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
-triages it into one of the three sections below.
+decided whether it is testable, and before any test is written. Give it the next unused number —
+**one above the highest in the [Index](#index)**, read from there rather than from any number
+written in prose — state what breaks and why the failure is quiet, and leave the **Test** half to
+whoever triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
 
@@ -476,24 +483,6 @@ producer can disable the screen entirely with
 in Risk-26 do, and is the right diagnostic to point someone at. If a real producer is ever found to
 write bad statistics, the response is a note naming that producer, not a change to the screen.
 
-### Risk-10 — Memory: two paths deliberately read whole columns
-
-- **A sort key column is always read whole.** A global order needs every row, so there is no
-  row-group-scoped equivalent the way there is for filtering. This is inherent to sorting, and the
-  fix is documentation rather than engineering.
-- **A scoped filter re-reads its filter columns.** The row-group-scoped builder does not populate
-  `column_cache`, so a filter column read afterwards comes off disk again. That is the price of the
-  bounded-memory guarantee the scoped path exists to provide, and it is the right trade there — but
-  it means the scoped path is not simply "the unscoped path with less memory".
-
-**Test.** Nothing to test — this entry records two deliberate costs, not a defect, and a test would
-only freeze the current shape.
-
-**What to do instead of testing it:** state both in the user-facing documentation where a reader is
-choosing between the scoped and unscoped paths, so that "the scoped path is the unscoped path with
-less memory" is never assumed — it is a different trade, not a strictly better one. If either cost is
-ever attacked, measure with the Arrow pool counter (Risk-1), not with RSS.
-
 ### Risk-33 — `pf_permute` through a `%col` pointer desynchronises a table
 
 `parquet_table%col` hands back a **writable pointer into a table's live column storage**, and
@@ -585,45 +574,6 @@ returns row indices must carry the same paragraph. Do not add a `sort=`-style co
 applies a caller-supplied permutation to a table: that is the arbitrary-permutation operation
 Risk-33's neighbourhood already rules out, and handing it a stale array is exactly how the silent
 row-correspondence loss described there happens.
-
-### Risk-51 — A pre-run error-scenario result can be consumed as this run's answer
-
-`prime_error_scenarios` (`test/test_errors.f90`) runs every error scenario once, up front and in
-parallel, into `test_run/.primed/<scenario>.{out,err,status}`; `run_error_scenario` then answers
-from those files instead of spawning. The whole ~630-subprocess cost of `fpm test` collapses onto
-that one pre-run, and so does its trustworthiness: **a triple left behind by an earlier run is
-byte-indistinguishable from one this run produced.** Consuming a stale one makes every test that
-depends on it assert against a binary that no longer exists — and they *pass*, because the recorded
-status is whatever the old code did. That is a vacuous green suite, not a failure, which is why it
-is worth writing down rather than leaving to the code.
-
-Two things stand between the design and that outcome, and both must survive any future edit:
-
-- `prime_error_scenarios` **wipes `prime_dir` itself** (`rm -rf` then `mkdir -p`) before writing
-  anything, so no file in it predates this process.
-- `g_prime_ok` is a **per-process** flag set only after that wipe-and-repopulate has completed,
-  and it is the *only* thing `run_error_scenario` consults before reading a primed triple. A
-  directory on disk is never sufficient on its own.
-
-**Test.** Not testable from inside the suite, and the reason is structural rather than
-accidental: the prime runs in `run_tester` *before the first test exists*, so no test can arrange
-the pre-state the risk needs (a populated `prime_dir` that this process did not create). Planting
-files from a test is too late — they are already wiped — and disabling priming to plant them
-clears `g_prime_ok`, which is the very guard under examination. An out-of-process scenario cannot
-help either: it would have to drive `run_tester`, not `error_scenarios`.
-
-**How to avoid it instead.**
-
-- Never read anything under `prime_dir` without `g_prime_ok`. A future helper that "just checks
-  whether the capture exists" is exactly the shape that reintroduces this.
-- Never make `g_prime_ok` settable from anywhere but `prime_error_scenarios`' own tail, and never
-  persist it across processes (an environment variable saying "already primed", say).
-- Keep the wipe and the repopulate in that one routine, in that order. Splitting them — a wipe at
-  exit, or a "reuse if fresh enough" check — turns a structural guarantee into a heuristic.
-- **Every failure path in the prime must fall back to spawning, never to a primed answer.** That
-  is what keeps a missing or unreadable capture a performance question instead of a correctness
-  one, and it is why `run_error_scenario` falls through rather than failing when a triple is
-  incomplete.
 
 ### Risk-54 — The parallel rewrite's memory cost is bounded by documentation and nothing else
 
@@ -814,80 +764,6 @@ field left out of the copy list) are covered instead by the equality tests in
 `test/test_table_parallel.f90`, which caught all three tried — see `feature_table_parallel.md`
 section 17.9.
 
-### Risk-59 — A `shared_ptr` parameter on a per-element helper costs 7x and fails nothing
-
-Every per-element helper in `src/parquet_wrapper.cpp` — `real_family_value_at`,
-`small_integer_value_at`, `decimal_value_at`, `decimal_to_int64_checked` — is called **once per
-row**. Taking the array as `const std::shared_ptr<arrow::Array> &` rather than `const arrow::Array *`
-means every `std::static_pointer_cast` inside builds a new `shared_ptr`: **an atomic increment and
-an atomic decrement, to read one number.**
-
-Measured on a 16-column x 2 M-row file, one filter clause: **13.6 ns per row** with the `shared_ptr`
-parameter, **1.8 ns** with the raw pointer. The clause evaluation it serves was 75-93% of the cost of
-installing a row filter, so the whole operation went from 0.25 s to 0.061 s at eight clauses. See
-`feature_table_parallel.md` section 17.10.
-
-**The failure is not a wrong answer — it is no signal at all.** Reverting the signature keeps every
-value identical, every test passing, and every error scenario green. Only a benchmark nobody runs by
-default notices, and the cost is invisible in a profile that samples by function name, because the
-atomics are attributed to the helper that was already going to be hot.
-
-**Test.** Not testable, and not worth trying to make so. A timing assertion would be the flakiest
-test in the suite — it would fail on a loaded CI runner and pass on a fast one, whatever threshold
-was chosen — and a call-count assertion would test the implementation rather than the property.
-
-**How it is guarded instead.** `tools/check_source_conventions.py`'s
-`check_no_per_element_shared_ptr` fails the lint stage on the SHAPE — a `static` function taking
-`const std::shared_ptr<arrow::Array> &` next to an element index — rather than on a list of helper
-names, so it cannot go blind to the next helper added (CLAUDE.md's "A static check that enumerates
-names goes stale silently"). Confirmed to fire: reverting `real_family_value_at`'s signature makes
-it fail with the line number and the measurement, and restoring it clears.
-
-**What this forbids more generally.** The rule is about ownership, not about `shared_ptr` being
-slow: the caller already holds a reference for the whole loop, so the loop needs the *pointer*, not a
-share of the ownership. A genuinely per-element helper that must extend an array's lifetime would be
-the exception, and would have to argue for itself in a comment and in the check — not simply be
-written and merged because nothing complained.
-
-### Risk-63 — Replacing an in-place compaction's byte loop with an array section costs a heap temporary per element
-
-`compact_all_serial` and `delete_by_mask_serial` (`src/parquet_strings.f90`) compact a column's payload
-**in place**, copying each element's bytes with a scalar loop:
-
-```fortran
-do k = lo, hi
-    wpos = wpos + 1_int64
-    c%data(wpos) = c%data(k)
-end do
-```
-
-That loop looks like an oversight. It is not, and the tidy-up is expensive in a way nothing reports:
-`c%data(wpos+1:wpos+n) = c%data(lo:hi)` has **the same array on both sides**, so the compiler cannot
-prove the two ranges do not overlap and must evaluate the right-hand side into a temporary first — one
-heap allocation and free **per element**. Measured on 4 M elements: `trim_all` **0.0261 s → 0.1439 s
-(5.5x slower)**, `delete_by_mask` **0.0118 s → 0.0886 s (7.5x slower)**. Every test still passes, every
-answer is still correct, and the column still validates.
-
-This is [Risk-60](#risk-60--a-per-element-allocatable-character-round-trip-in-a-bulk-string-operation-costs-4x-and-fails-nothing)'s
-class arriving from a direction that risk's lint check cannot see: `check_no_per_element_string_alloc`
-matches `%get`/`%to_string` calls, and there is no call here at all — the allocation is emitted by the
-compiler from an assignment that mentions nothing.
-
-**The threaded paths use exactly that section assignment, and must.** Their destination is a *different*
-array, so it is provably non-overlapping and compiles to a single `memcpy` — which is most of why
-`delete_by_mask` threads to 3.46x (5,800 MB/s to 19,900 MB/s) rather than to the ~3x threads alone would
-buy. **The rule is about aliasing, not about sections**: same array, use the loop; different arrays, use
-the section.
-
-**Test.** None, and none is proposed: the failure is a 5.5x slowdown, not a wrong answer, and a timing
-assertion in the unit suite would be flaky on a loaded machine. `bench/benchmark_strings.sh`'s `trim_all`
-and `delete_by_mask` rows are where it would show, which is how it was found.
-
-**What this forbids.** Do not "modernise" either loop, and do not copy the pattern *into* a new in-place
-compaction without checking which array the destination lives in. If a future in-place bulk operation is
-added here, it inherits this constraint; if it can afford a fresh destination buffer, prefer that
-instead, since it removes the aliasing and buys the parallelism at the same time.
-
 ### Risk-76 — `%cast`'s post-touch re-check guards an invariant that lives in another file
 
 **What breaks.** `table_cast` (`src/parquet_tables_mutate.f90`) compares the column's kind against the
@@ -918,39 +794,6 @@ The branch body is `GCOVR_EXCL`'d with that reasoning recorded beside it.
   branch live, and the entry moves to section 2 with a test the moment that happens.
 - **Do not "simplify" the two checks into one.** They are asking different questions: the first is
   about what the table has been told the column is, the second about what it actually holds.
-
-### Risk-93 — The test log names a DIFFERENT test from the one that is stuck
-
-test-drive prints its `Starting <name>` line *before* dispatching, and runs the tests of a
-parallelisable suite inside its own `!$omp parallel do`. So when a run wedges, the last `Starting`
-line in the log names whichever test the scheduler had reached — **not** the one on the stack.
-Diagnose a hang from a live stack (`sample <pid>` on macOS, `eu-stack`/`gdb` on Linux), never from
-the log's tail.
-
-**Provenance, and why it is filed rather than fixed.** Found while diagnosing a one-off stall during
-the Stage 6 engine flip: a 2000-element sort sat over 456 s inside `sort_radix_hist_threaded`'s
-`!$omp parallel`, under `libgomp` in `_pthread_mutex_firstfit_lock_slow`. The log blamed a different
-test, and an hour went into the wrong hypothesis because of it.
-
-**That stall was investigated and left unexplained; it is most likely environmental.** Nesting was
-refuted twice — the `sorting` suite is excluded from test-drive's parallelism, so the enclosing
-region is inactive and `omp_in_parallel()` is `.false.`; and nested regions are serialised by default,
-creating no team at all. It did not reproduce in **83,790** sorts mimicking the offending test, nor in
-25 rounds under `OMP_MAX_ACTIVE_LEVELS=4`, nor in any full-suite run since, and the machine was
-running several processes at the time. The one fact that does not fit the environmental story: it was
-blocked *acquiring a mutex* rather than waiting on a condition, which is deadlock-shaped. Reopen only
-on a recurrence, and capture **machine state** (load, concurrent processes) rather than more sorts —
-sorts have been shown not to be the variable.
-
-**One measurement from that investigation is worth keeping.** Opening an OpenMP team costs **~183 us**
-on machine A — 0.512 s for 2793 sorts of at most 400 elements, where the sorting itself is
-microseconds. That is several times what sorting 32,000 elements costs end to end, and it means
-section 14's engine floor of `max(32768, 2048*nt)` is not conservative: it is roughly where a team
-starts paying for itself.
-
-**Test.** None possible for the logging trap — it is a property of a dependency's output, and a test
-asserting that a log is misleading would be asserting the bug rather than guarding against it.
-
 
 ### Risk-111 — A bulk fill that silently stopped threading would fail no test
 
@@ -1665,42 +1508,6 @@ check for whether any is missing.
   route it through the shared predicate rather than testing the handle, and check whether a
   *sibling module* reaches the site — `%row_group_bounds` did, and its refusal used to surface
   naming a reader-level procedure the caller never opened.
-
-### Risk-5 — `print_stat` format churn
-
-`parquet_reader_print_stat`'s output is asserted across several test suites and by error scenarios, so
-any format change breaks assertions far from the change. It carries a `filter:` line, a `sort:` line
-and a `screened:` line on top of the per-column table. Additive-only changes (a new line, no column
-changes) keep the blast radius small; anything else does not. The table's own `%print_stat` was
-deliberately *not* modelled on it, so it does not inherit this fragility — keep it that way, and note
-its test asserts behaviour (a lazy table stays lazy, `all=.true.` still reads nothing) rather than
-text.
-
-**Test.** Covered — but the risk as originally written was **wrong**, and the correction matters
-more than the fix.
-
-- **The premise was false.** This entry claimed `print_stat`'s output was "asserted across several
-  test suites and by error scenarios", so that a format change would break assertions far from the
-  change. An audit found **exactly one** text assertion in the entire repository (a
-  `sample: fraction=0.4 seed=42` substring in `test_print_stat_sampled_rows`); every other
-  `print_stat` scenario asserts only an exit status, and `tools/run_error_scenarios.sh` discards the
-  output entirely. There was no scattered fragility to consolidate — the real exposure was the
-  opposite one: the format was **essentially untested**, so a regression would be caught by nothing.
-- **And it had already drifted.** `doc/pages/io/reading.md` documented a `prefetc` column the code
-  calls `fetched`, and omitted `qcmin`, `qcmax`, `qcmiss` and `filter` entirely. The documentation
-  is the format's only contract, so this was the whole guard being wrong.
-- **Covered:** the documentation was corrected against the code (including what `qcmin`/`qcmax`
-  actually print — the operator followed by the raw bound, not a `-`), and
-  `tools/check_source_conventions.py` (`print_stat's columns match its documentation`) now compares
-  the C++ `headers` vector against that table in both directions. Mutation-verified by renaming a
-  column: it reports both the undocumented new name and the now-absent old one.
-- **Comparing the two SETS rather than asserting the printed header line is deliberate.** The header
-  is padded to each column's widest cell, so its exact text depends on the data; a test matching it
-  literally would be brittle in a way that teaches people to delete it.
-- **Keep the table's own `%print_stat` out of this.** It was deliberately not modelled on the
-  reader's, and its test asserts *behaviour* (a lazy table stays lazy, `all=.true.` still reads
-  nothing) rather than text. A future change that started asserting its exact output would import
-  the problem this entry describes.
 
 ### Risk-6 — The concurrency guards must keep agreeing, and one of them protects a wrong ANSWER
 
@@ -3268,9 +3075,9 @@ slowest operation in the module because it paid the allocation *and* grew its de
 
 **The failure is not a wrong answer — it is no signal at all.** The allocating form returns byte-identical
 results, so every test passes, every error scenario stays green, and the code reads as ordinary, idiomatic
-Fortran. Only a benchmark notices. This is the Fortran twin of [Risk-59](#risk-59--a-shared_ptr-parameter-on-a-per-element-helper-costs-7x-and-fails-nothing),
-found the same way and for the same underlying reason: a per-element convenience that the surrounding loop
-never needed.
+Fortran. Only a benchmark notices. It is the Fortran twin of the C++ side's per-element `shared_ptr`
+parameter (CLAUDE.md, "A `shared_ptr` parameter on a per-row helper"), found the same way and for the
+same underlying reason: a per-element convenience that the surrounding loop never needed.
 
 **Test.** Not testable as such — a timing assertion would be the flakiest test in the suite. What *is*
 tested is that the direct-copy path is correct, by `to_character matches %get element for element,
@@ -4254,51 +4061,6 @@ must be DECLINED. Both run through `counting_ab`, which requires the counting an
 agree with each other and with the C++ engine, and which asserts via the insertion-shift tracker that
 the expected path was actually taken — without that last check the "declined" half would pass just as
 happily against a counting path that accepted the key and answered correctly by luck.
-
-### Risk-88 — The sort comparator silently loses a third of its speed if it outgrows an inlining budget
-
-`sort_compare_key` and `sort_tier_of` (`src/parquet_argsort_engine.f90`) are called once per
-comparison from the introsort's inner loops. GCC inlines them **only while they fit its default
-budget**; past that it splits `sort_compare_key` into a `sort_compare_key.part.0` clone, inlines a
-cheap prologue and leaves the body out of line — so the hot path, a single non-null key reaching the
-value comparison, takes a **call on every comparison**, on the critical path of a dependent branch
-chain.
-
-Measured on machine A, gfortran 15.2, `--profile release`: with the split present, the serial
-`f64` argsort ran at **1.28x** the C++ engine; without it, **0.91x**. Same algorithm, same
-comparison count, same data — a **~39%** swing decided entirely by whether one procedure fit.
-
-**What breaks, and why nothing notices.** Every answer stays identical, every test passes, and the
-only symptom is speed. Worse, it is invisible in the obvious place to look: `sort_row_less` *is*
-fully inlined into the sort's loops in both cases, so a check for "is the comparator inlined" that
-greps for a call to `sort_row_less` reports success while the damage sits one level down. And the
-comparator's own microbenchmark does **not** see it — `bench/benchmark_sort_comparator.f90` measured
-the Fortran comparator at 0.72–0.85x of C++ *with the split in place*, because a sweep's iterations
-are independent and the call overlaps with them, where a quicksort partition's next iteration
-depends on this comparison's branch.
-
-The current shape was arrived at deliberately for this: `sort_tier_of` returns the **raw** tier and
-`nulls_first` is applied once by `sort_compare_key`, as a negation of the tier comparison, rather
-than by relabelling tiers on every call. That removed two nested three-way if-chains and is what
-brought the chain back under the budget.
-
-**The rule this forbids.** *Anything added to `sort_tier_of` or `sort_compare_key` must be paid for
-by taking something else out.* Concretely: a new tier, a new key family arm inline (put it behind a
-call, as `compare_bytes` already is), a validity scheme needing more than one test, or hoisting a
-branch "for clarity" are all changes that can cross the threshold. They will look free.
-
-**Test.** None — a static check, not a test, because the failure is a timing one and this project
-does not put timing assertions in the suite. The check is one command against a release build:
-
-```bash
-nm <build>/.../src_parquet_argsort_engine.f90.o | grep -c 'sort_compare_key\.part'
-```
-
-It must read **0**. A nonzero count means the comparator no longer fits and the sort has lost
-roughly a third of its speed. `bench/benchmark_sort_ab.sh` is what confirms the size of the loss
-once the symbol is seen. Note the budget is a property of the compiler and its version, so a future
-GCC may reintroduce the split without any source change — which is exactly why this is written down
-rather than left to whoever next reads a disappointing benchmark.
 
 ### Risk-89 — The radix path is a third expression of the ordering, and a wrong answer there is silent
 

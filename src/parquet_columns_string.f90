@@ -53,7 +53,7 @@ contains
     module procedure parquet_column_get_at_str
         call parquet_column_check_kind(col, PK_STRING, "get_at")
         call parquet_column_check_index(col, i, "get_at")
-        call col%str%get(i, value, allow_null=.true.)
+        call parquet_string_column_get(col%str, i, value, allow_null=.true.)
     end procedure parquet_column_get_at_str
     !
     !> Reads string element `i` out of a PK_STRING column (polymorphic form).
@@ -77,7 +77,7 @@ contains
         ! so going through an allocatable string costs a heap round trip per element for a copy that
         ! ends up blank-padded either way. Truncation semantics are identical -- see `%copy_to`.
         do e = 1_int64, w
-            call col%str%copy_to(base + e, value(e), allow_null=.true.)
+            call parquet_string_column_copy_to(col%str, base + e, value(e), allow_null=.true.)
         end do
     end procedure parquet_column_get_at_strv
     !
@@ -97,7 +97,7 @@ contains
         call parquet_column_check_element(col, e, "get_elem")
         ! allow_null keeps a null element from aborting: it reads back as "", and %is_null is how
         ! a caller tells the two apart.
-        call col%str%get((i - 1_int64)*int(col%width, int64) + e, value, allow_null=.true.)
+        call parquet_string_column_get(col%str, (i - 1_int64)*int(col%width, int64) + e, value, allow_null=.true.)
     end procedure parquet_column_get_elem_strv
     !
     !> Reads ONE element of row `i`'s string vector (polymorphic form).
@@ -111,7 +111,7 @@ contains
         call parquet_column_check_index(col, i, "set_elem")
         call parquet_column_check_element(col, e, "set_elem")
         ! The store's own %set clears that element's null, exactly as it does for `set_at_str`.
-        call col%str%set((i - 1_int64)*int(col%width, int64) + e, value)
+        call parquet_string_column_set(col%str, (i - 1_int64)*int(col%width, int64) + e, value)
     end procedure parquet_column_set_elem_strv
     !
     !> Writes ONE element of row `i`'s string vector (polymorphic form).
@@ -127,9 +127,9 @@ contains
         call parquet_column_check_kind(col, PK_STRING, "set_at")
         call parquet_column_check_index(col, i, "set_at")
         if (.not. mod_nulls) then
-            if (col%str%is_null(i)) return
+            if (parquet_string_column_is_null(col%str, i)) return
         end if
-        call col%str%set(i, value)
+        call parquet_string_column_set(col%str, i, value)
     end procedure parquet_column_set_at_str
     !
     !> Writes string element `i` of a PK_STRING column (polymorphic form).
@@ -154,9 +154,9 @@ contains
         ! one null element still has its other elements written.
         do e = 1_int64, w
             if (.not. mod_nulls) then
-                if (col%str%is_null(base + e)) cycle
+                if (parquet_string_column_is_null(col%str, base + e)) cycle
             end if
-            call col%str%set(base + e, value(e), trim=.true.)
+            call parquet_string_column_set(col%str, base + e, value(e), trim=.true.)
         end do
     end procedure parquet_column_set_at_strv
     !
@@ -252,7 +252,7 @@ contains
         type(parquet_string_column), intent(inout) :: str !! the store to append to.
         character(len=*), intent(in) :: values(*)         !! `n` elements, in flat store order.
         integer(int64), intent(in) :: n                   !! elements to append.
-        call str%append_values(values(1:n))
+        call parquet_string_column_append_values(str, values(1:n))
     end subroutine append_flat_strings
     !
     !> Appends rows to a PK_STRING column. `values` is an ARRAY, so trailing blanks are trimmed --
@@ -264,7 +264,7 @@ contains
         n = size(values, kind=int64)
         if (n == 0_int64) return
         ! One bulk append rather than n x %append_string, for the reason refill_string_store gives.
-        call self%str%append_values(values)
+        call parquet_string_column_append_values(self%str, values)
         self%nrows = self%nrows + n
     end procedure append_values_str
     !

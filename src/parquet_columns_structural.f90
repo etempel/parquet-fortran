@@ -183,7 +183,7 @@ contains
             ! The string store indexes by ELEMENT, not by row (RF6), so a width-w column of n rows
             ! needs n*w elements reserved. Characters are left to grow on their own: how many bytes
             ! n rows will occupy is not knowable from a row count.
-            call self%str%reserve(n*int(self%width, int64), 0_int64)
+            call parquet_string_column_reserve(self%str, n*int(self%width, int64), 0_int64)
             return
         end if
         call ensure_capacity(self, n)
@@ -201,10 +201,10 @@ contains
             ! Two independent buffers carry slack in a string store -- the offsets array and the
             ! byte payload -- and either alone means there is something to release.
             if (present(released)) then
-                released = self%str%capacity() > self%str%size() .or. &
-                    self%str%character_capacity() > self%str%character_size()
+                released = parquet_string_column_capacity(self%str) > parquet_string_column_size(self%str) .or. &
+                    parquet_string_column_character_capacity(self%str) > parquet_string_column_character_size(self%str)
             end if
-            call self%str%shrink_to_fit()
+            call parquet_string_column_shrink_to_fit(self%str)
             return
         end if
         if (present(released)) released = self%cap > self%nrows
@@ -360,7 +360,7 @@ contains
         end do
         if (is_string_kind(self%kind)) then
             call expand_row_mask(keep, int(self%width, int64), elem_keep)
-            call self%str%delete_by_mask(elem_keep)
+            call parquet_string_column_delete_by_mask(self%str, elem_keep)
         else
             call gather_storage(self, idx(1:kept))
         end if
@@ -435,7 +435,7 @@ contains
             ! shape delete_by_mask also uses -- so for an EMPTY selection it hands back one
             ! uninitialized entry. reindex never sees that (a zero-row column returns before the
             ! call), but a gather legitimately can: %top_n(keys, 0) empties a table that has rows.
-            call self%str%gather(elem_idx(1:m*int(self%width, int64)))
+            call parquet_string_column_gather(self%str, elem_idx(1:m*int(self%width, int64)))
         else
             call gather_storage(self, idx)
         end if
@@ -490,9 +490,9 @@ contains
             ! reindex has to say so here as well -- otherwise a string column keeps paying the very
             ! scan this path exists to skip, over width*nrows elements rather than nrows.
             if (trusted) then
-                call self%str%reindex_trusted(elem_perm)
+                call parquet_string_column_reindex_trusted(self%str, elem_perm)
             else
-                call self%str%reindex(elem_perm)
+                call parquet_string_column_reindex(self%str, elem_perm)
             end if
         else
             call gather_storage(self, perm)
@@ -528,7 +528,7 @@ contains
         integer(int64), intent(in) :: n              !! number of rows to add.
         if (n <= 0_int64) return
         if (is_string_kind(self%kind)) then
-            call self%str%append_nulls(n*int(self%width, int64))
+            call parquet_string_column_append_nulls(self%str, n*int(self%width, int64))
             self%nrows = self%nrows + n
         else
             call grow_storage(self, n)

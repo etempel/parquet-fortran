@@ -39,7 +39,7 @@ contains
         res = .false.
         if (self%nrows <= 0_int64) return
         if (is_string_kind(self%kind)) then
-            if (allocated(self%str)) res = self%str%null_count() > 0_int64
+            if (allocated(self%str)) res = parquet_string_column_null_count(self%str) > 0_int64
             return
         end if
         if (is_temporal_kind(self%kind)) then
@@ -85,11 +85,11 @@ contains
         case (PK_STRING, PK_STRING_VEC)
             if (.not. allocated(col%str)) return
             if (col%kind == PK_STRING) then
-                res = col%str%is_null(i)
+                res = parquet_string_column_is_null(col%str, i)
             else
                 base = (i - 1_int64)*w
                 do e = 1_int64, w
-                    if (col%str%is_null(base + e)) then
+                    if (parquet_string_column_is_null(col%str, base + e)) then
                         res = .true.
                         return
                     end if
@@ -159,7 +159,7 @@ contains
         select case (col%kind)
         case (PK_STRING, PK_STRING_VEC)
             if (.not. allocated(col%str)) return
-            res = col%str%is_null((i - 1_int64)*w + e)
+            res = parquet_string_column_is_null(col%str, (i - 1_int64)*w + e)
         case (PK_DATE)
             res = col%dt(i)%is_null()
         case (PK_TIME)
@@ -255,7 +255,7 @@ contains
             do i = 1_int64, n
                 base = (i - 1_int64)*w
                 do e = 1_int64, w
-                    if (self%str%is_null(base + e)) then
+                    if (parquet_string_column_is_null(self%str, base + e)) then
                         valid(i) = .false.
                         exit
                     end if
@@ -342,7 +342,7 @@ contains
             do i = 1_int64, n
                 base = (i - 1_int64)*w
                 do e = 1_int64, w
-                    valid(e, i) = .not. self%str%is_null(base + e)
+                    valid(e, i) = .not. parquet_string_column_is_null(self%str, base + e)
                 end do
             end do
             return
@@ -544,11 +544,11 @@ contains
         w = int(col%width, int64)
         select case (col%kind)
         case (PK_STRING)
-            call col%str%set_null(i)
+            call parquet_string_column_set_null(col%str, i)
         case (PK_STRING_VEC)
             base = (i - 1_int64)*w
             do e = 1_int64, w
-                call col%str%set_null(base + e)
+                call parquet_string_column_set_null(col%str, base + e)
             end do
         case (PK_DATE)
             call col%dt(i)%set_null()
@@ -604,7 +604,7 @@ contains
         flat = (i - 1_int64)*w + e
         select case (col%kind)
         case (PK_STRING, PK_STRING_VEC)
-            call col%str%set_null(flat)
+            call parquet_string_column_set_null(col%str, flat)
         case (PK_DATE)
             call col%dt(i)%set_null()
             col%nulls_dirty = .true.
@@ -652,11 +652,11 @@ contains
         w = int(col%width, int64)
         select case (col%kind)
         case (PK_STRING)
-            call col%str%set(i, "")
+            call parquet_string_column_set(col%str, i, "")
         case (PK_STRING_VEC)
             base = (i - 1_int64)*w
             do e = 1_int64, w
-                call col%str%set(base + e, "")
+                call parquet_string_column_set(col%str, base + e, "")
             end do
         case (PK_DATE, PK_TIME, PK_TIMESTAMP, PK_DATE_VEC, PK_TIME_VEC, PK_TIMESTAMP_VEC)
             error stop EP//"clear_null: a temporal element becomes valid by writing a value to it"
@@ -691,7 +691,7 @@ contains
         flat = (i - 1_int64)*w + e
         select case (col%kind)
         case (PK_STRING, PK_STRING_VEC)
-            call col%str%set(flat, "")
+            call parquet_string_column_set(col%str, flat, "")
         case (PK_DATE, PK_TIME, PK_TIMESTAMP, PK_DATE_VEC, PK_TIME_VEC, PK_TIMESTAMP_VEC)
             error stop EP//"clear_null: a temporal element becomes valid by writing a value to it"
         case (PK_NONE)
@@ -744,7 +744,7 @@ contains
         res = .false.
         if (col%nrows <= 0_int64) return
         if (is_string_kind(col%kind)) then
-            if (allocated(col%str)) res = col%str%null_count() > 0_int64
+            if (allocated(col%str)) res = parquet_string_column_null_count(col%str) > 0_int64
             return
         end if
         if (is_temporal_kind(col%kind)) then

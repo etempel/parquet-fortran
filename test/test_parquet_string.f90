@@ -89,7 +89,9 @@ contains
             new_unittest("comparison orders a trailing byte below a blank correctly", &
                 test_compare_trailing_byte_below_blank), &
             new_unittest("copy_buffers exports the offsets and payload, empty column included", &
-                test_copy_buffers) &
+                test_copy_buffers), &
+            new_unittest("every typed parquet_string_column_* form agrees with its own binding", &
+                test_typed_tier_agrees_with_bindings) &
             ]
     end subroutine collect_tests_parquet_string
     !
@@ -2250,6 +2252,161 @@ contains
             "an empty column must still write its leading zero offset, whether or not it ever " // &
             "allocated an offsets array")
     end subroutine test_copy_buffers
+    !
+
+    !> **Every `parquet_string_column_*` procedure and the binding of the same name must be one
+    !! implementation, not two.**
+    !!
+    !! Each binding is now a one-line forwarder onto the typed form, which is what keeps ifx from
+    !! building a runtime type descriptor in a caller's prologue when `parquet_columns` reaches a
+    !! column's `str` component (feature_ifx.md; `check_no_type_bound_string_column_access` is the
+    !! static half of the guard). A forwarder is exactly the shape that can be miswired without
+    !! failing anything: swap two arguments of the same type, drop an `optional`, or forward to the
+    !! wrong kind specific, and the code still compiles.
+    !!
+    !! **What makes this a test rather than a restatement of the forwarder** is that it drives both
+    !! halves on ONE column and compares them, on a fixture built to the project's own rule --
+    !! shortest element first, a null present, and row-distinct values, so a length taken from the
+    !! first element and a swapped index are both visible. The mutators are asserted by their
+    !! EFFECT: each is applied through the typed form and then through the binding, and the two
+    !! columns must agree element for element.
+    subroutine test_typed_tier_agrees_with_bindings(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: col, a, b, src
+        character(len=:), allocatable :: s1, s2
+        character(len=8) :: d1, d2
+        integer(int64) :: i
+        logical :: same
+        !
+        call seed_agreement_column(col)
+        !
+        ! ---- Queries: same column, both routes, element by element. ----
+        same = .true.
+        do i = 1_int64, col%size()
+            if (col%is_null(i) .neqv. parquet_string_column_is_null(col, i)) same = .false.
+            call col%get(i, s1, allow_null=.true.)
+            call parquet_string_column_get(col, i, s2, allow_null=.true.)
+            if (s1 /= s2) same = .false.
+            call col%copy_to(i, d1, allow_null=.true.)
+            call parquet_string_column_copy_to(col, i, d2, allow_null=.true.)
+            if (d1 /= d2) same = .false.
+        end do
+        call check(error, same, "the typed is_null/get/copy_to must answer as their bindings do")
+        if (allocated(error)) return
+        call check(error, col%size() == parquet_string_column_size(col), &
+            "the typed size must answer as %size() does")
+        if (allocated(error)) return
+        call check(error, col%null_count() == parquet_string_column_null_count(col), &
+            "the typed null_count must answer as %null_count() does")
+        if (allocated(error)) return
+        call check(error, col%capacity() == parquet_string_column_capacity(col), &
+            "the typed capacity must answer as %capacity() does")
+        if (allocated(error)) return
+        call check(error, col%character_size() == parquet_string_column_character_size(col), &
+            "the typed character_size must answer as %character_size() does")
+        if (allocated(error)) return
+        call check(error, col%character_capacity() == parquet_string_column_character_capacity(col), &
+            "the typed character_capacity must answer as %character_capacity() does")
+        if (allocated(error)) return
+        call check(error, col%has_validity() .eqv. parquet_string_column_has_validity(col), &
+            "the typed has_validity must answer as %has_validity() does")
+        if (allocated(error)) return
+        !
+        ! ---- Mutators: two identical columns, one per route, compared afterwards. ----
+        call seed_agreement_column(a)
+        call seed_agreement_column(b)
+        call a%set(2_int64, "REPLACED")
+        call parquet_string_column_set(b, 2_int64, "REPLACED")
+        call a%set_null(3_int64)
+        call parquet_string_column_set_null(b, 3_int64)
+        call a%append_null()
+        call parquet_string_column_append_null(b)
+        call a%append_nulls(2_int64)
+        call parquet_string_column_append_nulls(b, 2_int64)
+        call a%append_values(["yy", "z "])
+        call parquet_string_column_append_values(b, ["yy", "z "])
+        call seed_agreement_column(src)
+        call a%append_column(src)
+        call parquet_string_column_append_column(b, src)
+        call a%append_from(src, 2_int64)
+        call parquet_string_column_append_from(b, src, 2_int64)
+        call a%reserve(64_int64, 512_int64)
+        call parquet_string_column_reserve(b, 64_int64, 512_int64)
+        call a%reserve_validity()
+        call parquet_string_column_reserve_validity(b)
+        call a%shrink_to_fit()
+        call parquet_string_column_shrink_to_fit(b)
+        call check_columns_agree(error, a, b, "set/set_null/append_*/reserve/shrink_to_fit")
+        if (allocated(error)) return
+        !
+        ! ---- The reordering family, on its own pair. ----
+        call seed_agreement_column(a)
+        call seed_agreement_column(b)
+        call a%reindex([5_int64, 4_int64, 3_int64, 2_int64, 1_int64])
+        call parquet_string_column_reindex(b, [5_int64, 4_int64, 3_int64, 2_int64, 1_int64])
+        call check_columns_agree(error, a, b, "reindex")
+        if (allocated(error)) return
+        call a%reindex_trusted([2_int64, 1_int64, 4_int64, 3_int64, 5_int64])
+        call parquet_string_column_reindex_trusted(b, [2_int64, 1_int64, 4_int64, 3_int64, 5_int64])
+        call check_columns_agree(error, a, b, "reindex_trusted")
+        if (allocated(error)) return
+        call a%gather([3_int64, 3_int64, 1_int64])
+        call parquet_string_column_gather(b, [3_int64, 3_int64, 1_int64])
+        call check_columns_agree(error, a, b, "gather")
+        if (allocated(error)) return
+        !
+        call seed_agreement_column(a)
+        call seed_agreement_column(b)
+        call a%delete_by_mask([.true., .false., .true., .false., .true.])
+        call parquet_string_column_delete_by_mask(b, [.true., .false., .true., .false., .true.])
+        call check_columns_agree(error, a, b, "delete_by_mask")
+        if (allocated(error)) return
+        !
+        call a%clear()
+        call parquet_string_column_clear(b)
+        call check_columns_agree(error, a, b, "clear")
+    end subroutine test_typed_tier_agrees_with_bindings
+    !
+    !> The fixture both routes above are driven on: five elements, SHORTEST FIRST (so a length
+    !! derived from element 1 truncates something), row-distinct values (so a swapped index shows),
+    !! and one null (so the validity half is exercised at all).
+    subroutine seed_agreement_column(col)
+        type(parquet_string_column), intent(out) :: col !! the seeded column.
+        call col%append_string("a")
+        call col%append_string("bb")
+        call col%append_null()
+        call col%append_string("dddd")
+        call col%append_string("eeeeeeee")
+    end subroutine seed_agreement_column
+    !
+    !> Fails unless two columns hold the same elements, null states and counts.
+    subroutine check_columns_agree(error, a, b, what)
+        type(error_type), allocatable, intent(out) :: error !! set when they disagree.
+        type(parquet_string_column), intent(in) :: a        !! the binding-driven column.
+        type(parquet_string_column), intent(in) :: b        !! the typed-form-driven column.
+        character(len=*), intent(in) :: what                !! the family being compared.
+        character(len=:), allocatable :: sa, sb
+        integer(int64) :: i
+        logical :: same
+        !
+        same = a%size() == b%size() .and. a%null_count() == b%null_count() &
+            .and. a%character_size() == b%character_size()
+        if (same) then
+            do i = 1_int64, a%size()
+                if (a%is_null(i) .neqv. b%is_null(i)) then
+                    same = .false.
+                    exit
+                end if
+                call a%get(i, sa, allow_null=.true.)
+                call b%get(i, sb, allow_null=.true.)
+                if (sa /= sb) then
+                    same = .false.
+                    exit
+                end if
+            end do
+        end if
+        call check(error, same, "the typed form of "//what//" must leave the same column as the binding")
+    end subroutine check_columns_agree
     !
 
 end module test_parquet_string

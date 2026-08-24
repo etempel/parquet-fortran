@@ -330,6 +330,103 @@ module parquet_strings
         !     iteration, so `h = col%view(i)` in a user loop would pay for it on every element.
     end type parquet_string
     !
+    ! ---- The TYPED (non-polymorphic) tier: `parquet_string_column_*` (feature_ifx.md) ----
+    !
+    ! Every name below is the `type(parquet_string_column)`-dummy IMPLEMENTATION of the like-named
+    ! binding above, which is now a one-line forwarder onto it. `parquet_columns` calls these and
+    ! never `%str%<binding>(...)`: passing a `type(parquet_string_column)` actual (the `str`
+    ! component of a `parquet_column`) to a `class` dummy makes ifx build a runtime type descriptor
+    ! -- one record per allocatable component, 24 stores -- in the CALLER's prologue,
+    ! unconditionally, ahead of any branch. Those stores land in STATIC storage, so every thread
+    ! writes the same cache lines and a per-element scan collapses under OpenMP: measured at
+    ! 38.9 s against 0.26 s for one 200000-row null scan on 384 threads.
+    !
+    ! The generics are public so that `parquet_columns` can reach them; the specifics beneath them
+    ! stay private, and `src/parquet.f90` privatises every generic again, so the surface a
+    ! `use parquet` program sees is unchanged. `check_no_type_bound_string_column_access`
+    ! (tools/check_source_conventions.py) is the enforcement.
+    !
+    public :: parquet_string_column_clear
+    public :: parquet_string_column_shrink_to_fit
+    public :: parquet_string_column_capacity
+    public :: parquet_string_column_character_capacity
+    public :: parquet_string_column_size
+    public :: parquet_string_column_character_size
+    public :: parquet_string_column_null_count
+    public :: parquet_string_column_has_validity
+    public :: parquet_string_column_reserve_validity
+    public :: parquet_string_column_append_column
+    public :: parquet_string_column_append_null
+    public :: parquet_string_column_append_values
+    public :: parquet_string_column_delete_by_mask
+    public :: parquet_string_column_reserve
+    public :: parquet_string_column_get
+    public :: parquet_string_column_copy_to
+    public :: parquet_string_column_is_null
+    public :: parquet_string_column_append_from
+    public :: parquet_string_column_set
+    public :: parquet_string_column_set_null
+    public :: parquet_string_column_reindex
+    public :: parquet_string_column_reindex_trusted
+    public :: parquet_string_column_gather
+    public :: parquet_string_column_append_nulls
+    !
+    !> Typed form of `%reserve`, generic over an int32 or int64 index/count argument.
+    interface parquet_string_column_reserve
+        module procedure parquet_string_column_reserve_i32
+        module procedure parquet_string_column_reserve_i64
+    end interface parquet_string_column_reserve
+    !> Typed form of `%get`, generic over an int32 or int64 index/count argument.
+    interface parquet_string_column_get
+        module procedure parquet_string_column_get_i32
+        module procedure parquet_string_column_get_i64
+    end interface parquet_string_column_get
+    !> Typed form of `%copy_to`, generic over an int32 or int64 index/count argument.
+    interface parquet_string_column_copy_to
+        module procedure parquet_string_column_copy_to_i32
+        module procedure parquet_string_column_copy_to_i64
+    end interface parquet_string_column_copy_to
+    !> Typed form of `%is_null`, generic over an int32 or int64 index/count argument.
+    interface parquet_string_column_is_null
+        module procedure parquet_string_column_is_null_i32
+        module procedure parquet_string_column_is_null_i64
+    end interface parquet_string_column_is_null
+    !> Typed form of `%append_from`, generic over an int32 or int64 index/count argument.
+    interface parquet_string_column_append_from
+        module procedure parquet_string_column_append_from_i32
+        module procedure parquet_string_column_append_from_i64
+    end interface parquet_string_column_append_from
+    !> Typed form of `%set`, generic over an int32 or int64 index/count argument.
+    interface parquet_string_column_set
+        module procedure parquet_string_column_set_i32
+        module procedure parquet_string_column_set_i64
+    end interface parquet_string_column_set
+    !> Typed form of `%set_null`, generic over an int32 or int64 index/count argument.
+    interface parquet_string_column_set_null
+        module procedure parquet_string_column_set_null_i32
+        module procedure parquet_string_column_set_null_i64
+    end interface parquet_string_column_set_null
+    !> Typed form of `%reindex`, generic over an int32 or int64 index/count argument.
+    interface parquet_string_column_reindex
+        module procedure parquet_string_column_reindex_i32
+        module procedure parquet_string_column_reindex_i64
+    end interface parquet_string_column_reindex
+    !> Typed form of `%reindex_trusted`, generic over an int32 or int64 index/count argument.
+    interface parquet_string_column_reindex_trusted
+        module procedure parquet_string_column_reindex_trusted_i32
+        module procedure parquet_string_column_reindex_trusted_i64
+    end interface parquet_string_column_reindex_trusted
+    !> Typed form of `%gather`, generic over an int32 or int64 index/count argument.
+    interface parquet_string_column_gather
+        module procedure parquet_string_column_gather_i32
+        module procedure parquet_string_column_gather_i64
+    end interface parquet_string_column_gather
+    !> Typed form of `%append_nulls`, generic over an int32 or int64 index/count argument.
+    interface parquet_string_column_append_nulls
+        module procedure parquet_string_column_append_nulls_i32
+        module procedure parquet_string_column_append_nulls_i64
+    end interface parquet_string_column_append_nulls
+    !
 contains
     !
     ! ==================================================================================
@@ -911,8 +1008,8 @@ contains
     !
     !> Resets the column to an empty state and releases all owned memory (capacity becomes 0).
     !! Invalidates every outstanding handle into this column.
-    subroutine clear(self)
-        class(parquet_string_column), intent(inout) :: self !! the column.
+    subroutine parquet_string_column_clear(self)
+        type(parquet_string_column), intent(inout) :: self !! the column.
         if (allocated(self%offsets)) deallocate(self%offsets)
         if (allocated(self%data)) deallocate(self%data)
         if (allocated(self%validity)) deallocate(self%validity)
@@ -920,31 +1017,56 @@ contains
         self%nchars = 0
         self%n_null = 0
         self%has_nulls = .false.
+    end subroutine parquet_string_column_clear
+    !
+    !> Binding form of `parquet_string_column_clear`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
+    subroutine clear(self)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        call parquet_string_column_clear(self)
     end subroutine clear
     !
     !> int32 specific of reserve; see the reserve generic.
+    subroutine parquet_string_column_reserve_i32(self, n_rows, n_characters)
+        type(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int32), intent(in) :: n_rows                !! required row capacity.
+        integer(int32), intent(in) :: n_characters          !! required character capacity (bytes).
+        call parquet_string_column_reserve_i64(self, int(n_rows, int64), int(n_characters, int64))
+    end subroutine parquet_string_column_reserve_i32
+    !
+    !> Binding form of `parquet_string_column_reserve_i32`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
     subroutine reserve_i32(self, n_rows, n_characters)
         class(parquet_string_column), intent(inout) :: self !! the column.
         integer(int32), intent(in) :: n_rows                !! required row capacity.
         integer(int32), intent(in) :: n_characters          !! required character capacity (bytes).
-        call self%reserve_i64(int(n_rows, int64), int(n_characters, int64))
+        call parquet_string_column_reserve_i32(self, n_rows, n_characters)
     end subroutine reserve_i32
     !
     !> int64 specific of reserve: grows capacity to hold at least `n_rows`/`n_characters`
     !! (never shrinks; pass 0 for "no requirement on this dimension").
-    subroutine reserve_i64(self, n_rows, n_characters)
-        class(parquet_string_column), intent(inout) :: self !! the column.
+    subroutine parquet_string_column_reserve_i64(self, n_rows, n_characters)
+        type(parquet_string_column), intent(inout) :: self !! the column.
         integer(int64), intent(in) :: n_rows                !! required row capacity.
         integer(int64), intent(in) :: n_characters          !! required character capacity (bytes).
         if (n_rows > 0) call ensure_offsets_cap(self, max(n_rows, self%nrows))
         if (n_characters > 0) call ensure_data_cap(self, max(n_characters, self%nchars))
         if (self%has_nulls .and. n_rows > 0) call ensure_validity_cap(self, max(n_rows, self%nrows))
+    end subroutine parquet_string_column_reserve_i64
+    !
+    !> Binding form of `parquet_string_column_reserve_i64`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
+    subroutine reserve_i64(self, n_rows, n_characters)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int64), intent(in) :: n_rows                !! required row capacity.
+        integer(int64), intent(in) :: n_characters          !! required character capacity (bytes).
+        call parquet_string_column_reserve_i64(self, n_rows, n_characters)
     end subroutine reserve_i64
     !
     !> Reallocates the buffers down to exactly the current size (frees unused capacity).
     !! Invalidates every outstanding handle into this column.
-    subroutine shrink_to_fit(self)
-        class(parquet_string_column), intent(inout) :: self !! the column.
+    subroutine parquet_string_column_shrink_to_fit(self)
+        type(parquet_string_column), intent(inout) :: self !! the column.
         integer(int64), allocatable :: to(:)
         character(len=1), allocatable :: td(:)
         integer(int8), allocatable :: tv(:)
@@ -973,38 +1095,73 @@ contains
                 call move_alloc(tv, self%validity)
             end if
         end if
+    end subroutine parquet_string_column_shrink_to_fit
+    !
+    !> Binding form of `parquet_string_column_shrink_to_fit`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
+    subroutine shrink_to_fit(self)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        call parquet_string_column_shrink_to_fit(self)
     end subroutine shrink_to_fit
     !
     !> Returns the current row capacity.
+    integer(int64) function parquet_string_column_capacity(self)
+        type(parquet_string_column), intent(in) :: self !! the column.
+        if (allocated(self%offsets)) then
+            parquet_string_column_capacity = size(self%offsets, kind=int64) - 1_int64
+        else
+            parquet_string_column_capacity = 0_int64
+        end if
+    end function parquet_string_column_capacity
+    !
+    !> Binding form of `parquet_string_column_capacity`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
     integer(int64) function capacity(self)
         class(parquet_string_column), intent(in) :: self !! the column.
-        if (allocated(self%offsets)) then
-            capacity = size(self%offsets, kind=int64) - 1_int64
-        else
-            capacity = 0_int64
-        end if
+        capacity = parquet_string_column_capacity(self)
     end function capacity
     !
     !> Returns the current character-buffer capacity in bytes.
+    integer(int64) function parquet_string_column_character_capacity(self)
+        type(parquet_string_column), intent(in) :: self !! the column.
+        if (allocated(self%data)) then
+            parquet_string_column_character_capacity = size(self%data, kind=int64)
+        else
+            parquet_string_column_character_capacity = 0_int64
+        end if
+    end function parquet_string_column_character_capacity
+    !
+    !> Binding form of `parquet_string_column_character_capacity`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
     integer(int64) function character_capacity(self)
         class(parquet_string_column), intent(in) :: self !! the column.
-        if (allocated(self%data)) then
-            character_capacity = size(self%data, kind=int64)
-        else
-            character_capacity = 0_int64
-        end if
+        character_capacity = parquet_string_column_character_capacity(self)
     end function character_capacity
     !
     !> Returns the number of elements stored.
+    integer(int64) function parquet_string_column_size(self)
+        type(parquet_string_column), intent(in) :: self !! the column.
+        parquet_string_column_size = self%nrows
+    end function parquet_string_column_size
+    !
+    !> Binding form of `parquet_string_column_size`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
     integer(int64) function col_size(self)
         class(parquet_string_column), intent(in) :: self !! the column.
-        col_size = self%nrows
+        col_size = parquet_string_column_size(self)
     end function col_size
     !
     !> Returns the total number of characters stored across all elements.
+    integer(int64) function parquet_string_column_character_size(self)
+        type(parquet_string_column), intent(in) :: self !! the column.
+        parquet_string_column_character_size = self%nchars
+    end function parquet_string_column_character_size
+    !
+    !> Binding form of `parquet_string_column_character_size`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
     integer(int64) function character_size(self)
         class(parquet_string_column), intent(in) :: self !! the column.
-        character_size = self%nchars
+        character_size = parquet_string_column_character_size(self)
     end function character_size
     !
     !> Returns .true. when the column holds no rows.
@@ -1014,9 +1171,16 @@ contains
     end function col_empty
     !
     !> Returns the number of null elements.
+    integer(int64) function parquet_string_column_null_count(self)
+        type(parquet_string_column), intent(in) :: self !! the column.
+        parquet_string_column_null_count = self%n_null
+    end function parquet_string_column_null_count
+    !
+    !> Binding form of `parquet_string_column_null_count`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
     integer(int64) function null_count(self)
         class(parquet_string_column), intent(in) :: self !! the column.
-        null_count = self%n_null
+        null_count = parquet_string_column_null_count(self)
     end function null_count
     !
     !> Whether the validity bitmap has been materialized yet.
@@ -1025,9 +1189,16 @@ contains
     !! time an element is actually nulled. So this answers "would nulling an element allocate?",
     !! which is what a caller about to null elements from several threads needs to know -- see
     !! `reserve_validity`.
+    logical function parquet_string_column_has_validity(self)
+        type(parquet_string_column), intent(in) :: self !! the column.
+        parquet_string_column_has_validity = allocated(self%validity)
+    end function parquet_string_column_has_validity
+    !
+    !> Binding form of `parquet_string_column_has_validity`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
     logical function has_validity(self)
         class(parquet_string_column), intent(in) :: self !! the column.
-        has_validity = allocated(self%validity)
+        has_validity = parquet_string_column_has_validity(self)
     end function has_validity
     !
     !> Materializes the validity bitmap now, with every element still valid.
@@ -1040,10 +1211,17 @@ contains
     !!
     !! Idempotent: a column that already has a bitmap is untouched, and a zero-row column still
     !! gets the minimum allocation, so a later append has nothing to grow from scratch either.
-    subroutine reserve_validity(self)
-        class(parquet_string_column), intent(inout) :: self !! the column.
+    subroutine parquet_string_column_reserve_validity(self)
+        type(parquet_string_column), intent(inout) :: self !! the column.
         call ensure_validity_cap(self, max(self%nrows, 1_int64))
         self%has_nulls = .true.
+    end subroutine parquet_string_column_reserve_validity
+    !
+    !> Binding form of `parquet_string_column_reserve_validity`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
+    subroutine reserve_validity(self)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        call parquet_string_column_reserve_validity(self)
     end subroutine reserve_validity
     !
     !> Returns the total bytes of allocated buffers (offsets + data + validity + object overhead).
@@ -1150,13 +1328,24 @@ contains
     end function length_i64
     !
     !> int32 specific of get; see the get generic.
+    subroutine parquet_string_column_get_i32(self, i, res, null_value, allow_null)
+        type(parquet_string_column), intent(in) :: self !! the column.
+        integer(int32), intent(in) :: i                  !! 1-based element index.
+        character(len=:), allocatable, intent(out) :: res !! element i (unallocated if null and allowed).
+        character(len=*), intent(in), optional :: null_value !! substitute returned for a null element.
+        logical, intent(in), optional :: allow_null           !! .true. => suppress abort, return empty string for a null.
+        call parquet_string_column_get_i64(self, int(i, int64), res, null_value, allow_null)
+    end subroutine parquet_string_column_get_i32
+    !
+    !> Binding form of `parquet_string_column_get_i32`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
     subroutine get_i32(self, i, res, null_value, allow_null)
         class(parquet_string_column), intent(in) :: self !! the column.
         integer(int32), intent(in) :: i                  !! 1-based element index.
         character(len=:), allocatable, intent(out) :: res !! element i (unallocated if null and allowed).
         character(len=*), intent(in), optional :: null_value !! substitute returned for a null element.
         logical, intent(in), optional :: allow_null           !! .true. => suppress abort, return empty string for a null.
-        call self%get_i64(int(i, int64), res, null_value, allow_null)
+        call parquet_string_column_get_i32(self, i, res, null_value, allow_null)
     end subroutine get_i32
     !
     !> int64 specific of get: writes element i into `res`. A null element error stops by
@@ -1165,8 +1354,8 @@ contains
     !! `null_value` takes precedence. A subroutine (not a function) so this never returns
     !! `character(len=:), allocatable` as a function result -- see "Build and compiler notes" in
     !! CLAUDE.md for why.
-    subroutine get_i64(self, i, res, null_value, allow_null)
-        class(parquet_string_column), intent(in) :: self !! the column.
+    subroutine parquet_string_column_get_i64(self, i, res, null_value, allow_null)
+        type(parquet_string_column), intent(in) :: self !! the column.
         integer(int64), intent(in) :: i                  !! 1-based element index.
         character(len=:), allocatable, intent(out) :: res !! element i (unallocated if null and allowed).
         character(len=*), intent(in), optional :: null_value !! substitute returned for a null element.
@@ -1191,15 +1380,36 @@ contains
         elen = b - a + 1_int64
         allocate(character(len=elen) :: res)
         if (elen > 0) res = transfer(self%data(a:b), res)
+    end subroutine parquet_string_column_get_i64
+    !
+    !> Binding form of `parquet_string_column_get_i64`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
+    subroutine get_i64(self, i, res, null_value, allow_null)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        integer(int64), intent(in) :: i                  !! 1-based element index.
+        character(len=:), allocatable, intent(out) :: res !! element i (unallocated if null and allowed).
+        character(len=*), intent(in), optional :: null_value !! substitute returned for a null element.
+        logical, intent(in), optional :: allow_null           !! .true. => suppress abort, return empty string for a null.
+        call parquet_string_column_get_i64(self, i, res, null_value, allow_null)
     end subroutine get_i64
     !
     !> int32 specific of copy_to; see the copy_to generic.
+    subroutine parquet_string_column_copy_to_i32(self, i, dest, allow_null)
+        type(parquet_string_column), intent(in) :: self !! the column.
+        integer(int32), intent(in) :: i                  !! 1-based element index.
+        character(len=*), intent(out) :: dest            !! receives the element, blank-padded.
+        logical, intent(in), optional :: allow_null      !! .true. => a null yields blanks.
+        call parquet_string_column_copy_to_i64(self, int(i, int64), dest, allow_null)
+    end subroutine parquet_string_column_copy_to_i32
+    !
+    !> Binding form of `parquet_string_column_copy_to_i32`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
     subroutine copy_to_i32(self, i, dest, allow_null)
         class(parquet_string_column), intent(in) :: self !! the column.
         integer(int32), intent(in) :: i                  !! 1-based element index.
         character(len=*), intent(out) :: dest            !! receives the element, blank-padded.
         logical, intent(in), optional :: allow_null      !! .true. => a null yields blanks.
-        call self%copy_to_i64(int(i, int64), dest, allow_null)
+        call parquet_string_column_copy_to_i32(self, i, dest, allow_null)
     end subroutine copy_to_i32
     !
     !> int64 specific of copy_to: copies element `i`'s bytes into `dest`, blank-padding the rest.
@@ -1214,8 +1424,8 @@ contains
     !! is truncated rather than aborting — which is what `dest = s` would have done. A caller that
     !! must not truncate sizes `dest` from `%length(i)` or `%max_length()` first, both of which
     !! allocate nothing either.
-    subroutine copy_to_i64(self, i, dest, allow_null)
-        class(parquet_string_column), intent(in) :: self !! the column.
+    subroutine parquet_string_column_copy_to_i64(self, i, dest, allow_null)
+        type(parquet_string_column), intent(in) :: self !! the column.
         integer(int64), intent(in) :: i                  !! 1-based element index.
         character(len=*), intent(out) :: dest            !! receives the element, blank-padded.
         logical, intent(in), optional :: allow_null      !! .true. => a null yields blanks.
@@ -1234,6 +1444,16 @@ contains
         n = min(elen, int(len(dest), int64))
         if (n > 0_int64) dest(1:n) = transfer(self%data(a:a+n-1_int64), dest(1:n))
         if (n < int(len(dest), int64)) dest(n+1_int64:) = ""
+    end subroutine parquet_string_column_copy_to_i64
+    !
+    !> Binding form of `parquet_string_column_copy_to_i64`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
+    subroutine copy_to_i64(self, i, dest, allow_null)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        integer(int64), intent(in) :: i                  !! 1-based element index.
+        character(len=*), intent(out) :: dest            !! receives the element, blank-padded.
+        logical, intent(in), optional :: allow_null      !! .true. => a null yields blanks.
+        call parquet_string_column_copy_to_i64(self, i, dest, allow_null)
     end subroutine copy_to_i64
     !
     !> int32 specific of view; see the view generic.
@@ -1311,18 +1531,34 @@ contains
     end subroutine view_slice_i64
     !
     !> int32 specific of is_null; see the is_null generic.
+    logical function parquet_string_column_is_null_i32(self, i) result(res)
+        type(parquet_string_column), intent(in) :: self !! the column.
+        integer(int32), intent(in) :: i                  !! 1-based element index.
+        res = parquet_string_column_is_null_i64(self, int(i, int64))
+    end function parquet_string_column_is_null_i32
+    !
+    !> Binding form of `parquet_string_column_is_null_i32`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
     logical function is_null_i32(self, i) result(res)
         class(parquet_string_column), intent(in) :: self !! the column.
         integer(int32), intent(in) :: i                  !! 1-based element index.
-        res = self%is_null_i64(int(i, int64))
+        res = parquet_string_column_is_null_i32(self, i)
     end function is_null_i32
     !
     !> int64 specific of is_null: whether element i is null (always safe -- the primary null guard).
-    logical function is_null_i64(self, i) result(res)
-        class(parquet_string_column), intent(in) :: self !! the column.
+    logical function parquet_string_column_is_null_i64(self, i) result(res)
+        type(parquet_string_column), intent(in) :: self !! the column.
         integer(int64), intent(in) :: i                  !! 1-based element index.
         call check_index(self, i, "is_null")
         res = .not. bit_valid(self, i)
+    end function parquet_string_column_is_null_i64
+    !
+    !> Binding form of `parquet_string_column_is_null_i64`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
+    logical function is_null_i64(self, i) result(res)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        integer(int64), intent(in) :: i                  !! 1-based element index.
+        res = parquet_string_column_is_null_i64(self, i)
     end function is_null_i64
     !
     !> int32 specific of is_empty; see the is_empty generic.
@@ -1386,8 +1622,8 @@ contains
     end subroutine append_string
     !
     !> Appends a null element to the end of the column (a zero-width, invalid slot).
-    subroutine append_null(self)
-        class(parquet_string_column), intent(inout) :: self !! the column.
+    subroutine parquet_string_column_append_null(self)
+        type(parquet_string_column), intent(inout) :: self !! the column.
         call ensure_offsets_cap(self, self%nrows + 1_int64)
         self%offsets(self%nrows+2) = self%nchars
         self%has_nulls = .true.
@@ -1395,12 +1631,19 @@ contains
         call set_bit_null(self, self%nrows + 1_int64)
         self%n_null = self%n_null + 1_int64
         self%nrows = self%nrows + 1_int64
+    end subroutine parquet_string_column_append_null
+    !
+    !> Binding form of `parquet_string_column_append_null`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
+    subroutine append_null(self)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        call parquet_string_column_append_null(self)
     end subroutine append_null
     !
     !> Appends all elements (payload and nulls) from another column. Bulk-copies the payload and
     !! offsets; never re-trims. `other` is left unchanged.
-    subroutine append_column(self, other)
-        class(parquet_string_column), intent(inout) :: self !! the destination column.
+    subroutine parquet_string_column_append_column(self, other)
+        type(parquet_string_column), intent(inout) :: self !! the destination column.
         type(parquet_string_column), intent(in) :: other    !! the source column.
         integer(int64) :: base, k, nn
         if (other%nrows == 0) return
@@ -1426,14 +1669,31 @@ contains
         end if
         self%nrows = self%nrows + other%nrows
         self%nchars = self%nchars + other%nchars
+    end subroutine parquet_string_column_append_column
+    !
+    !> Binding form of `parquet_string_column_append_column`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
+    subroutine append_column(self, other)
+        class(parquet_string_column), intent(inout) :: self !! the destination column.
+        type(parquet_string_column), intent(in) :: other    !! the source column.
+        call parquet_string_column_append_column(self, other)
     end subroutine append_column
     !
     !> int32 specific of append_from; see the append_from generic.
+    subroutine parquet_string_column_append_from_i32(self, src, i)
+        type(parquet_string_column), intent(inout) :: self !! the destination column.
+        type(parquet_string_column), intent(in) :: src      !! the source column.
+        integer(int32), intent(in) :: i                     !! 1-based source element index.
+        call parquet_string_column_append_from_i64(self, src, int(i, int64))
+    end subroutine parquet_string_column_append_from_i32
+    !
+    !> Binding form of `parquet_string_column_append_from_i32`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
     subroutine append_from_i32(self, src, i)
         class(parquet_string_column), intent(inout) :: self !! the destination column.
         type(parquet_string_column), intent(in) :: src      !! the source column.
         integer(int32), intent(in) :: i                     !! 1-based source element index.
-        call self%append_from_i64(src, int(i, int64))
+        call parquet_string_column_append_from_i32(self, src, i)
     end subroutine append_from_i32
     !
     !> int64 specific of append_from: appends element `i` of `src` to the end of self, **null state
@@ -1450,14 +1710,14 @@ contains
     !! with both an `intent(inout)` and an `intent(in)` dummy of the same call once either is defined
     !! (F2018 15.5.2.13), and neither gfortran nor ifx diagnoses it. Appending a column to itself is
     !! `%append_column(other)`'s job, on a copy.
-    subroutine append_from_i64(self, src, i)
-        class(parquet_string_column), intent(inout) :: self !! the destination column.
+    subroutine parquet_string_column_append_from_i64(self, src, i)
+        type(parquet_string_column), intent(inout) :: self !! the destination column.
         type(parquet_string_column), intent(in) :: src      !! the source column.
         integer(int64), intent(in) :: i                     !! 1-based source element index.
         integer(int64) :: a, b, elen
         call check_index(src, i, "append_from")
         if (.not. bit_valid(src, i)) then
-            call self%append_null()
+            call parquet_string_column_append_null(self)
             return
         end if
         call elem_bounds(src, i, a, b)
@@ -1472,6 +1732,15 @@ contains
         end if
         self%nrows = self%nrows + 1_int64
         self%nchars = self%nchars + elen
+    end subroutine parquet_string_column_append_from_i64
+    !
+    !> Binding form of `parquet_string_column_append_from_i64`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
+    subroutine append_from_i64(self, src, i)
+        class(parquet_string_column), intent(inout) :: self !! the destination column.
+        type(parquet_string_column), intent(in) :: src      !! the source column.
+        integer(int64), intent(in) :: i                     !! 1-based source element index.
+        call parquet_string_column_append_from_i64(self, src, i)
     end subroutine append_from_i64
     !
     !> Clears self, then gathers an array of independently-obtained parquet_string handles into it
@@ -1609,7 +1878,7 @@ contains
     !! deferred-length allocation and free, plus a capacity check on a destination that grew
     !! incrementally. See `feature_risks.md` Risk-60.
     subroutine build_from_fill_serial(self, handles, want)
-        class(parquet_string_column), intent(inout) :: self !! sized and cleared; receives the fill.
+        type(parquet_string_column), intent(inout) :: self !! sized and cleared; receives the fill.
         type(parquet_string), intent(in) :: handles(:)      !! source handles, already validated.
         integer(int64), intent(in) :: want                  !! payload bytes the validation pass summed.
         integer(int64) :: k, m, pos, a, b, elen, idx
@@ -1772,8 +2041,8 @@ contains
     !!
     !! `is_null`, when present, appends those elements as zero-width nulls and ignores their
     !! `values` entry.
-    subroutine append_values(self, values, is_null)
-        class(parquet_string_column), intent(inout) :: self   !! the column, appended to.
+    subroutine parquet_string_column_append_values(self, values, is_null)
+        type(parquet_string_column), intent(inout) :: self   !! the column, appended to.
         character(len=*), intent(in), contiguous :: values(:) !! elements to append; blanks trimmed.
         logical, intent(in), optional :: is_null(:)           !! .true. => append that element as null.
         integer(int64) :: n, k, nchars, nnull, base_rows
@@ -1838,23 +2107,43 @@ contains
         end if
         self%nrows = base_rows + n
         self%nchars = self%nchars + nchars
+    end subroutine parquet_string_column_append_values
+    !
+    !> Binding form of `parquet_string_column_append_values`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
+    subroutine append_values(self, values, is_null)
+        class(parquet_string_column), intent(inout) :: self   !! the column, appended to.
+        character(len=*), intent(in), contiguous :: values(:) !! elements to append; blanks trimmed.
+        logical, intent(in), optional :: is_null(:)           !! .true. => append that element as null.
+        call parquet_string_column_append_values(self, values, is_null)
     end subroutine append_values
     !
     !> int32 specific of set; see the set generic.
+    subroutine parquet_string_column_set_i32(self, i, str, strip, trim)
+        type(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int32), intent(in) :: i                     !! 1-based element index.
+        character(len=*), intent(in) :: str                 !! the replacement string.
+        logical, intent(in), optional :: strip               !! remove leading and trailing blanks.
+        logical, intent(in), optional :: trim                !! remove trailing blanks only.
+        call parquet_string_column_set_i64(self, int(i, int64), str, strip, trim)
+    end subroutine parquet_string_column_set_i32
+    !
+    !> Binding form of `parquet_string_column_set_i32`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
     subroutine set_i32(self, i, str, strip, trim)
         class(parquet_string_column), intent(inout) :: self !! the column.
         integer(int32), intent(in) :: i                     !! 1-based element index.
         character(len=*), intent(in) :: str                 !! the replacement string.
         logical, intent(in), optional :: strip               !! remove leading and trailing blanks.
         logical, intent(in), optional :: trim                !! remove trailing blanks only.
-        call self%set_i64(int(i, int64), str, strip, trim)
+        call parquet_string_column_set_i32(self, i, str, strip, trim)
     end subroutine set_i32
     !
     !> int64 specific of set: replaces the content of element i (clearing its null status).
     !! Same-length replacement is O(length); a different length shifts the payload tail (O(N)).
     !! Same strip/trim options as append_string.
-    subroutine set_i64(self, i, str, strip, trim)
-        class(parquet_string_column), intent(inout) :: self !! the column.
+    subroutine parquet_string_column_set_i64(self, i, str, strip, trim)
+        type(parquet_string_column), intent(inout) :: self !! the column.
         integer(int64), intent(in) :: i                     !! 1-based element index.
         character(len=*), intent(in) :: str                 !! the replacement string.
         logical, intent(in), optional :: strip               !! remove leading and trailing blanks.
@@ -1895,21 +2184,40 @@ contains
             call set_bit_valid(self, i)
             self%n_null = self%n_null - 1_int64
         end if
+    end subroutine parquet_string_column_set_i64
+    !
+    !> Binding form of `parquet_string_column_set_i64`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
+    subroutine set_i64(self, i, str, strip, trim)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int64), intent(in) :: i                     !! 1-based element index.
+        character(len=*), intent(in) :: str                 !! the replacement string.
+        logical, intent(in), optional :: strip               !! remove leading and trailing blanks.
+        logical, intent(in), optional :: trim                !! remove trailing blanks only.
+        call parquet_string_column_set_i64(self, i, str, strip, trim)
     end subroutine set_i64
     !
     !> int32 specific of set_null; see the set_null generic.
+    subroutine parquet_string_column_set_null_i32(self, i)
+        type(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int32), intent(in) :: i                     !! 1-based element index.
+        call parquet_string_column_set_null_i64(self, int(i, int64))
+    end subroutine parquet_string_column_set_null_i32
+    !
+    !> Binding form of `parquet_string_column_set_null_i32`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
     subroutine set_null_i32(self, i)
         class(parquet_string_column), intent(inout) :: self !! the column.
         integer(int32), intent(in) :: i                     !! 1-based element index.
-        call self%set_null_i64(int(i, int64))
+        call parquet_string_column_set_null_i32(self, i)
     end subroutine set_null_i32
     !
     !> int64 specific of set_null: sets element i to null, discarding any existing content (shrinks
     !! its payload span to zero width, shifting the tail left by the same amount set_i64 would for
     !! a same-index replacement with a shorter string). Idempotent: calling this on an already-null
     !! element leaves it null without double-counting null_count().
-    subroutine set_null_i64(self, i)
-        class(parquet_string_column), intent(inout) :: self !! the column.
+    subroutine parquet_string_column_set_null_i64(self, i)
+        type(parquet_string_column), intent(inout) :: self !! the column.
         integer(int64), intent(in) :: i                     !! 1-based element index.
         integer(int64) :: a, b, old_len, j
         logical :: was_null
@@ -1930,6 +2238,14 @@ contains
         call ensure_validity_cap(self, self%nrows)
         call set_bit_null(self, i)
         if (.not. was_null) self%n_null = self%n_null + 1_int64
+    end subroutine parquet_string_column_set_null_i64
+    !
+    !> Binding form of `parquet_string_column_set_null_i64`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
+    subroutine set_null_i64(self, i)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int64), intent(in) :: i                     !! 1-based element index.
+        call parquet_string_column_set_null_i64(self, i)
     end subroutine set_null_i64
     !
     !> int32 specific of erase; see the erase generic.
@@ -1976,10 +2292,18 @@ contains
     end subroutine erase_i64
     !
     !> int32 specific of reindex; see the reindex generic.
+    subroutine parquet_string_column_reindex_i32(self, perm)
+        type(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int32), intent(in) :: perm(:)               !! 1-based permutation of 1..size().
+        call parquet_string_column_reindex_i64(self, int(perm, int64))
+    end subroutine parquet_string_column_reindex_i32
+    !
+    !> Binding form of `parquet_string_column_reindex_i32`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
     subroutine reindex_i32(self, perm)
         class(parquet_string_column), intent(inout) :: self !! the column.
         integer(int32), intent(in) :: perm(:)               !! 1-based permutation of 1..size().
-        call self%reindex_i64(int(perm, int64))
+        call parquet_string_column_reindex_i32(self, perm)
     end subroutine reindex_i32
     !
     !> int64 specific of reindex: reorders every element so that element `k` of the result is the
@@ -1988,8 +2312,8 @@ contains
     !! validated first (length, range, no duplicates), so a bad permutation aborts before any
     !! buffer is touched and the column is left unchanged. The null count is preserved by
     !! construction. Invalidates every outstanding handle into the column.
-    subroutine reindex_i64(self, perm)
-        class(parquet_string_column), intent(inout) :: self !! the column.
+    subroutine parquet_string_column_reindex_i64(self, perm)
+        type(parquet_string_column), intent(inout) :: self !! the column.
         integer(int64), intent(in) :: perm(:)               !! 1-based permutation of 1..size().
         integer(int64) :: n, k, p, word
         integer(int8), allocatable :: seen(:)
@@ -2015,13 +2339,29 @@ contains
         end do
         deallocate(seen)
         call reindex_apply(self, perm)
+    end subroutine parquet_string_column_reindex_i64
+    !
+    !> Binding form of `parquet_string_column_reindex_i64`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
+    subroutine reindex_i64(self, perm)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int64), intent(in) :: perm(:)               !! 1-based permutation of 1..size().
+        call parquet_string_column_reindex_i64(self, perm)
     end subroutine reindex_i64
     !
     !> int32 specific of reindex_trusted; see the reindex_trusted generic.
+    subroutine parquet_string_column_reindex_trusted_i32(self, perm)
+        type(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int32), intent(in) :: perm(:)               !! 1-based permutation of 1..size().
+        call parquet_string_column_reindex_trusted_i64(self, int(perm, int64))
+    end subroutine parquet_string_column_reindex_trusted_i32
+    !
+    !> Binding form of `parquet_string_column_reindex_trusted_i32`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
     subroutine reindex_trusted_i32(self, perm)
         class(parquet_string_column), intent(inout) :: self !! the column.
         integer(int32), intent(in) :: perm(:)               !! 1-based permutation of 1..size().
-        call self%reindex_trusted_i64(int(perm, int64))
+        call parquet_string_column_reindex_trusted_i32(self, perm)
     end subroutine reindex_trusted_i32
     !
     !> int64 specific of reindex_trusted: `reindex` without the O(n) range/duplicate scan, for a
@@ -2032,14 +2372,22 @@ contains
     !! re-validating one permutation once per column) and `pf_permute(..., assume_valid=.true.)`.
     !! A caller who passes a non-permutation gets silently duplicated and dropped elements, so this
     !! is internal plumbing rather than an alternative to `%reindex`.
-    subroutine reindex_trusted_i64(self, perm)
-        class(parquet_string_column), intent(inout) :: self !! the column.
+    subroutine parquet_string_column_reindex_trusted_i64(self, perm)
+        type(parquet_string_column), intent(inout) :: self !! the column.
         integer(int64), intent(in) :: perm(:)               !! 1-based permutation of 1..size().
         if (size(perm, kind=int64) /= self%nrows) then
             error stop EP//"reindex_trusted: permutation length does not match the row count"
         end if
         if (self%nrows == 0_int64) return
         call reindex_apply(self, perm)
+    end subroutine parquet_string_column_reindex_trusted_i64
+    !
+    !> Binding form of `parquet_string_column_reindex_trusted_i64`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
+    subroutine reindex_trusted_i64(self, perm)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int64), intent(in) :: perm(:)               !! 1-based permutation of 1..size().
+        call parquet_string_column_reindex_trusted_i64(self, perm)
     end subroutine reindex_trusted_i64
     !
     !> Rebuilds payload, offsets and validity in the order `perm` gives, for a permutation that has
@@ -2051,7 +2399,7 @@ contains
     !! the reason given at that procedure's own branch: one pass pays one cache miss per element on
     !! the scattered `offsets(perm(k))` read, and any splittable form pays it twice.
     subroutine reindex_apply_serial(self, perm)
-        class(parquet_string_column), intent(inout) :: self !! the column.
+        type(parquet_string_column), intent(inout) :: self !! the column.
         integer(int64), intent(in) :: perm(:)               !! 1-based permutation of 1..size().
         integer(int64) :: n, k, a, b, elen, pos
         integer(int64), allocatable :: new_off(:)
@@ -2090,7 +2438,7 @@ contains
     end subroutine reindex_apply_serial
     !
     subroutine reindex_apply(self, perm)
-        class(parquet_string_column), intent(inout) :: self !! the column.
+        type(parquet_string_column), intent(inout) :: self !! the column.
         integer(int64), intent(in) :: perm(:)               !! 1-based permutation of 1..size().
         integer(int64) :: n, k, a, elen
         integer(int64), allocatable :: new_off(:)
@@ -2198,8 +2546,8 @@ contains
     !! Dropping every element leaves a valid empty column. Invalidates every outstanding handle
     !! into the column. Note this is the bulk counterpart of `erase`: deleting m elements one at a
     !! time costs O(m*nchars), this costs O(nchars) once.
-    subroutine delete_by_mask(self, keep)
-        class(parquet_string_column), intent(inout) :: self !! the column.
+    subroutine parquet_string_column_delete_by_mask(self, keep)
+        type(parquet_string_column), intent(inout) :: self !! the column.
         logical, intent(in) :: keep(:)                      !! .true. for every element to retain.
         integer(int64) :: n
         integer :: nt
@@ -2214,6 +2562,14 @@ contains
         else
             call delete_by_mask_parallel(self, keep, nt)
         end if
+    end subroutine parquet_string_column_delete_by_mask
+    !
+    !> Binding form of `parquet_string_column_delete_by_mask`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
+    subroutine delete_by_mask(self, keep)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        logical, intent(in) :: keep(:)                      !! .true. for every element to retain.
+        call parquet_string_column_delete_by_mask(self, keep)
     end subroutine delete_by_mask
     !
     !> `delete_by_mask`'s threaded form. **The only rebuild in this module that carries TWO
@@ -2231,7 +2587,7 @@ contains
     !! procedure for why in-place and parallel are incompatible here, and why the fresh destination
     !! is also what lets the copy be a `memcpy` rather than a scalar byte loop.
     subroutine delete_by_mask_parallel(self, keep, nt)
-        class(parquet_string_column), intent(inout) :: self !! the column.
+        type(parquet_string_column), intent(inout) :: self !! the column.
         logical, intent(in) :: keep(:)                      !! .true. for every element to retain.
         integer, intent(in) :: nt                           !! threads to use (> 1).
         integer(int64) :: n, k, a, b, elen, kept, total, nn, rpos, bpos, cnt, bytes
@@ -2316,7 +2672,7 @@ contains
     !> `delete_by_mask`'s serial, in-place form. See `delete_by_mask_parallel` for why the threaded
     !! one cannot be in place and why this one's copy must stay a scalar loop.
     subroutine delete_by_mask_serial(self, keep)
-        class(parquet_string_column), intent(inout) :: self !! the column.
+        type(parquet_string_column), intent(inout) :: self !! the column.
         logical, intent(in) :: keep(:)                      !! .true. for every element to retain.
         integer(int64) :: n, k, j, a, b, elen, pos, kept, nn
         logical, allocatable :: old_null(:)
@@ -2354,10 +2710,18 @@ contains
     end subroutine delete_by_mask_serial
     !
     !> int32 specific of gather; see the gather generic.
+    subroutine parquet_string_column_gather_i32(self, idx)
+        type(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int32), intent(in) :: idx(:)                !! 1-based source index per destination element.
+        call parquet_string_column_gather_i64(self, int(idx, int64))
+    end subroutine parquet_string_column_gather_i32
+    !
+    !> Binding form of `parquet_string_column_gather_i32`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
     subroutine gather_i32(self, idx)
         class(parquet_string_column), intent(inout) :: self !! the column.
         integer(int32), intent(in) :: idx(:)                !! 1-based source index per destination element.
-        call self%gather_i64(int(idx, int64))
+        call parquet_string_column_gather_i32(self, idx)
     end subroutine gather_i32
     !
     !> int64 specific of gather: rebuilds the column so that element `k` is the element that was at
@@ -2379,8 +2743,8 @@ contains
     !! `reindex_apply`, both consequences of the length being free to change: the payload is sized to
     !! the SELECTED characters rather than to `nchars`, and `n_null` is recounted rather than carried
     !! over.
-    subroutine gather_i64(self, idx)
-        class(parquet_string_column), intent(inout) :: self !! the column.
+    subroutine parquet_string_column_gather_i64(self, idx)
+        type(parquet_string_column), intent(inout) :: self !! the column.
         integer(int64), intent(in) :: idx(:)                !! 1-based source index per destination element.
         integer(int64) :: n, m, k, a, elen, want, nn, est
         integer(int64), allocatable :: new_off(:)
@@ -2484,6 +2848,14 @@ contains
             !$omp end parallel do
             self%n_null = nn
         end if
+    end subroutine parquet_string_column_gather_i64
+    !
+    !> Binding form of `parquet_string_column_gather_i64`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
+    subroutine gather_i64(self, idx)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int64), intent(in) :: idx(:)                !! 1-based source index per destination element.
+        call parquet_string_column_gather_i64(self, idx)
     end subroutine gather_i64
     !
     !> `gather`'s original single-cursor rebuild, kept for the serial case. See `gather_i64` for why
@@ -2492,7 +2864,7 @@ contains
     !! Assumes `idx` has already been range-checked. The two shapes must produce byte-identical
     !! columns; `test_string_parallel` holds them to that.
     subroutine gather_apply_serial(self, idx)
-        class(parquet_string_column), intent(inout) :: self !! the column.
+        type(parquet_string_column), intent(inout) :: self !! the column.
         integer(int64), intent(in) :: idx(:)                !! 1-based source index per destination element.
         integer(int64) :: m, k, a, b, elen, pos, want, nn
         integer(int64), allocatable :: new_off(:)
@@ -2545,17 +2917,25 @@ contains
     end subroutine gather_apply_serial
     !
     !> int32 specific of append_nulls; see the append_nulls generic.
+    subroutine parquet_string_column_append_nulls_i32(self, n)
+        type(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int32), intent(in) :: n                     !! number of null elements to append.
+        call parquet_string_column_append_nulls_i64(self, int(n, int64))
+    end subroutine parquet_string_column_append_nulls_i32
+    !
+    !> Binding form of `parquet_string_column_append_nulls_i32`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
     subroutine append_nulls_i32(self, n)
         class(parquet_string_column), intent(inout) :: self !! the column.
         integer(int32), intent(in) :: n                     !! number of null elements to append.
-        call self%append_nulls_i64(int(n, int64))
+        call parquet_string_column_append_nulls_i32(self, n)
     end subroutine append_nulls_i32
     !
     !> int64 specific of append_nulls: appends `n` null (zero-width, invalid) elements in one bulk
     !! operation -- the counterpart of calling `append_null` n times, but with a single capacity
     !! growth instead of one per element. `n == 0` is a no-op; a negative `n` aborts.
-    subroutine append_nulls_i64(self, n)
-        class(parquet_string_column), intent(inout) :: self !! the column.
+    subroutine parquet_string_column_append_nulls_i64(self, n)
+        type(parquet_string_column), intent(inout) :: self !! the column.
         integer(int64), intent(in) :: n                     !! number of null elements to append.
         integer(int64) :: k
         if (n < 0_int64) error stop EP//"append_nulls: negative element count"
@@ -2569,6 +2949,14 @@ contains
         end do
         self%n_null = self%n_null + n
         self%nrows = self%nrows + n
+    end subroutine parquet_string_column_append_nulls_i64
+    !
+    !> Binding form of `parquet_string_column_append_nulls_i64`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
+    subroutine append_nulls_i64(self, n)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int64), intent(in) :: n                     !! number of null elements to append.
+        call parquet_string_column_append_nulls_i64(self, n)
     end subroutine append_nulls_i64
     !
     !> Strips leading and trailing blanks from every non-null element, in place (O(nchars)).
@@ -3143,7 +3531,7 @@ contains
         integer(int64) :: n, base, k, a, b
         call check_range(self, first, last, "slice")
         n = last - first + 1_int64
-        call dest%clear()
+        call parquet_string_column_clear(dest)
         call ensure_offsets_cap(dest, n)
         base = self%offsets(first)
         a = base + 1_int64

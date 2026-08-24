@@ -354,6 +354,13 @@ def check_pointers_go_through_cache():
     return problems
 
 
+#: `src/parquet_strings.f90` -- the module that owns `parquet_string_column` and its typed tier.
+STRINGS_FILE = SRC / "parquet_strings.f90"
+
+#: Prefix of `parquet_string_column`'s typed (non-polymorphic) tier -- see feature_ifx.md.
+STRING_TYPED_PREFIX = "parquet_string_column_"
+
+
 #: The files holding `parquet_column`'s own implementation, typed tier included.
 COLUMN_FILES = sorted(SRC.glob("parquet_columns*.f90"))
 
@@ -515,6 +522,106 @@ def check_no_type_bound_column_access():
                     )
     return problems
 
+
+def _string_column_bindings():
+    """Binding names on `parquet_string_column`, i.e. the `%<name>(` forms a caller can write."""
+    text = STRINGS_FILE.read_text()
+    start = re.search(r"^\s*type\s*::\s*parquet_string_column\b", text, re.M)
+    if not start:
+        return set()
+    end = re.search(r"^\s*end\s+type\s+parquet_string_column\b", text[start.end():], re.M)
+    body = text[start.end():start.end() + end.start()] if end else ""
+    names = set()
+    for raw in body.split("\n"):
+        line = strip_comment(raw).strip()
+        m = re.match(r"^(?:procedure|generic)\b[^:]*::\s*(.+)$", line, re.I)
+        if not m:
+            continue
+        spec = m.group(1)
+        # `name => impl` binds `name`; a bare list binds each name to itself.
+        names.update(part.strip().lower() for part in spec.split("=>")[0].split(","))
+    return {n for n in names if n.isidentifier()}
+
+
+def check_no_type_bound_string_column_access():
+    """feature_ifx.md -- `parquet_columns` must not reach `%str` through a binding.
+
+    The same defect as `check_no_type_bound_column_access` above, one type further down. A
+    `parquet_column`'s string storage is a `type(parquet_string_column)` component, so
+    `col%str%is_null(i)` hands a non-polymorphic actual to a `class` passed-object dummy and ifx
+    builds the runtime type descriptor -- three records, 24 stores -- in the CALLER's prologue,
+    unconditionally, ahead of the `select case` that decides whether the string arm runs at all.
+
+    **Those stores go to STATIC storage, which is what makes this one worse than a per-call cost.**
+    Every thread writes the same `.bss` cache lines, so a per-element scan that costs 9 ns per call
+    on one thread costs 1.4 us on sixteen. Measured on one 200000-row `%has_nulls` scan at 384
+    threads: 38.9 s before, 0.26 s after; the whole `fpm test` run went from 93 to 9 minutes of CPU.
+
+    Two halves, as above:
+
+      1. No file in `parquet_columns*` may write `<designator>%str%<binding>(...)`.
+      2. The typed tier itself must not reach a binding on a `type` dummy of its own.
+
+    Nothing fails when either regresses: every answer stays correct and every test stays green.
+    """
+    problems = []
+    bindings = _string_column_bindings()
+    if not bindings:
+        problems.append("src/parquet_strings.f90: found no type-bound procedure on "
+                        "parquet_string_column -- this check can no longer see the type and is "
+                        "passing vacuously")
+        return problems
+    published = {n.lower() for n in re.findall(
+        r"^\s*public\s*::\s*(" + STRING_TYPED_PREFIX + r"\w+)\s*$",
+        STRINGS_FILE.read_text(), re.M)}
+    if not published:
+        problems.append("src/parquet_strings.f90: no public `%s*` name -- the typed string tier "
+                        "is gone, or this check has gone stale (feature_ifx.md)"
+                        % STRING_TYPED_PREFIX)
+
+    # 1. Every consumer of a column's string storage.
+    site = re.compile(r"(?<![\w%])(\w+%str)%(\w+)\s*\(")
+    for path in COLUMN_FILES:
+        for lineno, raw in enumerate(path.read_text().split("\n"), start=1):
+            match = site.search(strip_comment(raw))
+            if not match or match.group(2).lower() not in bindings:
+                continue
+            problems.append(
+                "%s:%d: reaches the string store through the type-bound `%%str%%%s(...)`. Call "
+                "`%s%s(%s, ...)` instead -- a `type(parquet_string_column)` actual passed to a "
+                "`class` dummy makes ifx build a runtime type descriptor in STATIC storage in "
+                "this procedure's prologue, on every call, and every thread then writes the same "
+                "cache lines (feature_ifx.md). Nothing fails if this regresses:\n    %s"
+                % (path.relative_to(REPO_ROOT), lineno, match.group(2), STRING_TYPED_PREFIX,
+                   match.group(2), match.group(1), raw.strip()))
+
+    # 2. The typed tier itself: a `type` dummy of parquet_string_column must not be used as the
+    #    passed object of a binding. Only procedures whose passed-object-shaped dummies are `type`
+    #    are scanned, so the ordinary `class`-dummy bindings above them are untouched.
+    text = STRINGS_FILE.read_text().split("\n")
+    typed_dummies, current, header = set(), None, 0
+    for lineno, raw in enumerate(text, start=1):
+        code = strip_comment(raw)
+        m = re.match(r"^\s*(?:pure |elemental |impure |recursive )*"
+                     r"(?:[\w()=:,* ]+?\s)?(?:function|subroutine)\s+(\w+)\s*\(", code)
+        if m:
+            current, typed_dummies, header = m.group(1), set(), lineno
+            continue
+        d = re.match(r"^\s*type\(parquet_string_column\)[^:]*::\s*(\w+)", code)
+        if d and current:
+            typed_dummies.add(d.group(1).lower())
+            continue
+        if not current or not typed_dummies:
+            continue
+        for designator, bound in re.findall(r"(?<![\w%])(\w+)\s*%\s*(\w+)\s*\(", code):
+            if designator.lower() in typed_dummies and bound.lower() in bindings:
+                problems.append(
+                    "src/parquet_strings.f90:%d: `%s` makes the type-bound call `%s%%%s(...)` on a "
+                    "`type(parquet_string_column)` dummy, which is the conversion the typed tier "
+                    "exists to remove. Call `%s%s(%s, ...)` instead (feature_ifx.md):\n    %s"
+                    % (lineno, current, designator, bound, STRING_TYPED_PREFIX, bound,
+                       designator, text[lineno - 1].strip()))
+    return problems
 
 def check_generated_file_conventions():
     """feature_risks.md Risk-19 -- a template omission is invisible to the generators' --check modes."""
@@ -3199,6 +3306,8 @@ CHECKS = (
     ("MAML block headers are matched case-insensitively", check_maml_keys_case_insensitive),
     ("table pointers are reached through %cache", check_pointers_go_through_cache),
     ("no per-cell path reaches a column through a binding", check_no_type_bound_column_access),
+    ("no path reaches a column's string store through a binding",
+     check_no_type_bound_string_column_access),
     ("generated files carry their conventions", check_generated_file_conventions),
     ("the schema-less write declares auto sizes", check_schemaless_write_declares_auto),
     ("row-group reads guard against a sort", check_row_group_reads_guard_against_sort),

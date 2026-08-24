@@ -112,6 +112,22 @@ module parquet
     ! Not part of that per-cell tier, hidden here for the same reason: it is the non-mutating
     ! `any_null` the table's read accessors must use, and a user already has `%any_null()`.
     private :: parquet_column_any_null
+    ! parquet_strings' typed tier, hidden for the same reason once more. These are how
+    ! parquet_columns reaches a column's embedded parquet_string_column without a type-bound
+    ! call, and they duplicate no user-facing capability: every one of them is already a binding
+    ! on parquet_string_column (%is_null, %get, %set, ...), which is what a user calls. Adding a
+    ! typed string accessor means adding a line here too.
+    private :: parquet_string_column_clear
+    private :: parquet_string_column_shrink_to_fit, parquet_string_column_capacity
+    private :: parquet_string_column_character_capacity, parquet_string_column_size
+    private :: parquet_string_column_character_size, parquet_string_column_null_count
+    private :: parquet_string_column_has_validity, parquet_string_column_reserve_validity
+    private :: parquet_string_column_append_column, parquet_string_column_append_null
+    private :: parquet_string_column_append_values, parquet_string_column_delete_by_mask
+    private :: parquet_string_column_reserve, parquet_string_column_get, parquet_string_column_copy_to
+    private :: parquet_string_column_is_null, parquet_string_column_append_from, parquet_string_column_set
+    private :: parquet_string_column_set_null, parquet_string_column_reindex, parquet_string_column_reindex_trusted
+    private :: parquet_string_column_gather, parquet_string_column_append_nulls
     !
     ! ---- The sorting tiers' internals need NO `private ::` here, and that is worth stating ----
     !

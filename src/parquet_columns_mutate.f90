@@ -618,7 +618,7 @@ contains
             call grow_storage(self, n)
             self%tsv(:, old+1_int64:old+n) = other%tsv(:, 1:n)
         case (PK_STRING, PK_STRING_VEC)
-            call self%str%append_column(other%str)
+            call parquet_string_column_append_column(self%str, other%str)
             self%nrows = old + n
         case default
             error stop EP//"append_storage: column has no active storage"
@@ -686,7 +686,7 @@ contains
             ! One flat store of nrows*width elements, row i at (i-1)*width + 1 .. i*width (RF6).
             ! append_from copies one element without materializing it as a Fortran string.
             do e = 1_int64, w
-                call self%str%append_from(other%str, (irow - 1_int64)*w + e)
+                call parquet_string_column_append_from(self%str, other%str, (irow - 1_int64)*w + e)
             end do
             self%nrows = self%nrows + 1_int64
             return

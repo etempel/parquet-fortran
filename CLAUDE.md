@@ -69,6 +69,7 @@ working rules).
   - [New `parquet_table` state goes on the CACHE](#new-parquet_table-state-goes-on-the-cache--never-as-an-allocatable-component-of-the-type)
   - [Assembling a `parquet_column` from pieces: preallocate and `%paste`](#assembling-a-parquet_column-from-pieces-preallocate-and-paste)
   - [`parquet_column`'s TYPED accessor tier: never reach storage through a binding](#parquet_columns-typed-accessor-tier-never-reach-storage-through-a-binding)
+  - [`parquet_string_column`'s typed tier: the same rule, and why concurrency makes it worse](#parquet_string_columns-typed-tier-the-same-rule-and-why-concurrency-makes-it-worse)
   - [A `parquet_schema` built in code must be parsed before anything reads its fields](#a-parquet_schema-built-in-code-must-be-parsed-before-anything-reads-its-fields)
 - [Element-domain modules (`parquet_strings`, `parquet_temporal`)](#element-domain-modules-parquet_strings-parquet_temporal)
   - [The `parquet_strings` module](#the-parquet_strings-module)
@@ -2195,6 +2196,63 @@ to the work, so it amortises away on a per-column path. A library-wide sweep wen
 procedures carrying the block, and everything left is per-column or cold. `parquet_sorting` is
 excluded on the same grounds (it binds a sort key once per column). Widening scope needs a
 measurement, not an assumption.
+
+### `parquet_string_column`'s typed tier: the same rule, and why concurrency makes it worse
+
+**`parquet_columns` must never call a type-bound procedure on a column's `str` component.** A
+`parquet_column`'s string storage is `type(parquet_string_column), allocatable :: str`, so
+`col%str%is_null(i)` hands a non-polymorphic actual to a `class` passed-object dummy — the same
+conversion the section above removes one type further up. Every access goes through the
+`parquet_string_column_*` names `parquet_strings` exports instead. They are public there so
+`parquet_columns` can reach them, and `src/parquet.f90` privatises every one again, so the
+`use parquet` surface is unchanged. `check_no_type_bound_string_column_access`
+(`tools/check_source_conventions.py`) is the enforcement, and it covers both halves: no
+`%str%<binding>(...)` in `parquet_columns*`, and no binding call on a `type` dummy inside the tier
+itself.
+
+**The measurement that widened the scope, since the section above says a measurement is what it
+takes.** `parquet_string_column` has three allocatable components, so the descriptor block here is
+three records and **24 stores** rather than 21 and 178 — about a seventh of the per-call cost, which
+is why a serial reading of it says "not worth it". That reading is wrong, and the reason is *where*
+the stores go rather than how many there are: **ifx emits the block into `.bss`, not onto the
+stack**, so it is one set of process-global cache lines that every thread writes on every call.
+
+```
+                     `%has_nulls` on one 200000-row date column, 8 rounds
+    threads     2        8       16       64      384
+    before   0.07 s   3.28 s   8.93 s   16.4 s   38.9 s      <- work per thread is CONSTANT
+    after    0.06 s   0.07 s   0.06 s   0.10 s    0.27 s
+```
+
+Two things are worth reading off that table. The scan is **read-only and touches no shared state of
+its own**, so nothing in the source suggests it should scale at all badly — the contention is
+entirely in code the compiler emitted. And the block is emitted **ahead of the `select case` that
+picks the kind**, so a `date` column pays for the string arm in full without ever entering it. The
+whole `fpm test` run went from **39 s wall / 93 min CPU to 12 s / 9 min** on the change to one
+procedure, before the rest of the sweep.
+
+Practical notes:
+
+- **`perf` names the symptom precisely and the cause not at all**: 94% of cycles sit in
+  `parquet_column_is_null_row`, and annotation puts them on the `movq $0x4e0,...(%rip)` stores in
+  its prologue. `nm` is what settles it — a descriptor temporary shows as a **`b` (local `.bss`)**
+  `var$NNN` symbol, so it is shared; a stack temporary has no symbol at all.
+- **No compiler flag avoids it.** `-auto`, `-assume recursion`, `-standard-semantics`, `-O1` and
+  `-O3` all emit the identical 30 static descriptors (ifx 2026.1.1). The fix has to be in the source.
+- **The shape is the same as the section above and the arrow must not be flipped**: the
+  implementation lives at the `type` end and the binding is a one-line forwarder onto it. A typed
+  wrapper calling the binding relocates the block into the wrapper and buys nothing.
+- **A private module helper of `parquet_strings` should simply take a `type` dummy.** Six did not
+  (`reindex_apply`, `delete_by_mask_serial`/`_parallel`, `gather_apply_serial`, …) and each one put
+  the block back inside the typed procedure that called it. None was a binding target, so dropping
+  the `class` cost nothing.
+- **Scope, and what is deliberately left.** Three procedures still carry the *`parquet_column`*
+  block — `deep_copy`, `move_from` and `clear`, all through `out%clear()`/`out%init()` on a `type`
+  dummy. They are once per column, which is the boundary the section above draws, and no
+  measurement has been taken that moves them across it.
+- The one-command check, per procedure:
+  `objdump -d <binary> | awk '/<parquet_columns_mp_parquet_column_is_null_row_>:/,/^$/' | grep -c 'var\$'`,
+  which must read **0**.
 
 ### A `parquet_schema` built in code must be parsed before anything reads its fields
 

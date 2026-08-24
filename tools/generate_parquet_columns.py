@@ -461,7 +461,19 @@ def gen_spec():
 !! it symmetrically without a circular dependency.
 module parquet_columns
     use, intrinsic :: iso_fortran_env, only : int8, int32, int64, real32, real64
-    use parquet_strings, only : parquet_string_column
+    ! The TYPED tier of parquet_string_column (feature_ifx.md): every `str` access below goes
+    ! through these, never through a binding -- a `type` actual passed to a `class` dummy makes
+    ! ifx build a runtime type descriptor in STATIC storage in the caller's prologue, on every
+    ! call, which turns a per-element scan into cross-thread cache-line contention.
+    use parquet_strings, only : parquet_string_column, &
+        parquet_string_column_append_column, parquet_string_column_append_from, parquet_string_column_append_nulls, &
+        parquet_string_column_append_values, parquet_string_column_capacity, &
+        parquet_string_column_character_capacity, parquet_string_column_character_size, &
+        parquet_string_column_copy_to, parquet_string_column_delete_by_mask, parquet_string_column_gather, &
+        parquet_string_column_get, parquet_string_column_has_validity, parquet_string_column_is_null, &
+        parquet_string_column_null_count, parquet_string_column_reindex, parquet_string_column_reindex_trusted, &
+        parquet_string_column_reserve, parquet_string_column_reserve_validity, parquet_string_column_set, &
+        parquet_string_column_set_null, parquet_string_column_shrink_to_fit, parquet_string_column_size
     use parquet_temporal, only : parquet_date, parquet_time, parquet_timestamp
     !
     implicit none
@@ -1443,7 +1455,7 @@ contains
         integer(int64) :: res                     !! rows the storage is allocated for.
         if (is_string_kind(self%kind)) then
             res = 0_int64
-            if (allocated(self%str)) res = self%str%capacity()/int(self%width, int64)
+            if (allocated(self%str)) res = parquet_string_column_capacity(self%str)/int(self%width, int64)
         else
             res = self%cap
         end if
@@ -1933,7 +1945,7 @@ contains""")
             call grow_storage(self, n)
             self%{comp}(:, old+1_int64:old+n) = other%{comp}(:, 1:n)""")
     w("""        case (PK_STRING, PK_STRING_VEC)
-            call self%str%append_column(other%str)
+            call parquet_string_column_append_column(self%str, other%str)
             self%nrows = old + n
         case default
             error stop EP//"append_storage: column has no active storage"
@@ -1963,7 +1975,7 @@ contains""")
             ! One flat store of nrows*width elements, row i at (i-1)*width + 1 .. i*width (RF6).
             ! append_from copies one element without materializing it as a Fortran string.
             do e = 1_int64, w
-                call self%str%append_from(other%str, (irow - 1_int64)*w + e)
+                call parquet_string_column_append_from(self%str, other%str, (irow - 1_int64)*w + e)
             end do
             self%nrows = self%nrows + 1_int64
             return

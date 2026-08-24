@@ -297,7 +297,7 @@ contains
             res = .true.
         else if (is_string_kind(self%kind)) then
             res = .false.
-            if (allocated(self%str)) res = self%str%has_validity()
+            if (allocated(self%str)) res = parquet_string_column_has_validity(self%str)
         else
             res = allocated(self%validity)
         end if
@@ -306,7 +306,7 @@ contains
     module procedure ensure_validity
         if (is_temporal_kind(self%kind)) return
         if (is_string_kind(self%kind)) then
-            if (allocated(self%str)) call self%str%reserve_validity()
+            if (allocated(self%str)) call parquet_string_column_reserve_validity(self%str)
             return
         end if
         ! PK_NONE has no storage to give validity to, and ensure_bitmap would size a bitmap from

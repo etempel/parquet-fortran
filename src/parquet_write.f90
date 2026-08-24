@@ -1407,6 +1407,11 @@ contains
             case default
                 ! Unreachable through the public API: parquet_validate_maml rejects any other
                 ! data_type before a schema can reach a writer. GCOVR_EXCL_LINE
+                !
+                ! gcov attribution artifact: gfortran gives this statement no entry for its first
+                ! line and a positive count for its CONTINUATION, so the excluded line below is
+                ! expected to show hits even though the arm never runs -- if it ever did, the
+                ! error stop would take the whole suite down with it.
                 error stop "parquet_close_writer: cannot write an empty column of data_type '" // &
                     dtype // "' for column " // cname // ctx ! GCOVR_EXCL_LINE
             end select

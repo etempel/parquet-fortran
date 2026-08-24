@@ -9550,6 +9550,7 @@ contains
         integer(int64), allocatable :: ri(:)
         integer(int32), allocatable :: k(:)
         character(len=:), allocatable :: names(:)
+        logical :: found
         integer :: ncols0
         integer, parameter :: N = 20, CH = 7
         character(len=*), parameter :: f = "test_run/table_row_index.parquet"
@@ -9617,6 +9618,35 @@ contains
         call t%get(PARQUET_ROW_INDEX, ri)
         call check(error, ri(1) == 4_int64, &
             "a materialized row index should survive a row mutation and still name the file row")
+        if (allocated(error)) return
+        !
+        ! Materializing it is ONE-SHOT: dropped, the name is gone, exactly as for any other
+        ! dropped column. `table_make_row_index` returns at its first line once `row_index_live`
+        ! is set, so nothing rebuilds it -- and %has_column has to agree, or it promises a name
+        ! %get refuses. The ordinary column beside it is the control: this is not special
+        ! treatment of the reserved name, it is what dropping any column does.
+        call parquet_open_table(t, f)
+        call t%get(PARQUET_ROW_INDEX, ri)
+        call t%get("k", k)
+        call t%drop_column(PARQUET_ROW_INDEX)
+        call t%drop_column("k")
+        call check(error, .not. t%has_column(PARQUET_ROW_INDEX), &
+            "%has_column must stop answering for the row-index column once it has been dropped")
+        if (allocated(error)) return
+        call check(error, .not. t%has_column("k"), "the dropped ordinary column must be gone too")
+        if (allocated(error)) return
+        call t%get(PARQUET_ROW_INDEX, ri, found=found)
+        call check(error, .not. found, &
+            "a dropped row-index column must not be silently rebuilt by the next %get")
+        if (allocated(error)) return
+        call t%get("k", k, found=found)
+        call check(error, .not. found, "and neither must a dropped ordinary column")
+        if (allocated(error)) return
+        ! The negative control for the flag itself: on a fresh table of the same file the name is
+        ! usable again, so the refusal above is the DROP and not something about this fixture.
+        call parquet_open_table(t, f)
+        call check(error, t%has_column(PARQUET_ROW_INDEX), &
+            "a freshly opened table must still offer the row-index column")
         if (allocated(error)) return
         !
         ! A table built in memory was not read from a file, so it has no row index at all.

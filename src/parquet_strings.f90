@@ -3560,5 +3560,4 @@ contains
         end if
     end subroutine psv_print
     !
-    !> Finalizer -- nullifies the reference. Never deallocates the referenced column (non-owning).
-end module parquet_strings
+end module parquet_strings ! GCOVR_EXCL_LINE

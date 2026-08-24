@@ -804,6 +804,10 @@ contains
                 test_write_float_to_int64_out_of_range_aborts), &
             new_unittest("parquet_set_arrow_threads(0) aborts", &
                 test_set_max_threads_below_one_aborts), &
+            new_unittest("a negative random work floor aborts while 0 and a positive value are accepted", &
+                test_set_random_parallel_min_elements_negative_aborts), &
+            new_unittest("parquet_write_table through a schema declaring no fields aborts", &
+                test_write_table_schema_init_no_fields_aborts), &
             new_unittest("concurrent calls into a shared parquet_reader abort", &
                 test_concurrent_calls_into_shared_reader_aborts), &
             new_unittest("concurrent calls into a shared parquet_writer abort", &
@@ -1428,6 +1432,8 @@ contains
                 test_get_version_arrow_mode_removed_aborts), &
             new_unittest("parquet_get_arrow_version with an invalid mode aborts", &
                 test_get_arrow_version_invalid_mode_aborts), &
+            new_unittest("an over-long invalid mode is quoted back capped, never in full", &
+                test_invalid_mode_message_is_capped), &
             new_unittest("parquet_column_exists with an unrecognized types= token aborts", &
                 test_column_exists_bad_type_token_aborts), &
             new_unittest("parquet_column_exists validates types= before checking the column exists", &
@@ -6848,6 +6854,69 @@ contains
             required_stderr="parquet_write_column: float value out of int64 range for column v")
     end subroutine test_write_float_to_int64_out_of_range_aborts
 
+    !> The work floor accepts `0` -- which DISABLES it, and is the documented way a test asks for a
+    !> team on a small array -- and refuses only a negative value.
+    !>
+    !> Those two facts are one rule, which is why the control matters more than usual here: a guard
+    !> written `n <= 0` would abort on the very value the API promises to accept, and an
+    !> exit-status-only test of the negative case could not tell the two guards apart. The scenario
+    !> sets `0` and a positive value first and prints what the getter then reports.
+    subroutine test_set_random_parallel_min_elements_negative_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat
+        logical :: found
+
+        call run_error_scenario("set_random_parallel_min_elements_negative", exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat /= 0, "a negative random work floor was expected to abort")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, "control: 0 accepted, floor now 0", found)
+        call check(error, found, &
+            "0 must be ACCEPTED and must disable the floor, or the guard rejects the one value " // &
+            "the API documents as meaningful")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, "control: 1000 accepted, floor now 1000", found)
+        call check(error, found, "an ordinary positive floor must be accepted and round-trip")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, &
+            "parquet_set_random_parallel_min_elements: n must be >= 0", found)
+        call check(error, found, "the abort must name this setter and its rule")
+    end subroutine test_set_random_parallel_min_elements_negative_aborts
+
+    !> `parquet_write_table` must not read an unparsed schema's `%cinfo`: `%get_num_fields` on one
+    !> is uninitialized state, and the write loop turns that into a runaway allocation and an OOM
+    !> kill rather than any diagnosable failure.
+    !>
+    !> A schema `%init`ed with no field added is the only state that reaches the parse call there
+    !> (`%add_field` parses as it goes; a loaded or embedded MAML arrives parsed; a directly
+    !> assigned `%maml` never had `%init` and takes the neighbouring "not built" abort). Its MAML
+    !> is header-only, so the parse fails validation and says so. The control writes the same table
+    !> through an ordinary schema first, which is what separates this from a table that could not
+    !> be written at all.
+    subroutine test_write_table_schema_init_no_fields_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat
+        logical :: found
+
+        call run_error_scenario("write_table_schema_init_no_fields", exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat /= 0, &
+            "writing a table through a schema that declares no fields was expected to abort")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, "control: a table wrote through an ordinary schema", found)
+        call check(error, found, &
+            "the same table must write through an ordinary schema first, or the abort says " // &
+            "nothing about the schema")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, "no fields defined", found)
+        call check(error, found, &
+            "the abort must come from validating the header-only MAML and name the real problem")
+    end subroutine test_write_table_schema_init_no_fields_aborts
+
     subroutine test_set_max_threads_below_one_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
@@ -7995,6 +8064,51 @@ contains
             failure_message="parquet_get_arrow_version with an unrecognized mode was expected to abort", &
             required_stderr="parquet_get_arrow_version: invalid mode 'internal'")
     end subroutine test_get_arrow_version_invalid_mode_aborts
+
+    !> Both invalid-mode messages quote an over-long `mode` CAPPED at 100 characters plus an
+    !> ellipsis, never in full.
+    !>
+    !> **The cap is a correctness guard, not a tidiness one.** `mode` is caller-supplied and
+    !> unbounded, and ifx 2026.1.1's ERROR STOP runtime corrupts the heap once the composed message
+    !> reaches 8192 bytes -- so a guard reporting the value verbatim would turn a clean abort into
+    !> a crash on precisely the input that triggers it.
+    !>
+    !> Asserting the cap needs BOTH halves: that the first 100 characters and the ellipsis are
+    !> there, and that the marker past them is not. The first alone passes against no cap at all.
+    !> The two guards are separate code in separate modules (parquet_version and
+    !> parquet_settings), so both are swept here rather than one standing for the other.
+    subroutine test_invalid_mode_message_is_capped(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat
+        logical :: found
+        integer :: k
+        character(len=40) :: names(2)
+        character(len=1) :: fill(2)
+
+        names(1) = "get_version_invalid_mode_long"
+        names(2) = "get_arrow_version_invalid_mode_long"
+        fill(1) = "x"
+        fill(2) = "y"
+
+        do k = 1, 2
+            call run_error_scenario(trim(names(k)), exitstat, cmdstat, out_file, err_file)
+            call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+            if (allocated(error)) return
+            call check(error, exitstat /= 0, "an invalid mode was expected to abort: " // trim(names(k)))
+            if (allocated(error)) return
+            call scenario_capture_contains(out_file, err_file, repeat(fill(k), 100) // "...", found)
+            call check(error, found, &
+                "the message must quote the first 100 characters of the mode and then an " // &
+                "ellipsis: " // trim(names(k)))
+            if (allocated(error)) return
+            call scenario_capture_contains(out_file, err_file, "TAIL_MUST_NOT_APPEAR", found)
+            call check(error, .not. found, &
+                "the message must NOT carry anything past the cap -- without this the assertion " // &
+                "above passes against a guard that quotes the value in full: " // trim(names(k)))
+            if (allocated(error)) return
+        end do
+    end subroutine test_invalid_mode_message_is_capped
 
     subroutine test_column_exists_bad_type_token_aborts(error)
         type(error_type), allocatable, intent(out) :: error

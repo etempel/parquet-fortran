@@ -132,7 +132,14 @@ contains
         ! %column_names disagree, and deliberately: %has_column asks "can I use this name?", which
         ! is yes, while %column_names lists what the table is holding, which does not include a
         ! column nobody has asked for.
-        if (.not. found .and. name == PARQUET_ROW_INDEX) found = self%cache%file_backed
+        !
+        ! `row_index_live` is what separates "not asked for yet" from "asked for and then dropped".
+        ! Materializing it is ONE-SHOT -- table_make_row_index returns immediately once the flag is
+        ! set -- so after %drop_column the name cannot be used again, exactly as for any other
+        ! dropped column, and answering .true. here would promise something %get refuses.
+        if (.not. found .and. name == PARQUET_ROW_INDEX) then
+            found = self%cache%file_backed .and. .not. self%cache%row_index_live
+        end if
     end procedure table_has_column
     !
     module procedure missing_columns_array

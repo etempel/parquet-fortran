@@ -2335,6 +2335,9 @@ contains
                 ! `huge` of 1.7977e308. It is kept because the bound is derived from `exp_key`'s
                 ! range, and a change there would make it reachable again with nothing else to
                 ! notice. See wd_min_weight; no fixture this repository can build reaches it.
+                ! gcov attribution artifact: the test itself runs once per weight (over a million
+                ! times in a full suite run) while the error stop below never does, so this
+                ! excluded line is expected to report a positive hit count.
                 if (.not. ieee_is_finite(k1)) &                                  ! GCOVR_EXCL_LINE
                     error stop "pf_weighted_permutation: a weight is so small that its key " // &
                                "overflows; this cannot happen for a weight at or above " // &

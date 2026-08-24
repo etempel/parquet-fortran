@@ -767,4 +767,8 @@ contains
         end do
     end subroutine fold_ascii_lower
     !
+    ! gcov attribution artifact: an `end module` line is not a statement and reports 0 hits in the
+    ! thirty other files carrying this marker, but gfortran attributes a count to this one -- so
+    ! the excluded line is expected to show a positive hit count here. The marker stays: which way
+    ! a given gcov attributes it is not something to depend on.
 end module parquet_settings_base ! GCOVR_EXCL_LINE

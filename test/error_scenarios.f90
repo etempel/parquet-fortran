@@ -902,6 +902,10 @@ program error_scenarios
         call scenario_write_float_to_int64_out_of_range()
     case ("set_max_threads_below_one")
         call scenario_set_max_threads_below_one()
+    case ("set_random_parallel_min_elements_negative")
+        call scenario_set_random_parallel_min_elements_negative()
+    case ("write_table_schema_init_no_fields")
+        call scenario_write_table_schema_init_no_fields()
     case ("concurrent_calls_into_shared_reader")
         call scenario_concurrent_calls_into_shared_reader()
     case ("concurrent_calls_into_shared_writer")
@@ -1358,6 +1362,10 @@ program error_scenarios
         call scenario_get_version_arrow_mode_removed()
     case ("get_arrow_version_invalid_mode")
         call scenario_get_arrow_version_invalid_mode()
+    case ("get_version_invalid_mode_long")
+        call scenario_get_version_invalid_mode_long()
+    case ("get_arrow_version_invalid_mode_long")
+        call scenario_get_arrow_version_invalid_mode_long()
     case ("column_exists_bad_type_token")
         call scenario_column_exists_bad_type_token()
     case ("column_exists_bad_type_token_missing_column")
@@ -9598,6 +9606,52 @@ contains
         print '(a)', "unexpectedly accepted parquet_set_arrow_threads(0) without error"
     end subroutine scenario_set_max_threads_below_one
 
+    !> The random bulk-draw work floor takes `0` and refuses a NEGATIVE value, and the two are a
+    !! pair rather than one rule: `0` is the documented way to disable the floor entirely (how a
+    !! test asks for a team on a small array), so a guard written as `n <= 0` would reject the one
+    !! value the API promises to accept.
+    !!
+    !! Both accepted values are exercised as the control before the abort -- the factory default is
+    !! restored afterwards so nothing later in this process inherits a disabled floor -- which is
+    !! what separates "a negative value was rejected" from "this setter rejects everything".
+    subroutine scenario_set_random_parallel_min_elements_negative()
+        call parquet_set_random_parallel_min_elements(0)
+        print '(a,i0)', "control: 0 accepted, floor now ", parquet_get_random_parallel_min_elements()
+        call parquet_set_random_parallel_min_elements(1000)
+        print '(a,i0)', "control: 1000 accepted, floor now ", parquet_get_random_parallel_min_elements()
+        call parquet_set_random_parallel_min_elements(-1)
+        print '(a)', "unexpectedly accepted a negative work floor"
+    end subroutine scenario_set_random_parallel_min_elements_negative
+
+    !> `parquet_write_table` parses a schema that was initialized but never parsed, rather than
+    !! reading an unpopulated `%cinfo` -- which `%get_num_fields` would turn into a runaway
+    !! allocation and an OOM kill instead of a diagnosable failure.
+    !!
+    !! **This is the only state that reaches that parse call**, and it follows from what the two
+    !! readiness queries read (see the comment above the guard in src/parquet_tables_write.f90):
+    !! `%add_field` parses as it goes, an embedded or loaded MAML arrives parsed, and a `%maml`
+    !! assigned directly never had `%init` called so it takes the neighbouring "not built" abort
+    !! instead. `%init` with no field added yet is what is left, and its MAML is header-only -- so
+    !! the parse always fails validation, naming the real problem.
+    !!
+    !! The control is a schema built the ordinary way, written to a different file first: without
+    !! it, an abort here would not distinguish an unparsed schema from a table that cannot be
+    !! written at all.
+    subroutine scenario_write_table_schema_init_no_fields()
+        type(parquet_schema) :: good, bare
+        type(parquet_table) :: t
+
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32, 2_int32])
+        call good%init(table="write_table_control")
+        call good%add_field("a", "int32")
+        call parquet_write_table(t, "test_run/error_scenario_write_table_control.parquet", good)
+        print '(a)', "control: a table wrote through an ordinary schema"
+        call bare%init(table="write_table_bare")
+        call parquet_write_table(t, "test_run/error_scenario_write_table_bare.parquet", bare)
+        print '(a)', "unexpectedly wrote a table through a schema declaring no fields"
+    end subroutine scenario_write_table_schema_init_no_fields
+
     !> A schema-enforced writer (cinfo given) already error stops on this via
     !> parquet_mark_column_written's write_counts tracking. A schema-less
     !> writer (no cinfo) previously had no such tracking at all: the C++ side
@@ -11940,6 +11994,34 @@ contains
         call parquet_get_arrow_version(ver_string, mode="internal")
         print '(a)', "unexpectedly returned a version string for an invalid mode"
     end subroutine scenario_get_arrow_version_invalid_mode
+
+    !> An invalid `mode` is quoted back CAPPED, never in full -- the long half of the pair above.
+    !!
+    !! `mode` is caller-supplied and unbounded, and ifx 2026.1.1's ERROR STOP runtime corrupts the
+    !! heap once the composed message reaches 8192 bytes, so a guard that reported the offending
+    !! value verbatim would turn a clean abort into a crash on exactly the input that triggers it.
+    !! The cap is 100 characters plus an ellipsis.
+    !!
+    !! The tail marker is what makes this checkable: the wrapper asserts the first 100 characters
+    !! and the ellipsis are present AND that the marker beyond them is not, which a cap that
+    !! silently did nothing would fail.
+    subroutine scenario_get_version_invalid_mode_long()
+        character(len=:), allocatable :: ver_string
+
+        call parquet_get_version(ver_string, mode=repeat("x", 100) // "TAIL_MUST_NOT_APPEAR")
+        print '(a)', "unexpectedly returned a version string for a very long invalid mode"
+    end subroutine scenario_get_version_invalid_mode_long
+
+    !> The same cap on parquet_get_arrow_version's own invalid-mode message; see
+    !! scenario_get_version_invalid_mode_long for why it exists and what the tail marker is for.
+    !! The two guards are separate code in separate modules (parquet_version and
+    !! parquet_settings), so one being capped says nothing about the other.
+    subroutine scenario_get_arrow_version_invalid_mode_long()
+        character(len=:), allocatable :: ver_string
+
+        call parquet_get_arrow_version(ver_string, mode=repeat("y", 100) // "TAIL_MUST_NOT_APPEAR")
+        print '(a)', "unexpectedly returned a version string for a very long invalid mode"
+    end subroutine scenario_get_arrow_version_invalid_mode_long
 
     !> parquet_column_exists error stops on an unrecognized types= token (typo "itn32"), checked
     !> up front before the existence check itself -- see parquet_read.f90's

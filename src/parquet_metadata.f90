@@ -265,7 +265,10 @@ contains
 
         if (.not. allocated(metadata%source_maml_lines)) return
         n_new = size(lines) - first + 1
-        if (n_new <= 0) return ! GCOVR_EXCL_LINE (the caller returns early when nothing was appended)
+        ! Defensive: the caller returns early when nothing was appended, so this branch is never
+        ! taken. NOT excluded from coverage -- the line itself runs on every call, so gcov counts
+        ! it as hit and an exclusion here would only ever be reported as a stale one.
+        if (n_new <= 0) return
         n_have = size(metadata%source_maml_lines)
         newlen = max(len(metadata%source_maml_lines), len(lines))
         allocate(character(len=newlen) :: grown(n_have + n_new))
@@ -412,7 +415,10 @@ contains
         integer :: n_old, i
 
         if (.not. allocated(items)) return
-        if (size(items) == 0) return ! GCOVR_EXCL_LINE (take_user_metadata never returns an empty array)
+        ! Defensive: take_user_metadata never returns an empty array, so this branch is never
+        ! taken. Not excluded, for the same reason as append_source_lines' own zero guard: the
+        ! line runs whenever this procedure is reached, so it is covered and only the branch is not.
+        if (size(items) == 0) return
 
         ! See g_maml_mutex in parquet_wrapper.cpp.
         call parquet_maml_lock()

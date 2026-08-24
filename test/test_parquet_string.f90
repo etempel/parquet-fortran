@@ -1023,6 +1023,51 @@ contains
             call col%append_values(none)
             call check(error, col%size() == before, "a zero-length append_values must change nothing")
         end block
+
+        ! --- every element blank, onto an EMPTY column: the payload is never allocated ---
+        ! `ensure_data_cap` deliberately allocates nothing for a zero-byte payload, so `self%data`
+        ! is still unallocated when `pack_character_bytes` is called -- and that routine takes its
+        ! destination as an ordinary (non-allocatable) dummy, so a stand-in must be passed instead.
+        ! **Both conditions are needed**: every element blank AND the column empty, since any
+        ! earlier append has already allocated the payload, which is why the two blocks below run
+        ! in this order rather than reusing `col` from above.
+        !
+        ! gfortran runs the non-conforming version of this silently; nagfor's `-C=array` is what
+        ! reports it ("ALLOCATABLE SELF%DATA is not currently allocated"). So the values asserted
+        ! here are not what this is guarding -- passing at all is.
+        block
+            type(parquet_string_column) :: blank_col
+            character(len=5) :: blanks(3)
+            blanks = [character(len=5) :: "     ", "     ", "     "]
+            call blank_col%append_values(blanks)
+            call check(error, blank_col%size() == 3_int64, &
+                "appending three blank elements onto an empty column must give three rows")
+            if (allocated(error)) return
+            call check(error, blank_col%character_size() == 0_int64, &
+                "three blank elements must contribute no bytes at all")
+            if (allocated(error)) return
+            call blank_col%get(2_int64, s)
+            call check(error, len(s) == 0, "a blank element must read back as the empty string")
+            if (allocated(error)) return
+            call check(error, .not. blank_col%is_null(2_int64), &
+                "a blank element is EMPTY, not null -- the two are distinct here")
+            if (allocated(error)) return
+            call check(error, blank_col%validate(), "all-blank append onto an empty column: invariants hold")
+            if (allocated(error)) return
+            ! The control: the same append onto a column that already holds bytes takes the OTHER
+            ! branch, with `self%data` allocated. Without it a stand-in passed unconditionally
+            ! would satisfy every assertion above.
+            call blank_col%clear()
+            call blank_col%build_from(first)
+            call blank_col%append_values(blanks)
+            call check(error, blank_col%size() == 6_int64 .and. blank_col%character_size() == 1+2+3, &
+                "blank elements appended onto a non-empty column must add rows but no bytes")
+            if (allocated(error)) return
+            call blank_col%get(1_int64, s)
+            call check(error, s == "a", "the pre-existing bytes must survive an all-blank append")
+            if (allocated(error)) return
+            call check(error, blank_col%validate(), "all-blank append onto a non-empty column: invariants hold")
+        end block
     end subroutine test_append_values_character
     !
     !> `build_from` sizes the destination from a validation pass and then copies each element's

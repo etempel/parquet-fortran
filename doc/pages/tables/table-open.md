@@ -375,7 +375,9 @@ Five things to know:
   "can I use this name?", `%column_names` lists what the table is holding. Any of `%get`, `%col`
   or `%prefetch(PARQUET_ROW_INDEX)` counts as asking. `%materialize_all` does **not** — it reads
   the columns the table has, so a table that never asked for the row index does not acquire one
-  from a bulk read.
+  from a bulk read. Building it is **one-shot**: `%drop_column(PARQUET_ROW_INDEX)` removes it for
+  good, the next `%get` does not rebuild it, and `%has_column` stops answering `.true.` — exactly
+  as for any other dropped column. Reopen the file to get it back.
 - **Materialize it before changing the row set.** It names rows of a file, so a
   [detached](table-mutate.html#what-detaching-means) table cannot produce it any more — asking
   then is an error saying so. Ask for it *first* and it becomes an ordinary column: `%sort_by`

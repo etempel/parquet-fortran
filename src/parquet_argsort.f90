@@ -1491,6 +1491,10 @@ contains
         logical, intent(in) :: bound          !! whether the entry point is associated.
         character(len=*), intent(in) :: proc  !! calling procedure, for the message.
         !
+        ! gcov attribution artifact: the condition is evaluated on EVERY call (414 times in a
+        ! full suite run) while the guarded body below is never reached, so this excluded
+        ! line is expected to report a positive hit count and is not a stale exclusion. See
+        ! CLAUDE.md's "Fortran gcov attribution artifacts".
         if (.not. bound) then ! GCOVR_EXCL_START -- unreachable; see the note above.
             error stop EP // proc // ": the C++ sort engine was selected but is not bound; " // &
                 "add `use parquet_sorting_oracle` to the program that selects it"

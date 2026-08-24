@@ -36,12 +36,25 @@ contains
         if (present(schema)) then
             ! %get_num_fields on an unpopulated %cinfo reads uninitialized state, which turns the
             ! write loop into a runaway allocation and an OOM kill rather than any kind of
-            ! diagnosable failure. A schema built with %init/%add_field keeps %cinfo in step as
-            ! it is built, and one from parquet_parse_maml obviously does -- so this only fires
-            ! for a schema whose %maml was populated directly (an embedded MAML) and never
-            ! parsed. Parsing it here rather than making the caller say so is a visible side
-            ! effect (their schema stays parsed afterwards, which is what they wanted anyway),
-            ! which is why `schema` is intent(inout).
+            ! diagnosable failure. So a schema that has not been parsed is stopped here, one way
+            ! or the other.
+            !
+            ! **Which schema lands in which arm follows from what the two queries actually read**
+            ! -- %is_parsed() is `allocated(%cinfo%col)` and %is_init() is that OR the %init flag:
+            !
+            !   * built with %init/%add_field -- %add_field parses as it goes, so %is_parsed() is
+            !     already .true. after the first field and neither arm runs;
+            !   * from parquet_parse_maml, parquet_load_maml_file or an embedded get_parquet_maml
+            !     -- parsed on arrival, likewise neither arm;
+            !   * %maml%lines assigned DIRECTLY and never parsed -- %init was never called, so
+            !     %is_init() is .false. and this is the error stop below, not the parse;
+            !   * %init called and no field added yet -- %is_init() .true., %is_parsed() .false.,
+            !     which is the ONE state reaching the parse call.
+            !
+            ! That last one is header-only MAML, so the parse always fails validation with
+            ! "no fields defined" naming the schema. Keeping the call rather than adding a second
+            ! bespoke guard is deliberate: the parser's own message is the accurate one, and the
+            ! call is also what makes `schema` intent(inout) rather than intent(in).
             !
             ! A schema that was never built at all is a different mistake and still an error:
             ! parsing empty MAML text would report something about the text rather than the call.

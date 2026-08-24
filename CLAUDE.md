@@ -701,7 +701,7 @@ instead — expect it to be very noisy (several thousand warnings), dominated by
 
 **The one category that is genuinely load-bearing is `Unknown entity`,** which is the
 use-association accessibility limitation documented under "FORD config gotchas" and stands at
-**118** as of 2026-08-23, across **ten** modules — **measured**, and it corrects a figure this file
+**126** as of 2026-08-24, across **ten** modules — **measured**, and it corrects a figure this file
 carried for two days. The previous entry said 113 across nine and was *derived* rather than measured
 (no FORD on the machine that made the change): the derivation reasoned about what left the facade
 but never counted `parquet_version`'s own four re-exports, so it under-reported by exactly that
@@ -818,23 +818,29 @@ Keep new code to the same standard:
   fix without first checking a newer FORD release against upstream issue
   (https://github.com/Fortran-FOSS-Programmers/ford/issues/738).
 - **FORD 7.0.13 cannot resolve a `use`-association accessibility statement** — an
-  `Unknown entity '<name>' with attribute '<public|private>' in module '<m>'` warning, **118** of
-  them as of 2026-08-23 and the one FORD number worth tracking across a change (measured with the
+  `Unknown entity '<name>' with attribute '<public|private>' in module '<m>'` warning, **126** of
+  them as of 2026-08-24 and the one FORD number worth tracking across a change (measured with the
   command above, not derived). Ten modules
   contribute, and the per-module census is what to compare across a change rather than the total:
 
   | module | attribute | names |
   |---|---|---|
   | `parquet_sorting` | public | 31 |
-  | `parquet_settings` | public | 22 |
-  | `parquet` | private | 16 |
+  | `parquet_settings` | public | 25 |
+  | `parquet` | private | 19 |
   | `parquet_core` | public | 14 |
   | `parquet_argsort` | public | 12 |
-  | `parquet_io` | private | 8 |
+  | `parquet_io` | private | 10 |
   | `parquet_strings` | public | 6 |
   | `parquet_version` | public | 4 |
   | `parquet_sampling` | public | 4 |
   | `parquet_tables` | public | 1 |
+
+  Re-derived 2026-08-24 with the command above. The previous census read 118 across the same ten
+  modules; **three rows moved and only two of the eight new warnings are attributable to that
+  round's change** (row 30 hid `parquet_push_settings_to_cpp` and `parquet_validity_block_bits` in
+  the facades). The rest was drift that had accumulated unnoticed, which is the reason this note
+  says to re-derive rather than quote.
 
   **Five of those eight groups exist because of one rule** — a module re-exports, getter and setter
   both, every settings knob its own code reads (see "Nested submodule tree"). Every such re-export
@@ -848,15 +854,18 @@ Keep new code to the same standard:
   `parquet_timestamp` and the eight `parquet_unit_*`/`parquet_ns_*` constants from
   `parquet_temporal`; `parquet_string`/`parquet_string_column` from `parquet_strings`;
   `parquet_maml_file` from `parquet_maml_base`), which FORD silently drops from that module's
-  generated page; and **15 `private ::`** names in the `parquet` facade — six names from
-  `parquet_settings` (`parquet_valid_compressions`, `parquet_resolve_writer_compression`, the three
-  `parquet_emit_*` output channels and `parquet_output_is_suppressed`), and the **nine**
-  `parquet_column_*`
+  generated page; and **19 `private ::`** names in the `parquet` facade (measured 2026-08-24; it
+  read 15 until row 30, which added the last two) — nine names from
+  `parquet_settings`/`parquet_columns` (`parquet_valid_compressions`,
+  `parquet_resolve_writer_compression`, the three `parquet_emit_*` output channels,
+  `parquet_output_is_suppressed`, `parquet_clamp_to_affinity`, `parquet_push_settings_to_cpp` and
+  `parquet_validity_block_bits`), the `parquet_column_any_null` the table's read accessors use, and
+  the **nine** `parquet_column_*`
   generics of the typed accessor tier (`_get_at`, `_set_at`, `_get_elem`, `_set_elem`, `_data_ptr`,
   `_string_column`, `_is_null`, `_set_null`, `_clear_null`) — which are the facade's only way to
   keep those names out of the namespace `use parquet` hands a user, so they cannot be removed.
   Note the count is of *names*, not of `private ::` statements: one statement may list several, and
-  `src/parquet.f90` carries 7 statements for those 15 names. It used to carry three more names
+  `src/parquet.f90` carries 11 statements for those 19 names. It used to carry three more names
   (`c_int` and the two `parquet_get_*_version` bindings, imported for the version procedure the
   facade no longer holds) plus `private :: cversion`, which warned about nothing — `cversion` was
   *defined* in the facade rather than use-associated, which is exactly the distinction this warning
@@ -1149,9 +1158,10 @@ Five rules follow, and all five are easy to violate by reflex:
   /`c_get_parquet_version` in `parquet_bindings` for the collision reason under "Naming
   conventions"; the `bind(C, name=)` values, and so `parquet_wrapper.cpp`, are untouched.
 - **The facade uses bare `use <sibling>` with DEFAULT-PUBLIC accessibility**, deliberately — that
-  is what re-exports a whole module without maintaining a ~120-name `public ::` list. Its seven
-  `private ::` statements (15 names: the compression pair, the three emit channels and the
-  suppression query, and the nine typed column accessors) are the only thing
+  is what re-exports a whole module without maintaining a ~120-name `public ::` list. Its eleven
+  `private ::` statements (19 names: the compression pair, the three emit channels and the
+  suppression query, the affinity clamp, the C++ settings push, the validity block width, and the
+  ten `parquet_column_*` accessors) are the only thing
   keeping implementation details out of the user's namespace, so anything new the facade imports
   for its own use needs its own `private ::` line. `parquet_bindings` is never re-exported.
   `parquet_maml_base` is imported with an `only:` list rather than in full, because its other

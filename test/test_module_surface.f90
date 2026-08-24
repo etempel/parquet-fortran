@@ -492,11 +492,11 @@ contains
         if (what == "" .and. size(got) /= 3) what = "%get returned the wrong size"
         if (what == "" .and. got(2) /= 2.5_real64) what = "%get did not round-trip the value"
         if (what == "" .and. back%residency("mass") /= RES_FULL) what = "%residency after %get"
-        ! The regime constants have no public accessor to compare against -- `regime` is a private
-        ! component -- so they are named here purely so that dropping either from this module's
-        ! public list breaks the build, which is the property this whole file exists to hold. The
-        ! comparison is trivially true and is not the test; the reference is.
-        if (what == "" .and. REGIME_FULL == REGIME_SLICE) what = "the regime constants collide"
+        ! REGIME_FULL/REGIME_SLICE were named here for the same build-breaking reason as every
+        ! other reference in this file, and they are gone: row 30 made them private, because
+        ! `regime` is a private component and no binding exposes it, so no caller could ever obtain
+        ! a value to compare against either one. Do not restore the reference without first
+        ! restoring the accessor that would make the constants usable.
     end subroutine check_tables_surface
 
 end module test_module_surface_tables

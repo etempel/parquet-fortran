@@ -34,6 +34,11 @@
 !> vector column reaches it at 20000 rows and the whole fixture stays small and fast.
 module test_table_parallel
     use parquet
+    ! parquet_validity_block_bits is no longer re-exported by the facade (row 30 hid it: it is
+    ! published for parquet_tables' benefit, not for a user's). This file needs it because its
+    ! whole subject is the read-modify-write on one bitmap block, so it takes it from the module
+    ! that owns it -- which is the more accurate import in any case.
+    use parquet_columns, only : parquet_validity_block_bits
     use iso_fortran_env, only : int32, int64, real64
     use iso_c_binding, only : c_int64_t
     use testdrive, only : new_unittest, unittest_type, error_type, check, skip_test

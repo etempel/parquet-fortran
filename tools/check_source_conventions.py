@@ -2134,6 +2134,235 @@ def check_page_titles_match_their_list_entries():
     return problems
 
 
+def _footprint_counts():
+    """Fortran-file count per entry module, from the committed measured footprints.
+
+    `tools/module_footprints.txt` lists every file fpm compiles for a single-module import,
+    which includes `src/parquet_wrapper.cpp` in EVERY section and always will (`link` is a
+    package-level key in fpm.toml). The two published tables count Fortran files, so the C++
+    translation unit is excluded here rather than subtracted -- if a second one is ever added,
+    this keeps working, and `check_single_cpp_translation_unit` is what forbids that anyway.
+    """
+    text = (TOOLS / "module_footprints.txt").read_text()
+    counts, section = {}, None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = re.match(r"^\[(.+)\]$", line)
+        if m:
+            section = m.group(1)
+            counts[section] = 0
+            continue
+        if section is not None and not line.endswith(".cpp"):
+            counts[section] += 1
+    return counts
+
+
+def _module_table_rows(path):
+    """The `| `module` | N | ... |` rows of a published entry-module table, as {module: N}."""
+    rows = {}
+    for line in path.read_text().splitlines():
+        m = re.match(r"^\|\s*`([a-z_]+)`\s*\|\s*(\d+)\s*\|", line)
+        if m:
+            rows[m.group(1)] = int(m.group(2))
+    return rows
+
+
+def check_module_tables_match_the_measured_footprints():
+    """README.md's and choosing-a-module.md's Files columns must equal the measured footprints.
+
+    Both pages carry the same twelve-row entry-module table, and its Files column is a MEASURED
+    quantity: `tools/check_module_footprints.sh` builds a throwaway consumer per module and diffs
+    the result against `tools/module_footprints.txt`. That script never reads either page
+    (`grep -c README` on it returns 0), and until this check existed nothing else did either -- so
+    the number a reader uses to choose an import was maintained by hand against a file the build
+    already measures.
+
+    It had already gone wrong. Row 22a found **3 of the 11 rows then present** wrong -- `parquet_io`
+    43 -> 44, `parquet_tables` 64 -> 62, `parquet` 65 -> 66 -- and fixed them by hand; README was not
+    even in that review's plan and was caught only because it carries the same table. The counts move
+    whenever a `use` line is added anywhere in the library, which is the change least likely to
+    prompt anyone to open README.
+
+    Both tables are checked against the measurement INDEPENDENTLY rather than against each other, so
+    a one-sided edit cannot pass by making the two agree on a wrong number.
+    """
+    problems = []
+    measured = _footprint_counts()
+    if not measured:
+        return ["tools/module_footprints.txt: parsed no sections -- this check needs updating"]
+    tables = {
+        "README.md": REPO_ROOT / "README.md",
+        "doc/pages/operating/choosing-a-module.md":
+            REPO_ROOT / "doc" / "pages" / "operating" / "choosing-a-module.md",
+    }
+    for label, path in tables.items():
+        rows = _module_table_rows(path)
+        if not rows:
+            problems.append("%s: found no entry-module table rows -- either the table moved or its "
+                            "shape changed, and this check needs updating" % label)
+            continue
+        for mod, stated in sorted(rows.items()):
+            if mod not in measured:
+                problems.append(
+                    "%s: the table has a row for `%s`, which has no section in "
+                    "tools/module_footprints.txt. Add it to ENTRY_MODULES in "
+                    "tools/check_module_footprints.sh and re-measure, or drop the row." % (label, mod))
+                continue
+            if stated != measured[mod]:
+                problems.append(
+                    "%s: `%s` is listed as %d Fortran file(s); tools/module_footprints.txt measures "
+                    "%d. Re-run tools/check_module_footprints.sh and correct the table -- a `use` "
+                    "line added anywhere in the library moves these counts."
+                    % (label, mod, stated, measured[mod]))
+        for mod in sorted(set(measured) - set(rows)):
+            problems.append(
+                "%s: `%s` is measured in tools/module_footprints.txt but has no row in the table. "
+                "Every advertised entry module needs one, or a reader cannot compare imports."
+                % (label, mod))
+    return problems
+
+
+def _module_accessibility():
+    """Per-module public surface and re-export graph, for the `use parquet` closure below.
+
+    Three things a naive scan gets wrong, each found by getting it wrong:
+
+    * **Default accessibility.** Every module here except the two facades declares a bare
+      `private`, so it exports exactly its `public ::` list. Ignoring that makes `parquet_core`'s
+      unrestricted `use parquet_bindings` re-export all 169 binding names, and the closure comes
+      out 277 names too large.
+    * **Inline declarations.** Six names are made public on their own declaration
+      (`type, public :: pf_random_stream`, `integer(int64), parameter, public ::
+      parquet_validity_block_bits`, ...) rather than by a `public ::` statement. Missing them
+      reports real, correctly-indexed names as non-existent.
+    * **Submodules are not modules.** A `submodule` statement must not be read as opening a new
+      module scope, or its parent's accessibility is lost.
+    """
+    pub, priv, uses, default_public = {}, {}, {}, {}
+    for path in sorted(SRC.glob("*.f90")):
+        mod, in_type, seen_contains = None, False, False
+        buf = ""
+        for raw in path.read_text().splitlines():
+            s = raw.strip()
+            if buf:
+                s = buf + " " + s.lstrip("&")
+                buf = ""
+            if s.endswith("&"):
+                buf = s[:-1].rstrip()
+                continue
+            low = s.lower()
+            if re.match(r"^submodule\s*\(", low):
+                mod = None
+                continue
+            m = re.match(r"^module\s+([a-z_][a-z0-9_]*)\s*$", low)
+            if m:
+                mod = m.group(1)
+                pub[mod], priv[mod], uses[mod] = set(), set(), []
+                default_public[mod], in_type, seen_contains = True, False, False
+                continue
+            if mod is None:
+                continue
+            if re.match(r"^type\s*(,|::|\s+[a-z_])", low) and "=" not in low.split("::")[0]:
+                in_type = True
+            elif re.match(r"^end\s+type\b", low):
+                in_type = False
+            elif re.match(r"^contains\s*$", low) and not in_type:
+                seen_contains = True
+            if low == "private" and not in_type and not seen_contains:
+                default_public[mod] = False
+                continue
+            m = re.match(r"^use\s+([a-z_][a-z0-9_]*)\s*(?:,\s*only\s*:(.*))?$", low)
+            if m:
+                uses[mod].append((m.group(1), m.group(2)))
+                continue
+            m = re.match(r"^public\s*::\s*(.*)$", s, re.I)
+            if m:
+                pub[mod] |= {n.strip().split("=>")[0].strip() for n in m.group(1).split(",")
+                             if n.strip()}
+                continue
+            m = re.match(r"^private\s*::\s*(.*)$", s, re.I)
+            if m:
+                priv[mod] |= {n.strip().split("=>")[0].strip() for n in m.group(1).split(",")
+                              if n.strip()}
+                continue
+            # An inline `..., public :: name` declaration -- a type or a named constant.
+            if re.match(r"^[a-z0-9_() ,=*]*\bpublic\b[a-z0-9_() ,=*]*::", low):
+                tail = s.split("::", 1)[1]
+                name = tail.strip().split("=")[0].split("(")[0].strip()
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name):
+                    pub[mod].add(name)
+    return pub, priv, uses, default_public
+
+
+def _facade_surface():
+    """Every name a `use parquet` program can see."""
+    pub, priv, uses, default_public = _module_accessibility()
+
+    def surface(mod, seen=frozenset()):
+        if mod in seen or mod not in pub:
+            return set()
+        seen = seen | {mod}
+        out = set(pub[mod])
+        if default_public.get(mod):
+            for used, only in uses[mod]:
+                if used not in pub:
+                    continue
+                sub = surface(used, seen)
+                if only is None:
+                    out |= sub
+                else:
+                    named = {n.strip().split("=>")[0].strip() for n in only.split(",") if n.strip()}
+                    out |= named & sub
+        return out - priv[mod]
+
+    return surface("parquet")
+
+
+def check_readme_api_index_names_every_public_name():
+    """README.md's API overview must name every public `use parquet` name.
+
+    The section says what it is: "A quick index of the public `use parquet` API". It is the only
+    complete enumeration of the public surface anywhere in the repository, it is maintained entirely
+    by hand, and nothing compared it to the surface until this check -- so row 30 found **14** public
+    names missing from it, including three `RES_*` constants that `%residency` returns and a settings
+    knob pair with five siblings already listed.
+
+    Two classes are excluded, both deliberately and both documented elsewhere:
+
+    * `parquet_debug_*` -- CLAUDE.md, "A public debug hook is excluded from README.md's API
+      overview". There are 44 of them and they are test-only.
+    * `PK_*` -- named collectively ("the `parquet_column` foundation and its `PK_*` kind
+      constants") rather than one row per kind, which is what keeps the index readable.
+
+    The failure this catches is not a typo: it is a new `public ::` added to any tier by someone who
+    had no reason to open README. That is why it runs one direction only -- a name in the index that
+    no longer exists is a different defect, and it fails the build long before the lint stage.
+    """
+    surface = _facade_surface()
+    if len(surface) < 100:
+        return ["src/: the `use parquet` surface parsed as only %d names, which cannot be right -- "
+                "_module_accessibility() needs updating" % len(surface)]
+    readme = (REPO_ROOT / "README.md").read_text()
+    lines = readme.splitlines()
+    try:
+        start = next(i for i, l in enumerate(lines) if l.startswith("## API overview"))
+    except StopIteration:
+        return ["README.md: no `## API overview` heading -- this check needs updating"]
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+    section = "\n".join(lines[start:end])
+    named = set()
+    for span in re.findall(r"`([^`]+)`", section):
+        named |= set(re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\b", span))
+    missing = sorted(n for n in surface - named
+                     if not n.startswith("parquet_debug") and not n.startswith("PK_"))
+    return ["README.md: `%s` is public through `use parquet` but is not named in the API overview. "
+            "Either index it, or make it private in the facade if it is cross-module plumbing "
+            "rather than user API (src/parquet.f90 already hides nineteen such names)." % n
+            for n in missing]
+
+
 def check_no_indented_code_fence():
     """A fenced code block in doc/pages/ must start at column 0 or it is not rendered as code.
 
@@ -2897,6 +3126,10 @@ CHECKS = (
     ("doc/pages index files agree with the page tree", check_doc_page_index_consistency),
     ("the landing page names every entry module", check_landing_page_names_every_entry_module),
     ("page titles match their list entries", check_page_titles_match_their_list_entries),
+    ("the entry-module tables match the measured footprints",
+     check_module_tables_match_the_measured_footprints),
+    ("README's API overview names every public name",
+     check_readme_api_index_names_every_public_name),
     ("no doc/pages code fence is indented", check_no_indented_code_fence),
     ("no call aliases one variable onto a writable dummy", check_no_aliased_output_argument),
     ("parquet_random takes array lengths as int64", check_fill_size_kind),

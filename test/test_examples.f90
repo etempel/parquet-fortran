@@ -28,9 +28,10 @@ contains
         type(unittest_type), allocatable, intent(out) :: testsuite(:)
 
         testsuite = [ &
-            new_unittest("README minimal writer/reader example", test_readme_minimal_example), &
-            new_unittest("README MAML-schema writer example", test_readme_maml_schema_writer_example), &
-            new_unittest("doc/pages/schema/combined-example.md example", test_readme_combined_example), &
+            new_unittest("README.md quick_example", test_readme_quick_example), &
+            new_unittest("schema-driven write: only enabled columns are written", &
+                test_schema_driven_write_enabled), &
+            new_unittest("doc/pages/schema/combined-example.md example", test_combined_example), &
             new_unittest("doc/pages/schema/building-schema-in-code.md build_schema example", &
                 test_build_schema_example), &
             new_unittest("maml_example2 writer produces a matching sidecar .maml", &
@@ -423,9 +424,10 @@ contains
             "narrow_import: pf_argsort modified its input, which the page says it never does")
     end subroutine test_narrow_import_example
 
-    !> "Minimal writer example" + "Minimal reader example"
-    !> (README sections "Writing parquet files..." / "Reading parquet files...")
-    subroutine test_readme_minimal_example(error)
+    !> README.md's `## Quick example` -- the page's ONE runnable example, and its only `fortran`
+    !> fence. Mirrors it: write an `id` column, reopen, read it back. The names on both sides are
+    !> what makes the mirror findable; if the example on the page changes, this changes with it.
+    subroutine test_readme_quick_example(error)
         type(error_type), allocatable, intent(out) :: error
         character(len=*), parameter :: out_file = "test_run/readme_minimal_example.parquet"
         type(parquet_reader) :: reader
@@ -434,7 +436,7 @@ contains
 
         call readme_write_parquet_example(out_file)
 
-        ! README "Minimal reader example", reading the file written above.
+        ! The read half of the Quick example, reading the file written above.
         call parquet_open_reader(reader, out_file)
         call parquet_get_nrows(reader, nrows)
 
@@ -444,8 +446,8 @@ contains
         call parquet_close_reader(reader)
 
         call check(error, nrows == 3_int64 .and. id(1) == 1_int32 .and. id(3) == 3_int32, &
-            "README minimal writer/reader example did not round-trip the 'id' column correctly")
-    end subroutine test_readme_minimal_example
+            "README.md quick_example did not round-trip the 'id' column correctly")
+    end subroutine test_readme_quick_example
 
     subroutine readme_write_parquet_example(out_file)
         character(len=*), intent(in) :: out_file
@@ -462,9 +464,15 @@ contains
         call parquet_close_writer(writer)
     end subroutine readme_write_parquet_example
 
-    !> The "explicit column definitions and table metadata" MAML-schema
-    !> snippet from the README's "Writing parquet files..." section.
-    subroutine test_readme_maml_schema_writer_example(error)
+    !> Schema-driven write: with a `schema=`, only columns marked `is_set` are written.
+    !>
+    !> This was labelled a README example and is no longer one -- README carries a single `fortran`
+    !> fence (the Quick example) and the section this test was named for was dissolved when README
+    !> became a landing page. It is kept as a behaviour test of the path it exercises: parse a MAML,
+    !> `set_column_unavailable()` everything, re-enable one column, write, read back. The pattern
+    !> itself is documented in doc/pages/io/writing.md and worked through in
+    !> doc/pages/schema/combined-example.md, whose own example has its own mirror below.
+    subroutine test_schema_driven_write_enabled(error)
         type(error_type), allocatable, intent(out) :: error
         character(len=*), parameter :: out_file = "test_run/readme_maml_schema_example.parquet"
         type(parquet_writer) :: writer
@@ -474,7 +482,7 @@ contains
         integer(int32), allocatable :: id0_read(:)
         integer(int64) :: nrows
 
-        ! README: call parquet_parse_maml("maml_example.maml", schema)
+        ! call parquet_parse_maml("maml_example.maml", schema)
         call parquet_parse_maml("schemas/maml_example.maml", schema)
 
         ! Only write the one column this test provides data for.
@@ -483,7 +491,7 @@ contains
 
         id0 = [1_int32, 2_int32, 3_int32]
 
-        ! README: call parquet_open_writer(writer, "data.parquet", schema)
+        ! call parquet_open_writer(writer, "data.parquet", schema)
         call parquet_open_writer(writer, out_file, schema)
         call parquet_write_column(writer, "id0", id0)
         call parquet_close_writer(writer)
@@ -495,14 +503,14 @@ contains
         call parquet_close_reader(reader)
 
         call check(error, nrows == 3_int64 .and. all(id0_read == id0), &
-            "README MAML-schema writer example did not round-trip the 'id0' column correctly")
-    end subroutine test_readme_maml_schema_writer_example
+            "schema-driven write did not round-trip the enabled 'id0' column correctly")
+    end subroutine test_schema_driven_write_enabled
 
-    !> README "Combined example: MAML schema, matrices and metadata".
+    !> doc/pages/schema/combined-example.md's "MAML schema, vector columns and metadata".
     !> Mirrors the program's use clause and declarations verbatim (this is
-    !> what caught a missing `int64` import in an earlier version of the
-    !> README example).
-    subroutine test_readme_combined_example(error)
+    !> what caught a missing `int64` import in an earlier version of that
+    !> page's example).
+    subroutine test_combined_example(error)
         use iso_fortran_env, only: int32, int64, real64
         implicit none
         type(error_type), allocatable, intent(out) :: error
@@ -553,7 +561,7 @@ contains
         call parquet_close_reader(reader)
 
         call check(error, nrows == 3_int64 .and. all(id0_read == id0) .and. all(idarr_read == idarr), &
-            "README combined example did not round-trip the 'id0'/'idarr' columns correctly")
+            "combined-example.md did not round-trip the 'id0'/'idarr' columns correctly")
         if (allocated(error)) return
         call check(error, meta_runtime == "write_parquet_combined_example", &
             "the metadata key added at run time with schema%add_metadata did not reach the file")
@@ -564,7 +572,7 @@ contains
         call check(error, meta_absent == "<absent>", &
             "negative control: a key present in neither the MAML nor the runtime additions must " // &
             "fall back to default=, otherwise the two checks above prove nothing")
-    end subroutine test_readme_combined_example
+    end subroutine test_combined_example
 
     !> Mirrors doc/pages/schema/building-schema-in-code.md's `build_schema` program: a schema built
     !! entirely in code, with no explicit parse anywhere. Asserts the round trip AND that

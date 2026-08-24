@@ -89,6 +89,15 @@ module parquet
     private :: parquet_emit_info, parquet_emit_warning, parquet_emit_error_context
     private :: parquet_output_is_suppressed
     private :: parquet_clamp_to_affinity
+    ! The Fortran->C++ mirror push, and the validity bitmap's block width. Both are public from
+    ! their own module because a sibling needs them -- parquet_read/parquet_write/
+    ! parquet_sorting_oracle call the push when a reader, writer or sort opens, and
+    ! parquet_tables_read needs the block width to trim a threaded paste to whole blocks rather
+    ! than copying the constant (CLAUDE.md, "Disjoint ROWS are not disjoint BITS"). Publishing to
+    ! a SIBLING and publishing to every user of the library are different decisions, and only the
+    ! first was ever taken. Row 30's code issues 2 and 3.
+    private :: parquet_push_settings_to_cpp
+    private :: parquet_validity_block_bits
     ! parquet_columns' typed per-cell accessor tier, hidden for the same reason again. These are
     ! how parquet_tables reaches a column's storage without a type-bound call -- which is what
     ! keeps ifx from building a runtime type descriptor in the caller's prologue on every access

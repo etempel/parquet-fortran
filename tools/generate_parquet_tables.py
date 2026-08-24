@@ -248,7 +248,11 @@ module parquet_tables
     !! module parquet_version, carried only by the `parquet` facade.
     public :: parquet_get_arrow_version
     public :: PARQUET_ROW_INDEX
-    public :: REGIME_FULL, REGIME_SLICE
+    ! REGIME_FULL/REGIME_SLICE are deliberately NOT public. `regime` is a private component of
+    ! parquet_table and no binding exposes it, so a caller could never obtain a value to compare
+    ! against either constant -- publishing them advertised a distinction the public API cannot
+    ! express. The submodules that assign `regime` reach both by host association, which is why
+    ! nothing inside the tier changes. Row 30's code issue 1.
     public :: RES_EMPTY, RES_PARTIAL, RES_FULL
     !> TEST-ONLY debug hook; deliberately NOT in README.md's API overview. See its own
     !! doc-comment for why it has to be public at all.

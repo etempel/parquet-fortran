@@ -203,6 +203,12 @@ something a reader is expected to have.
 | [Risk-135](#risk-135--a-validity-bit-update-that-is-not-atomic-loses-a-null-whenever-two-threads-write-rows-in-one-block) | A validity bit update that is not atomic loses a null whenever two threads write rows in one block | 4 — covered |
 | [Risk-136](#risk-136--a-read-accessor-that-refreshes-a-cache-is-a-writer-and-loses-another-threads-flag) | A READ accessor that refreshes a cache is a writer, and loses another thread's flag | 4 — covered |
 | [Risk-137](#risk-137--a-carried-metadata-key-the-writer-also-generates-shadows-the-writers-own) | A carried metadata key the writer also generates shadows the writer's own | 4 — covered |
+| [Risk-138](#risk-138--a-copyfalse-index-must-reach-its-coordinates-through-the-permutation) | A `copy=.false.` index must reach its coordinates through the permutation | 4 — covered |
+| [Risk-139](#risk-139--a-periodic-grid-must-tile-the-box-exactly-and-only-translation-invariance-sees-it) | A periodic grid must tile the box exactly, and only translation invariance sees it | 4 — covered |
+| [Risk-140](#risk-140--rebuilds-comparison-must-stay-element-wise-a-checksum-admits-a-stale-index) | `%rebuild`'s comparison must stay element-wise; a checksum admits a stale index | 4 — covered |
+| [Risk-141](#risk-141--a-cell-size-is-a-performance-choice-and-must-never-change-an-answer) | A cell size is a PERFORMANCE choice and must never change an ANSWER | 4 — covered |
+| [Risk-142](#risk-142--only-a-bulk-entry-point-may-rebuild-a-spatial-index-and-nothing-enforces-it) | Only a BULK entry point may rebuild a spatial index, and nothing enforces it | 3 — not testable |
+| [Risk-143](#risk-143--a-spatial-index-cannot-tell-that-the-coordinates-under-it-have-moved) | A spatial index cannot tell that the coordinates under it have moved | 3 — not testable |
 
 ---
 
@@ -843,6 +849,45 @@ but it does rule out the silently-serial implementation, which is the failure ac
 Confirmed on `pf_random_resample` with three such mutations; `pf_random_permutation` has not had the
 same treatment and would repay it.
 
+
+### Risk-142 — Only a BULK entry point may rebuild a spatial index, and nothing enforces it
+
+`pf_spatial_index` re-tunes itself when a bulk query's radius disagrees badly with the one it was
+built for. The rebuild reallocates `start`, `idx` and, in copy mode, all three coordinate arrays --
+so a query that can trigger it is not read-only, and two threads querying concurrently could both
+decide to rebuild and race on the same arrays. The failure is a corrupted heap, which surfaces
+somewhere else entirely.
+
+It is prevented **by construction**: `spatial_maybe_rebuild` is called only from
+`spatial_bulk_setup`, which every bulk family goes through *before* opening its parallel region, and
+a single `%within`/`%count_within` never probes and never rebuilds. That is a design rule and not a
+mechanism, and the change that breaks it -- "let a single query rebuild too, so a loop of them gets
+the benefit" -- is a perfectly reasonable-sounding request.
+
+**Test.** Not testable as a race: provoking it needs two threads to arrive together, and a test that
+sometimes passes is worse than none. What a test COULD assert is the property that makes the rule
+work -- that a single query leaves `%cell_size()` and `parquet_debug_spatial_rebuilds()` unchanged
+however far its radius is from the built one. That is worth adding and is not a substitute for
+keeping the rule.
+
+### Risk-143 — A spatial index cannot tell that the coordinates under it have moved
+
+An index built with `copy=.true.` holds its own reordered copy, so mutating the caller's arrays
+afterwards leaves it answering, perfectly consistently, about the OLD positions -- no crash, no
+warning, plausible neighbours of points that have moved. Built with `copy=.false.` it holds pointers
+instead, so the same mutation is seen (which is usually what the caller wanted) while deallocating
+or reallocating those arrays leaves it reading freed memory.
+
+There is no generation counter at this layer and there cannot easily be one: the inputs are plain
+Fortran arrays, which carry no version. `%rebuild(x, y, z)` exists precisely so a caller can hand
+the arrays back and have the index check them element-wise -- that is the whole answer, and it is
+opt-in.
+
+**Test.** Not testable. Neither half is detectable from inside the library: the stale-copy case is
+indistinguishable from a correct index over different data, and the dangling case is undefined
+behaviour. `%rebuild`'s own detection IS tested (Risk-140); what cannot be tested is a caller who
+never calls it. The contract belongs in `%build`'s doc-comment and in the guide, which is where it
+is.
 
 ## 4. Risks already covered, kept for what they still forbid
 
@@ -5816,3 +5861,112 @@ behaviour and a mutation that drops the *writer's* copy instead would produce. T
 distinguishes them — the same trap Risk-73's own carry test had to be shaped around. Its last two
 assertions are the negative control against over-filtering: an ordinary carried key and a scalar
 `<KEY>.datatype` companion must both survive.
+
+### Risk-138 — A `copy=.false.` index must reach its coordinates through the permutation
+
+The whole reason `pf_spatial_index` beats a KD-tree on query time is that it **reorders** the
+coordinates into cell order, so a query scans a contiguous run of memory. `copy=.false.` trades that
+away: the index borrows the caller's arrays and cannot reorder them, so stored position `t` and row
+`idx(t)` stop being the same number and every coordinate lookup has to go through the permutation.
+
+**Get it wrong and the query returns the neighbours of a DIFFERENT point.** Not garbage, not a
+crash: `xs(t)` is a real coordinate belonging to a real row, so the answer is a plausible,
+correctly-sized neighbour list about the wrong query point. This is not hypothetical -- the first
+implementation did exactly this, and every uniform-cloud assertion passed while `copy=.false.` was
+silently wrong.
+
+Two places carry it, and the second is the one that will be missed:
+
+- **The scan** (`spatial_scan`, `src/parquet_spatial_query.f90`) forks on `self%owns` at the RUN
+  level, not per point -- testing per point would slow the DEFAULT path to serve the borrowed one.
+  Both the free and the periodic walks have the fork, so a new walk needs it too.
+- **The bucketing** (`spatial_bucket`, `src/parquet_spatial_build.f90`) must COMPOSE the new
+  permutation with the old one only when the coordinates were reordered too. A borrowed index's
+  `idx` is always a permutation of rows, so on a re-bucket `perm` is the new one outright;
+  composing there renumbers every row through a permutation that was never applied to anything.
+  Reached by `%rebuild_for` on a `copy=.false.` index, which is not the obvious path.
+
+**Covered by** `test_copy_false_matches` (`test/test_spatial.f90`), which queries a borrowed index
+and a copying one over the same cloud at the same explicit cell and demands the same rows. **The
+same explicit cell is load-bearing**: letting each tune itself would let two different grids answer
+identically for the wrong reason, and the assertion is about the lookup, not the tuner.
+
+### Risk-139 — A periodic grid must tile the box exactly, and only translation invariance sees it
+
+With periodic boundaries the grid spans the simulation box rather than the data, and its cells must
+divide the box **exactly** -- which is why `spatial_grid_dims` fixes the cell COUNT first
+(`floor(L/h)`) and derives the side from it (`L/nx`) rather than taking the tuner's `h` directly. A
+grid that does not tile leaves the seam cell a different width from the rest, and every query
+crossing it is wrong by a fraction of a cell: a handful of neighbours missing or invented, silently,
+at one face.
+
+**NO ANSWER-BASED TEST CATCHES THIS, and that was established by mutation rather than assumed.**
+Replacing `L/nx` with the requested `h` survived the entire spatial suite -- the brute-force
+comparisons, the face-and-corner queries, and translation invariance included. The reason is worth
+knowing, because it generalises: a grid that fails to tile folds its last partial slab into cell 0,
+the wrapped walk visits cell 0 anyway (it is adjacent to the last cell), and the exact distance test
+then filters the strays. The shortfall is always under one cell, so a reach of one cell already
+covers it. The property is real -- the seam cell IS a different width -- and only its arithmetic can
+observe it.
+
+**Covered by** `test_periodic_cells_tile_the_box` (`test/test_spatial.f90`), which asserts
+`nx * cell_x == L` to the last bit on all three axes of a non-cubic box, over four cell sizes that
+divide none of the sides, with a non-periodic negative control proving the adjustment does not fire
+where nothing has to tile. **`%cell_sides` exists for this test** -- the per-axis side is otherwise
+unobservable from outside the module, and an invariant nothing can read is an invariant nothing can
+guard.
+
+**Keep `test_periodic_translation_invariant` as well.** It is blind to THIS defect and is the sharp
+instrument for the rest of the periodic walk -- shift every point by an arbitrary vector modulo the
+box, deliberately not a whole number of cells, and every neighbour set must be identical. That is
+the test whose SHAPE any future periodic operation (a periodic segment search, a periodic k-nearest)
+needs its own version of. The lesson is that the area needs BOTH kinds of test, and that "the
+answers are right" is not evidence about a geometric invariant.
+
+Two adjacent properties the same area depends on, both cheap to lose:
+
+- **A point outside the box is never moved.** `modulo` in `spatial_cell_of` puts it in the cell of
+  its image and the minimum-image test answers about that image, so "wrap silently" holds by
+  construction. Adding a wrapping pass would mutate the caller's data in `copy=.false.` mode.
+- **`r > L/2` must ABORT, never clamp.** Beyond half the box a point can be its own neighbour
+  through two images, so the answer is not inaccurate -- it does not exist. Covered by the
+  `spatial_radius_exceeds_half_box` error scenario, and checked per query as well as at build,
+  because a bulk query may name a radius the build never saw.
+
+### Risk-140 — `%rebuild`'s comparison must stay element-wise; a checksum admits a stale index
+
+`%rebuild(x, y, z)` exists so a caller can hand the arrays back in a loop and have the index decide
+whether anything moved. It compares **element by element and exactly**. Both that and a checksum are
+O(n), and the checksum looks obviously cheaper -- which is why someone will propose it.
+
+**A collision means the index keeps answering about the OLD positions**, consistently and forever,
+with the caller having explicitly asked whether it needed rebuilding and been told no. That is the
+worst outcome available in this module and the mechanism exists to prevent exactly it.
+
+The element-wise scan is also not the slow choice it looks like: it exits at the first difference, so
+the common "something changed" case is a few iterations, and only "nothing changed" is a full pass --
+against a rebuild that costs several.
+
+**Covered by** `test_rebuild_detects_change` (`test/test_spatial.f90`), whose shape matters: it moves
+ONE coordinate by a small amount and then asserts the index answers about the new positions, so a
+comparison that sampled, hashed, or checked only the bounding box would fail it.
+
+### Risk-141 — A cell size is a PERFORMANCE choice and must never change an ANSWER
+
+Everything in `parquet_spatial`'s tuner -- the cost model, the density estimate, the probe, the
+bracket, the refinement, the cell-count clamp -- exists to make queries fast. **None of it may change
+which rows a query returns.** A cell that changed the answer would be invisible to every benchmark
+and to most tests, because a neighbour list is usually checked against another query rather than
+against the truth.
+
+The mechanisms that could break it are all plausible optimisations: a cell reach computed as
+`int(r/h)` instead of a floor over the real span (loses a boundary cell), a query clamped to the
+bounding box before the radius is added, an x-run whose two ends are taken from different cells, a
+periodic axis whose cell count lets the wrapped span name one cell twice (which reports its points
+**twice**, not once).
+
+**Covered by** `test_answers_survive_any_cell` (`test/test_spatial.f90`), which forces cells across
+two orders of magnitude and compares every result against a brute-force scan -- not against another
+query. Keep the brute-force oracle: every cheaper comparison available here compares one part of the
+grid against another and would satisfy a defect in the walk itself.
+

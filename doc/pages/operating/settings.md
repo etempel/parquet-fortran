@@ -328,6 +328,29 @@ from a population of a trillion is 100 elements of work, and stays serial.
 `parquet_get_random_threads()` and `parquet_get_random_parallel_min_elements()` report the raw
 settings.
 
+## Threads for a bulk spatial query, and the rebuild warning
+
+`parquet_set_spatial_threads(n)` caps the threads one bulk `pf_spatial_index` query —
+`%all_within`, `%pairs_within`, `%count_all_within` — may use. Like every other per-area cap it is a
+cap rather than a request, read per call, with `0` meaning automatic and `1` forcing serial, and an
+explicit `threads=` on the call itself still wins.
+
+**The answer does not depend on the thread count.** The index is read-only for the whole of a query
+and each thread writes its own disjoint slice of the result, so the serial and threaded answers are
+identical row for row — which is what makes threading admissible here as a setting rather than as
+something that would have to be a call argument.
+
+`parquet_set_spatial_rebuild_warning(flag)` governs whether an index says so when it rebuilds
+itself. A bulk query whose radius disagrees badly with the `radius=` the index was built for
+re-tunes the cell size before sweeping, and warns once per index that it has done so. The warning is
+on by default because a silent rebuild is a silent performance cliff: the message exists to tell you
+your `radius=` hint was wrong, and without it the symptom is simply a library that seems slow.
+Turning it off does not stop the rebuild — it stops the library mentioning it. `verbosity="silent"`
+silences it too, as it does all solicited output; this knob is the narrower control for a program
+that wants everything else.
+
+`parquet_get_spatial_threads()` and `parquet_get_spatial_rebuild_warning()` report the raw settings.
+
 ## Writer defaults
 
 `parquet_set_default_compression(name)` and `parquet_set_default_compression_level(n)` supply what
@@ -606,6 +629,8 @@ One variable per knob, named `PARQUET_FORTRAN_` plus the knob's name in capitals
 | `PARQUET_FORTRAN_TABLE_THREADS` | integer >= 0 (`0` = automatic) |
 | `PARQUET_FORTRAN_STRING_THREADS` | integer >= 0 (`0` = automatic) |
 | `PARQUET_FORTRAN_RANDOM_THREADS` | integer >= 0 (`0` = automatic) |
+| `PARQUET_FORTRAN_SPATIAL_THREADS` | integer >= 0 (`0` = automatic) |
+| `PARQUET_FORTRAN_SPATIAL_REBUILD_WARNING` | `true` / `false` |
 | `PARQUET_FORTRAN_RANDOM_PARALLEL_MIN_ELEMENTS` | integer >= 0 (`0` = no floor) |
 | `PARQUET_FORTRAN_SORT_COUNTING_PATH` | `true`/`false`/`1`/`0` |
 | `PARQUET_FORTRAN_SORT_RADIX_PATH` | `true`/`false`/`1`/`0` |
@@ -671,7 +696,9 @@ parquet-fortran settings
   table_threads                    0
   string_threads                   0
   random_threads                   0
+  spatial_threads                  0
   random_parallel_min_elements     1000
+  spatial_rebuild_warning          true
   sort_counting_path               true
   sort_radix_path                  true
   sort_counting_bucket_limit       4194304

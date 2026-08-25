@@ -100,6 +100,8 @@ contains
                 test_string_threads_effect), &
             new_unittest("random_threads caps what a bulk permutation resolves to", &
                 test_random_threads_effect), &
+            new_unittest("spatial_threads caps what a bulk spatial query resolves to", &
+                test_spatial_threads_effect), &
             new_unittest("random_parallel_min_elements decides whether a bulk permutation threads", &
                 test_random_parallel_min_effect), &
             new_unittest("the random work floor lowers the thread count before it forces serial", &
@@ -141,7 +143,7 @@ contains
             new_unittest("a variable overrides an earlier explicit set", test_env_overrides_explicit), &
             new_unittest("integers accept blanks and a sign, booleans fold case", test_env_value_forms), &
             new_unittest("a codec and its level both arrive", test_env_codec_and_level), &
-            new_unittest("set_threads moves all six thread counts", test_set_threads), &
+            new_unittest("set_threads moves every thread count", test_set_threads), &
             new_unittest("file_date pins the creation timestamp, making two writes byte-identical", &
                 test_file_date_pins_output), &
             new_unittest("PARQUET_FORTRAN_THREADS is overridden by the specific variables", &
@@ -287,6 +289,10 @@ contains
         if (allocated(error)) return
         call check(error, parquet_get_random_threads() == 0, "random_threads defaults to 0 (automatic)")
         if (allocated(error)) return
+        call check(error, parquet_get_spatial_threads() == 0, "spatial_threads defaults to 0 (automatic)")
+        if (allocated(error)) return
+        call check(error, parquet_get_spatial_rebuild_warning(), "spatial_rebuild_warning defaults to .true.")
+        if (allocated(error)) return
         call check(error, parquet_get_random_parallel_min_elements() == 1000_int64, &
             "random_parallel_min_elements defaults to 1000 elements per thread")
         if (allocated(error)) return
@@ -348,6 +354,8 @@ contains
         call parquet_set_prefetch_threads(2)
         call parquet_set_string_threads(3)
         call parquet_set_random_threads(4)
+        call parquet_set_spatial_threads(5)
+        call parquet_set_spatial_rebuild_warning(.false.)
         call parquet_set_random_parallel_min_elements(77_int64)
         call parquet_set_default_compression("gzip")
         call parquet_set_default_compression_level(9)
@@ -367,6 +375,10 @@ contains
         call check(error, parquet_get_string_threads() == 0, "reset restores string_threads")
         if (allocated(error)) return
         call check(error, parquet_get_random_threads() == 0, "reset restores random_threads")
+        if (allocated(error)) return
+        call check(error, parquet_get_spatial_threads() == 0, "reset restores spatial_threads")
+        if (allocated(error)) return
+        call check(error, parquet_get_spatial_rebuild_warning(), "reset restores spatial_rebuild_warning")
         if (allocated(error)) return
         call check(error, parquet_get_random_parallel_min_elements() == 1000_int64, &
             "reset restores random_parallel_min_elements")
@@ -1419,8 +1431,8 @@ contains
         if (rc /= 0) error stop "unset_env: unsetenv failed for '" // name // "'"
     end subroutine unset_env
 
-    !> All three thread counts must move, and each is read back through its OWN getter -- a
-    !> convenience that set one of them and forgot the others would pass any single assertion.
+    !> Every thread count must move, and each is read back through its OWN getter -- a convenience
+    !> that set one of them and forgot the others would pass any single assertion.
     !>
     !> `0` is deliberately not accepted here even though the sort and prefetch caps take it; that
     !> abort lives in test/error_scenarios.f90 (`settings_set_threads_zero`), since it kills the
@@ -1439,15 +1451,17 @@ contains
             "set_threads must set the random cap")
         if (.not. allocated(error)) call check(error, parquet_get_prefetch_threads() == 3, &
             "set_threads must set the prefetch cap")
-        ! The fifth and sixth knobs. A forgotten call is invisible without its own assertion, since
-        ! the others still work and the name says nothing about how many "all" is -- which is exactly
-        ! how this test came to say "all four" while a fifth cap existed and was never set, and then
-        ! "all five" while a sixth did. `parquet_set_threads`' own doc-comment names this test as the
-        ! other place a seventh cap has to be added.
+        ! A forgotten call is invisible without its own assertion, since the others still work and
+        ! the name says nothing about how many "all" is -- which is exactly how this test came to
+        ! say "all four" while a fifth cap existed and was never set, and then "all five" while a
+        ! sixth did. Both this test's name and `parquet_set_threads`' doc-comment now NAME the caps
+        ! rather than counting them, so adding one means adding a line here and nowhere else.
         if (.not. allocated(error)) call check(error, parquet_get_table_threads() == 3, &
             "set_threads must set the table mutation cap")
         if (.not. allocated(error)) call check(error, parquet_get_string_threads() == 3, &
             "set_threads must set the string-column cap")
+        if (.not. allocated(error)) call check(error, parquet_get_spatial_threads() == 3, &
+            "set_threads must set the spatial cap")
         ! A later individual setter overrides just its own knob, which is what makes the convenience
         ! composable rather than a mode you have to leave.
         if (.not. allocated(error)) then
@@ -2277,6 +2291,61 @@ contains
         if (allocated(error)) return
         call parquet_reset_settings()
     end subroutine test_random_threads_effect
+
+    !> The observed effect of `spatial_threads`, WITH its negative control.
+    !>
+    !> A set-then-get test passes just as happily against a value that is stored and never read, so
+    !> the assertion is on what a bulk query actually opens -- reported by
+    !> `parquet_debug_spatial_threads_used`, which exists because the resolved count is otherwise
+    !> unobservable from outside the module. The `avail > 1` guard is the single-core limitation:
+    !> on such a machine the capped and automatic answers are both 1 and the comparison is vacuous.
+    subroutine test_spatial_threads_effect(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(pf_spatial_index) :: sx
+        integer(int64), allocatable :: counts(:)
+        real(real64) :: x(2000), y(2000), z(2000)
+        integer :: auto_n, capped_n, avail, i
+        !
+        avail = 1
+#ifdef _OPENMP
+        avail = min(omp_get_max_threads(), omp_get_num_procs())
+#endif
+        do i = 1, 2000
+            x(i) = pf_random_at(99_int64, i, 1_int64)
+            y(i) = pf_random_at(99_int64, i, 2_int64)
+            z(i) = pf_random_at(99_int64, i, 3_int64)
+        end do
+        call parquet_reset_settings()
+        call sx%build(x, y, z, radius=0.1_real64)
+        !
+        call sx%count_all_within(0.1_real64, counts)
+        auto_n = parquet_debug_spatial_threads_used()
+        call check(error, auto_n >= 1, "the automatic answer is always at least one thread")
+        if (allocated(error)) return
+        call check(error, auto_n <= avail, "the automatic answer never exceeds what OpenMP and the affinity mask allow")
+        if (allocated(error)) return
+        !
+        call parquet_set_spatial_threads(1)
+        call sx%count_all_within(0.1_real64, counts)
+        capped_n = parquet_debug_spatial_threads_used()
+        call check(error, capped_n == 1, "a spatial cap of 1 forces one thread")
+        if (allocated(error)) return
+        if (avail > 1) then
+            call check(error, auto_n > capped_n, &
+                "negative control: with threads available the automatic answer must EXCEED the cap")
+            if (allocated(error)) return
+        end if
+        !
+        ! An EXPLICIT threads= outranks the cap -- the cap is a default, not a ceiling on intent.
+        if (avail > 1) then
+            call sx%count_all_within(0.1_real64, counts, threads=2)
+            call check(error, parquet_debug_spatial_threads_used() == 2, &
+                "an explicit threads= is honoured above the configured cap")
+            if (allocated(error)) return
+        end if
+        call parquet_reset_settings()
+        call parquet_debug_reset_spatial_counters()
+    end subroutine test_spatial_threads_effect
 
     !> The observed effect of the work floor: it decides whether a bulk permutation threads at all.
     !>

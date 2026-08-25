@@ -76,6 +76,7 @@ module parquet_settings_base
     public :: cfg_random_threads, cfg_random_parallel_min_elements
     public :: cfg_sort_threads, cfg_sort_counting_path, cfg_sort_radix_path
     public :: cfg_sort_counting_bucket_limit, cfg_message_stream
+    public :: cfg_spatial_threads, cfg_spatial_rebuild_warning
     !
     ! ---- The settings API for the Arrow-free modules: state, getter AND setter ----
     public :: parquet_set_sort_threads, parquet_get_sort_threads
@@ -84,6 +85,8 @@ module parquet_settings_base
     public :: parquet_set_sort_counting_bucket_limit, parquet_get_sort_counting_bucket_limit
     public :: parquet_set_string_threads
     public :: parquet_set_random_threads, parquet_set_random_parallel_min_elements
+    public :: parquet_set_spatial_threads, parquet_get_spatial_threads
+    public :: parquet_set_spatial_rebuild_warning, parquet_get_spatial_rebuild_warning
     public :: parquet_set_verbosity, parquet_get_verbosity
     public :: parquet_set_message_stream, parquet_get_message_stream
     public :: parquet_emit_info, parquet_emit_warning, parquet_emit_error_context
@@ -147,6 +150,20 @@ module parquet_settings_base
     !! read, deliberately, so a read-time `sort_by=` and a raw-array sort can never disagree about
     !! it (feature_risks.md Risk-40).
     integer, save :: cfg_sort_threads = 0
+    !> Cap on the threads one bulk `pf_spatial_index` query may use internally. `0` means "auto" (as
+    !! many as OpenMP offers). Written by `parquet_set_spatial_threads` below; read only by
+    !! `spatial_threads` (src/parquet_spatial_bulk.f90), for the same single-reader reason as
+    !! cfg_sort_threads and cfg_string_threads (feature_risks.md Risk-40).
+    integer, save :: cfg_spatial_threads = 0
+    !> Whether a `pf_spatial_index` says so when a query radius disagrees badly enough with the one
+    !! it was built for that it rebuilds itself.
+    !!
+    !! **On by default, because a silent rebuild is a silent performance cliff.** The whole point of
+    !! the message is to tell the caller their `radius=` hint was wrong -- an index that quietly
+    !! rebuilds inside a bulk sweep looks like a library that is slow rather than like a hint that
+    !! needs fixing. This is the narrower control for a program that wants everything else the
+    !! library prints; `verbosity="silent"` silences it too, as it does all solicited output.
+    logical, save :: cfg_spatial_rebuild_warning = .true.
     !> Which stream the library's own messages go to. Read only by the emit channels below.
     integer, save :: cfg_message_stream = stream_stdout
     !> Whether the sort's integer counting fast path may be taken at all. Mirrored to C++ by
@@ -452,6 +469,50 @@ contains
         if (n < 0) error stop "parquet_set_string_threads: n must be >= 0 (0 means automatic)"
         cfg_string_threads = n
     end subroutine parquet_set_string_threads
+    !
+    !> Sets the cap on how many threads one bulk `pf_spatial_index` query may use internally.
+    !>
+    !> Read per call, so it takes effect immediately. `0` restores automatic behaviour (as many
+    !> threads as OpenMP offers, clamped to the affinity mask). The value is a **cap** and never a
+    !> request: it can only lower the automatic answer, it never overrides the rule that an
+    !> unqualified bulk call inside an OpenMP parallel region runs serially, and an explicit
+    !> `threads=` on `%build`/`%all_within` is still honoured everywhere.
+    !>
+    !> **Threading a spatial query changes how fast it answers and never what it answers.** The
+    !> index is read-only during a query and each thread writes its own disjoint slice of the
+    !> result, so the serial and threaded answers are identical row for row -- which is what makes
+    !> this admissible as a setting at all.
+    subroutine parquet_set_spatial_threads(n)
+        integer, intent(in) :: n !! thread cap, or 0 for automatic; must be >= 0.
+
+        if (n < 0) error stop "parquet_set_spatial_threads: n must be >= 0 (0 means automatic)"
+        cfg_spatial_threads = n
+    end subroutine parquet_set_spatial_threads
+    !
+    !> The configured spatial thread cap, as set. `0` means automatic and is NOT the resolved
+    !> count -- ask the index what it used, or read `parquet_get_spatial_threads` only to find out
+    !> what was asked for.
+    integer function parquet_get_spatial_threads() result(n)
+
+        n = cfg_spatial_threads
+    end function parquet_get_spatial_threads
+    !
+    !> Turns the spatial index's automatic-rebuild warning on or off.
+    !>
+    !> The warning fires at most once per index object, when a query radius disagrees badly enough
+    !> with the radius the index was built for that the index rebuilds itself. Turning it off does
+    !> not stop the rebuild -- it stops the library saying so.
+    subroutine parquet_set_spatial_rebuild_warning(on)
+        logical, intent(in) :: on !! .true. warns (the default), .false. rebuilds silently.
+
+        cfg_spatial_rebuild_warning = on
+    end subroutine parquet_set_spatial_rebuild_warning
+    !
+    !> Whether the spatial index's automatic-rebuild warning is enabled.
+    logical function parquet_get_spatial_rebuild_warning() result(on)
+
+        on = cfg_spatial_rebuild_warning
+    end function parquet_get_spatial_rebuild_warning
     !
     !> Sets the cap on how many threads one bulk `pf_random_permutation`/`pf_random_subset` call
     !> may use internally.

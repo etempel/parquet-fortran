@@ -62,6 +62,8 @@ module parquet_settings
     public :: parquet_set_sort_counting_bucket_limit, parquet_get_sort_counting_bucket_limit
     public :: parquet_set_string_threads, parquet_get_string_threads
     public :: parquet_set_random_threads, parquet_get_random_threads
+    public :: parquet_set_spatial_threads, parquet_get_spatial_threads
+    public :: parquet_set_spatial_rebuild_warning, parquet_get_spatial_rebuild_warning
     public :: parquet_set_random_parallel_min_elements
     public :: parquet_get_random_parallel_min_elements
     public :: parquet_set_verbosity, parquet_get_verbosity
@@ -386,36 +388,36 @@ contains
         n = cfg_table_threads
     end function parquet_get_table_threads
 
-    !> Sets all six thread counts at once: Arrow's pool and the five per-area caps -- sorting, the
-    !> table prefetch, the table mutation, one string column's bulk work and the bulk random draws.
+    !> Sets every thread count at once: Arrow's pool, and each per-area cap -- sorting, the table
+    !> prefetch, the table mutation, one string column's bulk work, the bulk random draws and the
+    !> spatial index's bulk queries.
     !>
     !> A convenience for the common case of "give this library N threads and no more", equivalent to
-    !> calling `parquet_set_arrow_threads(n)`, `parquet_set_sort_threads(n)`,
-    !> `parquet_set_prefetch_threads(n)`, `parquet_set_table_threads(n)`,
-    !> `parquet_set_string_threads(n)` and `parquet_set_random_threads(n)` in turn. It has no state
-    !> of its own -- read the six back individually, or with `parquet_print_settings`, and set any
-    !> one of them afterwards to override just that one.
+    !> calling `parquet_set_arrow_threads(n)` and each per-area setter in turn. It has no state of
+    !> its own -- read them back individually, or with `parquet_print_settings`, and set any one of
+    !> them afterwards to override just that one.
     !>
-    !> **`n` must be at least 1; `0` is not accepted here even though the five caps take it.**
-    !> `0` means "automatic" to the five per-area caps, but Arrow's pool has no automatic
+    !> **`n` must be at least 1; `0` is not accepted here even though the per-area caps take it.**
+    !> `0` means "automatic" to a per-area cap, but Arrow's pool has no automatic
     !> value at all -- its starting capacity is hardware-derived and is not a number this library gets
     !> to invent. Rather than have one argument mean two different things, this takes a real thread
     !> count only; use the individual setters when you want automatic behaviour, or
     !> `parquet_reset_settings` to put everything back.
     !>
-    !> **The six do not all take effect at the same moment**, which is the one thing worth knowing
+    !> **They do not all take effect at the same moment**, which is the one thing worth knowing
     !> before reaching for this. Arrow's pool is resized immediately and is shared, so readers and
-    !> writers already open are affected too; the five per-area caps are read per call, so they
-    !> apply to work started afterwards. Setting all six together does not make them simultaneous.
+    !> writers already open are affected too; the per-area caps are read per call, so they apply to
+    !> work started afterwards. Setting them together does not make them simultaneous.
     !>
-    !> **Adding a seventh cap means adding it here and to the assertion in `test_set_threads`.** The
+    !> **Adding another cap means adding it here and to the assertion in `test_set_threads`.** The
     !> name says nothing about how many "all" is, so a forgotten call is invisible -- which is how
-    !> this doc-comment came to say "all four" while a fifth and a sixth cap existed.
+    !> this doc-comment came to say "all four" while a fifth and a sixth cap existed. It now NAMES
+    !> them rather than counting them, so a seventh needs one line here and nowhere else.
     subroutine parquet_set_threads(n)
-        integer, intent(in) :: n !! thread count for all six; must be >= 1.
+        integer, intent(in) :: n !! thread count for every cap; must be >= 1.
 
         if (n < 1) error stop "parquet_set_threads: n must be >= 1 " // &
-            "(0 means automatic to the five per-area caps, but Arrow's pool " // &
+            "(0 means automatic to a per-area cap, but Arrow's pool " // &
             "has no automatic value; set them individually if that is what you want)"
         call parquet_set_arrow_threads(n)
         call parquet_set_sort_threads(n)
@@ -423,6 +425,7 @@ contains
         call parquet_set_table_threads(n)
         call parquet_set_string_threads(n)
         call parquet_set_random_threads(n)
+        call parquet_set_spatial_threads(n)
     end subroutine parquet_set_threads
 
     !> Sets the compression codec `parquet_open_writer` uses when the caller passes no
@@ -898,6 +901,18 @@ contains
             call parquet_set_random_threads(n32)
         end if
 
+        call env_value("PARQUET_FORTRAN_SPATIAL_THREADS", text, got)
+        if (got) then
+            call env_int32("PARQUET_FORTRAN_SPATIAL_THREADS", text, n32)
+            call parquet_set_spatial_threads(n32)
+        end if
+
+        call env_value("PARQUET_FORTRAN_SPATIAL_REBUILD_WARNING", text, got)
+        if (got) then
+            call env_logical("PARQUET_FORTRAN_SPATIAL_REBUILD_WARNING", text, flag)
+            call parquet_set_spatial_rebuild_warning(flag)
+        end if
+
         call env_value("PARQUET_FORTRAN_RANDOM_PARALLEL_MIN_ELEMENTS", text, got)
         if (got) then
             call env_int64("PARQUET_FORTRAN_RANDOM_PARALLEL_MIN_ELEMENTS", text, n64)
@@ -1135,6 +1150,8 @@ contains
         cfg_table_threads = 0
         cfg_string_threads = 0
         cfg_random_threads = 0
+        cfg_spatial_threads = 0
+        cfg_spatial_rebuild_warning = .true.
         cfg_random_parallel_min_elements = 1000_int64
         cfg_default_compression = ""
         cfg_default_compression_level = level_codec_default
@@ -1173,7 +1190,9 @@ contains
         call print_one(u, "table_threads", cfg_table_threads)
         call print_one(u, "string_threads", cfg_string_threads)
         call print_one(u, "random_threads", cfg_random_threads)
+        call print_one(u, "spatial_threads", cfg_spatial_threads)
         call print_big(u, "random_parallel_min_elements", cfg_random_parallel_min_elements)
+        call print_text(u, "spatial_rebuild_warning", merge("true ", "false", cfg_spatial_rebuild_warning))
         call print_text(u, "sort_counting_path", merge("true ", "false", cfg_sort_counting_path))
         call print_text(u, "sort_radix_path", merge("true ", "false", cfg_sort_radix_path))
         call print_big(u, "sort_counting_bucket_limit", parquet_get_sort_counting_bucket_limit())

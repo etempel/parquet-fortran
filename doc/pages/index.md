@@ -15,12 +15,12 @@ type/function/subroutine under `use parquet`), see the [modules](../lists/module
 
 **One `use parquet` brings in the whole library** — readers and writers, schemas and MAML, the
 `parquet_table` container, the `parquet_column` foundation and its `PK_*` kind constants, compact
-string columns, the date/time/timestamp types, sorting, random numbers and sampling, and the
-process-global settings. Every page below assumes that single import. The individual modules
-(`parquet_io`, `parquet_tables`, `parquet_columns`, `parquet_strings`, `parquet_temporal`,
-`parquet_sorting`, `parquet_argsort`, `parquet_sampling`, `parquet_random`, `parquet_settings`,
-`parquet_version`, `parquet_maml_base`) are still there and can be named directly when you want a
-narrower import — see [Choosing a module](operating/choosing-a-module.html) for what each one costs
+string columns, the date/time/timestamp types, sorting, random numbers and sampling, spatial
+neighbour search, and the process-global settings. Every page below assumes that single import. The
+individual modules (`parquet_io`, `parquet_tables`, `parquet_columns`, `parquet_strings`,
+`parquet_temporal`, `parquet_sorting`, `parquet_argsort`, `parquet_sampling`, `parquet_spatial`,
+`parquet_random`, `parquet_settings`, `parquet_version`, `parquet_maml_base`) are still there and
+can be named directly when you want a narrower import — see [Choosing a module](operating/choosing-a-module.html) for what each one costs
 to compile against and which of them are covered by the library's API stability promise.
 `parquet_core` is the exception in the other direction: it is internal and is covered by no promise.
 Because `parquet` re-exports rather than defines, the generated

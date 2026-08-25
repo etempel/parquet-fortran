@@ -984,6 +984,18 @@ scenarios=(
     "extra_section_capitalized:1"
     "extra_section_lowercase_control:1"
     "compact_write_exceeds_array_size_warns:0"
+    "spatial_query_before_build:1"
+    "spatial_length_mismatch:1"
+    "spatial_radius_not_positive:1"
+    "spatial_box_needs_both:1"
+    "spatial_radius_exceeds_half_box:1"
+    "spatial_query_rank_mismatch:1"
+    "spatial_rebuild_needs_copy:1"
+    "spatial_bulk_radius_length:1"
+    "spatial_copy_false_strided:1"
+    "spatial_threads_below_one:1"
+    "spatial_rebuild_warning_on:0"
+    "spatial_rebuild_warning_off:0"
 )
 
 # writer_guard_sequential_handoff is the negative control for the two racy

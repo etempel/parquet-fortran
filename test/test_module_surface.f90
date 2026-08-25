@@ -186,6 +186,81 @@ contains
 
 end module test_module_surface_sampling
 
+!> `parquet_spatial` alone: its own two knobs, the sorting knobs its bucketing goes through, and
+!> the output pair, get and set -- plus a working index, built and queried through this one import.
+!!
+!! **One library import, and it must stay that way.** A user who imports this module to get
+!! neighbour search must be able to cap its threads and silence its rebuild warning without also
+!! importing `parquet_settings`, which would drag in `parquet_bindings` and with it Arrow.
+module test_module_surface_spatial
+    use parquet_spatial                ! THE ONLY library import.
+    use iso_fortran_env, only : int64, real64
+    implicit none
+    private
+    public :: check_spatial_surface
+
+contains
+
+    !> Round-trips every knob `parquet_spatial`'s own code reads, then builds and queries an index.
+    subroutine check_spatial_surface(what)
+        character(len=:), allocatable, intent(out) :: what !! the first knob that failed, or "".
+        character(len=:), allocatable :: tok
+        type(pf_spatial_index) :: sx
+        real(real64) :: x(8), y(8), z(8)
+        integer(int64) :: got(8), m
+        integer :: n_spatial, i
+        logical :: warn
+
+        what = ""
+        n_spatial = parquet_get_spatial_threads()
+        warn = parquet_get_spatial_rebuild_warning()
+
+        call parquet_set_spatial_threads(3)
+        if (parquet_get_spatial_threads() /= 3) what = "spatial_threads"
+        call parquet_set_spatial_rebuild_warning(.not. warn)
+        if (what == "" .and. parquet_get_spatial_rebuild_warning() .eqv. warn) what = "spatial_rebuild_warning"
+        ! The sorting knobs: %build buckets through pf_argsort, so a user of this module alone must
+        ! be able to steer which path that takes.
+        call parquet_set_sort_threads(2)
+        if (what == "" .and. parquet_get_sort_threads() /= 2) what = "sort_threads"
+        call parquet_set_sort_counting_path(.false.)
+        if (what == "" .and. parquet_get_sort_counting_path()) what = "sort_counting_path"
+        call parquet_set_sort_counting_path(.true.)
+        call parquet_set_sort_radix_path(.false.)
+        if (what == "" .and. parquet_get_sort_radix_path()) what = "sort_radix_path"
+        call parquet_set_sort_radix_path(.true.)
+        call parquet_set_sort_counting_bucket_limit(64_int64)
+        if (what == "" .and. parquet_get_sort_counting_bucket_limit() /= 64_int64) what = "sort_counting_bucket_limit"
+        call parquet_set_sort_counting_bucket_limit(0_int64)
+        ! The output pair: the automatic-rebuild warning emits from this tier.
+        call parquet_set_verbosity("silent")
+        call parquet_get_verbosity(tok)
+        if (what == "" .and. tok /= "silent") what = "verbosity"
+        call parquet_set_verbosity("normal")
+        call parquet_set_message_stream("stderr")
+        call parquet_get_message_stream(tok)
+        if (what == "" .and. tok /= "stderr") what = "message_stream"
+        call parquet_set_message_stream("stdout")
+
+        ! And the capability itself: a re-export list that compiles while exporting no usable type
+        ! would satisfy every assertion above.
+        do i = 1, 8
+            x(i) = real(i, kind=real64)
+            y(i) = 0.0_real64
+            z(i) = 0.0_real64
+        end do
+        call sx%build(x, y, z, radius=1.5_real64)
+        m = sx%within([3.0_real64, 0.0_real64, 0.0_real64], 1.5_real64, got)
+        if (what == "" .and. m /= 3_int64) what = "pf_spatial_index%within"
+        if (what == "" .and. sx%metric() /= PF_METRIC_EUCLIDEAN) what = "PF_METRIC_EUCLIDEAN"
+
+        call parquet_set_spatial_threads(n_spatial)
+        call parquet_set_spatial_rebuild_warning(warn)
+        call parquet_set_sort_threads(0)
+    end subroutine check_spatial_surface
+
+end module test_module_surface_spatial
+
 !> `parquet_version` alone: the library's own version string.
 !!
 !! **This is the acceptance test for the leaf.** `parquet_get_version` is deliberately re-exported
@@ -508,6 +583,7 @@ module test_module_surface
     use test_module_surface_strings, only : check_strings_surface
     use test_module_surface_sampling, only : check_sampling_surface
     use test_module_surface_version, only : check_version_surface
+    use test_module_surface_spatial, only : check_spatial_surface
     use test_module_surface_columns, only : check_columns_surface
     use test_module_surface_random, only : check_random_surface
     use test_module_surface_tables, only : check_tables_surface
@@ -608,6 +684,8 @@ contains
                 test_strings_surface), &
             new_unittest("parquet_sampling alone exposes every knob it reads", &
                 test_sampling_surface), &
+            new_unittest("parquet_spatial alone builds an index and exposes every knob it reads", &
+                test_spatial_surface), &
             new_unittest("parquet_version alone reports the library version", &
                 test_version_surface), &
             new_unittest("parquet_io alone reaches every layer of the read/write API", &
@@ -646,6 +724,15 @@ contains
         call check_tables_surface(what)
         call check(error, what == "", "the table was not usable through `use parquet_tables` alone: " // what)
     end subroutine test_tables_surface
+
+    !> The test-drive wrapper over check_spatial_surface.
+    subroutine test_spatial_surface(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: what
+
+        call check_spatial_surface(what)
+        call check(error, what == "", "the spatial index was not usable through `use parquet_spatial` alone: " // what)
+    end subroutine test_spatial_surface
 
     !> The test-drive wrapper over check_version_surface.
     subroutine test_version_surface(error)

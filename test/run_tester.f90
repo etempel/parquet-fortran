@@ -39,6 +39,7 @@ program tester
     use test_random_omp, only : collect_tests_parquet_random_omp
     use test_random_weighted, only : collect_tests_parquet_random_weighted
     use test_random_dist, only : collect_tests_parquet_random_dist
+    use test_spatial, only : collect_tests_parquet_spatial
     use parquet_bindings, only : parquet_warmup_memory_pool
     !
     implicit none
@@ -97,7 +98,8 @@ program tester
         new_testsuite("random_perm", collect_tests_parquet_random_perm), &
         new_testsuite("random_omp", collect_tests_parquet_random_omp), &
         new_testsuite("random_weighted", collect_tests_parquet_random_weighted), &
-        new_testsuite("random_dist", collect_tests_parquet_random_dist) &
+        new_testsuite("random_dist", collect_tests_parquet_random_dist), &
+        new_testsuite("spatial", collect_tests_parquet_spatial) &
         ]
     !
     ! command line argument for a specific testsuite and test
@@ -241,6 +243,16 @@ contains
     !> 0 and nonzero, purely from sibling tests sorting at the same time. The suite is ~25 fast
     !> file-based tests and the lost parallelism is not measurable.
     !>
+    !> "spatial" is excluded for the same reason again, in its sharpest form: the probe counter,
+    !> the rebuild counter, the resolved thread count and the forced cell size
+    !> (parquet_debug_spatial_probe_count, _rebuilds, _threads_used, parquet_debug_set_spatial_cell)
+    !> are all process-global, because the state they force is private to parquet_spatial and there
+    !> is no bind(C) boundary to hide a hook behind. A sibling test forcing a cell mid-run would
+    !> leave the probe test asserting a count nobody produced -- and since a spatial query's ANSWERS
+    !> do not depend on the cell size, every correctness test in the suite would go on passing while
+    !> the tuner tests measured each other. The suite is pure in-memory work and costs under a
+    !> second serially.
+    !>
     !> "filter_screen" is excluded for a different reason from the four below: the screen setting
     !> (parquet_set_statistics_prescreen) and the pruned-row-group count
     !> (parquet_debug_get_row_groups_pruned) are both process-global -- the first because every
@@ -319,7 +331,8 @@ contains
         safe = .not. (name == "writing" .or. name == "errors" .or. name == "metadata" .or. name == "maml" &
             .or. name == "filter_screen" .or. name == "sorting" .or. name == "sort" .or. name == "settings" &
             .or. name == "table_parallel" .or. name == "string_parallel" .or. name == "diagnostics" &
-            .or. name == "random_omp" .or. name == "random_perm" .or. name == "module_surface")
+            .or. name == "random_omp" .or. name == "random_perm" .or. name == "module_surface" &
+            .or. name == "spatial")
     end function suite_is_safe_to_parallelize
 
     !> Whether running just this suite is worth pre-running the whole scenario set for. Purely a

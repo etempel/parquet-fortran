@@ -1441,6 +1441,24 @@ def check_parquet_temporal_stays_arrow_free():
         "The date/time/timestamp elements are advertised as a one-file, Arrow-free import.")
 
 
+def check_parquet_spatial_stays_arrow_free():
+    """`use parquet_spatial` must not drag the Arrow/Parquet C++ stack into a consumer's build.
+
+    The spatial index is a grid over plain Fortran coordinate arrays and reaches nothing but
+    `parquet_argsort` and `parquet_settings_base`, so a consumer wanting neighbour search compiles
+    five files rather than the sixty-odd the reader/writer stack costs. That is a property of the
+    `use` graph and nothing in `fpm test` can see it -- the library obviously has Arrow, so a stray
+    import compiles and tests perfectly well here and inflates every downstream build.
+
+    One check per tier rather than a few for the group is deliberate: a tier covered only
+    transitively loses its coverage silently the day the import it was riding on moves.
+    """
+    return _check_stays_arrow_free(
+        "parquet_spatial",
+        "The spatial tier exists so that neighbour search costs a consumer five files; an import "
+        "reaching the reader/writer stack would make it sixty.")
+
+
 def check_parquet_version_stays_arrow_free():
     """`use parquet_version` must not reach parquet_bindings.
 
@@ -3327,6 +3345,7 @@ CHECKS = (
     ("parquet_columns stays Arrow-free", check_parquet_columns_stays_arrow_free),
     ("parquet_temporal stays Arrow-free", check_parquet_temporal_stays_arrow_free),
     ("parquet_version stays Arrow-free", check_parquet_version_stays_arrow_free),
+    ("parquet_spatial stays Arrow-free", check_parquet_spatial_stays_arrow_free),
     ("parquet_get_version has exactly one home", check_get_version_has_one_home),
     ("parquet_random imports nothing from src/", check_parquet_random_stays_leaf),
     ("no submodule calls a sort-oracle procedure pointer",

@@ -1445,7 +1445,19 @@ contains
             new_unittest("parquet_column_exists validates types= before checking the column exists", &
                 test_column_exists_bad_type_token_missing_column_aborts), &
             new_unittest("parquet_column_exists with a blank types= filter aborts", &
-                test_column_exists_empty_type_filter_aborts) &
+                test_column_exists_empty_type_filter_aborts), &
+            new_unittest("querying an unbuilt spatial index aborts", test_spatial_query_before_build_aborts), &
+            new_unittest("mismatched coordinate lengths abort", test_spatial_length_mismatch_aborts), &
+            new_unittest("a radius hint of zero aborts", test_spatial_radius_not_positive_aborts), &
+            new_unittest("box_lo= without box_hi= aborts", test_spatial_box_needs_both_aborts), &
+            new_unittest("a periodic radius above half the box aborts", test_spatial_half_box_aborts), &
+            new_unittest("querying a 2D index with a 3D point aborts", test_spatial_query_rank_aborts), &
+            new_unittest("rebuilding a copy=.false. index aborts", test_spatial_rebuild_needs_copy_aborts), &
+            new_unittest("a radius array of the wrong length aborts", test_spatial_bulk_radius_aborts), &
+            new_unittest("copy=.false. over a strided section aborts", test_spatial_copy_false_strided_aborts), &
+            new_unittest("threads= below one aborts", test_spatial_threads_below_one_aborts), &
+            new_unittest("the automatic-rebuild warning is said, and can be silenced", &
+                test_spatial_rebuild_warning) &
             ]
         testsuite = [p1, p2, p3, p4, p5, p6, p7]
     end subroutine collect_tests_parquet_errors
@@ -2208,6 +2220,109 @@ contains
             failure_message="reindex_trusted with a wrong-length permutation was expected to abort", &
             required_stderr="reindex_trusted: permutation length does not match")
     end subroutine test_reindex_trusted_length_aborts
+
+    !
+    ! ---- parquet_spatial abort paths ----
+    !
+    subroutine test_spatial_query_before_build_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_query_before_build", expect_abort=.true., &
+            failure_message="querying an unbuilt spatial index was expected to abort", &
+            required_stderr="this index has not been built")
+    end subroutine test_spatial_query_before_build_aborts
+
+    subroutine test_spatial_length_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_length_mismatch", expect_abort=.true., &
+            failure_message="building from mismatched coordinate arrays was expected to abort", &
+            required_stderr="x and y must be the same length")
+    end subroutine test_spatial_length_mismatch_aborts
+
+    subroutine test_spatial_radius_not_positive_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_radius_not_positive", expect_abort=.true., &
+            failure_message="a radius hint of zero was expected to abort", &
+            required_stderr="every radius= must be > 0")
+    end subroutine test_spatial_radius_not_positive_aborts
+
+    subroutine test_spatial_box_needs_both_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_box_needs_both", expect_abort=.true., &
+            failure_message="box_lo= without box_hi= was expected to abort", &
+            required_stderr="need both box_lo= and box_hi=")
+    end subroutine test_spatial_box_needs_both_aborts
+
+    !> Beyond `L/2` the minimum image is ambiguous, so this must abort rather than clamp: a point
+    !> can be its own neighbour through two images and there is no answer to give.
+    subroutine test_spatial_half_box_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_radius_exceeds_half_box", expect_abort=.true., &
+            failure_message="a periodic radius above half the box was expected to abort", &
+            required_stderr="must not exceed half the box on any axis")
+    end subroutine test_spatial_half_box_aborts
+
+    subroutine test_spatial_query_rank_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_query_rank_mismatch", expect_abort=.true., &
+            failure_message="querying a 2D index with a 3D point was expected to abort", &
+            required_stderr="as many coordinates as the index was built with")
+    end subroutine test_spatial_query_rank_aborts
+
+    subroutine test_spatial_rebuild_needs_copy_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_rebuild_needs_copy", expect_abort=.true., &
+            failure_message="rebuilding a copy=.false. index was expected to abort", &
+            required_stderr="holds no copy to compare against")
+    end subroutine test_spatial_rebuild_needs_copy_aborts
+
+    subroutine test_spatial_bulk_radius_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_bulk_radius_length", expect_abort=.true., &
+            failure_message="a radius array of the wrong length was expected to abort", &
+            required_stderr="radius must be one value or one per point")
+    end subroutine test_spatial_bulk_radius_aborts
+
+    !> A `contiguous` dummy would copy a strided actual into a temporary that dies at the end of the
+    !> call, leaving the index pointing at freed memory with nothing able to detect it -- so this
+    !> must be refused at build time rather than diagnosed later.
+    subroutine test_spatial_copy_false_strided_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_copy_false_strided", expect_abort=.true., &
+            failure_message="copy=.false. over a strided section was expected to abort", &
+            required_stderr="needs contiguous x and y")
+    end subroutine test_spatial_copy_false_strided_aborts
+
+    subroutine test_spatial_threads_below_one_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_threads_below_one", expect_abort=.true., &
+            failure_message="threads= 0 on a bulk query was expected to abort", &
+            required_stderr="threads= must be >= 1")
+    end subroutine test_spatial_threads_below_one_aborts
+
+    !> The observed effect of `spatial_rebuild_warning`, WITH its negative control.
+    !>
+    !> Both scenarios rebuild -- each prints `rebuilds=1` -- so the only thing that differs is
+    !> whether the library says so. Asserting only the first half would pass just as happily
+    !> against a knob that is stored and never read.
+    subroutine test_spatial_rebuild_warning(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "spatial_rebuild_warning_on", expect_abort=.false., &
+            failure_message="the rebuild-warning scenario was not expected to abort", &
+            required_stderr="rebuilt for a query radius far from the one it was built for")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "spatial_rebuild_warning_on", expect_abort=.false., &
+            failure_message="the rebuild-warning scenario was expected to rebuild", &
+            required_stderr="rebuilds=1")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_no_output(error, "spatial_rebuild_warning_off", expect_abort=.false., &
+            failure_message="the silenced rebuild-warning scenario was not expected to abort", &
+            forbidden_text="rebuilt for a query radius")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "spatial_rebuild_warning_off", expect_abort=.false., &
+            failure_message="the silenced scenario must still rebuild -- the knob governs the message, not the rebuild", &
+            required_stderr="rebuilds=1")
+    end subroutine test_spatial_rebuild_warning
 
     subroutine test_permute_assume_valid_length_aborts(error)
         type(error_type), allocatable, intent(out) :: error

@@ -1830,6 +1830,30 @@ program error_scenarios
         call scenario_reindex_trusted_length_mismatch()
     case ("permute_assume_valid_short_perm")
         call scenario_permute_assume_valid_short_perm()
+    case ("spatial_query_before_build")
+        call scenario_spatial_query_before_build()
+    case ("spatial_length_mismatch")
+        call scenario_spatial_length_mismatch()
+    case ("spatial_radius_not_positive")
+        call scenario_spatial_radius_not_positive()
+    case ("spatial_box_needs_both")
+        call scenario_spatial_box_needs_both()
+    case ("spatial_radius_exceeds_half_box")
+        call scenario_spatial_radius_exceeds_half_box()
+    case ("spatial_query_rank_mismatch")
+        call scenario_spatial_query_rank_mismatch()
+    case ("spatial_rebuild_needs_copy")
+        call scenario_spatial_rebuild_needs_copy()
+    case ("spatial_bulk_radius_length")
+        call scenario_spatial_bulk_radius_length()
+    case ("spatial_copy_false_strided")
+        call scenario_spatial_copy_false_strided()
+    case ("spatial_threads_below_one")
+        call scenario_spatial_threads_below_one()
+    case ("spatial_rebuild_warning_on")
+        call scenario_spatial_rebuild_warning(warn=.true.)
+    case ("spatial_rebuild_warning_off")
+        call scenario_spatial_rebuild_warning(warn=.false.)
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -16374,5 +16398,160 @@ contains
         end if
         print '(a,a)', "NSIDE.datatype=", token
     end subroutine metadata_datatype_collision_case
+
+
+    ! ---- parquet_spatial ----
+
+    !> A deterministic cloud for the spatial scenarios below.
+    subroutine spatial_cloud(n, x, y, z)
+        integer, intent(in) :: n !! how many points.
+        real(real64), allocatable, intent(out) :: x(:) !! x of every point.
+        real(real64), allocatable, intent(out) :: y(:) !! y of every point.
+        real(real64), allocatable, intent(out) :: z(:) !! z of every point.
+        integer :: i
+
+        allocate (x(n), y(n), z(n))
+        do i = 1, n
+            x(i) = pf_random_at(1234_int64, i, 1_int64)
+            y(i) = pf_random_at(1234_int64, i, 2_int64)
+            z(i) = pf_random_at(1234_int64, i, 3_int64)
+        end do
+    end subroutine spatial_cloud
+
+    !> Querying an index that has never been built.
+    subroutine scenario_spatial_query_before_build()
+        type(pf_spatial_index) :: sx
+        integer(int64) :: got(4), m
+
+        m = sx%within([0.0_real64, 0.0_real64, 0.0_real64], 1.0_real64, got)   ! -> aborts
+        print '(a,i0)', "unexpectedly queried an unbuilt index, m=", m
+    end subroutine scenario_spatial_query_before_build
+
+    !> Coordinate arrays of different lengths.
+    subroutine scenario_spatial_length_mismatch()
+        type(pf_spatial_index) :: sx
+        real(real64) :: x(10), y(9), z(10)
+
+        x = 0.0_real64
+        y = 0.0_real64
+        z = 0.0_real64
+        call sx%build(x, y, z, radius=1.0_real64)   ! -> aborts
+        print '(a)', "unexpectedly built an index from mismatched coordinate arrays"
+    end subroutine scenario_spatial_length_mismatch
+
+    !> A radius hint of zero. The hint is mandatory precisely so that the cell size is never chosen
+    !> in the dark, and a zero would make the cost model meaningless rather than merely coarse.
+    subroutine scenario_spatial_radius_not_positive()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.0_real64)   ! -> aborts
+        print '(a)', "unexpectedly accepted radius= 0"
+    end subroutine scenario_spatial_radius_not_positive
+
+    !> Half a periodic box. Periodicity is a property of the box, so it needs both corners.
+    subroutine scenario_spatial_box_needs_both()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.1_real64, box_lo=[0.0_real64, 0.0_real64, 0.0_real64])   ! -> aborts
+        print '(a)', "unexpectedly accepted box_lo= without box_hi="
+    end subroutine scenario_spatial_box_needs_both
+
+    !> A periodic search radius above half the box.
+    !>
+    !> **Not inaccuracy but ill-definition**: beyond `L/2` a point can be its own neighbour through
+    !> two images, so there is no answer to give. This is the one periodic guard that survives the
+    !> "wrap silently" rule, because it is not about bad input.
+    subroutine scenario_spatial_radius_exceeds_half_box()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.75_real64, box_lo=[0.0_real64, 0.0_real64, 0.0_real64], &
+            box_hi=[1.0_real64, 1.0_real64, 1.0_real64])   ! -> aborts
+        print '(a)', "unexpectedly accepted a periodic radius above half the box"
+    end subroutine scenario_spatial_radius_exceeds_half_box
+
+    !> A 2D index queried with a three-coordinate point.
+    subroutine scenario_spatial_query_rank_mismatch()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int64) :: got(8), m
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, radius=0.2_real64)
+        m = sx%within([0.5_real64, 0.5_real64, 0.5_real64], 0.2_real64, got)   ! -> aborts
+        print '(a,i0)', "unexpectedly queried a 2D index with a 3D point, m=", m
+    end subroutine scenario_spatial_query_rank_mismatch
+
+    !> `%rebuild` on an index that holds no copy to compare against.
+    subroutine scenario_spatial_rebuild_needs_copy()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable, target :: x(:), y(:), z(:)
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64, copy=.false.)
+        call sx%rebuild(x, y, z)   ! -> aborts
+        print '(a)', "unexpectedly rebuilt a copy=.false. index"
+    end subroutine scenario_spatial_rebuild_needs_copy
+
+    !> A per-point radius array whose length is neither 1 nor the point count.
+    subroutine scenario_spatial_bulk_radius_length()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int64), allocatable :: counts(:)
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64)
+        call sx%count_all_within([0.1_real64, 0.2_real64, 0.3_real64], counts)   ! -> aborts
+        print '(a)', "unexpectedly accepted a radius array of the wrong length"
+    end subroutine scenario_spatial_bulk_radius_length
+
+    !> `copy=.false.` over a strided section.
+    !>
+    !> A `contiguous` dummy would copy such an actual into a temporary that dies at the end of the
+    !> call, so the index would point at freed memory the moment it was built -- and nothing later
+    !> could detect that. Refusing is the only safe answer.
+    subroutine scenario_spatial_copy_false_strided()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable, target :: x(:), y(:), z(:)
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x(1:63:2), y(1:63:2), z(1:63:2), radius=0.2_real64, copy=.false.)   ! -> aborts
+        print '(a)', "unexpectedly accepted a strided section with copy=.false."
+    end subroutine scenario_spatial_copy_false_strided
+
+    !> An explicit thread count below one.
+    subroutine scenario_spatial_threads_below_one()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int64), allocatable :: counts(:)
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64)
+        call sx%count_all_within(0.2_real64, counts, threads=0)   ! -> aborts
+        print '(a)', "unexpectedly accepted threads= 0"
+    end subroutine scenario_spatial_threads_below_one
+
+    !> The automatic-rebuild warning, on and off. Exits cleanly either way -- what differs is
+    !> whether the library says anything, which is the whole observable this knob has.
+    subroutine scenario_spatial_rebuild_warning(warn)
+        logical, intent(in) :: warn !! whether to leave the warning enabled.
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int64), allocatable :: counts(:)
+
+        call parquet_set_message_stream("stderr")
+        call parquet_set_spatial_rebuild_warning(warn)
+        call spatial_cloud(3000, x, y, z)
+        call sx%build(x, y, z, radius=0.005_real64)
+        ! A radius two orders of magnitude from the hint: far enough that the cell the model would
+        ! choose for it differs by more than the rebuild factor, so the index re-tunes itself.
+        call sx%count_all_within(0.5_real64, counts)
+        print '(a,i0)', "rebuilds=", parquet_debug_spatial_rebuilds()
+    end subroutine scenario_spatial_rebuild_warning
 
 end program error_scenarios

@@ -328,6 +328,7 @@ drives a `.f90` program of the same name in the same directory.
 | `benchmark_random.sh` | `pf_random_*` against the intrinsic `random_number`. |
 | `benchmark_random_kernels.sh` | Times the two route (e) kernels against each other. Its correctness twin is `tools/check_random_kernels.sh`; this one reports, that one asserts. |
 | `benchmark_arrow_release.sh` | Pins the Arrow-release figure `benchmark_table.sh` only reports, as an assertion. |
+| `benchmark_spatial.sh` | `pf_spatial_index`: how good the chosen cell size is, what the probe costs, and how a bulk sweep scales. |
 | `bench_resolve_ladder.py` | Compile-out ladder over `table_resolve` — attributing per-cell cost without timers. |
 | `run_practrand.sh` | Runs the PractRand battery over one axis of `parquet_random`. |
 | `large_scale.sh` | Manual large-scale check — genuinely exceeding `huge(1)` rows. Never run by `fpm test` or CI. |

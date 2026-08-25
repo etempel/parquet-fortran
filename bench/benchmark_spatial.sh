@@ -29,9 +29,11 @@
 #           A*cells_visited + B*points_tested; A/B = 2 was fitted on arm64/NEON and is a ratio of a
 #           cache-miss-ish cost to an arithmetic-ish one -- exactly what differs on AVX2 and
 #           AVX-512. The table prints each swept cell's measured time beside its two counts, then
-#           scores every candidate ratio. The constant is meant to be forgiving: anything from 0.5
-#           to 16 kept the mean penalty under 3.2% where it was fitted, so a machine landing
-#           anywhere in that band CONFIRMS the shipped value rather than contradicting it.
+#           scores every candidate ratio. BOTH arms use the probe's own workload -- cloud points,
+#           radii cycling the declared list -- because a ratio fitted between two different
+#           workloads is a ratio for neither. On machine A the usable band is 2 to 4 and 2 is the
+#           unique best by mean and by worst case, so a machine whose best row is 2 or 4 CONFIRMS
+#           the shipped value; only a best row outside that is a reason to change anything.
 #   build   What the probe costs: a tuned build against one at the same cell with cell= given,
 #           which skips the probe entirely. The difference is the probe.
 #   query   Single-query and bulk-sweep throughput at the tuned cell.

@@ -330,31 +330,71 @@ contains
         write (output_unit, '(a,i0)') "  checksum         : ", keep
     end subroutine mode_tune
 
+    !> Times `nq` queries drawn EXACTLY as the probe draws them: query points sampled from the
+    !> cloud by the same golden-ratio stride, radii cycling the declared list.
+    !>
+    !> **`--mode=ab` must time what the probe counts, or it fits the constant against a workload the
+    !> probe never faces.** The first version of this mode timed random points in the box at radii
+    !> uniform in `[rlo, rhi]` while counting work at `r_eff` alone -- three different workloads, and
+    !> a ratio fitted between two of them says little about the third. `--mode=tune` deliberately
+    !> keeps the random-point workload, because there the question IS whether the tuner's pick serves
+    !> a realistic query load; here the question is whether the proxy ranks what it claims to rank.
+    real(real64) function time_probe_workload(sx, radii, keep) result(best)
+        type(pf_spatial_index), intent(in) :: sx !! the index to query.
+        real(real64), intent(in) :: radii(:) !! the radius list, cycled exactly as the probe cycles it.
+        integer(int64), intent(out) :: keep !! total neighbours found, so nothing is optimised away.
+        integer(int64) :: q, m, total, i, pos, stride
+        integer :: it, nr
+        real(real64) :: t0, t1, p(3)
+
+        best = huge(1.0_real64)
+        keep = 0_int64
+        nr = size(radii)
+        stride = max(1_int64, int(0.6180339887498949_real64 * real(np, kind=real64), kind=int64))
+        do it = 1, rounds
+            total = 0_int64
+            pos = 0_int64
+            t0 = wtime()
+            do q = 1_int64, nq
+                i = pos + 1_int64
+                p(1) = x(i)
+                p(2) = y(i)
+                p(3) = z(i)
+                m = sx%count_within(p, radii(1 + int(mod(q - 1_int64, int(nr, kind=int64)))))
+                total = total + m
+                pos = modulo(pos + stride, np)
+            end do
+            t1 = wtime()
+            best = min(best, t1 - t0)
+            keep = total
+        end do
+    end function time_probe_workload
+
     !> Re-fits the probe's `A/B` constant against timed reality on this machine.
     subroutine mode_ab()
         type(pf_spatial_index) :: sx
         real(real64) :: cells(max_cells), times(max_cells)
         real(real64) :: cw(max_cells), pw(max_cells)
-        real(real64) :: h_tuned, ratio, best_score, work, r_eff, penalty, worst
+        real(real64) :: h_tuned, ratio, best_score, work, penalty, worst
         integer(int64) :: keep, cc, pp
         character(len=:), allocatable :: saved_verbosity
         integer :: n, k, ir, best_k, pick, hits
         real(real64), parameter :: ratios(9) = [0.25_real64, 0.5_real64, 1.0_real64, 2.0_real64, &
             4.0_real64, 8.0_real64, 16.0_real64, 32.0_real64, 64.0_real64]
 
-        r_eff = (rlo ** 3 + rhi ** 3) / (rlo ** 2 + rhi ** 2)
         call sx%build(x, y, z, radius=[rlo, rhi])
         h_tuned = sx%cell_size()
         call sweep_cells(h_tuned, cells, n)
         call parquet_get_verbosity(saved_verbosity)
         call parquet_set_verbosity("errors_only")
         write (output_unit, '(a)') ""
+        write (output_unit, '(a)') "  (both arms use the probe's own workload: cloud points, radii cycling the list)"
         write (output_unit, '(a)') "  cell          us/query       cells_visited     points_tested"
         best_k = 1
         do k = 1, n
             call sx%build(x, y, z, radius=[rlo, rhi], cell=cells(k))
-            times(k) = time_queries(sx, keep)
-            call parquet_debug_spatial_work(sx, cells(k), r_eff, cc, pp)
+            times(k) = time_probe_workload(sx, [rlo, rhi], keep)
+            call parquet_debug_spatial_work(sx, cells(k), [rlo, rhi], cc, pp)
             cw(k) = real(cc, kind=real64)
             pw(k) = real(pp, kind=real64)
             write (output_unit, '(2x,es10.3,2x,f12.4,2x,i16,2x,i16)') cells(k), &

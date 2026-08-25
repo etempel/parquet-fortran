@@ -260,7 +260,8 @@ contains
         cells = 0_int64
         points = 0_int64
         if (.not. index%built_ok) return
-        call spatial_probe_counts(index, h, [radius], cells, points)
+        if (size(radius) < 1) error stop "parquet_debug_spatial_work: name at least one radius"
+        call spatial_probe_counts(index, h, radius, cells, points)
     end procedure parquet_debug_spatial_work
 
     !> Counts how many points fall in each cell of a candidate grid, applying the same cell-count

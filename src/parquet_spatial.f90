@@ -100,11 +100,30 @@ module parquet_spatial
     integer, parameter :: spatial_probe_points = 256
     !> Relative cost of stepping to one more cell against distance-testing one more point.
     !!
-    !! The probe ranks candidates by `A*cells_visited + B*points_tested`. Measured on machine A over
-    !! 18 overlapping sweep triples: `A/B = 2` picks the timed winner 15 times out of 18, worst
-    !! miss 7.8%, mean 1.17%; and anywhere from 0.5 to 16 keeps the mean penalty under 3.2%. That
-    !! 32x tolerance is the whole reason this replaced the fitted `kappa`, which had to be right
-    !! within about 1.3x.
+    !! The probe ranks candidate cell sizes by `A*cells_visited + B*points_tested`, and **only the
+    !! RATIO matters** -- scaling both leaves the cheapest candidate unchanged -- so `B` is 1 by
+    !! definition and `A` carries the whole content. `A/B = 2` says a cell step costs about what two
+    !! point tests cost, which is plausible for what each one is: a cell step is two loads from a
+    !! prefix-sum array at a stride, latency-bound; a point test is three contiguous loads and nine
+    !! flops, throughput-bound.
+    !!
+    !! **Fitted on machine A (arm64, NEON, gfortran 15.2) against five 1M-point fixtures**, timing
+    !! and counting the SAME workload -- cloud points, radii cycling the declared list -- because a
+    !! ratio fitted between two different workloads is a ratio for neither. Mean and worst penalty
+    !! of each ratio's pick against that fixture's timed optimum, over uniform, clustered, wedge,
+    !! sphere and flat:
+    !!
+    !!     A/B     0.25   0.5     1      2      4      8     16
+    !!     mean    8.0%   8.0%   8.0%   2.5%   4.4%   7.1%  18.2%
+    !!     worst  14.0%  14.0%  14.0%   6.1%  15.2%  15.2%  36.1%
+    !!
+    !! **2 is the unique best on both counts**, and the usable band is roughly 2 to 4 rather than
+    !! the 32x span an earlier fit against the gate's recorded sweeps suggested. It is still far
+    !! more forgiving than the `kappa` it replaced, which sets the cell LINEARLY and so had to be
+    !! right within about 1.3x -- this one enters only as a tie-break between candidates a factor
+    !! apart. Re-derive it elsewhere with `bench/benchmark_spatial.sh --mode=ab`; it is a ratio of a
+    !! latency-bound cost to a throughput-bound one, which is what differs across NEON, AVX2 and
+    !! AVX-512.
     real(real64), parameter :: spatial_work_a = 2.0_real64
     real(real64), parameter :: spatial_work_b = 1.0_real64 !! see spatial_work_a.
     !> Ceiling on cells per point.
@@ -377,10 +396,15 @@ module parquet_spatial
         !! two things most likely to differ on AVX2 or AVX-512. Pairing these counts with a timed
         !! sweep is what lets `bench/benchmark_spatial.sh --mode=ab` re-fit it elsewhere without
         !! reimplementing the walk. No library code calls it.
+        !!
+        !! **It takes the radius LIST, not one radius, because the probe does.** A fit that counted
+        !! work at one radius and timed queries at another would be fitting the constant against a
+        !! workload the probe never faces -- which is exactly the mistake the first version of
+        !! `--mode=ab` made.
         module subroutine parquet_debug_spatial_work(index, h, radius, cells, points)
             type(pf_spatial_index), intent(in), target :: index !! an index holding the points to probe.
             real(real64), intent(in) :: h !! the candidate cell side.
-            real(real64), intent(in) :: radius !! the query radius to probe at.
+            real(real64), intent(in) :: radius(:) !! the radius LIST, exactly as `%build` was given it.
             integer(int64), intent(out) :: cells !! cells the probe queries would visit in total.
             integer(int64), intent(out) :: points !! points they would distance-test in total.
         end subroutine parquet_debug_spatial_work

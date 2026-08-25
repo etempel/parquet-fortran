@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **`parquet_write_table`'s `copy_metadata=`/`metadata_keys=` no longer carry a key the writer
+  generates itself** — `DATE`, `name`, the two `IVOA.VOTable-Parquet.*` keys and every
+  `column.<name>.<attr>` entry. `copy_metadata=.true.` skips them; `metadata_keys=` naming one is
+  now an error. A copied file previously carried a second entry for each, and for `column.*` that
+  second entry was the one a reader got back.
+
 ## [2.0.0] - 2026-08-24
 
 **Toolchain floor:** gfortran ≥ 13 (13 on CI; 15.2.0 the primary development target), and —

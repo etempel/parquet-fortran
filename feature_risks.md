@@ -202,6 +202,7 @@ something a reader is expected to have.
 | [Risk-134](#risk-134--the-shared-table-guard-can-be-rewritten-to-key-on-the-region-and-every-abort-test-still-passes) | The shared-table guard can be rewritten to key on the REGION, and every abort test still passes | 4 — covered |
 | [Risk-135](#risk-135--a-validity-bit-update-that-is-not-atomic-loses-a-null-whenever-two-threads-write-rows-in-one-block) | A validity bit update that is not atomic loses a null whenever two threads write rows in one block | 4 — covered |
 | [Risk-136](#risk-136--a-read-accessor-that-refreshes-a-cache-is-a-writer-and-loses-another-threads-flag) | A READ accessor that refreshes a cache is a writer, and loses another thread's flag | 4 — covered |
+| [Risk-137](#risk-137--a-carried-metadata-key-the-writer-also-generates-shadows-the-writers-own) | A carried metadata key the writer also generates shadows the writer's own | 4 — covered |
 
 ---
 
@@ -5771,3 +5772,47 @@ created for in the first place.
 - **A single round caught it only 8 times in 10.** The test repeats the race, which is
   machine-independent in a way that tuning the writer's stagger is not; post-fix every round is
   deterministic, so repetition cannot make it flaky in the failing direction.
+
+### Risk-137 — A carried metadata key the writer also generates shadows the writer's own
+
+**What breaks.** `parquet_write_table(..., copy_metadata=.true.)` carries the source file's footer
+snapshot into the output schema, and `build_file_metadata` (`src/parquet_wrapper.cpp`) *also* emits
+`DATE`, `name`, `IVOA.VOTable-Parquet.content`, `IVOA.VOTable-Parquet.version` and every
+`column.<name>.<attr>` from that schema. Carrying a key from the first set therefore puts two
+entries of one name in one file — and which of the two a reader gets depends on the order that
+function pushes them in, which differs between the two groups:
+
+- **`column.<name>.<attr>` is pushed AFTER the carried table metadata.** `parquet_get_metadata`
+  resolves the **first** match (`parquet_metadata_find_index`, `src/parquet_metadata_get.f90`), so
+  the file answers with the SOURCE file's unit/description/ucd for a column whose own Arrow field
+  and VOTable `FIELD` carry what the output schema declared. Two answers in one file and the read
+  path returns the wrong one, silently — this is the half that makes it a risk rather than a
+  tidiness complaint.
+- **`DATE`, `name` and the two `IVOA.*` keys are pushed BEFORE it**, so the writer's own wins and
+  the carried copy is dead weight — including a duplicated full XML sidecar, which roughly doubles
+  the footer on a column-heavy file.
+
+**What forbids it.** `writer_regenerates_key` (`src/parquet_tables_write.f90`) refuses the whole set
+in the carry loop, and `metadata_keys=` naming one aborts before the output is opened.
+
+**Three rules for whoever edits this next:**
+
+- **A key `build_file_metadata` starts generating must be added to `writer_regenerates_key`.** The
+  two lists live in different languages and nothing links them, so a new writer-emitted key
+  silently rejoins the first case above. This is the standing obligation the entry is kept for.
+- **The `column.` rule is a PREFIX, deliberately, and covers keys the output has no column for.** A
+  carried `column.x.unit` for a column the output does not write is metadata about a column that is
+  not there; narrowing this to "columns the output writes" would let those back in.
+- **`metadata_keys=` must ABORT rather than skip.** The source file really does have the key, so
+  the existing "does the source have it?" check passes; a silent skip would make an explicit
+  request a no-op, against `parquet_write_table`'s own documented "naming a key is a claim" rule.
+
+**Covered by** `test_write_table_copy_metadata_skips_regenerated` (`test/test_table.f90`) and the
+`table_copy_metadata_regenerated_key` error scenario with its
+`table_copy_metadata_regenerated_control` negative control. **The test's shape is the load-bearing
+part:** counting entries is not enough, because one `column.v.unit` is what both the fixed
+behaviour and a mutation that drops the *writer's* copy instead would produce. The source declares
+`SOURCE_UNIT` and the output schema `DEST_UNIT`, so it is the surviving **value** that
+distinguishes them — the same trap Risk-73's own carry test had to be shaped around. Its last two
+assertions are the negative control against over-filtering: an ordinary carried key and a scalar
+`<KEY>.datatype` companion must both survive.

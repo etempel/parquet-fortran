@@ -277,6 +277,8 @@ contains
                 test_write_table_copy_metadata), &
             new_unittest("copy_metadata carries a <KEY>.datatype companion exactly once", &
                 test_copy_metadata_carries_datatype_once), &
+            new_unittest("copy_metadata does not carry back a key the writer regenerates", &
+                test_write_table_copy_metadata_skips_regenerated), &
             new_unittest("has_nulls is conservative without statistics and exact once resident", &
                 test_has_nulls_without_statistics), &
             new_unittest("a schema field the schema itself disabled is skipped, not demanded", &
@@ -7183,6 +7185,89 @@ contains
         call check(error, token == "int32", &
             "the schema's own token must win, not the carried stale one, got '" // token // "'")
     end subroutine test_copy_metadata_carries_datatype_once
+    !
+    !> `copy_metadata=` must not carry back a key the writer generates from the output schema.
+    !!
+    !! `build_file_metadata` emits `DATE`, `name`, the two `IVOA.VOTable-Parquet.*` keys and every
+    !! `column.<name>.<attr>` itself, so a carried copy is a second entry of that name in one file.
+    !! For `column.*` that is a WRONG ANSWER rather than mere bloat: the carried entries are pushed
+    !! ahead of the writer's own, and `parquet_get_metadata` resolves the first match, so the file
+    !! reports the SOURCE's unit for a column whose Arrow field says the output schema's.
+    !!
+    !! Counting is not enough to pin that -- one entry is what both behaviours produce once the
+    !! carry is skipped OR the writer's own is the one dropped -- so the source declares
+    !! `SOURCE_UNIT` and the output schema `DEST_UNIT`, and it is the surviving VALUE that
+    !! distinguishes them. The last two assertions are the negative control: this filter must not
+    !! swallow an ordinary carried key or a scalar datatype companion.
+    subroutine test_write_table_copy_metadata_skips_regenerated(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: w
+        type(parquet_reader) :: rd
+        type(parquet_table) :: t
+        type(parquet_schema) :: s, out_s
+        real(real64) :: v(NROW)
+        character(len=:), allocatable :: keys(:), vals(:)
+        character(len=:), allocatable :: unit_seen
+        integer :: i, n_unit, n_date, n_content, n_origin, n_dtype
+        character(len=*), parameter :: f = "test_run/table_regen_in.parquet"
+        character(len=*), parameter :: fo = "test_run/table_regen_out.parquet"
+        !
+        do i = 1, NROW
+            v(i) = real(i, real64)
+        end do
+        call s%init("regen_source")
+        call s%add_field("v", "float64", unit="SOURCE_UNIT")
+        call s%add_metadata("origin", "survey_A")
+        call s%add_metadata("NSIDE", 1024_int64)
+        call parquet_open_writer(w, f, s)
+        call parquet_write_column(w, "v", v)
+        call parquet_close_writer(w)
+        !
+        call out_s%init("regen_dest")
+        call out_s%add_field("v", "float64", unit="DEST_UNIT")
+        !
+        call parquet_open_table(t, f)
+        call t%materialize_all()
+        call parquet_write_table(t, fo, out_s, copy_metadata=.true.)
+        !
+        call parquet_open_reader(rd, fo)
+        call parquet_get_metadata_items(rd, keys, vals)
+        call parquet_close_reader(rd)
+        n_unit = 0
+        n_date = 0
+        n_content = 0
+        n_origin = 0
+        n_dtype = 0
+        unit_seen = ""
+        do i = 1, size(keys)
+            select case (trim(keys(i)))
+            case ("column.v.unit")
+                n_unit = n_unit + 1
+                if (n_unit == 1) unit_seen = trim(vals(i))
+            case ("DATE")
+                n_date = n_date + 1
+            case ("IVOA.VOTable-Parquet.content")
+                n_content = n_content + 1
+            case ("origin")
+                n_origin = n_origin + 1
+            case ("NSIDE.datatype")
+                n_dtype = n_dtype + 1
+            end select
+        end do
+        !
+        call check(error, n_unit == 1, "a carried column.<name>.unit should not duplicate the writer's own")
+        if (allocated(error)) return
+        call check(error, unit_seen == "DEST_UNIT", &
+            "the OUTPUT schema's unit must be the one the file answers with, got '" // unit_seen // "'")
+        if (allocated(error)) return
+        call check(error, n_date == 1, "a carried DATE should not duplicate the writer's own")
+        if (allocated(error)) return
+        call check(error, n_content == 1, "a carried VOTable sidecar should not duplicate the writer's own")
+        if (allocated(error)) return
+        call check(error, n_origin == 1, "negative control: an ordinary key must still be carried")
+        if (allocated(error)) return
+        call check(error, n_dtype == 1, "negative control: a scalar datatype companion must still be carried")
+    end subroutine test_write_table_copy_metadata_skips_regenerated
     !
     !> A read-in MAML's `fields:`' `unit:` key gives a file-backed column its unit.
     !!

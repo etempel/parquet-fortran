@@ -1011,6 +1011,10 @@ contains
                 test_table_copy_metadata_in_memory_aborts), &
             new_unittest("copy_metadata=.true. with metadata_keys= aborts", &
                 test_table_copy_metadata_both_forms_aborts), &
+            new_unittest("metadata_keys= naming a writer-generated key aborts", &
+                test_table_copy_metadata_regenerated_key_aborts), &
+            new_unittest("metadata_keys= naming an ordinary key still carries it", &
+                test_table_copy_metadata_regenerated_control_runs), &
             new_unittest("opening a table slice starting before row 1 aborts", &
                 test_table_slice_below_first_row_aborts), &
             new_unittest("opening a table slice past the last row aborts", &
@@ -1872,6 +1876,19 @@ contains
             failure_message="copy_metadata= with metadata_keys= was expected to abort", &
             required_stderr="copy_metadata=.true. and metadata_keys= cannot both be given")
     end subroutine test_table_copy_metadata_both_forms_aborts
+
+    subroutine test_table_copy_metadata_regenerated_key_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_copy_metadata_regenerated_key", expect_abort=.true., &
+            failure_message="naming a writer-generated key in metadata_keys= was expected to abort", &
+            required_stderr="which the writer generates itself from the output schema")
+    end subroutine test_table_copy_metadata_regenerated_key_aborts
+
+    subroutine test_table_copy_metadata_regenerated_control_runs(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status(error, "table_copy_metadata_regenerated_control", expect_abort=.false., &
+            failure_message="negative control: an ordinary metadata_keys= entry should still be carried")
+    end subroutine test_table_copy_metadata_regenerated_control_runs
 
     subroutine test_table_write_unbuilt_schema_aborts(error)
         type(error_type), allocatable, intent(out) :: error

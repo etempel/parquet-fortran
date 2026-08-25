@@ -405,6 +405,8 @@ scenarios=(
     "table_copy_metadata_unknown_key:1"
     "table_copy_metadata_in_memory:1"
     "table_copy_metadata_both_forms:1"
+    "table_copy_metadata_regenerated_key:1"
+    "table_copy_metadata_regenerated_control:0"
     "table_slice_below_first_row:1"
     "table_slice_past_last_row:1"
     "table_slice_inverted:1"

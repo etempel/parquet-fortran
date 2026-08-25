@@ -410,6 +410,8 @@ contains
     !! * **A requested key that does not exist is an error**, not a silent omission -- naming a key
     !!   is a claim that it is there, and quietly writing a file without it is the failure mode
     !!   this is supposed to prevent.
+    !! * **A key the writer regenerates from the output schema is never carried**, and naming one
+    !!   through `metadata_keys=` is an error. See `writer_regenerates_key`.
     !! * **It works after a detach**, because the metadata was snapshotted at open. That is the
     !!   whole point: the natural shape is read, mutate rows, write, and the reader is gone by then.
     subroutine carry_source_metadata(table, sch, keys)
@@ -440,6 +442,16 @@ contains
                     error stop EP // "parquet_write_table: metadata_keys names '" // trim(keys(k)) // &
                         "', which this table's source file does not have" // sfx
                 end if
+                ! Refused rather than skipped: the source file HAS this key, so the check above
+                ! passes and a silent skip would make naming it a no-op -- against this
+                ! procedure's own "naming a key is a claim" rule. Carrying it is worse still; see
+                ! writer_regenerates_key.
+                if (writer_regenerates_key(trim(keys(k)))) then
+                    call table_context_suffix(table%cache, "", sfx)
+                    error stop EP // "parquet_write_table: metadata_keys names '" // trim(keys(k)) // &
+                        "', which the writer generates itself from the output schema -- the output " // &
+                        "carries its own value for it, so it cannot also be copied from the source" // sfx
+                end if
             end do
         end if
         n_declared = 0
@@ -453,6 +465,7 @@ contains
                 end do
             end if
             if (.not. wanted) cycle
+            if (writer_regenerates_key(trim(table%cache%meta_keys(i)))) cycle
             if (schema_declares_key(sch, trim(table%cache%meta_keys(i)))) cycle
             ! A carried "<key>.datatype" describes a key the schema declares itself, so the key it
             ! describes was just skipped by the rule above and this one now describes nothing that
@@ -465,6 +478,41 @@ contains
             call sch%add_metadata(trim(table%cache%meta_keys(i)), trim(table%cache%meta_values(i)))
         end do
     end subroutine carry_source_metadata
+    !
+    !> .true. when `build_file_metadata` (`src/parquet_wrapper.cpp`) emits `key` itself from the
+    !> output schema, so carrying the source file's copy would put two entries of that name in one
+    !> file. Both halves of the damage are silent, and they differ in kind because of the order
+    !> that function pushes its keys in:
+    !>
+    !> * `column.<name>.<attr>` is pushed AFTER the carried table metadata, so the carried copy
+    !>   comes first and `parquet_get_metadata` -- which resolves the first match -- answers with
+    !>   the SOURCE file's value for a column whose own Arrow field and VOTable FIELD say what the
+    !>   output schema declared. Two answers in one file, and the read path returns the wrong one.
+    !> * `DATE`, `name` and the two `IVOA.VOTable-Parquet.*` keys are pushed BEFORE it, so the
+    !>   writer's own wins and the carried copy is dead weight -- a duplicated full XML sidecar
+    !>   among it -- plus a `WARNING: ... reserved for the parquet writer's own internal file
+    !>   metadata` line per key, the library warning about its own copy operation.
+    !>
+    !> Every `column.` key is refused, not just those naming a column the output has: a
+    !> `column.x.*` entry for a column the output does not write is metadata about a column that
+    !> is not there. A new key that function starts generating must be added here, or it silently
+    !> joins the first case above -- see `feature_risks.md` Risk-137.
+    logical function writer_regenerates_key(key) result(regenerated)
+        character(len=*), intent(in) :: key !! the source key to test.
+        character(len=*), parameter :: COL_PREFIX = "column."
+        character(len=28), parameter :: FIXED(4) = [character(len=28) :: &
+            "DATE", "name", "IVOA.VOTable-Parquet.version", "IVOA.VOTable-Parquet.content"]
+        integer :: i
+        !
+        regenerated = .true.
+        if (len(key) > len(COL_PREFIX)) then
+            if (key(1:len(COL_PREFIX)) == COL_PREFIX) return
+        end if
+        do i = 1, size(FIXED)
+            if (trim(FIXED(i)) == key) return
+        end do
+        regenerated = .false.
+    end function writer_regenerates_key
     !
     !> .true. when `key` is a "<name>.datatype" companion whose own `name` the schema declared
     !> itself, so carrying it would leave the output with two companions for one key. See the

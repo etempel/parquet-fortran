@@ -267,7 +267,7 @@ call parquet_write_table(t, "out.parquet", s, copy_metadata=.true.)      ! every
 call parquet_write_table(t, "out.parquet", s, metadata_keys=["origin"])  ! only these
 ```
 
-Five rules:
+Six rules:
 
 - **`copy_metadata=.true.` and `metadata_keys=` are mutually exclusive.** One means every key and
   the other means exactly the listed ones, so asking for both is an error rather than a guess.
@@ -277,6 +277,14 @@ Five rules:
   output, so a carried key of the same name is skipped rather than overwriting it.
 - **A key `metadata_keys=` names but the source file does not have is an error**, checked before
   the output file is opened. Naming a key is a claim that it is there.
+- **A key the writer generates itself is never carried, and naming one is an error.** Those are
+  `DATE`, `name`, `IVOA.VOTable-Parquet.content`, `IVOA.VOTable-Parquet.version` and every
+  `column.<name>.<attr>` entry — the writer emits them from the output schema, so copying the
+  source's would put two entries of one name in the file. `copy_metadata=.true.` skips them
+  silently, since it means "every key" rather than a claim about any particular one; naming one
+  through `metadata_keys=` aborts before the output is opened, because skipping it there would
+  make an explicit request a no-op. Your column metadata comes from the schema you are writing
+  with, which is where a change to it belongs.
 - **Either form on a table that was never opened from a file is an error**, since there is no
   source file to copy from. A table built with `parquet_new_table` has no metadata snapshot at
   all; give the output schema its own entries with `%add_metadata` instead.

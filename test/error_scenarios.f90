@@ -1580,6 +1580,10 @@ program error_scenarios
         call scenario_table_copy_metadata_in_memory()
     case ("table_copy_metadata_both_forms")
         call scenario_table_copy_metadata_both_forms()
+    case ("table_copy_metadata_regenerated_key")
+        call scenario_table_copy_metadata_regenerated_key()
+    case ("table_copy_metadata_regenerated_control")
+        call scenario_table_copy_metadata_regenerated_control()
     case ("table_slice_below_first_row")
         call scenario_table_slice_below_first_row()
     case ("table_slice_past_last_row")
@@ -13933,6 +13937,39 @@ contains
             copy_metadata=.true., metadata_keys=["origin"])   ! -> aborts
         print '(a)', "unexpectedly accepted copy_metadata= and metadata_keys= together"
     end subroutine scenario_table_copy_metadata_both_forms
+
+    !> A key the writer generates itself from the output schema cannot be copied from the source.
+    !!
+    !! The source file HAS this key -- every written file carries a DATE -- so the "does the source
+    !! have it?" check above passes and the refusal is this one. Skipping it silently instead would
+    !! make naming a key a no-op, against parquet_write_table's own "naming a key is a claim" rule;
+    !! carrying it would put two entries of that name in one file. See writer_regenerates_key in
+    !! src/parquet_tables_write.f90 for which half of that pair a reader would then get.
+    subroutine scenario_table_copy_metadata_regenerated_key()
+        type(parquet_table) :: t
+        type(parquet_schema) :: out_s
+        call write_metadata_scenario_fixture("test_run/es_meta_regen_in.parquet")
+        call parquet_open_table(t, "test_run/es_meta_regen_in.parquet")
+        call out_s%init("dest")
+        call out_s%add_field("v", "float64")
+        call parquet_write_table(t, "test_run/es_meta_regen_out.parquet", out_s, &
+            metadata_keys=["DATE"])   ! -> aborts
+        print '(a)', "unexpectedly carried a metadata key the writer generates itself"
+    end subroutine scenario_table_copy_metadata_regenerated_key
+
+    !> Negative control for the scenario above: an ordinary key of the same fixture, named the same
+    !! way, must still be carried. Without this a refusal that fired unconditionally would pass the
+    !! abort test while making metadata_keys= useless.
+    subroutine scenario_table_copy_metadata_regenerated_control()
+        type(parquet_table) :: t
+        type(parquet_schema) :: out_s
+        call write_metadata_scenario_fixture("test_run/es_meta_regenctl_in.parquet")
+        call parquet_open_table(t, "test_run/es_meta_regenctl_in.parquet")
+        call out_s%init("dest")
+        call out_s%add_field("v", "float64")
+        call parquet_write_table(t, "test_run/es_meta_regenctl_out.parquet", out_s, &
+            metadata_keys=["origin"])   ! -> must NOT abort
+    end subroutine scenario_table_copy_metadata_regenerated_control
 
     !> A schema that was never built at all cannot be parsed into anything, and writing with it
     !! would otherwise read uninitialized state and run away. Reported as its own mistake rather

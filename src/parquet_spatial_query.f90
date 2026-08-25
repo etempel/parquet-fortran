@@ -82,7 +82,7 @@ contains
     module procedure spatial_scan
         real(real64), pointer, contiguous :: xs(:), ys(:), zs(:)
         integer(int64) :: nc(3), a(3), cnt(3)
-        integer(int64) :: ii, jj, kk, jc, kc, base, s0, e0, t, cap, row, minrow
+        integer(int64) :: ii, jj, kk, jc, kc, base, s0, e0, t, cap, row, minkey
         integer(int64) :: run_lo(2), run_hi(2), ilo, ihi
         real(real64) :: r2, dx, dy, dz, d2, p1, p2, p3
         real(real64) :: w1, w2, w3, wi1, wi2, wi3
@@ -98,9 +98,13 @@ contains
         has32 = present(out32)
         has64 = present(out64)
         hasd = present(dist)
-        want_min = present(min_index)
-        minrow = 0_int64
-        if (want_min) minrow = min_index
+        want_min = present(min_key)
+        minkey = 0_int64
+        if (want_min) minkey = min_key
+        ! Defensive: the two are one mechanism and both call sites pass them together, so this is
+        ! unreachable through any public entry point and no fixture can build a case for it.
+        if (want_min .and. .not. present(keys)) error stop & ! GCOVR_EXCL_LINE
+            "pf_spatial_index: min_key needs keys" ! GCOVR_EXCL_LINE
         if (has32 .and. self%npts > int(huge(0_int32), kind=int64)) error stop &
             "pf_spatial_index%within: this index holds more rows than an int32 buffer can name; use an int64 one"
         cap = 0_int64
@@ -144,10 +148,10 @@ contains
                             dz = zs(t) - p3
                             d2 = dx * dx + dy * dy + dz * dz
                             if (d2 <= r2) then
-                                row = self%idx(t)
                                 if (want_min) then
-                                    if (row <= minrow) cycle
+                                    if (keys(t) <= minkey) cycle
                                 end if
+                                row = self%idx(t)
                                 m = m + 1_int64
                                 if (m <= cap) then
                                     if (has32) out32(m) = int(row, kind=int32)
@@ -165,7 +169,7 @@ contains
                             d2 = dx * dx + dy * dy + dz * dz
                             if (d2 <= r2) then
                                 if (want_min) then
-                                    if (row <= minrow) cycle
+                                    if (keys(t) <= minkey) cycle
                                 end if
                                 m = m + 1_int64
                                 if (m <= cap) then
@@ -241,10 +245,10 @@ contains
                             dz = dz - w3 * anint(dz * wi3)
                             d2 = dx * dx + dy * dy + dz * dz
                             if (d2 <= r2) then
-                                row = self%idx(t)
                                 if (want_min) then
-                                    if (row <= minrow) cycle
+                                    if (keys(t) <= minkey) cycle
                                 end if
+                                row = self%idx(t)
                                 m = m + 1_int64
                                 if (m <= cap) then
                                     if (has32) out32(m) = int(row, kind=int32)
@@ -265,7 +269,7 @@ contains
                             d2 = dx * dx + dy * dy + dz * dz
                             if (d2 <= r2) then
                                 if (want_min) then
-                                    if (row <= minrow) cycle
+                                    if (keys(t) <= minkey) cycle
                                 end if
                                 m = m + 1_int64
                                 if (m <= cap) then

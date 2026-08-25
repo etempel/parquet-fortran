@@ -59,6 +59,10 @@ contains
             new_unittest("all_within accepts one radius per point", test_all_within_per_point_radius), &
             new_unittest("count_all_within agrees with all_within", test_count_all_agrees), &
             new_unittest("pairs_within reproduces all_within with i < j", test_pairs_match_all_within), &
+            new_unittest("pairs_within is symmetric under a per-point radius", &
+                         test_pairs_per_point_radius_is_symmetric), &
+            new_unittest("a uniform radius vector gives the scalar pair list", &
+                         test_pairs_uniform_vector_matches_scalar), &
             new_unittest("a threaded bulk sweep equals the serial one", test_bulk_threaded_matches_serial), &
             new_unittest("a periodic index matches a minimum-image scan", test_periodic_matches_brute_force), &
             new_unittest("a periodic index is translation invariant", test_periodic_translation_invariant), &
@@ -531,6 +535,95 @@ contains
             if (allocated(error)) return
         end do
     end subroutine test_pairs_match_all_within
+
+    !> With one radius per point, the edge list is every pair within `max(r_i, r_j)` -- exactly.
+    !>
+    !> **This is the test that pins the symmetric rule.** A per-point radius makes "who was doing
+    !> the searching" observable: emitting from the lower row with its own radius drops every pair
+    !> that only the larger ball reaches, and the result still looks like a perfectly ordinary
+    !> neighbour list. `want_low` counts what that rule would have produced and the fixture is
+    !> asserted to separate the two, so this cannot pass against a sweep that ignores the ranking.
+    subroutine test_pairs_per_point_radius_is_symmetric(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:), rv(:)
+        integer(int64), allocatable :: pi(:), pj(:)
+        logical, allocatable :: want(:, :), got(:, :)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, a, b, k, want_max, want_low
+        real(real64) :: d2, rmax, rlow
+
+        n = 300_int64
+        call make_cloud(n, 1.0_real64, .false., x, y, z)
+        allocate (rv(n))
+        do a = 1_int64, n
+            rv(a) = 0.03_real64 + 0.22_real64 * pf_random_at(fixture_seed, a, 11_int64)
+        end do
+        allocate (want(n, n), got(n, n))
+        want = .false.
+        got = .false.
+        want_max = 0_int64
+        want_low = 0_int64
+        do a = 1_int64, n - 1_int64
+            do b = a + 1_int64, n
+                d2 = (x(a) - x(b))**2 + (y(a) - y(b))**2 + (z(a) - z(b))**2
+                rmax = max(rv(a), rv(b))
+                if (d2 <= rmax * rmax) then
+                    want(a, b) = .true.
+                    want_max = want_max + 1_int64
+                end if
+                ! The rule a sweep applies when the LOWER row always does the searching with its
+                ! own radius: the negative control for everything below.
+                rlow = rv(a)
+                if (d2 <= rlow * rlow) want_low = want_low + 1_int64
+            end do
+        end do
+        call check(error, want_max > want_low, &
+            "the fixture must separate the symmetric rule from the lower-row-searches rule")
+        if (allocated(error)) return
+        call sx%build(x, y, z, radius=rv)
+        call sx%pairs_within(rv, pi, pj)
+        call check(error, size(pi, kind=int64) == want_max, &
+            "the edge list must hold every pair within max(r_i, r_j), and no others")
+        if (allocated(error)) return
+        call check(error, all(pi < pj), "every reported pair must have i < j")
+        if (allocated(error)) return
+        do k = 1_int64, size(pi, kind=int64)
+            got(pi(k), pj(k)) = .true.
+        end do
+        ! Set equality, not just a count: a count alone cannot tell a duplicated pair plus a
+        ! missing one from the right answer.
+        call check(error, all(got .eqv. want), &
+            "the edge list must be exactly the pairs within max(r_i, r_j)")
+    end subroutine test_pairs_per_point_radius_is_symmetric
+
+    !> A radius vector whose entries are all equal gives the scalar form's answer, pair for pair.
+    !>
+    !> The ranking machinery only runs on the vector path, so without this a defect in it that
+    !> happens to preserve the pair COUNT would show up nowhere: the symmetric test above varies
+    !> the radii, and every other pair test takes the scalar path and never builds a rank at all.
+    subroutine test_pairs_uniform_vector_matches_scalar(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:), rv(:)
+        integer(int64), allocatable :: si(:), sj(:), vi(:), vj(:)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n
+        real(real64), parameter :: r = 0.18_real64
+
+        n = 400_int64
+        call make_cloud(n, 1.0_real64, .false., x, y, z)
+        allocate (rv(n))
+        rv = r
+        call sx%build(x, y, z, radius=r)
+        call sx%pairs_within(r, si, sj)
+        call sx%pairs_within(rv, vi, vj)
+        call check(error, size(si, kind=int64) > 0_int64, "the fixture must actually find some pairs")
+        if (allocated(error)) return
+        call check(error, size(vi, kind=int64) == size(si, kind=int64), &
+            "a uniform radius vector must find the same number of pairs as the scalar form")
+        if (allocated(error)) return
+        call check(error, all(vi == si) .and. all(vj == sj), &
+            "a uniform radius vector must give the scalar form's pair list, pair for pair")
+    end subroutine test_pairs_uniform_vector_matches_scalar
 
     !> A threaded bulk sweep answers exactly as the serial one.
     !>

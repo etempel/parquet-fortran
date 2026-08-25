@@ -223,14 +223,24 @@ module parquet_spatial
         procedure, private :: bind_all_within_r0 !! %all_within with one radius.
         procedure, private :: bind_all_within_r1 !! %all_within with one radius per point.
         !> Every point's neighbours, as one CSR structure. The primary bulk query.
+        !!
+        !! DIRECTED: row `i`'s list holds the points within `radius(i)` of it, so a per-point
+        !! radius gives a list that is deliberately not symmetric. `%pairs_within` is the
+        !! symmetric one.
         generic :: all_within => bind_all_within_r0, bind_all_within_r1
         procedure, private :: bind_pairs_within_r0 !! %pairs_within with one radius.
         procedure, private :: bind_pairs_within_r1 !! %pairs_within with one radius per point.
         !> Every neighbouring pair once, as two parallel index arrays with `i < j`.
+        !!
+        !! SYMMETRIC: a pair qualifies when EITHER ball reaches the other, `d <= max(r_i, r_j)`,
+        !! so it does not matter which endpoint would have been doing the searching.
         generic :: pairs_within => bind_pairs_within_r0, bind_pairs_within_r1
         procedure, private :: bind_count_all_r0 !! %count_all_within with one radius.
         procedure, private :: bind_count_all_r1 !! %count_all_within with one radius per point.
         !> How many neighbours each point has, without materialising them.
+        !!
+        !! DIRECTED, exactly as `%all_within` -- it is that query's row lengths. Do NOT use it to
+        !! size a `%pairs_within` result: the two count different things under a per-point radius.
         generic :: count_all_within => bind_count_all_r0, bind_count_all_r1
     end type pf_spatial_index
 
@@ -423,7 +433,16 @@ module parquet_spatial
         !!
         !! The one scan every query family goes through. `out32`/`out64`/`dist` are filled only as
         !! far as they reach; `m` is always the TRUE count, so a caller can size a buffer and retry.
-        module subroutine spatial_scan(self, p, r, m, out32, out64, dist, min_index)
+        !!
+        !! **`min_key`/`keys` are how a pair sweep emits each pair from exactly one of its two
+        !! endpoints.** `keys` gives every point a distinct ORDER KEY, addressed by stored position
+        !! so it is read with the same locality as the coordinates, and the walk reports only points
+        !! whose key is strictly above `min_key`. The two are present together or not at all --
+        !! `keys` is not consulted unless `min_key` is given. A single-radius sweep passes the
+        !! caller's row index as the key; a per-point-radius sweep passes a rank that orders the
+        !! points by DESCENDING radius, which is what makes the endpoint doing the searching always
+        !! the one whose ball is large enough to reach the other. See `spatial_pairs_within_worker`.
+        module subroutine spatial_scan(self, p, r, m, out32, out64, dist, min_key, keys)
             type(pf_spatial_index), intent(in), target :: self !! the index to search.
             real(real64), intent(in) :: p(3) !! the query point; p(3) is ignored by a 2D index.
             real(real64), intent(in) :: r !! the search radius; must be >= 0.
@@ -431,7 +450,8 @@ module parquet_spatial
             integer(int32), intent(inout), optional :: out32(:) !! caller's row indices, int32 buffer.
             integer(int64), intent(inout), optional :: out64(:) !! caller's row indices, int64 buffer.
             real(real64), intent(inout), optional :: dist(:) !! distance to each reported point.
-            integer(int64), intent(in), optional :: min_index !! accept only rows strictly above this.
+            integer(int64), intent(in), optional :: min_key !! accept only points whose key is above this.
+            integer(int64), intent(in), optional :: keys(:) !! order key per STORED position; needs `min_key`.
         end subroutine spatial_scan
 
         !> Counts the cells a ball would visit and the points it would distance-test, without
@@ -732,6 +752,10 @@ contains
     end subroutine bind_all_within_r0
 
     !> `%all_within` with an independent radius per point.
+    !>
+    !> **Directed**: row `i`'s neighbour list holds what lies within `radius(i)` of it, so `j` can
+    !> appear in `i`'s list without `i` appearing in `j`'s. That is the meaning of the query, not a
+    !> defect -- `%pairs_within` is the symmetric form.
     subroutine bind_all_within_r1(self, radius, offsets, neighbours, threads)
         class(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
         real(real64), intent(in) :: radius(:) !! one radius per point, in the caller's row order.
@@ -743,6 +767,10 @@ contains
     end subroutine bind_all_within_r1
 
     !> `%pairs_within` with one radius for every point.
+    !>
+    !> Every neighbouring pair appears exactly once, with `i < j`. With one radius the relation is
+    !> symmetric by construction, so there is nothing to choose: either endpoint's ball reaches the
+    !> other or neither does.
     subroutine bind_pairs_within_r0(self, radius, i, j, threads)
         class(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
         real(real64), intent(in) :: radius !! the search radius, the same for every point.
@@ -754,6 +782,20 @@ contains
     end subroutine bind_pairs_within_r0
 
     !> `%pairs_within` with an independent radius per point.
+    !>
+    !> **A pair qualifies when EITHER ball reaches the other: `d(i, j) <= max(radius(i),
+    !> radius(j))`.** Which endpoint would have been doing the searching does not enter into it,
+    !> so the edge list is a symmetric graph however wide the radii spread -- and it is still every
+    !> pair exactly once, with `i < j`.
+    !>
+    !> Note this is genuinely more pairs than `%all_within` with the same vector reports, which is
+    !> not a discrepancy: that query is DIRECTED, listing for each row only what lies within its
+    !> own radius. `%count_all_within` counts the directed neighbours too, so it does not size this
+    !> result.
+    !>
+    !> Two other conventions are common for a per-point radius and neither is what this gives:
+    !> `d <= min(r_i, r_j)` (both must agree) and `d <= r_i + r_j` (the balls touch). Either can be
+    !> had by filtering this result, since both are subsets of it.
     subroutine bind_pairs_within_r1(self, radius, i, j, threads)
         class(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
         real(real64), intent(in) :: radius(:) !! one radius per point, in the caller's row order.

@@ -169,8 +169,8 @@ contains
     !> Every neighbouring pair exactly once, with `i < j` in the caller's row numbering.
     module procedure spatial_pairs_within_worker
         real(real64), pointer, contiguous :: xs(:), ys(:), zs(:)
-        integer(int64), allocatable :: counts(:), heads(:)
-        integer(int64) :: n, t, i, u, m, s0, e0, total
+        integer(int64), allocatable :: counts(:), heads(:), keys(:), ord(:), rank_row(:)
+        integer(int64) :: n, t, i, u, m, s0, e0, total, k
         real(real64) :: p(3), r
         integer :: nt, nr
         logical :: direct
@@ -182,6 +182,7 @@ contains
         end if
         call spatial_storage(self, xs, ys, zs)
         direct = self%owns
+        call pair_order_keys(self, radii, nr, n, nt, keys)
         allocate (counts(n), heads(n + 1_int64))
         !$omp parallel do num_threads(nt) schedule(guided) default(shared) private(t, i, u, m, p, r)
         do t = 1_int64, n
@@ -193,9 +194,9 @@ contains
             p(3) = zs(u)
             r = radii(1)
             if (nr > 1) r = radii(i)
-            ! `min_index` makes the walk report only rows strictly above this one, so each pair is
+            ! `min_key` makes the walk report only points ranked above this one, so each pair is
             ! produced by exactly one of its two endpoints and there is nothing to de-duplicate.
-            call spatial_scan(self, p, r, m, min_index=i)
+            call spatial_scan(self, p, r, m, min_key=keys(t), keys=keys)
             counts(t) = m
         end do
         !$omp end parallel do
@@ -207,7 +208,7 @@ contains
         end do
         total = heads(n + 1_int64) - 1_int64
         allocate (ii(total), jj(total))
-        !$omp parallel do num_threads(nt) schedule(guided) default(shared) private(t, i, u, m, p, r, s0, e0)
+        !$omp parallel do num_threads(nt) schedule(guided) default(shared) private(t, i, u, m, p, r, s0, e0, k)
         do t = 1_int64, n
             i = self%idx(t)
             s0 = heads(t)
@@ -219,11 +220,64 @@ contains
             p(3) = zs(u)
             r = radii(1)
             if (nr > 1) r = radii(i)
-            call spatial_scan(self, p, r, m, out64=jj(s0:e0), min_index=i)
-            if (e0 >= s0) ii(s0:e0) = i
+            call spatial_scan(self, p, r, m, out64=jj(s0:e0), min_key=keys(t), keys=keys)
+            ! `i` is the endpoint that did the SEARCHING, which under a per-point radius is the one
+            ! with the larger ball and so not necessarily the lower row. Order each pair here, so
+            ! both forms carry the same contract: every unordered pair once, always with i < j.
+            do k = s0, e0
+                if (jj(k) > i) then
+                    ii(k) = i
+                else
+                    ii(k) = jj(k)
+                    jj(k) = i
+                end if
+            end do
         end do
         !$omp end parallel do
     end procedure spatial_pairs_within_worker
+
+    !> Gives every point the ORDER KEY that decides which endpoint of a pair reports it.
+    !>
+    !> **A pair belongs in the output when EITHER ball reaches the other**, `d <= max(r_a, r_b)` --
+    !> and only the endpoint with the larger radius is guaranteed to walk far enough to see its
+    !> partner at all, so that is the one that has to do the reporting. Ranking the points by
+    !> DESCENDING radius and emitting only upward through the rank therefore produces every
+    !> qualifying pair exactly once, from the one endpoint whose own sweep can find it.
+    !>
+    !> Ties can fall either way and it does not matter: any permutation gives every point a
+    !> distinct rank, which is the whole of what the emit-once rule needs.
+    !>
+    !> A single radius needs no sort — the balls are all the same size, so both endpoints see each
+    !> other and any total order will do. The caller's row index is the one that keeps the output
+    !> in the order it has always been in.
+    subroutine pair_order_keys(self, radii, nr, n, nt, keys)
+        type(pf_spatial_index), intent(in) :: self !! the index about to be swept.
+        real(real64), intent(in) :: radii(:) !! one radius, or one per point in row order.
+        integer, intent(in) :: nr !! `size(radii)`.
+        integer(int64), intent(in) :: n !! how many points the index holds.
+        integer, intent(in) :: nt !! the team size, for the sort.
+        integer(int64), allocatable, intent(out) :: keys(:) !! order key per STORED position.
+        integer(int64), allocatable :: ord(:), rank_row(:)
+        integer(int64) :: t, k
+
+        allocate (keys(n))
+        if (nr <= 1) then
+            keys = self%idx
+            return
+        end if
+        call pf_argsort(radii, ord, descending=.true., threads=nt)
+        allocate (rank_row(n))
+        do k = 1_int64, n
+            rank_row(ord(k)) = k
+        end do
+        deallocate (ord)
+        ! Into STORED order, so the sweep reads a key with the same locality as a coordinate
+        ! instead of gathering one per candidate. Freeing `ord` first keeps the peak at two of
+        ! these arrays rather than three.
+        do t = 1_int64, n
+            keys(t) = rank_row(self%idx(t))
+        end do
+    end subroutine pair_order_keys
 
     !> Validates a bulk call's radius list, rebuilds if it disagrees badly with the build, and
     !> resolves the team size. The three things every bulk family does identically, before any of

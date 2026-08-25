@@ -209,6 +209,7 @@ something a reader is expected to have.
 | [Risk-141](#risk-141--a-cell-size-is-a-performance-choice-and-must-never-change-an-answer) | A cell size is a PERFORMANCE choice and must never change an ANSWER | 4 — covered |
 | [Risk-142](#risk-142--only-a-bulk-entry-point-may-rebuild-a-spatial-index-and-nothing-enforces-it) | Only a BULK entry point may rebuild a spatial index, and nothing enforces it | 3 — not testable |
 | [Risk-143](#risk-143--a-spatial-index-cannot-tell-that-the-coordinates-under-it-have-moved) | A spatial index cannot tell that the coordinates under it have moved | 3 — not testable |
+| [Risk-144](#risk-144--a-per-point-radius-makes-a-pair-sweep-asymmetric-and-the-wrong-answer-looks-ordinary) | A per-point radius makes a pair sweep asymmetric, and the wrong answer looks ordinary | 4 — covered |
 
 ---
 
@@ -5970,3 +5971,44 @@ two orders of magnitude and compares every result against a brute-force scan -- 
 query. Keep the brute-force oracle: every cheaper comparison available here compares one part of the
 grid against another and would satisfy a defect in the walk itself.
 
+### Risk-144 — A per-point radius makes a pair sweep asymmetric, and the wrong answer looks ordinary
+
+`%pairs_within` claims to enumerate every unordered neighbouring pair once. With **one** radius that
+is free: both endpoints see each other, so emitting from the lower row is complete. With **one
+radius per point** it stops being free, and the natural implementation is wrong — if the searcher
+applies its own radius and reports only rows above it, every pair that only the LARGER ball reaches
+is silently dropped.
+
+**The failure mode is the dangerous kind.** The output is still a plausible edge list: sorted, each
+pair once, every pair genuinely within somebody's radius, `i < j` throughout. Nothing aborts, no
+count is obviously wrong, and the only way to see it is to compare against a rule stated
+independently. It shipped that way and was caught by reading the doc-comment, not by any test.
+
+The rule is `d(i, j) <= max(radius(i), radius(j))` — a pair belongs when **either** ball reaches the
+other. What makes it non-trivial is that the smaller ball's cell walk may never visit the other
+point's cell at all, so the larger-radius endpoint is the only one that can be relied on to find the
+pair. `pair_order_keys` (`src/parquet_spatial_bulk.f90`) therefore ranks the points by descending
+radius and emits only upward through that rank.
+
+**What this still forbids:**
+
+- **Do not replace the rank key with the row index**, however much simpler it looks — that is
+  exactly the defect. The scalar path already uses the row index, which is correct there and is why
+  the shortcut is tempting.
+- **The key is addressed by STORED position, not by row.** Indexing `rank_row` by `t` instead of by
+  `self%idx(t)` type-checks, runs, and returns a wrong answer of the same plausible shape.
+- **`%all_within` and `%count_all_within` must stay DIRECTED.** They are not inconsistent with this;
+  a per-row search radius is asymmetric by definition and that is what those queries mean. The trap
+  is the other way round: `sum(counts)` does not size a `%pairs_within` result under a per-point
+  radius, though the scalar identity `size(i) == (sum(counts) - n) / 2` holds and invites it.
+- **Keep the `i < j` normalisation.** The searcher is the larger-radius endpoint, which is not
+  necessarily the lower row, so without it the vector form quietly stops honouring the contract the
+  scalar form documents.
+
+**Covered by** `test_pairs_per_point_radius_is_symmetric` (`test/test_spatial.f90`), which asserts
+exact set equality against an O(n^2) oracle, and `test_pairs_uniform_vector_matches_scalar`.
+**Copy the test's design, not just its assertions:** it counts what the old rule would have produced
+(`want_low`) and asserts the fixture separates the two, so it cannot pass against a sweep that
+ignores the ranking; and it compares a full boolean matrix rather than a count, because a count
+alone cannot tell a duplicated pair plus a missing one from the right answer. The uniform-vector
+test is what catches a stored-versus-row mix-up on its own, since that defect preserves the count.

@@ -74,6 +74,11 @@ contains
         ! hint was wrong, and repeating it per query would bury that under itself.
         if (.not. self%warned .and. cfg_spatial_rebuild_warning .and. .not. parquet_output_is_suppressed()) then
             self%warned = .true.
+            ! A sky index accumulates chords; the caller asked in degrees and must read degrees.
+            if (self%metric_id == PF_METRIC_SKY) then
+                r_cur = 2.0_real64 * asin(min(0.5_real64 * r_cur, 1.0_real64)) * spatial_rad2deg
+                r_new = 2.0_real64 * asin(min(0.5_real64 * r_new, 1.0_real64)) * spatial_rad2deg
+            end if
             call parquet_emit_warning("pf_spatial_index: rebuilt for a query radius far from the one " // &
                 "it was built for (built " // num_text(r_cur) // ", now " // num_text(r_new) // &
                 ", cell " // num_text(self%cell_side) // "). Pass a better radius= to %build, or " // &
@@ -90,7 +95,7 @@ contains
         integer :: nt, nr
         logical :: direct
 
-        call spatial_bulk_setup(self, radii, n, nr, nt, threads)
+        call spatial_bulk_setup(self, radii, expect_metric, n, nr, nt, threads)
         allocate (offsets(n + 1_int64))
         allocate (counts(max(n, 1_int64)))
         if (n == 0_int64) then
@@ -145,7 +150,7 @@ contains
         integer :: nt, nr
         logical :: direct
 
-        call spatial_bulk_setup(self, radii, n, nr, nt, threads)
+        call spatial_bulk_setup(self, radii, expect_metric, n, nr, nt, threads)
         allocate (counts(n))
         if (n == 0_int64) return
         call spatial_storage(self, xs, ys, zs)
@@ -175,7 +180,7 @@ contains
         integer :: nt, nr
         logical :: direct
 
-        call spatial_bulk_setup(self, radii, n, nr, nt, threads)
+        call spatial_bulk_setup(self, radii, expect_metric, n, nr, nt, threads)
         if (n == 0_int64) then
             allocate (ii(0), jj(0))
             return
@@ -282,9 +287,10 @@ contains
     !> Validates a bulk call's radius list, rebuilds if it disagrees badly with the build, and
     !> resolves the team size. The three things every bulk family does identically, before any of
     !> them opens a parallel region.
-    subroutine spatial_bulk_setup(self, radii, n, nr, nt, threads)
+    subroutine spatial_bulk_setup(self, radii, expect_metric, n, nr, nt, threads)
         type(pf_spatial_index), intent(inout), target :: self !! the index about to be swept.
-        real(real64), intent(in) :: radii(:) !! one radius, or one per point.
+        real(real64), intent(in) :: radii(:) !! one radius, or one per point, in the index's own units.
+        integer, intent(in) :: expect_metric !! the metric the caller's radii were stated in.
         integer(int64), intent(out) :: n !! how many points the index holds.
         integer, intent(out) :: nr !! `size(radii)`, so the sweep can pick per-row or scalar.
         integer, intent(out) :: nt !! the team size to open.
@@ -292,11 +298,18 @@ contains
 
         if (.not. self%built_ok) error stop &
             "pf_spatial_index: this index has not been built; call %build first"
-        ! Same reasoning as the single-query guard: a bulk sweep on a sky index would take its
-        ! radius as a chord from a caller who is thinking in degrees. There is no bulk sky form
-        ! yet, so this refuses rather than converts.
-        if (self%metric_id /= PF_METRIC_EUCLIDEAN) error stop &
-            "pf_spatial_index: a bulk query on a sky index is not supported yet; use %within_sky per point"
+        ! **Both directions, from one place.** By the time a worker runs, its radii have already
+        ! been converted into the index's own units, so nothing downstream can tell degrees from
+        ! chords -- which is exactly the confusion this catches. Every bulk binding therefore
+        ! declares which metric it converted FROM, and a mismatch aborts here rather than
+        ! producing a plausible answer to a question nobody asked.
+        if (self%metric_id /= expect_metric) then
+            if (expect_metric == PF_METRIC_SKY) error stop &
+                "pf_spatial_index: this is a Euclidean index; use the plain bulk forms, not the _sky ones"
+            error stop &
+                "pf_spatial_index: this index was built with %build_sky; use the _sky bulk forms, " // &
+                "which take an angular radius in degrees"
+        end if
         n = self%npts
         nr = size(radii)
         if (nr /= 1 .and. int(nr, kind=int64) /= n) error stop &

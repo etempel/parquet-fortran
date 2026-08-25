@@ -120,6 +120,10 @@ call sx%all_within(link_length, offsets, neighbours)    ! link_length(n): one pe
 `%all_within` reports a point as its own neighbour; `%pairs_within` does not, since a point is not
 a pair with itself.
 
+On a sky index these three are spelled `%all_within_sky`, `%pairs_within_sky` and
+`%count_all_within_sky`, and take their radii in degrees — see
+[search on the sky](#search-on-the-sky).
+
 ### Directed and symmetric are different questions
 
 With a single radius the distinction does not arise. With **one radius per point** it does, and the
@@ -189,10 +193,34 @@ the chord `2*sin(theta/2)`, which is strictly increasing, so a Euclidean ball of
 unit-vector space selects exactly the points within that angle. There is no pole special case and
 no wrap at 0h, because a sphere has neither.
 
+### Sky queries in bulk
+
+The same three self-join forms, with radii in degrees:
+
+```fortran
+call sky%all_within_sky(1.0_real64, offsets, neighbours)     ! CSR: every object's neighbours
+call sky%pairs_within_sky(1.0_real64, i, j)                  ! every close pair once, i < j
+call sky%count_all_within_sky(1.0_real64, counts)            ! counts only
+```
+
+Each takes one angular radius or one per point, threads with `threads=`, and behaves exactly as its
+Euclidean twin — including the [directed and symmetric](#directed-and-symmetric-are-different-questions)
+split, which survives the change of units unchanged: the chord is strictly increasing in the angle,
+so `max(chord_i, chord_j)` is the chord of `max(deg_i, deg_j)` and a pair qualifies when the wider
+of the two apertures reaches the other object.
+
+What each is for, since the three answer quite different questions: `%all_within_sky` is the
+catalogue self-match; `%pairs_within_sky` is what a group finder or a duplicate-source search
+wants; and `%count_all_within_sky` gives a local surface density per object without materialising
+the neighbour lists, which on a crowded field is the difference between a length-n array and one
+that does not fit in memory.
+
 **The metric belongs to the index, and mixing them aborts.** `%within` on a sky index and
 `%within_sky` on a Euclidean one are both refused, rather than quietly answering in the wrong
-units. That guard is the reason the metric is stored at build time instead of being passed per
-call.
+units — as are `%all_within` on a sky index and `%all_within_sky` on a Euclidean one, in both
+directions. That guard is the reason the metric is stored at build time instead of being passed
+per call: `%all_within(0.02)` on a sky index would otherwise be answered in chords to someone who
+meant degrees, and 0.02 chords is about 1.15 degrees — a plausible number, wrong by a factor of 57.
 
 Two further notes. `%effective_radius()` comes back in **degrees**, because that is what you gave
 it, while `%cell_size()` and `cell=` are both in unit-vector space — they are a matched pair, so a
@@ -268,9 +296,10 @@ against a swept optimum, and thread scaling, if you want numbers for your own ma
   than the box wraps onto itself, so a point can be near the shape through more than one image and
   the ball search's half-box guard has no equivalent. Only `%within` and the bulk forms are
   periodic-aware.
-- **Bulk queries are refused on a sky index.** `%within_sky` per point is the supported route for
-  now; a bulk sky form would need its own degrees-to-chord entry points, and passing degrees to
-  `%all_within` would otherwise be taken as a chord.
+- **There is no cross-match against a second catalogue.** Every bulk form here is a *self*-join:
+  it queries the index with the index's own points. Matching catalogue B against an index built
+  over catalogue A means a loop of `%within_sky`, which works and threads if you write the loop,
+  but has no single call.
 - **An angular radius above 90 degrees is refused.** The chord mapping stays exact all the way to
   180, but past a hemisphere the ball covers most of the catalogue and the grid has nothing left to
   prune — that is not a neighbour search, and refusing says so where returning everything slowly

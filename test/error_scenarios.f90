@@ -1856,6 +1856,8 @@ program error_scenarios
         call scenario_spatial_euclidean_query_on_sky()
     case ("spatial_sky_bulk_refused")
         call scenario_spatial_sky_bulk_refused()
+    case ("spatial_sky_bulk_on_euclidean")
+        call scenario_spatial_sky_bulk_on_euclidean()
     case ("spatial_sky_rsky_too_large")
         call scenario_spatial_sky_rsky_too_large()
     case ("spatial_sky_dec_out_of_range")
@@ -16585,12 +16587,13 @@ contains
         print '(a,i0)', "unexpectedly ran a Euclidean query on a sky index, m=", m
     end subroutine scenario_spatial_euclidean_query_on_sky
 
-    !> A bulk sweep on a sky index is refused for now.
+    !> A PLAIN bulk sweep on a sky index is refused, and points at the `_sky` forms.
     !>
-    !> **When a bulk sky form lands, this becomes an equality test rather than a deletion**: assert
-    !> that `%all_within_sky(deg, ...)` agrees with a loop of `%within_sky` over the same
-    !> catalogue, at the poles and across 0h. What it asserts today is that the refusal is real,
-    !> which is what stops a caller passing degrees where a chord is expected.
+    !> The bulk sky forms have landed, so this no longer guards an absent feature -- it guards the
+    !> units. `%all_within(0.02)` on a sky index would be answered in chords to a caller who is
+    !> almost certainly thinking in degrees, and 0.02 chords is about 1.15 degrees: a plausible
+    !> number, wrong by a factor of 57. The companion is `spatial_sky_bulk_on_euclidean`, which
+    !> checks the same guard from the other side.
     subroutine scenario_spatial_sky_bulk_refused()
         type(pf_spatial_index) :: sx
         real(real64), allocatable :: ra(:), dec(:)
@@ -16601,6 +16604,18 @@ contains
         call sx%all_within(0.02_real64, offs, nb)   ! -> aborts
         print '(a,i0)', "unexpectedly ran a bulk sweep on a sky index, n=", size(nb)
     end subroutine scenario_spatial_sky_bulk_refused
+
+    !> A `_sky` bulk form on a Euclidean index is refused: it would take degrees for a distance.
+    subroutine scenario_spatial_sky_bulk_on_euclidean()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int64), allocatable :: counts(:)
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64)
+        call sx%count_all_within_sky(1.0_real64, counts)   ! -> aborts
+        print '(a,i0)', "unexpectedly ran a sky bulk sweep on a Euclidean index, n=", size(counts)
+    end subroutine scenario_spatial_sky_bulk_on_euclidean
 
     !> An angular radius past a hemisphere is refused, since the grid then prunes nothing.
     subroutine scenario_spatial_sky_rsky_too_large()

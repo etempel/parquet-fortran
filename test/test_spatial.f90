@@ -74,6 +74,8 @@ contains
                          test_sky_matches_brute_force), &
             new_unittest("sky separations come back in degrees", test_sky_distances_are_degrees), &
             new_unittest("a sky index reports its radius in degrees", test_sky_metadata), &
+            new_unittest("the sky self-join reproduces N single sky queries", test_sky_bulk_matches_singles), &
+            new_unittest("sky pairs and counts agree, and pairs stay symmetric", test_sky_bulk_pairs_and_counts), &
             new_unittest("a threaded bulk sweep equals the serial one", test_bulk_threaded_matches_serial), &
             new_unittest("a periodic index matches a minimum-image scan", test_periodic_matches_brute_force), &
             new_unittest("a periodic index is translation invariant", test_periodic_translation_invariant), &
@@ -1165,6 +1167,111 @@ contains
         call eu%build(x, y, z, radius=0.2_real64)
         call check(error, eu%metric() == PF_METRIC_EUCLIDEAN, "%build must leave the Euclidean metric")
     end subroutine test_sky_metadata
+
+    !> `%all_within_sky` is exactly a loop of `%within_sky`, catalogue-wide.
+    !>
+    !> The equality test the `spatial_sky_bulk_refused` scenario asked for when the bulk sky forms
+    !> landed. It runs over the same pole-and-0h fixture as the single-query test, so the bulk path
+    !> is checked at the two places the conversion exists for rather than only in open sky.
+    subroutine test_sky_bulk_matches_singles(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:)
+        integer(int64), allocatable :: offs(:), nb(:), one(:)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, i, m, lo, hi, total
+        real(real64), parameter :: rq = 1.5_real64
+
+        n = 3000_int64
+        call make_sky(n, ra, dec)
+        call sx%build_sky(ra, dec, radius_deg=rq)
+        call sx%all_within_sky(rq, offs, nb)
+        call check(error, size(offs, kind=int64) == n + 1_int64, &
+            "the CSR offsets must have one entry per point plus a sentinel")
+        if (allocated(error)) return
+        total = offs(n + 1_int64) - 1_int64
+        call check(error, total >= n, "every point is its own neighbour, so the CSR cannot be shorter than n")
+        if (allocated(error)) return
+        allocate (one(n))
+        do i = 1_int64, n
+            m = sx%within_sky(ra(i), dec(i), rq, one)
+            lo = offs(i)
+            hi = offs(i + 1_int64) - 1_int64
+            call check(error, same_rows(nb(lo:hi), hi - lo + 1_int64, one, m), &
+                "each CSR row must hold exactly what a single sky query at that point returns")
+            if (allocated(error)) return
+        end do
+    end subroutine test_sky_bulk_matches_singles
+
+    !> The sky pair list and counts agree with the CSR, and pairs stay symmetric in degrees.
+    !>
+    !> **The per-point half is the one worth having.** The chord is strictly increasing in the
+    !> angle, so ranking by descending chord is ranking by descending angle -- but that is an
+    !> argument, and this asserts it: the edge list is compared against an O(n^2) haversine scan
+    !> under `separation <= max(deg_i, deg_j)`, with a count of what the lower-row-searches rule
+    !> would have produced beside it so the fixture is known to separate the two.
+    subroutine test_sky_bulk_pairs_and_counts(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), rv(:)
+        integer(int64), allocatable :: offs(:), nb(:), pi(:), pj(:), counts(:)
+        logical, allocatable :: want(:, :), got(:, :)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, i, a, b, k, csr_total, want_max, want_low
+        real(real64) :: sep
+        real(real64), parameter :: rq = 1.5_real64
+
+        n = 800_int64
+        call make_sky(n, ra, dec)
+        call sx%build_sky(ra, dec, radius_deg=rq)
+
+        ! Scalar radius: counts, CSR and the pair list must be three views of one answer.
+        call sx%all_within_sky(rq, offs, nb)
+        call sx%count_all_within_sky(rq, counts)
+        call sx%pairs_within_sky(rq, pi, pj)
+        do i = 1_int64, n
+            call check(error, counts(i) == offs(i + 1_int64) - offs(i), &
+                "count_all_within_sky must agree with the CSR row length for every point")
+            if (allocated(error)) return
+        end do
+        csr_total = offs(n + 1_int64) - 1_int64
+        call check(error, size(pi, kind=int64) == (csr_total - n) / 2_int64, &
+            "the sky edge list must hold each neighbouring pair exactly once")
+        if (allocated(error)) return
+        call check(error, all(pi < pj), "every reported sky pair must have i < j")
+        if (allocated(error)) return
+
+        ! Per-point radii, in degrees, against an independent haversine oracle.
+        allocate (rv(n))
+        do i = 1_int64, n
+            rv(i) = 0.3_real64 + 2.2_real64 * pf_random_at(fixture_seed, i, 31_int64)
+        end do
+        allocate (want(n, n), got(n, n))
+        want = .false.
+        got = .false.
+        want_max = 0_int64
+        want_low = 0_int64
+        do a = 1_int64, n - 1_int64
+            do b = a + 1_int64, n
+                sep = sky_sep(ra(a), dec(a), ra(b), dec(b))
+                if (sep <= max(rv(a), rv(b))) then
+                    want(a, b) = .true.
+                    want_max = want_max + 1_int64
+                end if
+                if (sep <= rv(a)) want_low = want_low + 1_int64
+            end do
+        end do
+        call check(error, want_max > want_low, &
+            "the fixture must separate the symmetric rule from the lower-row-searches rule")
+        if (allocated(error)) return
+        call sx%pairs_within_sky(rv, pi, pj)
+        call check(error, size(pi, kind=int64) == want_max, &
+            "the sky edge list must hold every pair within max(deg_i, deg_j), and no others")
+        if (allocated(error)) return
+        do k = 1_int64, size(pi, kind=int64)
+            got(pi(k), pj(k)) = .true.
+        end do
+        call check(error, all(got .eqv. want), &
+            "the sky edge list must be exactly the pairs within max(deg_i, deg_j)")
+    end subroutine test_sky_bulk_pairs_and_counts
 
     !> A threaded bulk sweep answers exactly as the serial one.
     !>

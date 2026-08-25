@@ -997,6 +997,7 @@ scenarios=(
     "spatial_sky_query_on_euclidean:1"
     "spatial_euclidean_query_on_sky:1"
     "spatial_sky_bulk_refused:1"
+    "spatial_sky_bulk_on_euclidean:1"
     "spatial_sky_rsky_too_large:1"
     "spatial_sky_dec_out_of_range:1"
     "spatial_sky_rebuild_refused:1"

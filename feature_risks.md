@@ -6076,13 +6076,20 @@ is out by a factor of 57 and has no reason to suspect it.
   first is a radius the caller gave in degrees, the second pairs with `cell=` and both are in
   unit-vector space. "Harmonising" them breaks a documented round trip in one direction or reports
   a chord as an angle in the other.
-- **A bulk sky form must convert at its own entry point**, never by relaxing the guard in
-  `spatial_bulk_setup` — relaxing it would let a caller pass degrees to `%all_within` and be
-  answered in chords, which is the exact failure the guard exists for.
+- **The bulk guard is two-directional and keyed on an argument, not on the metric alone.** Every
+  bulk binding passes `expect_metric` to `spatial_bulk_setup`, which aborts on a mismatch either
+  way. Do not simplify it back to "a sky index refuses bulk": by the time a worker runs its radii
+  are already in the index's own units, so nothing downstream can tell degrees from chords, and
+  the declaration at the entry point is the only place the distinction still exists.
+- **A new bulk form converts at its OWN entry point, through `sky_chords`.** That helper is the
+  single place a bulk angular radius is range-checked; a form that converts inline skips the
+  checks silently, and one that relaxes the guard instead lets a caller pass degrees to
+  `%all_within` and be answered in chords — the exact failure the guard exists for.
 
-**Covered by** six error scenarios (`spatial_sky_query_on_euclidean`, `spatial_euclidean_query_on_sky`,
-`spatial_sky_bulk_refused`, `spatial_sky_rsky_too_large`, `spatial_sky_dec_out_of_range`,
-`spatial_sky_rebuild_refused`) and by `test_sky_matches_brute_force`. **Copy that test's fixture
+**Covered by** seven error scenarios (`spatial_sky_query_on_euclidean`, `spatial_euclidean_query_on_sky`,
+`spatial_sky_bulk_refused`, `spatial_sky_bulk_on_euclidean`, `spatial_sky_rsky_too_large`,
+`spatial_sky_dec_out_of_range`, `spatial_sky_rebuild_refused`) and by `test_sky_matches_brute_force`,
+`test_sky_bulk_matches_singles` and `test_sky_bulk_pairs_and_counts`. **Copy that test's fixture
 design:** it piles points at both poles and across 0h, and asserts that the answers SPAN those
 discontinuities — a query at 0h must return points on both sides of the wrap, and a polar query
 must reach every meridian. A fixture in the middle of the sky passes with an implementation that

@@ -276,6 +276,18 @@ module parquet_spatial
         !! DIRECTED, exactly as `%all_within` -- it is that query's row lengths. Do NOT use it to
         !! size a `%pairs_within` result: the two count different things under a per-point radius.
         generic :: count_all_within => bind_count_all_r0, bind_count_all_r1
+        procedure, private :: bind_all_sky_r0 !! %all_within_sky with one angular radius.
+        procedure, private :: bind_all_sky_r1 !! %all_within_sky with one angular radius per point.
+        !> Every point's neighbours on the sky, as one CSR structure. Radii in degrees.
+        generic :: all_within_sky => bind_all_sky_r0, bind_all_sky_r1
+        procedure, private :: bind_pairs_sky_r0 !! %pairs_within_sky with one angular radius.
+        procedure, private :: bind_pairs_sky_r1 !! %pairs_within_sky with one angular radius per point.
+        !> Every neighbouring pair on the sky once, with `i < j`. Radii in degrees.
+        generic :: pairs_within_sky => bind_pairs_sky_r0, bind_pairs_sky_r1
+        procedure, private :: bind_count_all_sky_r0 !! %count_all_within_sky with one angular radius.
+        procedure, private :: bind_count_all_sky_r1 !! %count_all_within_sky with one per point.
+        !> How many neighbours each point has on the sky. Radii in degrees.
+        generic :: count_all_within_sky => bind_count_all_sky_r0, bind_count_all_sky_r1
     end type pf_spatial_index
 
     ! ---- Test-only state. Process-global by necessity: a hook over Fortran-side state has no ----
@@ -549,28 +561,31 @@ module parquet_spatial
 
     interface
         !> Every point's neighbours as CSR: row `i` occupies `neighbours(offsets(i):offsets(i+1)-1)`.
-        module subroutine spatial_all_within_worker(self, radii, offsets, neighbours, threads)
+        module subroutine spatial_all_within_worker(self, radii, offsets, neighbours, expect_metric, threads)
             type(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
-            real(real64), intent(in) :: radii(:) !! one radius, or one per point.
+            real(real64), intent(in) :: radii(:) !! one radius, or one per point, in the index's own units.
             integer(int64), allocatable, intent(out) :: offsets(:) !! length n+1, `offsets(1) == 1`.
             integer(int64), allocatable, intent(out) :: neighbours(:) !! the concatenated neighbour lists.
+            integer, intent(in) :: expect_metric !! the metric this call's radii are stated in.
             integer, intent(in), optional :: threads !! team size; absent resolves automatically.
         end subroutine spatial_all_within_worker
 
         !> Every neighbouring pair exactly once, with `i < j` in the caller's row numbering.
-        module subroutine spatial_pairs_within_worker(self, radii, ii, jj, threads)
+        module subroutine spatial_pairs_within_worker(self, radii, ii, jj, expect_metric, threads)
             type(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
-            real(real64), intent(in) :: radii(:) !! one radius, or one per point.
+            real(real64), intent(in) :: radii(:) !! one radius, or one per point, in the index's own units.
             integer(int64), allocatable, intent(out) :: ii(:) !! the lower row index of each pair.
             integer(int64), allocatable, intent(out) :: jj(:) !! the higher row index of each pair.
+            integer, intent(in) :: expect_metric !! the metric this call's radii are stated in.
             integer, intent(in), optional :: threads !! team size; absent resolves automatically.
         end subroutine spatial_pairs_within_worker
 
         !> How many neighbours each point has, in the caller's row order.
-        module subroutine spatial_count_all_worker(self, radii, counts, threads)
+        module subroutine spatial_count_all_worker(self, radii, counts, expect_metric, threads)
             type(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
-            real(real64), intent(in) :: radii(:) !! one radius, or one per point.
+            real(real64), intent(in) :: radii(:) !! one radius, or one per point, in the index's own units.
             integer(int64), allocatable, intent(out) :: counts(:) !! length n, in the caller's row order.
+            integer, intent(in) :: expect_metric !! the metric this call's radii are stated in.
             integer, intent(in), optional :: threads !! team size; absent resolves automatically.
         end subroutine spatial_count_all_worker
 
@@ -1044,7 +1059,7 @@ contains
         integer(int64), allocatable, intent(out) :: neighbours(:) !! the concatenated neighbour lists.
         integer, intent(in), optional :: threads !! team size; absent resolves automatically.
 
-        call spatial_all_within_worker(self, [radius], offsets, neighbours, threads)
+        call spatial_all_within_worker(self, [radius], offsets, neighbours, PF_METRIC_EUCLIDEAN, threads)
     end subroutine bind_all_within_r0
 
     !> `%all_within` with an independent radius per point.
@@ -1059,7 +1074,7 @@ contains
         integer(int64), allocatable, intent(out) :: neighbours(:) !! the concatenated neighbour lists.
         integer, intent(in), optional :: threads !! team size; absent resolves automatically.
 
-        call spatial_all_within_worker(self, radius, offsets, neighbours, threads)
+        call spatial_all_within_worker(self, radius, offsets, neighbours, PF_METRIC_EUCLIDEAN, threads)
     end subroutine bind_all_within_r1
 
     !> `%pairs_within` with one radius for every point.
@@ -1074,7 +1089,7 @@ contains
         integer(int64), allocatable, intent(out) :: j(:) !! the higher row index of each pair.
         integer, intent(in), optional :: threads !! team size; absent resolves automatically.
 
-        call spatial_pairs_within_worker(self, [radius], i, j, threads)
+        call spatial_pairs_within_worker(self, [radius], i, j, PF_METRIC_EUCLIDEAN, threads)
     end subroutine bind_pairs_within_r0
 
     !> `%pairs_within` with an independent radius per point.
@@ -1099,7 +1114,7 @@ contains
         integer(int64), allocatable, intent(out) :: j(:) !! the higher row index of each pair.
         integer, intent(in), optional :: threads !! team size; absent resolves automatically.
 
-        call spatial_pairs_within_worker(self, radius, i, j, threads)
+        call spatial_pairs_within_worker(self, radius, i, j, PF_METRIC_EUCLIDEAN, threads)
     end subroutine bind_pairs_within_r1
 
     !> `%count_all_within` with one radius for every point.
@@ -1109,7 +1124,7 @@ contains
         integer(int64), allocatable, intent(out) :: counts(:) !! length n, in the caller's row order.
         integer, intent(in), optional :: threads !! team size; absent resolves automatically.
 
-        call spatial_count_all_worker(self, [radius], counts, threads)
+        call spatial_count_all_worker(self, [radius], counts, PF_METRIC_EUCLIDEAN, threads)
     end subroutine bind_count_all_r0
 
     !> `%count_all_within` with an independent radius per point.
@@ -1119,8 +1134,100 @@ contains
         integer(int64), allocatable, intent(out) :: counts(:) !! length n, in the caller's row order.
         integer, intent(in), optional :: threads !! team size; absent resolves automatically.
 
-        call spatial_count_all_worker(self, radius, counts, threads)
+        call spatial_count_all_worker(self, radius, counts, PF_METRIC_EUCLIDEAN, threads)
     end subroutine bind_count_all_r1
+
+    ! ---- Bulk queries on the sky ----
+    !
+    ! Each of these is its Euclidean twin with the radii converted from degrees to chords at the
+    ! entry point, which is the only place that conversion may happen -- see `spatial_bulk_setup`.
+    ! Nothing else differs: the sweep, the threading, the auto-rebuild and the directed/symmetric
+    ! split are all shared, because a sky index IS a Euclidean index over unit vectors.
+
+    !> `%all_within_sky` with one angular radius for every point.
+    !>
+    !> The catalogue self-match: for each row, every row within `radius_deg` degrees of it, as one
+    !> CSR structure. DIRECTED under a per-point radius, exactly as `%all_within` is.
+    subroutine bind_all_sky_r0(self, radius_deg, offsets, neighbours, threads)
+        class(pf_spatial_index), intent(inout), target :: self !! the sky index to sweep.
+        real(real64), intent(in) :: radius_deg !! the angular radius, in degrees.
+        integer(int64), allocatable, intent(out) :: offsets(:) !! length n+1, `offsets(1) == 1`.
+        integer(int64), allocatable, intent(out) :: neighbours(:) !! the concatenated neighbour lists.
+        integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+
+        call spatial_all_within_worker(self, sky_chords([radius_deg], "all_within_sky"), &
+            offsets, neighbours, PF_METRIC_SKY, threads)
+    end subroutine bind_all_sky_r0
+
+    !> `%all_within_sky` with an independent angular radius per point, in the caller's row order.
+    subroutine bind_all_sky_r1(self, radius_deg, offsets, neighbours, threads)
+        class(pf_spatial_index), intent(inout), target :: self !! the sky index to sweep.
+        real(real64), intent(in) :: radius_deg(:) !! one angular radius per point, in degrees.
+        integer(int64), allocatable, intent(out) :: offsets(:) !! length n+1, `offsets(1) == 1`.
+        integer(int64), allocatable, intent(out) :: neighbours(:) !! the concatenated neighbour lists.
+        integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+
+        call spatial_all_within_worker(self, sky_chords(radius_deg, "all_within_sky"), &
+            offsets, neighbours, PF_METRIC_SKY, threads)
+    end subroutine bind_all_sky_r1
+
+    !> `%pairs_within_sky` with one angular radius for every point.
+    !>
+    !> Every close pair once, with `i < j` -- the shape a group finder or a duplicate-source search
+    !> wants.
+    subroutine bind_pairs_sky_r0(self, radius_deg, i, j, threads)
+        class(pf_spatial_index), intent(inout), target :: self !! the sky index to sweep.
+        real(real64), intent(in) :: radius_deg !! the angular radius, in degrees.
+        integer(int64), allocatable, intent(out) :: i(:) !! the lower row index of each pair.
+        integer(int64), allocatable, intent(out) :: j(:) !! the higher row index of each pair.
+        integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+
+        call spatial_pairs_within_worker(self, sky_chords([radius_deg], "pairs_within_sky"), &
+            i, j, PF_METRIC_SKY, threads)
+    end subroutine bind_pairs_sky_r0
+
+    !> `%pairs_within_sky` with an independent angular radius per point.
+    !>
+    !> **SYMMETRIC, and the degrees-to-chord conversion cannot disturb that.** A pair qualifies
+    !> when `separation <= max(radius_deg(i), radius_deg(j))`, and because the chord is strictly
+    !> increasing in the angle, the chord of the larger angle IS the larger chord -- so ranking the
+    !> points by descending chord ranks them by descending angle, and the sweep needs no knowledge
+    !> of which metric it is running under.
+    subroutine bind_pairs_sky_r1(self, radius_deg, i, j, threads)
+        class(pf_spatial_index), intent(inout), target :: self !! the sky index to sweep.
+        real(real64), intent(in) :: radius_deg(:) !! one angular radius per point, in degrees.
+        integer(int64), allocatable, intent(out) :: i(:) !! the lower row index of each pair.
+        integer(int64), allocatable, intent(out) :: j(:) !! the higher row index of each pair.
+        integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+
+        call spatial_pairs_within_worker(self, sky_chords(radius_deg, "pairs_within_sky"), &
+            i, j, PF_METRIC_SKY, threads)
+    end subroutine bind_pairs_sky_r1
+
+    !> `%count_all_within_sky` with one angular radius for every point.
+    !>
+    !> Counts without materialising the lists, which on a crowded field is the difference between
+    !> a length-n array and one that does not fit in memory. DIRECTED, as `%all_within_sky` is.
+    subroutine bind_count_all_sky_r0(self, radius_deg, counts, threads)
+        class(pf_spatial_index), intent(inout), target :: self !! the sky index to sweep.
+        real(real64), intent(in) :: radius_deg !! the angular radius, in degrees.
+        integer(int64), allocatable, intent(out) :: counts(:) !! length n, in the caller's row order.
+        integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+
+        call spatial_count_all_worker(self, sky_chords([radius_deg], "count_all_within_sky"), &
+            counts, PF_METRIC_SKY, threads)
+    end subroutine bind_count_all_sky_r0
+
+    !> `%count_all_within_sky` with an independent angular radius per point.
+    subroutine bind_count_all_sky_r1(self, radius_deg, counts, threads)
+        class(pf_spatial_index), intent(inout), target :: self !! the sky index to sweep.
+        real(real64), intent(in) :: radius_deg(:) !! one angular radius per point, in degrees.
+        integer(int64), allocatable, intent(out) :: counts(:) !! length n, in the caller's row order.
+        integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+
+        call spatial_count_all_worker(self, sky_chords(radius_deg, "count_all_within_sky"), &
+            counts, PF_METRIC_SKY, threads)
+    end subroutine bind_count_all_sky_r1
 
     ! ---- Shared argument checking ----
 
@@ -1170,6 +1277,27 @@ contains
 
         c = 2.0_real64 * sin(0.5_real64 * deg * spatial_deg2rad)
     end function sky_chord
+
+    !> A whole radius list from degrees to chords, validated on the way.
+    !>
+    !> **The one place a bulk sky radius is converted.** Every `_sky` bulk binding goes through it,
+    !> so the range checks are stated once and a new bulk form cannot quietly skip them.
+    function sky_chords(deg, what) result(c)
+        real(real64), intent(in) :: deg(:) !! the angular radii, in degrees.
+        character(len=*), intent(in) :: what !! the calling procedure, for the message.
+        real(real64), allocatable :: c(:) !! the corresponding chords.
+        integer :: k
+
+        allocate (c(size(deg)))
+        do k = 1, size(deg)
+            if (.not. (deg(k) >= 0.0_real64)) error stop "pf_spatial_index%" // what // &
+                ": every angular radius must be >= 0 and not NaN"
+            if (deg(k) > spatial_max_sky_deg) error stop "pf_spatial_index%" // what // &
+                ": an angular radius above 90 degrees is not a neighbour search; the ball then " // &
+                "covers most of the sky and the grid has nothing to prune"
+            c(k) = sky_chord(deg(k))
+        end do
+    end function sky_chords
 
     ! ---- Test-only hooks ----
 

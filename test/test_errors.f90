@@ -1459,7 +1459,8 @@ contains
             new_unittest("an axis query on a periodic index aborts", test_spatial_axis_periodic_aborts), &
             new_unittest("a sky query on a Euclidean index aborts", test_spatial_sky_on_euclidean_aborts), &
             new_unittest("a Euclidean query on a sky index aborts", test_spatial_euclidean_on_sky_aborts), &
-            new_unittest("a bulk sweep on a sky index aborts", test_spatial_sky_bulk_aborts), &
+            new_unittest("a plain bulk sweep on a sky index aborts", test_spatial_sky_bulk_aborts), &
+            new_unittest("a sky bulk sweep on a Euclidean index aborts", test_spatial_sky_bulk_euclidean_aborts), &
             new_unittest("a sky radius past a hemisphere aborts", test_spatial_sky_rsky_aborts), &
             new_unittest("a declination outside [-90, 90] aborts", test_spatial_sky_dec_aborts), &
             new_unittest("rebuilding a sky index aborts", test_spatial_sky_rebuild_aborts), &
@@ -2302,8 +2303,15 @@ contains
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "spatial_sky_bulk_refused", expect_abort=.true., &
             failure_message="a bulk sweep on a sky index was expected to abort", &
-            required_stderr="bulk query on a sky index is not supported yet")
+            required_stderr="use the _sky bulk forms")
     end subroutine test_spatial_sky_bulk_aborts
+
+    subroutine test_spatial_sky_bulk_euclidean_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_sky_bulk_on_euclidean", expect_abort=.true., &
+            failure_message="a sky bulk sweep on a Euclidean index was expected to abort", &
+            required_stderr="this is a Euclidean index; use the plain bulk forms")
+    end subroutine test_spatial_sky_bulk_euclidean_aborts
 
     subroutine test_spatial_sky_rsky_aborts(error)
         type(error_type), allocatable, intent(out) :: error

@@ -220,7 +220,7 @@ Every layer underneath is importable on its own, and several cost a great deal l
 | `parquet_random` | 3 | no | counter-based random numbers and distributions |
 | `parquet_argsort` | 4 | no | `pf_argsort` over the six intrinsic types |
 | `parquet_sampling` | 8 | no | permutations, subsets, resampling, weighted draws |
-| `parquet_spatial` | 9 | no | `pf_spatial_index`: neighbour search on a uniform grid |
+| `parquet_spatial` | 9 | no | `pf_spatial_index`: neighbour search on a uniform grid, including on the sky |
 | `parquet_columns` | 10 | no | the `parquet_column` container |
 | `parquet_sorting` | 21 | no | the whole sorting API, every element type |
 | `parquet_settings` | 3 | **yes** | the process-global knobs, and `parquet_get_arrow_version` |

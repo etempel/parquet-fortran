@@ -82,6 +82,18 @@ module parquet_spatial
     !> A unit-vector index over `(RA, Dec)`, queried by angular radius. What `%build_sky` produces.
     integer, parameter :: PF_METRIC_SKY = 2
 
+    !> Degrees to radians, for the sky metric's conversions.
+    real(real64), parameter :: spatial_deg2rad = 0.017453292519943295_real64
+    !> Radians to degrees, the inverse of `spatial_deg2rad`.
+    real(real64), parameter :: spatial_rad2deg = 57.29577951308232_real64
+    !> The largest angular radius a sky query will accept, in degrees.
+    !!
+    !! **Not a correctness limit -- the chord mapping is exact all the way to 180 degrees.** It is
+    !! a usefulness one: past a hemisphere the ball covers most of the catalogue, the grid has
+    !! nothing left to prune, and a query that returns almost every row is not a neighbour search.
+    !! Refusing says so, where returning everything slowly would not.
+    real(real64), parameter :: spatial_max_sky_deg = 90.0_real64
+
     ! ---- Tuning constants. None of these is a setting; see feature_pandas_S3_cubesort.md ----
 
     !> Centre of the cell-size bracket, `h = kappa * (r_eff / ((4/3) pi rho))^(1/(1+ndim))`.
@@ -196,6 +208,10 @@ module parquet_spatial
         procedure, private :: bind_build_r1 !! %build with a list of radii.
         !> Builds the index over `x`, `y` and optionally `z`. `radius=` is mandatory.
         generic :: build => bind_build_r0, bind_build_r1
+        procedure, private :: bind_build_sky_r0 !! %build_sky with one angular radius.
+        procedure, private :: bind_build_sky_r1 !! %build_sky with a list of angular radii.
+        !> Builds a SKY index over `(ra, dec)` in degrees. `radius_deg=` is mandatory.
+        generic :: build_sky => bind_build_sky_r0, bind_build_sky_r1
         procedure, private :: bind_rebuild_r0 !! %rebuild with one radius.
         procedure, private :: bind_rebuild_r1 !! %rebuild with a list of radii.
         !> Validate-and-rebuild against possibly-new coordinates; a no-op when they are unchanged.
@@ -220,6 +236,24 @@ module parquet_spatial
         !> Points within `r` of `p`, into a caller-owned buffer. Returns the TRUE count.
         generic :: within => bind_within_i32, bind_within_i64
         procedure :: count_within => bind_count_within !! How many points lie within `r` of `p`.
+        procedure, private :: bind_sky_i32 !! %within_sky into an int32 buffer.
+        procedure, private :: bind_sky_i64 !! %within_sky into an int64 buffer.
+        !> Points within `rsky_deg` degrees of `(ra, dec)`. Sky indexes only.
+        generic :: within_sky => bind_sky_i32, bind_sky_i64
+        procedure, private :: bind_seg_i32 !! %within_segment into an int32 buffer.
+        procedure, private :: bind_seg_i64 !! %within_segment into an int64 buffer.
+        !> Points within `r` of the SEGMENT `p1`-`p2`: a capsule, round ends included.
+        generic :: within_segment => bind_seg_i32, bind_seg_i64
+        procedure, private :: bind_cyl_i32 !! %within_cylinder into an int32 buffer.
+        procedure, private :: bind_cyl_i64 !! %within_cylinder into an int64 buffer.
+        !> Points within `r` of the axis `p1`-`p2` AND between its ends: flat caps.
+        generic :: within_cylinder => bind_cyl_i32, bind_cyl_i64
+        procedure, private :: bind_cone_i32 !! %within_cone into an int32 buffer.
+        procedure, private :: bind_cone_i64 !! %within_cone into an int64 buffer.
+        !> Points inside the truncated cone from radius `r1` at `p1` to `r2` at `p2`.
+        !!
+        !! The general form of the three: `r1 == r2` is exactly `%within_cylinder`.
+        generic :: within_cone => bind_cone_i32, bind_cone_i64
         procedure, private :: bind_all_within_r0 !! %all_within with one radius.
         procedure, private :: bind_all_within_r1 !! %all_within with one radius per point.
         !> Every point's neighbours, as one CSR structure. The primary bulk query.
@@ -276,6 +310,21 @@ module parquet_spatial
 
         !> Rebuilds `self` from `x`, `y`, `z` unless they are element-for-element what it already
         !! holds, in which case it only widens the radius record.
+        !> Builds a sky index: `(ra, dec)` in degrees onto unit vectors, angles onto chords.
+        !!
+        !! **The conversion is exact, not an approximation.** `chord = 2*sin(theta/2)` is strictly
+        !! increasing in `theta` over [0, 180 degrees], so a Euclidean ball of that radius in
+        !! unit-vector space selects exactly the points within `theta` on the sky -- with no pole
+        !! special case and no wrap at 0h, because the sphere has neither.
+        module subroutine spatial_build_sky_worker(self, ra, dec, radii_deg, cell, threads)
+            type(pf_spatial_index), intent(inout), target :: self !! the index to build.
+            real(real64), intent(in) :: ra(:) !! right ascension of every point, in degrees.
+            real(real64), intent(in) :: dec(:) !! declination of every point, in degrees.
+            real(real64), intent(in) :: radii_deg(:) !! the angular radii later queries will use.
+            real(real64), intent(in), optional :: cell !! forced cell side, in unit-vector space.
+            integer, intent(in), optional :: threads !! team size for the bucketing sort.
+        end subroutine spatial_build_sky_worker
+
         module subroutine spatial_rebuild_worker(self, x, y, z, radii, rebuilt)
             type(pf_spatial_index), intent(inout), target :: self !! the index to validate.
             real(real64), intent(in), target :: x(:) !! x of every point.
@@ -454,6 +503,33 @@ module parquet_spatial
             integer(int64), intent(in), optional :: keys(:) !! order key per STORED position; needs `min_key`.
         end subroutine spatial_scan
 
+        !> Walks the cells an axis-shaped region can reach and reports what it finds.
+        !!
+        !! **One walk and one accept test serve all three shapes**, because a cylinder is the cone
+        !! with `r1 == r2` and a capsule is the cone's test with the axis parameter CLAMPED to
+        !! [0, 1] instead of rejected outside it. Writing any of the three separately means writing
+        !! the cone twice.
+        !!
+        !! **The walk is per-SLAB along the axis's dominant direction, not over the region's
+        !! bounding box.** A long diagonal has an AABB equal to the whole grid, so a bounding-box
+        !! walk degenerates to a full scan exactly when the shape is most selective. Each slab
+        !! intersects the axis, pads the sub-segment by the largest radius over that slab's own
+        !! parameter range, and derives the other two axes' cell ranges from that alone -- so every
+        !! cell is visited at most once and there is nothing to de-duplicate.
+        module subroutine spatial_scan_axis(self, p1, p2, r1, r2, clamp, what, m, out32, out64, dist)
+            type(pf_spatial_index), intent(in), target :: self !! the index to search.
+            real(real64), intent(in) :: p1(3) !! one end of the axis; p1(3) is 0 on a 2D index.
+            real(real64), intent(in) :: p2(3) !! the other end of the axis.
+            real(real64), intent(in) :: r1 !! radius at `p1`; must be >= 0.
+            real(real64), intent(in) :: r2 !! radius at `p2`; must be >= 0.
+            logical, intent(in) :: clamp !! .true. gives round ends (a capsule), .false. flat ones.
+            character(len=*), intent(in) :: what !! the calling procedure, for any message.
+            integer(int64), intent(out) :: m !! how many points qualify, whatever the buffer holds.
+            integer(int32), intent(inout), optional :: out32(:) !! caller's row indices, int32 buffer.
+            integer(int64), intent(inout), optional :: out64(:) !! caller's row indices, int64 buffer.
+            real(real64), intent(inout), optional :: dist(:) !! distance to the axis, or to the segment.
+        end subroutine spatial_scan_axis
+
         !> Counts the cells a ball would visit and the points it would distance-test, without
         !! testing any of them. The probe's whole measurement.
         module subroutine spatial_scan_work(nc, lo, cell_inv, start, wrap, p, r, cells, pts)
@@ -552,6 +628,44 @@ contains
 
         call spatial_build_worker(self, x, y, z, radius, cell, box_lo, box_hi, copy, threads)
     end subroutine bind_build_r1
+
+    !> `%build_sky` with a single angular radius.
+    !>
+    !> **`(ra, dec)` in degrees; everything after that is Cartesian.** The points become unit
+    !> vectors and the angular radius becomes a chord, after which this is an ordinary 3D index --
+    !> the same tuner, the same bucketing, the same walk. That is the whole design: a sky index is
+    !> a MODE of one index type, not a second type that would duplicate all of it to change two
+    !> formulas.
+    !>
+    !> **There is no `copy=`, and that is not an omission.** The stored coordinates are unit
+    !> vectors this routine computes; there is nothing of the caller's to borrow, so a
+    !> `copy=.false.` that silently copied would be worse than not offering it.
+    !>
+    !> `cell=` and `%cell_size()` are both in unit-vector space rather than degrees, so they are a
+    !> matched pair and a value read from one can be fed back into the other. `%effective_radius()`
+    !> is the one that comes back in DEGREES, because it is a radius the caller gave in degrees.
+    subroutine bind_build_sky_r0(self, ra, dec, radius_deg, cell, threads)
+        class(pf_spatial_index), intent(inout), target :: self !! the index to build.
+        real(real64), intent(in) :: ra(:) !! right ascension of every point, in degrees.
+        real(real64), intent(in) :: dec(:) !! declination of every point, in degrees; |dec| <= 90.
+        real(real64), intent(in) :: radius_deg !! the angular radius later queries will use.
+        real(real64), intent(in), optional :: cell !! forced cell side, in unit-vector space.
+        integer, intent(in), optional :: threads !! team size for the bucketing sort.
+
+        call spatial_build_sky_worker(self, ra, dec, [radius_deg], cell, threads)
+    end subroutine bind_build_sky_r0
+
+    !> `%build_sky` with a list of angular radii. See `bind_build_sky_r0`.
+    subroutine bind_build_sky_r1(self, ra, dec, radius_deg, cell, threads)
+        class(pf_spatial_index), intent(inout), target :: self !! the index to build.
+        real(real64), intent(in) :: ra(:) !! right ascension of every point, in degrees.
+        real(real64), intent(in) :: dec(:) !! declination of every point, in degrees; |dec| <= 90.
+        real(real64), intent(in) :: radius_deg(:) !! the angular radii later queries will use.
+        real(real64), intent(in), optional :: cell !! forced cell side, in unit-vector space.
+        integer, intent(in), optional :: threads !! team size for the bucketing sort.
+
+        call spatial_build_sky_worker(self, ra, dec, radius_deg, cell, threads)
+    end subroutine bind_build_sky_r1
 
     ! ---- %rebuild and %rebuild_for ----
 
@@ -703,6 +817,11 @@ contains
 
         r = 0.0_real64
         if (self%r2sum > 0.0_real64) r = self%r3sum / self%r2sum
+        ! A sky index accumulates chords, because that is what it tunes on -- but it was given
+        ! degrees, so it answers in degrees. `%cell_size()` deliberately does NOT convert: it pairs
+        ! with `cell=`, and both are in unit-vector space.
+        if (self%metric_id == PF_METRIC_SKY) &
+            r = 2.0_real64 * asin(min(0.5_real64 * r, 1.0_real64)) * spatial_rad2deg
     end function bind_effective_radius
 
     ! ---- Single queries ----
@@ -737,6 +856,183 @@ contains
 
         call spatial_scan(self, query_point(self, p, "count_within"), r, m)
     end function bind_count_within
+
+    !> `%within_sky` into an `int32` buffer.
+    !>
+    !> **Angles in, angles out.** `rsky_deg` is an angular radius in degrees and `dist_deg` comes
+    !> back in degrees; a caller never sees a chord. The conversion is exact in both directions --
+    !> `chord = 2*sin(theta/2)` going in, `theta = 2*asin(chord/2)` coming out.
+    !>
+    !> Refused on a Euclidean index, and every Euclidean query is refused on a sky one. That guard
+    !> is the entire reason the metric is a property of the INDEX rather than of the call: without
+    !> it, `%within` on a sky index would quietly answer in chords to someone who asked in degrees.
+    integer(int64) function bind_sky_i32(self, ra, dec, rsky_deg, out, dist_deg) result(m)
+        class(pf_spatial_index), intent(in), target :: self !! the sky index to search.
+        real(real64), intent(in) :: ra !! right ascension of the query point, in degrees.
+        real(real64), intent(in) :: dec !! declination of the query point, in degrees.
+        real(real64), intent(in) :: rsky_deg !! the angular search radius, in degrees.
+        integer(int32), intent(out) :: out(:) !! caller's row indices of the points found.
+        real(real64), intent(out), optional :: dist_deg(:) !! angular separation, in degrees.
+
+        call sky_scan(self, ra, dec, rsky_deg, m, out32=out, dist_deg=dist_deg)
+    end function bind_sky_i32
+
+    !> `%within_sky` into an `int64` buffer. See `bind_sky_i32`.
+    integer(int64) function bind_sky_i64(self, ra, dec, rsky_deg, out, dist_deg) result(m)
+        class(pf_spatial_index), intent(in), target :: self !! the sky index to search.
+        real(real64), intent(in) :: ra !! right ascension of the query point, in degrees.
+        real(real64), intent(in) :: dec !! declination of the query point, in degrees.
+        real(real64), intent(in) :: rsky_deg !! the angular search radius, in degrees.
+        integer(int64), intent(out) :: out(:) !! caller's row indices of the points found.
+        real(real64), intent(out), optional :: dist_deg(:) !! angular separation, in degrees.
+
+        call sky_scan(self, ra, dec, rsky_deg, m, out64=out, dist_deg=dist_deg)
+    end function bind_sky_i64
+
+    !> The shared body of both `%within_sky` forms: guard, convert, scan, convert back.
+    subroutine sky_scan(self, ra, dec, rsky_deg, m, out32, out64, dist_deg)
+        type(pf_spatial_index), intent(in), target :: self !! the sky index to search.
+        real(real64), intent(in) :: ra !! right ascension of the query point, in degrees.
+        real(real64), intent(in) :: dec !! declination of the query point, in degrees.
+        real(real64), intent(in) :: rsky_deg !! the angular search radius, in degrees.
+        integer(int64), intent(out) :: m !! how many points qualify, whatever the buffer holds.
+        integer(int32), intent(inout), optional :: out32(:) !! int32 output buffer.
+        integer(int64), intent(inout), optional :: out64(:) !! int64 output buffer.
+        real(real64), intent(out), optional :: dist_deg(:) !! angular separation, in degrees.
+        real(real64) :: p(3), half
+        integer(int64) :: k, nfill
+
+        if (.not. self%built_ok) error stop &
+            "pf_spatial_index%within_sky: this index has not been built; call %build_sky first"
+        if (self%metric_id /= PF_METRIC_SKY) error stop &
+            "pf_spatial_index%within_sky: this index was built with %build, not %build_sky; use %within"
+        if (.not. (rsky_deg >= 0.0_real64)) error stop &
+            "pf_spatial_index%within_sky: the angular radius must be >= 0 and not NaN"
+        if (rsky_deg > spatial_max_sky_deg) error stop &
+            "pf_spatial_index%within_sky: an angular radius above 90 degrees is not a neighbour " // &
+            "search; the ball then covers most of the sky and the grid has nothing to prune"
+        p = sky_vector(ra, dec)
+        call spatial_scan(self, p, sky_chord(rsky_deg), m, out32=out32, out64=out64, dist=dist_deg)
+        if (.not. present(dist_deg)) return
+        ! Chords back to degrees, over the entries actually written -- `m` is the true count and
+        ! can exceed the buffer, which is the whole point of reporting it.
+        nfill = min(m, size(dist_deg, kind=int64))
+        do k = 1_int64, nfill
+            half = min(0.5_real64 * dist_deg(k), 1.0_real64)
+            dist_deg(k) = 2.0_real64 * asin(half) * spatial_rad2deg
+        end do
+    end subroutine sky_scan
+
+    !> `%within_segment` into an `int32` buffer.
+    !>
+    !> **A capsule**: every point whose distance to the SEGMENT `p1`-`p2` is at most `r`, so the
+    !> ends are round. A point beyond an end is inside this shape and outside `%within_cylinder`,
+    !> which is the whole difference between the two. `dist` reports the distance to the segment.
+    !>
+    !> `p1 == p2` degenerates to a ball of radius `r` about `p1` -- the right answer rather than a
+    !> special case, and the same reduction `%within_cone` makes.
+    integer(int64) function bind_seg_i32(self, p1, p2, r, out, dist) result(m)
+        class(pf_spatial_index), intent(in), target :: self !! the index to search.
+        real(real64), intent(in) :: p1(:) !! one end of the segment; 2 or 3 coordinates.
+        real(real64), intent(in) :: p2(:) !! the other end; as many coordinates as `p1`.
+        real(real64), intent(in) :: r !! the search radius about the segment.
+        integer(int32), intent(out) :: out(:) !! caller's row indices of the points found.
+        real(real64), intent(out), optional :: dist(:) !! distance to the segment, per reported point.
+
+        call spatial_scan_axis(self, query_point(self, p1, "within_segment"), &
+            query_point(self, p2, "within_segment"), r, r, .true., "within_segment", m, &
+            out32=out, dist=dist)
+    end function bind_seg_i32
+
+    !> `%within_segment` into an `int64` buffer. See `bind_seg_i32` for the shape.
+    integer(int64) function bind_seg_i64(self, p1, p2, r, out, dist) result(m)
+        class(pf_spatial_index), intent(in), target :: self !! the index to search.
+        real(real64), intent(in) :: p1(:) !! one end of the segment; 2 or 3 coordinates.
+        real(real64), intent(in) :: p2(:) !! the other end; as many coordinates as `p1`.
+        real(real64), intent(in) :: r !! the search radius about the segment.
+        integer(int64), intent(out) :: out(:) !! caller's row indices of the points found.
+        real(real64), intent(out), optional :: dist(:) !! distance to the segment, per reported point.
+
+        call spatial_scan_axis(self, query_point(self, p1, "within_segment"), &
+            query_point(self, p2, "within_segment"), r, r, .true., "within_segment", m, &
+            out64=out, dist=dist)
+    end function bind_seg_i64
+
+    !> `%within_cylinder` into an `int32` buffer.
+    !>
+    !> **Flat ends**: a point qualifies when it lies between the two end planes AND within `r` of
+    !> the axis. `dist` reports the perpendicular distance to the axis.
+    !>
+    !> `p1 == p2` degenerates to a ball of radius `r` about `p1`, exactly as `%within_segment`
+    !> does -- with no axis there is no "between the ends" left to test.
+    integer(int64) function bind_cyl_i32(self, p1, p2, r, out, dist) result(m)
+        class(pf_spatial_index), intent(in), target :: self !! the index to search.
+        real(real64), intent(in) :: p1(:) !! one end of the axis; 2 or 3 coordinates.
+        real(real64), intent(in) :: p2(:) !! the other end; as many coordinates as `p1`.
+        real(real64), intent(in) :: r !! the cylinder radius.
+        integer(int32), intent(out) :: out(:) !! caller's row indices of the points found.
+        real(real64), intent(out), optional :: dist(:) !! distance to the axis, per reported point.
+
+        call spatial_scan_axis(self, query_point(self, p1, "within_cylinder"), &
+            query_point(self, p2, "within_cylinder"), r, r, .false., "within_cylinder", m, &
+            out32=out, dist=dist)
+    end function bind_cyl_i32
+
+    !> `%within_cylinder` into an `int64` buffer. See `bind_cyl_i32` for the shape.
+    integer(int64) function bind_cyl_i64(self, p1, p2, r, out, dist) result(m)
+        class(pf_spatial_index), intent(in), target :: self !! the index to search.
+        real(real64), intent(in) :: p1(:) !! one end of the axis; 2 or 3 coordinates.
+        real(real64), intent(in) :: p2(:) !! the other end; as many coordinates as `p1`.
+        real(real64), intent(in) :: r !! the cylinder radius.
+        integer(int64), intent(out) :: out(:) !! caller's row indices of the points found.
+        real(real64), intent(out), optional :: dist(:) !! distance to the axis, per reported point.
+
+        call spatial_scan_axis(self, query_point(self, p1, "within_cylinder"), &
+            query_point(self, p2, "within_cylinder"), r, r, .false., "within_cylinder", m, &
+            out64=out, dist=dist)
+    end function bind_cyl_i64
+
+    !> `%within_cone` into an `int32` buffer.
+    !>
+    !> **A truncated cone (a frustum)**: flat ends like the cylinder, but the radius grows linearly
+    !> along the axis, from `r1` at `p1` to `r2` at `p2`. `r1 == r2` reproduces
+    !> `%within_cylinder` exactly, which is why this is the general routine the other two are
+    !> written in terms of.
+    !>
+    !> **This is the shape a fixed angular aperture actually sweeps out**, since the transverse
+    !> extent an aperture subtends grows linearly with distance -- so a selection outward from an
+    !> observer is a cone rather than a cylinder.
+    !>
+    !> `dist` reports the perpendicular distance to the axis, not to the sloping surface.
+    !> `p1 == p2` degenerates to a ball of radius `max(r1, r2)` about `p1`.
+    integer(int64) function bind_cone_i32(self, p1, p2, r1, r2, out, dist) result(m)
+        class(pf_spatial_index), intent(in), target :: self !! the index to search.
+        real(real64), intent(in) :: p1(:) !! one end of the axis; 2 or 3 coordinates.
+        real(real64), intent(in) :: p2(:) !! the other end; as many coordinates as `p1`.
+        real(real64), intent(in) :: r1 !! the radius at `p1`.
+        real(real64), intent(in) :: r2 !! the radius at `p2`.
+        integer(int32), intent(out) :: out(:) !! caller's row indices of the points found.
+        real(real64), intent(out), optional :: dist(:) !! distance to the axis, per reported point.
+
+        call spatial_scan_axis(self, query_point(self, p1, "within_cone"), &
+            query_point(self, p2, "within_cone"), r1, r2, .false., "within_cone", m, &
+            out32=out, dist=dist)
+    end function bind_cone_i32
+
+    !> `%within_cone` into an `int64` buffer. See `bind_cone_i32` for the shape.
+    integer(int64) function bind_cone_i64(self, p1, p2, r1, r2, out, dist) result(m)
+        class(pf_spatial_index), intent(in), target :: self !! the index to search.
+        real(real64), intent(in) :: p1(:) !! one end of the axis; 2 or 3 coordinates.
+        real(real64), intent(in) :: p2(:) !! the other end; as many coordinates as `p1`.
+        real(real64), intent(in) :: r1 !! the radius at `p1`.
+        real(real64), intent(in) :: r2 !! the radius at `p2`.
+        integer(int64), intent(out) :: out(:) !! caller's row indices of the points found.
+        real(real64), intent(out), optional :: dist(:) !! distance to the axis, per reported point.
+
+        call spatial_scan_axis(self, query_point(self, p1, "within_cone"), &
+            query_point(self, p2, "within_cone"), r1, r2, .false., "within_cone", m, &
+            out64=out, dist=dist)
+    end function bind_cone_i64
 
     ! ---- Bulk queries ----
 
@@ -838,11 +1134,42 @@ contains
 
         if (.not. self%built_ok) error stop "pf_spatial_index%" // what // &
             ": this index has not been built; call %build first"
+        ! The metric is a property of the INDEX, and this is what that buys: a Euclidean query on a
+        ! sky index would otherwise answer in chords to a caller who is thinking in degrees, which
+        ! is a wrong answer wearing the right units.
+        if (self%metric_id /= PF_METRIC_EUCLIDEAN) error stop "pf_spatial_index%" // what // &
+            ": this index was built with %build_sky; use %within_sky, which answers in degrees"
         if (size(p) /= self%ncoord) error stop "pf_spatial_index%" // what // &
             ": the query point must have as many coordinates as the index was built with"
         q = 0.0_real64
         q(1:self%ncoord) = p
     end function query_point
+
+    !> The unit vector for one `(ra, dec)` given in degrees.
+    !>
+    !> The standard conversion, with right ascension measured about the pole. Nothing here needs a
+    !> special case at the poles or at 0h -- that is the point of working in vectors.
+    function sky_vector(ra, dec) result(v)
+        real(real64), intent(in) :: ra !! right ascension, in degrees.
+        real(real64), intent(in) :: dec !! declination, in degrees.
+        real(real64) :: v(3) !! the corresponding unit vector.
+        real(real64) :: cd
+
+        cd = cos(dec * spatial_deg2rad)
+        v(1) = cd * cos(ra * spatial_deg2rad)
+        v(2) = cd * sin(ra * spatial_deg2rad)
+        v(3) = sin(dec * spatial_deg2rad)
+    end function sky_vector
+
+    !> The chord across the unit sphere subtended by an angle given in degrees.
+    !>
+    !> Strictly increasing over [0, 180 degrees], which is what makes a Euclidean ball of this
+    !> radius select exactly the points within that angle -- an identity, not an approximation.
+    real(real64) function sky_chord(deg) result(c)
+        real(real64), intent(in) :: deg !! the angle, in degrees.
+
+        c = 2.0_real64 * sin(0.5_real64 * deg * spatial_deg2rad)
+    end function sky_chord
 
     ! ---- Test-only hooks ----
 

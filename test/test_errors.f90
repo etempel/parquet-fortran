@@ -1456,6 +1456,15 @@ contains
             new_unittest("a radius array of the wrong length aborts", test_spatial_bulk_radius_aborts), &
             new_unittest("copy=.false. over a strided section aborts", test_spatial_copy_false_strided_aborts), &
             new_unittest("threads= below one aborts", test_spatial_threads_below_one_aborts), &
+            new_unittest("an axis query on a periodic index aborts", test_spatial_axis_periodic_aborts), &
+            new_unittest("a sky query on a Euclidean index aborts", test_spatial_sky_on_euclidean_aborts), &
+            new_unittest("a Euclidean query on a sky index aborts", test_spatial_euclidean_on_sky_aborts), &
+            new_unittest("a bulk sweep on a sky index aborts", test_spatial_sky_bulk_aborts), &
+            new_unittest("a sky radius past a hemisphere aborts", test_spatial_sky_rsky_aborts), &
+            new_unittest("a declination outside [-90, 90] aborts", test_spatial_sky_dec_aborts), &
+            new_unittest("rebuilding a sky index aborts", test_spatial_sky_rebuild_aborts), &
+            new_unittest("an axis query before build aborts", test_spatial_axis_before_build_aborts), &
+            new_unittest("a negative cone radius aborts", test_spatial_axis_radius_aborts), &
             new_unittest("the automatic-rebuild warning is said, and can be silenced", &
                 test_spatial_rebuild_warning) &
             ]
@@ -2267,6 +2276,69 @@ contains
             failure_message="querying a 2D index with a 3D point was expected to abort", &
             required_stderr="as many coordinates as the index was built with")
     end subroutine test_spatial_query_rank_aborts
+
+    subroutine test_spatial_axis_periodic_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_axis_on_periodic", expect_abort=.true., &
+            failure_message="an axis query on a periodic index was expected to abort", &
+            required_stderr="not supported on a periodic index")
+    end subroutine test_spatial_axis_periodic_aborts
+
+    subroutine test_spatial_sky_on_euclidean_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_sky_query_on_euclidean", expect_abort=.true., &
+            failure_message="a sky query on a Euclidean index was expected to abort", &
+            required_stderr="built with %build, not %build_sky")
+    end subroutine test_spatial_sky_on_euclidean_aborts
+
+    subroutine test_spatial_euclidean_on_sky_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_euclidean_query_on_sky", expect_abort=.true., &
+            failure_message="a Euclidean query on a sky index was expected to abort", &
+            required_stderr="use %within_sky, which answers in degrees")
+    end subroutine test_spatial_euclidean_on_sky_aborts
+
+    subroutine test_spatial_sky_bulk_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_sky_bulk_refused", expect_abort=.true., &
+            failure_message="a bulk sweep on a sky index was expected to abort", &
+            required_stderr="bulk query on a sky index is not supported yet")
+    end subroutine test_spatial_sky_bulk_aborts
+
+    subroutine test_spatial_sky_rsky_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_sky_rsky_too_large", expect_abort=.true., &
+            failure_message="an angular radius past a hemisphere was expected to abort", &
+            required_stderr="above 90 degrees is not a neighbour search")
+    end subroutine test_spatial_sky_rsky_aborts
+
+    subroutine test_spatial_sky_dec_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_sky_dec_out_of_range", expect_abort=.true., &
+            failure_message="a declination outside [-90, 90] was expected to abort", &
+            required_stderr="every dec must lie in [-90, 90] degrees")
+    end subroutine test_spatial_sky_dec_aborts
+
+    subroutine test_spatial_sky_rebuild_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_sky_rebuild_refused", expect_abort=.true., &
+            failure_message="rebuilding a sky index was expected to abort", &
+            required_stderr="rebuild it with %build_sky")
+    end subroutine test_spatial_sky_rebuild_aborts
+
+    subroutine test_spatial_axis_before_build_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_axis_before_build", expect_abort=.true., &
+            failure_message="an axis query before %build was expected to abort", &
+            required_stderr="within_cone: this index has not been built")
+    end subroutine test_spatial_axis_before_build_aborts
+
+    subroutine test_spatial_axis_radius_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_axis_radius_negative", expect_abort=.true., &
+            failure_message="a negative cone radius was expected to abort", &
+            required_stderr="every radius must be >= 0")
+    end subroutine test_spatial_axis_radius_aborts
 
     subroutine test_spatial_rebuild_needs_copy_aborts(error)
         type(error_type), allocatable, intent(out) :: error

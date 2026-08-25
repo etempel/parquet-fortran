@@ -292,6 +292,11 @@ contains
 
         if (.not. self%built_ok) error stop &
             "pf_spatial_index: this index has not been built; call %build first"
+        ! Same reasoning as the single-query guard: a bulk sweep on a sky index would take its
+        ! radius as a chord from a caller who is thinking in degrees. There is no bulk sky form
+        ! yet, so this refuses rather than converts.
+        if (self%metric_id /= PF_METRIC_EUCLIDEAN) error stop &
+            "pf_spatial_index: a bulk query on a sky index is not supported yet; use %within_sky per point"
         n = self%npts
         nr = size(radii)
         if (nr /= 1 .and. int(nr, kind=int64) /= n) error stop &

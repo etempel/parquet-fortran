@@ -372,6 +372,53 @@ contains
         self%built_ok = .true.
     end procedure spatial_build_worker
 
+    module procedure spatial_build_sky_worker
+        real(real64), allocatable :: vx(:), vy(:), vz(:), chords(:)
+        real(real64) :: cd, rr
+        integer(int64) :: n, i
+        integer :: k
+
+        n = size(ra, kind=int64)
+        if (size(dec, kind=int64) /= n) error stop &
+            "pf_spatial_index%build_sky: ra and dec must be the same length"
+        if (size(radii_deg) < 1) error stop &
+            "pf_spatial_index%build_sky: radius_deg= must name at least one radius"
+        do k = 1, size(radii_deg)
+            if (.not. (radii_deg(k) > 0.0_real64)) error stop &
+                "pf_spatial_index%build_sky: every radius_deg= must be > 0"
+            if (radii_deg(k) > spatial_max_sky_deg) error stop &
+                "pf_spatial_index%build_sky: an angular radius above 90 degrees is not a " // &
+                "neighbour search; the ball then covers most of the sky and the grid has nothing to prune"
+        end do
+        do i = 1_int64, n
+            if (.not. (abs(dec(i)) <= 90.0_real64)) error stop &
+                "pf_spatial_index%build_sky: every dec must lie in [-90, 90] degrees and not be NaN"
+        end do
+
+        allocate (vx(n), vy(n), vz(n))
+        do i = 1_int64, n
+            cd = cos(dec(i) * spatial_deg2rad)
+            vx(i) = cd * cos(ra(i) * spatial_deg2rad)
+            vy(i) = cd * sin(ra(i) * spatial_deg2rad)
+            vz(i) = sin(dec(i) * spatial_deg2rad)
+        end do
+        allocate (chords(size(radii_deg)))
+        do k = 1, size(radii_deg)
+            chords(k) = 2.0_real64 * sin(0.5_real64 * radii_deg(k) * spatial_deg2rad)
+        end do
+
+        ! From here it is an ordinary 3D Euclidean build -- same tuner, same bucketing, same walk.
+        ! `copy` is not offered and not passed: the coordinates are the unit vectors computed just
+        ! above, which are local to this routine, so they must be copied whatever a caller wants.
+        !
+        ! The density estimate is what makes this work at all. Unit vectors occupy a thin shell of
+        ! the [-1, 1]^3 box, so a bounding-box density would be meaningless -- the tuner takes the
+        ! MEDIAN OCCUPIED CELL instead, and the sphere is the sharpest instance of the problem that
+        ! choice already solves rather than a new one.
+        call spatial_build_worker(self, vx, vy, vz, chords, cell, threads=threads)
+        self%metric_id = PF_METRIC_SKY
+    end procedure spatial_build_sky_worker
+
     !> Rebuilds only when the coordinates differ from what the index already holds.
     module procedure spatial_rebuild_worker
         integer(int64) :: n, k, i
@@ -383,6 +430,8 @@ contains
             "pf_spatial_index%rebuild: this index has not been built; call %build first"
         if (.not. self%owns) error stop &
             "pf_spatial_index%rebuild: an index built with copy=.false. holds no copy to compare against"
+        if (self%metric_id /= PF_METRIC_EUCLIDEAN) error stop &
+            "pf_spatial_index%rebuild: this index was built with %build_sky; rebuild it with %build_sky"
         nd = 2
         if (present(z)) nd = 3
         if (nd /= self%ncoord) error stop &

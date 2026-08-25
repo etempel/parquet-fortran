@@ -1850,6 +1850,24 @@ program error_scenarios
         call scenario_spatial_copy_false_strided()
     case ("spatial_threads_below_one")
         call scenario_spatial_threads_below_one()
+    case ("spatial_sky_query_on_euclidean")
+        call scenario_spatial_sky_query_on_euclidean()
+    case ("spatial_euclidean_query_on_sky")
+        call scenario_spatial_euclidean_query_on_sky()
+    case ("spatial_sky_bulk_refused")
+        call scenario_spatial_sky_bulk_refused()
+    case ("spatial_sky_rsky_too_large")
+        call scenario_spatial_sky_rsky_too_large()
+    case ("spatial_sky_dec_out_of_range")
+        call scenario_spatial_sky_dec_out_of_range()
+    case ("spatial_sky_rebuild_refused")
+        call scenario_spatial_sky_rebuild_refused()
+    case ("spatial_axis_on_periodic")
+        call scenario_spatial_axis_on_periodic()
+    case ("spatial_axis_before_build")
+        call scenario_spatial_axis_before_build()
+    case ("spatial_axis_radius_negative")
+        call scenario_spatial_axis_radius_negative()
     case ("spatial_rebuild_warning_on")
         call scenario_spatial_rebuild_warning(warn=.true.)
     case ("spatial_rebuild_warning_off")
@@ -16486,6 +16504,138 @@ contains
         m = sx%within([0.5_real64, 0.5_real64, 0.5_real64], 0.2_real64, got)   ! -> aborts
         print '(a,i0)', "unexpectedly queried a 2D index with a 3D point, m=", m
     end subroutine scenario_spatial_query_rank_mismatch
+
+    !> An axis-shaped query on a PERIODIC index is refused rather than approximated.
+    !>
+    !> **When this refusal lifts, this becomes an equality test, not a deletion**: assert that the
+    !> capsule agrees with a minimum-image brute-force scan, with the same translation-invariance
+    !> fixture the ball search uses. What it asserts today is that the refusal is real.
+    subroutine scenario_spatial_axis_on_periodic()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int64) :: got(8), m
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64, box_lo=[0.0_real64, 0.0_real64, 0.0_real64], &
+            box_hi=[1.0_real64, 1.0_real64, 1.0_real64])
+        m = sx%within_segment([0.2_real64, 0.2_real64, 0.2_real64], &
+            [0.8_real64, 0.8_real64, 0.8_real64], 0.1_real64, got)   ! -> aborts
+        print '(a,i0)', "unexpectedly ran an axis query on a periodic index, m=", m
+    end subroutine scenario_spatial_axis_on_periodic
+
+    !> An axis-shaped query before `%build` is refused, naming the query that was attempted.
+    subroutine scenario_spatial_axis_before_build()
+        type(pf_spatial_index) :: sx
+        integer(int64) :: got(8), m
+
+        m = sx%within_cone([0.0_real64, 0.0_real64, 0.0_real64], &
+            [1.0_real64, 0.0_real64, 0.0_real64], 0.1_real64, 0.2_real64, got)   ! -> aborts
+        print '(a,i0)', "unexpectedly queried an unbuilt index, m=", m
+    end subroutine scenario_spatial_axis_before_build
+
+    !> A negative radius on an axis query is refused, as it is on the ball search.
+    subroutine scenario_spatial_axis_radius_negative()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int64) :: got(8), m
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64)
+        ! The FAR radius is the negative one, so this also pins that both are checked.
+        m = sx%within_cone([0.2_real64, 0.2_real64, 0.2_real64], &
+            [0.8_real64, 0.8_real64, 0.8_real64], 0.1_real64, -0.1_real64, got)   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted a negative cone radius, m=", m
+    end subroutine scenario_spatial_axis_radius_negative
+
+    !> A deterministic sky catalogue for the scenarios below.
+    subroutine spatial_sky_cloud(n, ra, dec)
+        integer, intent(in) :: n !! how many points.
+        real(real64), allocatable, intent(out) :: ra(:) !! right ascension, degrees.
+        real(real64), allocatable, intent(out) :: dec(:) !! declination, degrees.
+        integer :: i
+
+        allocate (ra(n), dec(n))
+        do i = 1, n
+            ra(i) = 360.0_real64 * pf_random_at(4321_int64, i, 1_int64)
+            dec(i) = -20.0_real64 + 40.0_real64 * pf_random_at(4321_int64, i, 2_int64)
+        end do
+    end subroutine spatial_sky_cloud
+
+    !> `%within_sky` on a Euclidean index is refused rather than answered in the wrong units.
+    subroutine scenario_spatial_sky_query_on_euclidean()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int64) :: got(8), m
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64)
+        m = sx%within_sky(10.0_real64, 20.0_real64, 1.0_real64, got)   ! -> aborts
+        print '(a,i0)', "unexpectedly ran a sky query on a Euclidean index, m=", m
+    end subroutine scenario_spatial_sky_query_on_euclidean
+
+    !> A Euclidean query on a sky index is refused: it would answer in chords, not degrees.
+    subroutine scenario_spatial_euclidean_query_on_sky()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: ra(:), dec(:)
+        integer(int64) :: got(8), m
+
+        call spatial_sky_cloud(64, ra, dec)
+        call sx%build_sky(ra, dec, radius_deg=1.0_real64)
+        m = sx%within([1.0_real64, 0.0_real64, 0.0_real64], 0.02_real64, got)   ! -> aborts
+        print '(a,i0)', "unexpectedly ran a Euclidean query on a sky index, m=", m
+    end subroutine scenario_spatial_euclidean_query_on_sky
+
+    !> A bulk sweep on a sky index is refused for now.
+    !>
+    !> **When a bulk sky form lands, this becomes an equality test rather than a deletion**: assert
+    !> that `%all_within_sky(deg, ...)` agrees with a loop of `%within_sky` over the same
+    !> catalogue, at the poles and across 0h. What it asserts today is that the refusal is real,
+    !> which is what stops a caller passing degrees where a chord is expected.
+    subroutine scenario_spatial_sky_bulk_refused()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: ra(:), dec(:)
+        integer(int64), allocatable :: offs(:), nb(:)
+
+        call spatial_sky_cloud(64, ra, dec)
+        call sx%build_sky(ra, dec, radius_deg=1.0_real64)
+        call sx%all_within(0.02_real64, offs, nb)   ! -> aborts
+        print '(a,i0)', "unexpectedly ran a bulk sweep on a sky index, n=", size(nb)
+    end subroutine scenario_spatial_sky_bulk_refused
+
+    !> An angular radius past a hemisphere is refused, since the grid then prunes nothing.
+    subroutine scenario_spatial_sky_rsky_too_large()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: ra(:), dec(:)
+        integer(int64) :: got(8), m
+
+        call spatial_sky_cloud(64, ra, dec)
+        call sx%build_sky(ra, dec, radius_deg=1.0_real64)
+        m = sx%within_sky(10.0_real64, 20.0_real64, 120.0_real64, got)   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted a 120-degree sky radius, m=", m
+    end subroutine scenario_spatial_sky_rsky_too_large
+
+    !> A declination outside [-90, 90] is refused at build time.
+    subroutine scenario_spatial_sky_dec_out_of_range()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: ra(:), dec(:)
+
+        call spatial_sky_cloud(64, ra, dec)
+        dec(7) = 91.0_real64
+        call sx%build_sky(ra, dec, radius_deg=1.0_real64)   ! -> aborts
+        print '(a,i0)', "unexpectedly built a sky index with |dec| > 90, n=", sx%size()
+    end subroutine scenario_spatial_sky_dec_out_of_range
+
+    !> `%rebuild` on a sky index is refused: it takes Cartesian coordinates.
+    subroutine scenario_spatial_sky_rebuild_refused()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: ra(:), dec(:), x(:), y(:), z(:)
+
+        call spatial_sky_cloud(64, ra, dec)
+        call sx%build_sky(ra, dec, radius_deg=1.0_real64)
+        call spatial_cloud(64, x, y, z)
+        call sx%rebuild(x, y, z)   ! -> aborts
+        print '(a,i0)', "unexpectedly rebuilt a sky index from Cartesian arrays, n=", sx%size()
+    end subroutine scenario_spatial_sky_rebuild_refused
 
     !> `%rebuild` on an index that holds no copy to compare against.
     subroutine scenario_spatial_rebuild_needs_copy()

@@ -285,6 +285,166 @@ contains
         end do
     end procedure spatial_scan
 
+    module procedure spatial_scan_axis
+        real(real64), pointer, contiguous :: xs(:), ys(:), zs(:)
+        integer(int64) :: nc(3), sa(3), sc(3), ia, alo, acnt, jj, kk, base, s0, e0, t, cap, row
+        integer(int64) :: ilo, ihi
+        real(real64) :: dv(3), c0(3), c1(3)
+        real(real64) :: dd, ddinv, rmax, dr, w0, w1, ta, tb, tlo, thi, rloc, ctr, half
+        real(real64) :: vx, vy, vz, b1, b2, b3, qx, qy, qz, wx, wy, wz, tp, d2, rad
+        logical :: has32, has64, hasd, direct
+        integer :: k, da
+
+        m = 0_int64
+        if (.not. self%built_ok) error stop "pf_spatial_index%" // what // &
+            ": this index has not been built; call %build first"
+        ! Refused rather than approximated. Under the minimum image an axis longer than the box
+        ! wraps onto itself, so a point can be near the shape through more than one image and the
+        ! ball search's `r <= L/2` guard has no equivalent here. See the guide page.
+        if (self%periodic_on) error stop "pf_spatial_index%" // what // &
+            ": an axis-shaped query is not supported on a periodic index; only %within is"
+        if (.not. (r1 >= 0.0_real64) .or. .not. (r2 >= 0.0_real64)) error stop &
+            "pf_spatial_index%" // what // ": every radius must be >= 0 and not NaN"
+        if (self%npts == 0_int64) return
+        has32 = present(out32)
+        has64 = present(out64)
+        hasd = present(dist)
+        if (has32 .and. self%npts > int(huge(0_int32), kind=int64)) error stop &
+            "pf_spatial_index%" // what // &
+            ": this index holds more rows than an int32 buffer can name; use an int64 one"
+        cap = 0_int64
+        if (has32 .or. has64 .or. hasd) cap = huge(0_int64)
+        if (has32) cap = min(cap, size(out32, kind=int64))
+        if (has64) cap = min(cap, size(out64, kind=int64))
+        if (hasd) cap = min(cap, size(dist, kind=int64))
+
+        dv = p2 - p1
+        dd = dv(1) * dv(1) + dv(2) * dv(2) + dv(3) * dv(3)
+        rmax = max(r1, r2)
+        ! A zero-length axis has no direction to project onto, so all three shapes collapse to the
+        ! same ball. Documented on each binding rather than left to be discovered.
+        if (.not. (dd > 0.0_real64)) then
+            call spatial_scan(self, p1, rmax, m, out32=out32, out64=out64, dist=dist)
+            return
+        end if
+        ddinv = 1.0_real64 / dd
+        dr = r2 - r1
+        nc = self%grid_n
+        direct = self%owns
+        call spatial_storage(self, xs, ys, zs)
+        vx = dv(1)
+        vy = dv(2)
+        vz = dv(3)
+        b1 = p1(1)
+        b2 = p1(2)
+        b3 = p1(3)
+
+        ! The axis travels furthest along this one, so a slab across it is a thin cross-section of
+        ! the shape rather than a long smear -- which is the whole reason this is not a walk over
+        ! the region's own bounding box.
+        da = 1
+        if (abs(dv(2)) > abs(dv(da))) da = 2
+        if (abs(dv(3)) > abs(dv(da))) da = 3
+
+        ctr = 0.5_real64 * (p1(da) + p2(da))
+        half = 0.5_real64 * abs(dv(da)) + rmax
+        call axis_span_free(ctr, half, self%lo(da), self%cell_inv(da), nc(da), alo, acnt)
+        if (acnt == 0_int64) return
+
+        do ia = alo, alo + acnt - 1_int64
+            w0 = self%lo(da) + real(ia, kind=real64) * self%cell(da)
+            w1 = w0 + self%cell(da)
+            ! Which part of the axis can serve this slab: the slab widened by the largest radius,
+            ! mapped back through the dominant component -- which cannot be zero, that being what
+            ! `da` was chosen for -- and then held inside [0, 1]. Ordering the two before clamping
+            ! is what makes a descending axis and a slab past either end all come out right.
+            ta = (w0 - rmax - p1(da)) / dv(da)
+            tb = (w1 + rmax - p1(da)) / dv(da)
+            tlo = min(max(min(ta, tb), 0.0_real64), 1.0_real64)
+            thi = min(max(max(ta, tb), 0.0_real64), 1.0_real64)
+            c0 = p1 + tlo * dv
+            c1 = p1 + thi * dv
+            ! The radius is linear in the parameter, so its largest value over this slab's range is
+            ! at one of the two ends. Taking it per slab rather than `max(r1, r2)` throughout is
+            ! what keeps a steep cone's narrow end from walking the wide end's cells.
+            rloc = max(r1 + tlo * dr, r1 + thi * dr)
+            sa(da) = ia
+            sc(da) = 1_int64
+            do k = 1, 3
+                if (k == da) cycle
+                ctr = 0.5_real64 * (c0(k) + c1(k))
+                half = 0.5_real64 * abs(c1(k) - c0(k)) + rloc
+                call axis_span_free(ctr, half, self%lo(k), self%cell_inv(k), nc(k), sa(k), sc(k))
+            end do
+            if (sc(1) == 0_int64 .or. sc(2) == 0_int64 .or. sc(3) == 0_int64) cycle
+            ilo = sa(1)
+            ihi = sa(1) + sc(1) - 1_int64
+            do kk = sa(3), sa(3) + sc(3) - 1_int64
+                do jj = sa(2), sa(2) + sc(2) - 1_int64
+                    base = 1_int64 + nc(1) * (jj + nc(2) * kk)
+                    s0 = self%start(base + ilo)
+                    e0 = self%start(base + ihi + 1_int64) - 1_int64
+                    ! Forked at the RUN exactly as the ball walk is, and for the same reason: an
+                    ! index that owns its coordinates has them in cell order, a borrowed one does
+                    ! not, and testing that per point would charge the default path for it.
+                    if (direct) then
+                        do t = s0, e0
+                            qx = xs(t) - b1
+                            qy = ys(t) - b2
+                            qz = zs(t) - b3
+                            tp = (qx * vx + qy * vy + qz * vz) * ddinv
+                            if (clamp) then
+                                tp = min(max(tp, 0.0_real64), 1.0_real64)
+                            else if (tp < 0.0_real64 .or. tp > 1.0_real64) then
+                                cycle
+                            end if
+                            wx = qx - tp * vx
+                            wy = qy - tp * vy
+                            wz = qz - tp * vz
+                            d2 = wx * wx + wy * wy + wz * wz
+                            rad = r1 + tp * dr
+                            if (d2 <= rad * rad) then
+                                row = self%idx(t)
+                                m = m + 1_int64
+                                if (m <= cap) then
+                                    if (has32) out32(m) = int(row, kind=int32)
+                                    if (has64) out64(m) = row
+                                    if (hasd) dist(m) = sqrt(d2)
+                                end if
+                            end if
+                        end do
+                    else
+                        do t = s0, e0
+                            row = self%idx(t)
+                            qx = xs(row) - b1
+                            qy = ys(row) - b2
+                            qz = zs(row) - b3
+                            tp = (qx * vx + qy * vy + qz * vz) * ddinv
+                            if (clamp) then
+                                tp = min(max(tp, 0.0_real64), 1.0_real64)
+                            else if (tp < 0.0_real64 .or. tp > 1.0_real64) then
+                                cycle
+                            end if
+                            wx = qx - tp * vx
+                            wy = qy - tp * vy
+                            wz = qz - tp * vz
+                            d2 = wx * wx + wy * wy + wz * wz
+                            rad = r1 + tp * dr
+                            if (d2 <= rad * rad) then
+                                m = m + 1_int64
+                                if (m <= cap) then
+                                    if (has32) out32(m) = int(row, kind=int32)
+                                    if (has64) out64(m) = row
+                                    if (hasd) dist(m) = sqrt(d2)
+                                end if
+                            end if
+                        end do
+                    end if
+                end do
+            end do
+        end do
+    end procedure spatial_scan_axis
+
     !> Counts the cells a ball would visit and the points it would distance-test.
     module procedure spatial_scan_work
         integer(int64) :: a(3), cnt(3), jj, kk, jc, kc, base, ilo, ihi

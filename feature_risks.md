@@ -210,6 +210,8 @@ something a reader is expected to have.
 | [Risk-142](#risk-142--only-a-bulk-entry-point-may-rebuild-a-spatial-index-and-nothing-enforces-it) | Only a BULK entry point may rebuild a spatial index, and nothing enforces it | 3 — not testable |
 | [Risk-143](#risk-143--a-spatial-index-cannot-tell-that-the-coordinates-under-it-have-moved) | A spatial index cannot tell that the coordinates under it have moved | 3 — not testable |
 | [Risk-144](#risk-144--a-per-point-radius-makes-a-pair-sweep-asymmetric-and-the-wrong-answer-looks-ordinary) | A per-point radius makes a pair sweep asymmetric, and the wrong answer looks ordinary | 4 — covered |
+| [Risk-145](#risk-145--the-slab-walks-padding-is-what-makes-it-complete-and-dropping-it-loses-only-boundary-points) | The slab walk's padding is what makes it complete, and dropping it loses only boundary points | 4 — covered |
+| [Risk-146](#risk-146--a-sky-index-answers-in-chords-and-a-euclidean-query-on-one-looks-perfectly-reasonable) | A sky index answers in chords, and a Euclidean query on one looks perfectly reasonable | 4 — covered |
 
 ---
 
@@ -6012,3 +6014,77 @@ exact set equality against an O(n^2) oracle, and `test_pairs_uniform_vector_matc
 ignores the ranking; and it compares a full boolean matrix rather than a count, because a count
 alone cannot tell a duplicated pair plus a missing one from the right answer. The uniform-vector
 test is what catches a stored-versus-row mix-up on its own, since that defect preserves the count.
+
+### Risk-145 — The slab walk's padding is what makes it complete, and dropping it loses only boundary points
+
+`spatial_scan_axis` (`src/parquet_spatial_query.f90`) does not walk the region's bounding box — a
+long diagonal's AABB is the whole grid, so that degenerates to a full scan exactly when the shape is
+most selective. It walks one slab at a time along the axis's dominant direction, and derives the
+other two axes' cell ranges from the sub-segment inside that slab.
+
+**Three paddings make that exact, and each looks like an off-by-one nobody would miss:**
+
+- the slab range along the dominant axis is widened by `max(r1, r2)`, without which a capsule's
+  round cap and a cylinder's corner points fall outside the walked slabs;
+- the sub-segment's parameter range is **ordered before it is clamped**, without which a descending
+  axis (`p2` below `p1` on the dominant axis) or a slab past either end produces an empty or
+  inverted range and the whole slab is skipped;
+- the other two axes are padded by `rloc`, the largest radius over *this slab's* parameter range,
+  without which every point more than the sub-segment's own extent from the axis is missed.
+
+**The failure is quiet and partial.** Dropping any one of them still returns a plausible, mostly
+correct neighbour list — the points near the axis's middle are all there, and only the boundary is
+eaten. A count-based assertion or a spot check passes.
+
+**What this still forbids:**
+
+- **Do not replace `rloc` with `max(r1, r2)` to simplify.** That is safe but wasteful, and it
+  removes the only thing keeping a steep cone's narrow end from walking the wide end's cells.
+  Tightening it further than `rloc`, on the other hand, is a correctness change.
+- **Do not lift the periodic refusal without solving the wrap.** Under the minimum image an axis
+  longer than the box wraps onto itself, so a point can be near the shape through more than one
+  image; the ball search's `r <= L/2` guard has no equivalent for a segment.
+- **Keep the degenerate `p1 == p2` reduction to a ball.** It is documented on every binding, and
+  the alternative — a division by a zero `dd` — is a NaN that silently accepts or rejects
+  everything.
+
+**Covered by** `test_axis_matches_brute_force`, which sweeps an axis parallel to each coordinate
+axis, a body diagonal and a short off-centre one across all three shapes (`test/test_spatial.f90`).
+Two mutations were run and both fail it: dropping the `rloc` padding, and dropping the `rmax`
+padding along the dominant axis. **Keep the orientation sweep** — the dominant-axis choice branches
+on direction, so a single orientation exercises one branch of three.
+
+### Risk-146 — A sky index answers in chords, and a Euclidean query on one looks perfectly reasonable
+
+`%build_sky` stores unit vectors and tunes on chords, because that is what makes the angular
+question exact: `chord = 2*sin(theta/2)` is strictly increasing, so a Euclidean ball selects exactly
+the points within `theta`. The consequence is that **every Euclidean entry point on a sky index is
+answering a different question than the caller asked** — `%within(p, 0.02)` returns points within a
+chord of 0.02, which is about 1.15 degrees, and `dist=` comes back in chords.
+
+Nothing about that looks wrong. The counts are sensible, the rows are real neighbours, the
+distances are small positive numbers. A caller who wrote `0.02` meaning degrees gets a result that
+is out by a factor of 57 and has no reason to suspect it.
+
+**What this still forbids:**
+
+- **Every new query family needs the metric guard**, not just the ones that existed when it was
+  written. It lives in `query_point` (which covers `%within`, `%count_within` and all three axis
+  shapes) and in `spatial_bulk_setup` (which covers the three bulk forms). A query family that
+  reaches `spatial_scan` by some other route is unguarded.
+- **`%effective_radius()` converts to degrees and `%cell_size()` does not**, deliberately: the
+  first is a radius the caller gave in degrees, the second pairs with `cell=` and both are in
+  unit-vector space. "Harmonising" them breaks a documented round trip in one direction or reports
+  a chord as an angle in the other.
+- **A bulk sky form must convert at its own entry point**, never by relaxing the guard in
+  `spatial_bulk_setup` — relaxing it would let a caller pass degrees to `%all_within` and be
+  answered in chords, which is the exact failure the guard exists for.
+
+**Covered by** six error scenarios (`spatial_sky_query_on_euclidean`, `spatial_euclidean_query_on_sky`,
+`spatial_sky_bulk_refused`, `spatial_sky_rsky_too_large`, `spatial_sky_dec_out_of_range`,
+`spatial_sky_rebuild_refused`) and by `test_sky_matches_brute_force`. **Copy that test's fixture
+design:** it piles points at both poles and across 0h, and asserts that the answers SPAN those
+discontinuities — a query at 0h must return points on both sides of the wrap, and a polar query
+must reach every meridian. A fixture in the middle of the sky passes with an implementation that
+compares right ascensions as if they were a Cartesian coordinate, which is the defect the whole
+conversion exists to prevent.

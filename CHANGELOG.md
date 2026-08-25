@@ -11,10 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`parquet_spatial`: `pf_spatial_index`, a uniform-grid spatial index over plain coordinate
   arrays.** Ball search into a caller-owned buffer, the self-join as CSR, the pair list and
-  count-only forms, all threaded; two or three dimensions; optional periodic boundaries with the
-  minimum-image convention; and an automatically chosen cell size. Every bulk query takes one
-  radius or one per point; the pair list is symmetric under a per-point radius (a pair qualifies
-  when either ball reaches the other) while the CSR and count forms are directed. A new Arrow-free entry module
+  count-only forms, all threaded; segment, cylinder and truncated-cone searches around an axis;
+  search on the sky by angular radius (`%build_sky`/`%within_sky`, degrees in and degrees out);
+  two or three dimensions; optional periodic boundaries with the minimum-image convention; and an
+  automatically chosen cell size. Every bulk query takes one radius or one per point; the pair
+  list is symmetric under a per-point radius (a pair qualifies when either ball reaches the other)
+  while the CSR and count forms are directed. A new Arrow-free entry module
   (`use parquet_spatial` compiles nine Fortran files), with `spatial_threads` and
   `spatial_rebuild_warning` joining the process-global settings.
 

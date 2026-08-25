@@ -2,14 +2,15 @@
 title: Utilities and code generation
 ordered_subpage: sorting.md
 ordered_subpage: random.md
+ordered_subpage: spatial.md
 ordered_subpage: generated-tables.md
 ordered_subpage: embedding-maml-schemas.md
 ---
 
 Things beyond the file being read or written: a general-purpose sorting API over plain Fortran
 arrays and this library's own column types, counter-based random numbers that survive a parallel
-loop — with the distributions and sampling built on them — and the two generators meant to be
-copied into your own project.
+loop — with the distributions and sampling built on them — spatial neighbour search over
+coordinate arrays, and the two generators meant to be copied into your own project.
 
 - [Sorting arrays and columns](sorting.html) — `pf_sort` and `pf_argsort` over eleven element
   types, from plain arrays to a `parquet_column`, with multi-key sorts and group boundaries; then
@@ -23,6 +24,11 @@ copied into your own project.
   (exponential, normal, Gamma, Poisson); then permutations, subsets and resampling, and weighted
   draws without replacement. Those last live in `parquet_sampling`, the sibling module for drawing
   from a *population* rather than drawing a number.
+- [Spatial neighbour search with `pf_spatial_index`](spatial.html) — a uniform-grid index over
+  plain coordinate arrays: ball search into a buffer you own, the self-join as CSR or as an edge
+  list, segment, cylinder and cone shapes around an axis, and search on the sky by angular radius.
+  Two or three dimensions, optional periodic boundaries, and a cell size the library measures for
+  itself rather than asking you to pick.
 - [Generated table types](generated-tables.html) — `tools/generate_user_table_code.py`: named,
   typed accessors on your own `parquet_table` extension, generated from a MAML schema. Opening one
   from a file, from a slice, or from nothing at all (`%init`, `%init_slice`, `%init_empty`);

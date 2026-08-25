@@ -46,7 +46,7 @@ in every one of them.
 | `parquet_random` | 3 | no | counter-based random numbers and the four distributions |
 | `parquet_argsort` | 4 | no | `pf_argsort` over the six intrinsic types, plus `pf_sort_threads` |
 | `parquet_sampling` | 8 | no | permutations, subsets, resampling and weighted draws |
-| `parquet_spatial` | 9 | no | `pf_spatial_index`: neighbour search on a uniform grid |
+| `parquet_spatial` | 9 | no | `pf_spatial_index`: neighbour search on a uniform grid, including on the sky |
 | `parquet_columns` | 10 | no | `parquet_column`: a typed, null-aware column container |
 | `parquet_sorting` | 21 | no | the whole sorting API, every element type, including `pf_sort_keys` |
 | `parquet_settings` | 3 | **yes** | the process-global knobs, and `parquet_get_arrow_version` |

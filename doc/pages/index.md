@@ -56,7 +56,7 @@ point in the library.
 
 ### Every page at a glance
 
-All 24 pages, in reading order. (This list, each group's own page list and the
+All 25 pages, in reading order. (This list, each group's own page list and the
 `ordered_subpage:` frontmatter are kept consistent by
 `tools/check_source_conventions.py`, which fails the CI lint stage when they drift.)
 
@@ -90,6 +90,7 @@ All 24 pages, in reading order. (This list, each group's own page list and the
 
 - [Sorting arrays and columns with `pf_sort`/`pf_argsort`](utilities/sorting.html)
 - [Random numbers and sampling with `pf_random_at`](utilities/random.html)
+- [Spatial neighbour search with `pf_spatial_index`](utilities/spatial.html)
 - [Generated table types: named accessors from a MAML schema](utilities/generated-tables.html)
 - [Embedding your own MAML schemas in your own project](utilities/embedding-maml-schemas.html)
 

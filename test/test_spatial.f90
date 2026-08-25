@@ -63,6 +63,17 @@ contains
                          test_pairs_per_point_radius_is_symmetric), &
             new_unittest("a uniform radius vector gives the scalar pair list", &
                          test_pairs_uniform_vector_matches_scalar), &
+            new_unittest("segment, cylinder and cone match a brute-force scan", test_axis_matches_brute_force), &
+            new_unittest("the three axis shapes accept the right points by hand", test_axis_shapes_by_hand), &
+            new_unittest("a cone with equal radii is exactly the cylinder", test_cone_equal_radii_is_cylinder), &
+            new_unittest("a zero-length axis is exactly the ball", test_axis_degenerate_is_a_ball), &
+            new_unittest("an axis outside the cloud, and one longer than it", test_axis_outside_and_overlong), &
+            new_unittest("an axis query works on a 2D index", test_axis_2d), &
+            new_unittest("axis distances and a short buffer behave", test_axis_dist_and_short_buffer), &
+            new_unittest("a sky index matches a haversine scan at the poles and across 0h", &
+                         test_sky_matches_brute_force), &
+            new_unittest("sky separations come back in degrees", test_sky_distances_are_degrees), &
+            new_unittest("a sky index reports its radius in degrees", test_sky_metadata), &
             new_unittest("a threaded bulk sweep equals the serial one", test_bulk_threaded_matches_serial), &
             new_unittest("a periodic index matches a minimum-image scan", test_periodic_matches_brute_force), &
             new_unittest("a periodic index is translation invariant", test_periodic_translation_invariant), &
@@ -156,6 +167,127 @@ contains
         call pf_sort(b(1:nb), q)
         same = all(p == q)
     end function same_rows
+
+    !> Every row inside an axis-shaped region, found by scanning every point.
+    !>
+    !> **This oracle shares the accept TEST with the implementation on purpose** -- that formula is
+    !> the definition of the shape, and what is under test here is the cell walk: whether a
+    !> per-slab traversal finds every point a full scan would. The accept test itself is checked
+    !> independently by `test_axis_shapes_by_hand`, which asserts membership for points placed at
+    !> known offsets from a known axis.
+    subroutine brute_axis(x, y, z, p1, p2, r1, r2, clamp, out, m)
+        real(real64), intent(in) :: x(:) !! x of every point.
+        real(real64), intent(in) :: y(:) !! y of every point.
+        real(real64), intent(in) :: z(:) !! z of every point.
+        real(real64), intent(in) :: p1(3) !! one end of the axis.
+        real(real64), intent(in) :: p2(3) !! the other end.
+        real(real64), intent(in) :: r1 !! radius at `p1`.
+        real(real64), intent(in) :: r2 !! radius at `p2`.
+        logical, intent(in) :: clamp !! .true. gives round ends, .false. flat ones.
+        integer(int64), allocatable, intent(out) :: out(:) !! the rows found, ascending.
+        integer(int64), intent(out) :: m !! how many rows were found.
+        integer(int64) :: i, n
+        real(real64) :: dv(3), q(3), w(3), dd, tp, rad, d2
+
+        n = size(x, kind=int64)
+        allocate (out(n))
+        m = 0_int64
+        dv = p2 - p1
+        dd = dot_product(dv, dv)
+        do i = 1_int64, n
+            q = [x(i), y(i), z(i)] - p1
+            if (dd <= 0.0_real64) then
+                d2 = dot_product(q, q)
+                rad = max(r1, r2)
+            else
+                tp = dot_product(q, dv) / dd
+                if (clamp) then
+                    tp = min(max(tp, 0.0_real64), 1.0_real64)
+                else if (tp < 0.0_real64 .or. tp > 1.0_real64) then
+                    cycle
+                end if
+                rad = r1 + tp * (r2 - r1)
+                w = q - tp * dv
+                d2 = dot_product(w, w)
+            end if
+            if (d2 <= rad * rad) then
+                m = m + 1_int64
+                out(m) = i
+            end if
+        end do
+    end subroutine brute_axis
+
+    !> A deterministic sky catalogue that deliberately piles points where a naive implementation
+    !> breaks: at both poles and straddling 0h, plus a scattered background.
+    subroutine make_sky(n, ra, dec)
+        integer(int64), intent(in) :: n !! how many points; a multiple of 4 is tidiest.
+        real(real64), allocatable, intent(out) :: ra(:) !! right ascension, degrees, in [0, 360).
+        real(real64), allocatable, intent(out) :: dec(:) !! declination, degrees, in [-90, 90].
+        integer(int64) :: i, q
+
+        allocate (ra(n), dec(n))
+        do i = 1_int64, n
+            q = mod(i - 1_int64, 4_int64)
+            select case (q)
+            case (0)
+                ! North polar cap: every right ascension, all within 3 degrees of the pole.
+                ra(i) = 360.0_real64 * pf_random_at(fixture_seed, i, 21_int64)
+                dec(i) = 90.0_real64 - 3.0_real64 * pf_random_at(fixture_seed, i, 22_int64)
+            case (1)
+                ! South polar cap.
+                ra(i) = 360.0_real64 * pf_random_at(fixture_seed, i, 23_int64)
+                dec(i) = -90.0_real64 + 3.0_real64 * pf_random_at(fixture_seed, i, 24_int64)
+            case (2)
+                ! Straddling 0h: a 6-degree band centred on it, wrapped into [0, 360).
+                ra(i) = modulo(357.0_real64 + 6.0_real64 * pf_random_at(fixture_seed, i, 25_int64), 360.0_real64)
+                dec(i) = -3.0_real64 + 6.0_real64 * pf_random_at(fixture_seed, i, 26_int64)
+            case default
+                ra(i) = 360.0_real64 * pf_random_at(fixture_seed, i, 27_int64)
+                dec(i) = -60.0_real64 + 120.0_real64 * pf_random_at(fixture_seed, i, 28_int64)
+            end select
+        end do
+    end subroutine make_sky
+
+    !> The angular separation between two sky positions, in degrees, by the HAVERSINE formula.
+    !>
+    !> **Deliberately not the library's route.** The implementation converts to unit vectors and
+    !> compares chords; this works in `(ra, dec)` throughout, so an error in the conversion cannot
+    !> hide in both. It is also the formula an astronomer would check the answer with by hand.
+    real(real64) function sky_sep(ra1, dec1, ra2, dec2) result(sep)
+        real(real64), intent(in) :: ra1 !! right ascension of the first point, degrees.
+        real(real64), intent(in) :: dec1 !! declination of the first point, degrees.
+        real(real64), intent(in) :: ra2 !! right ascension of the second point, degrees.
+        real(real64), intent(in) :: dec2 !! declination of the second point, degrees.
+        real(real64), parameter :: d2r = 0.017453292519943295_real64
+        real(real64) :: sd, sr, h
+
+        sd = sin(0.5_real64 * (dec2 - dec1) * d2r)
+        sr = sin(0.5_real64 * (ra2 - ra1) * d2r)
+        h = sd * sd + cos(dec1 * d2r) * cos(dec2 * d2r) * sr * sr
+        sep = 2.0_real64 * asin(min(sqrt(max(h, 0.0_real64)), 1.0_real64)) / d2r
+    end function sky_sep
+
+    !> Every row within `rsky` degrees of `(ra0, dec0)`, by scanning the whole catalogue.
+    subroutine brute_sky(ra, dec, ra0, dec0, rsky, out, m)
+        real(real64), intent(in) :: ra(:) !! right ascension of every point, degrees.
+        real(real64), intent(in) :: dec(:) !! declination of every point, degrees.
+        real(real64), intent(in) :: ra0 !! right ascension of the query point, degrees.
+        real(real64), intent(in) :: dec0 !! declination of the query point, degrees.
+        real(real64), intent(in) :: rsky !! the angular search radius, degrees.
+        integer(int64), allocatable, intent(out) :: out(:) !! the rows found, ascending.
+        integer(int64), intent(out) :: m !! how many rows were found.
+        integer(int64) :: i, n
+
+        n = size(ra, kind=int64)
+        allocate (out(n))
+        m = 0_int64
+        do i = 1_int64, n
+            if (sky_sep(ra0, dec0, ra(i), dec(i)) <= rsky) then
+                m = m + 1_int64
+                out(m) = i
+            end if
+        end do
+    end subroutine brute_sky
 
     ! ---- Ball search ----
 
@@ -624,6 +756,415 @@ contains
         call check(error, all(vi == si) .and. all(vj == sj), &
             "a uniform radius vector must give the scalar form's pair list, pair for pair")
     end subroutine test_pairs_uniform_vector_matches_scalar
+
+    ! ---- Segment, cylinder and cone ----
+
+    !> All three axis shapes agree with a full scan, over axes in every orientation that matters.
+    !>
+    !> **The orientations are the point.** The walk picks the axis the segment travels furthest
+    !> along and slabs across it, so which branch runs depends on the direction -- an axis parallel
+    !> to x, to y and to z each takes a different one, and a diagonal is the case a bounding-box
+    !> walk would degenerate on. All four are here, plus a steep cone whose narrow end must not
+    !> walk the wide end's cells.
+    subroutine test_axis_matches_brute_force(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int64), allocatable :: got(:), want(:)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, mg, mw
+        integer :: c
+        real(real64) :: p1(3), p2(3), r1, r2
+        logical :: clamp
+
+        n = 4000_int64
+        call make_cloud(n, 1.0_real64, .false., x, y, z)
+        call sx%build(x, y, z, radius=0.12_real64)
+        allocate (got(n))
+        do c = 1, 15
+            ! Five axes x three shapes: along x, along y, along z, a body diagonal, and a short
+            ! off-centre one. The shape cycles capsule / cylinder / cone.
+            select case (mod(c - 1, 5) + 1)
+            case (1)
+                p1 = [0.1_real64, 0.5_real64, 0.5_real64]
+                p2 = [0.9_real64, 0.5_real64, 0.5_real64]
+            case (2)
+                p1 = [0.5_real64, 0.1_real64, 0.5_real64]
+                p2 = [0.5_real64, 0.9_real64, 0.5_real64]
+            case (3)
+                p1 = [0.5_real64, 0.5_real64, 0.1_real64]
+                p2 = [0.5_real64, 0.5_real64, 0.9_real64]
+            case (4)
+                p1 = [0.05_real64, 0.05_real64, 0.05_real64]
+                p2 = [0.95_real64, 0.95_real64, 0.95_real64]
+            case default
+                p1 = [0.3_real64, 0.7_real64, 0.2_real64]
+                p2 = [0.45_real64, 0.6_real64, 0.35_real64]
+            end select
+            r1 = 0.12_real64
+            r2 = 0.12_real64
+            clamp = .false.
+            select case ((c - 1) / 5)
+            case (0)
+                clamp = .true.
+                mg = sx%within_segment(p1, p2, r1, got)
+            case (1)
+                mg = sx%within_cylinder(p1, p2, r1, got)
+            case default
+                r1 = 0.02_real64
+                r2 = 0.22_real64
+                mg = sx%within_cone(p1, p2, r1, r2, got)
+            end select
+            call brute_axis(x, y, z, p1, p2, r1, r2, clamp, want, mw)
+            call check(error, mw > 0_int64, "every axis fixture must find some points")
+            if (allocated(error)) return
+            call check(error, same_rows(got, mg, want, mw), &
+                "an axis-shaped query must return exactly what a full scan returns")
+            if (allocated(error)) return
+        end do
+    end subroutine test_axis_matches_brute_force
+
+    !> The three shapes accept the points they should, at offsets worked out by hand.
+    !>
+    !> **The independent check on the accept test**, which `brute_axis` deliberately shares with
+    !> the implementation. Everything here is placed relative to the unit axis along x, so the
+    !> expected answer is arithmetic a reader can redo: a point beyond an end is INSIDE the capsule
+    !> and OUTSIDE the cylinder, which is the entire difference between them, and the cone's radius
+    !> at parameter `t` is `r1 + t*(r2 - r1)`.
+    subroutine test_axis_shapes_by_hand(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64) :: x(7), y(7), z(7)
+        integer(int64) :: got(7), m
+        type(pf_spatial_index) :: sx
+        real(real64), parameter :: p1(3) = [0.0_real64, 0.0_real64, 0.0_real64]
+        real(real64), parameter :: p2(3) = [1.0_real64, 0.0_real64, 0.0_real64]
+
+        ! The axis runs from (0,0,0) to (1,0,0); the capsule and cylinder use r = 0.1 and the cone
+        ! runs from 0.05 to 0.2, so its radius at parameter t is 0.05 + 0.15*t. Every offset below
+        ! clears the nearest threshold by at least 4%, so nothing here rests on an exact tie.
+        !
+        !  1: t = 0.5, 0.05 out  -- in all three (cone radius there is 0.125)
+        !  2: t = 0.5, 0.12 out  -- outside r = 0.1, inside the cone's 0.125
+        !  3: 0.05 BEFORE the near end -- capsule yes; cylinder and cone reject t < 0
+        !  4: 0.05 BEYOND the far end  -- capsule yes; cylinder and cone reject t > 1
+        !  5: 0.2 before the near end  -- outside everything
+        !  6: t = 0.1, 0.12 out  -- cone radius there is 0.065, so outside the cone too
+        !  7: t = 0.9, 0.12 out  -- cone radius there is 0.185, so inside the cone only
+        x = [0.5_real64, 0.5_real64, -0.05_real64, 1.05_real64, -0.2_real64, 0.1_real64, 0.9_real64]
+        y = [0.05_real64, 0.12_real64, 0.0_real64, 0.0_real64, 0.0_real64, 0.12_real64, 0.12_real64]
+        z = 0.0_real64
+        call sx%build(x, y, z, radius=0.1_real64)
+
+        m = sx%within_segment(p1, p2, 0.1_real64, got)
+        call check(error, same_rows(got, m, [1_int64, 3_int64, 4_int64], 3_int64), &
+            "the capsule must take the mid-axis point and both points just beyond the ends")
+        if (allocated(error)) return
+
+        m = sx%within_cylinder(p1, p2, 0.1_real64, got)
+        call check(error, same_rows(got, m, [1_int64], 1_int64), &
+            "the cylinder must reject both points beyond its flat ends")
+        if (allocated(error)) return
+
+        m = sx%within_cone(p1, p2, 0.05_real64, 0.2_real64, got)
+        call check(error, same_rows(got, m, [1_int64, 2_int64, 7_int64], 3_int64), &
+            "the cone must accept by its own radius at each point's parameter along the axis")
+    end subroutine test_axis_shapes_by_hand
+
+    !> `%within_cone` with `r1 == r2` is `%within_cylinder`, row for row.
+    !>
+    !> The cone is the general routine and the cylinder is it restricted, so this asserts the
+    !> restriction rather than re-testing the walk: a defect in the radius interpolation that
+    !> happened to preserve the count would still show up here.
+    subroutine test_cone_equal_radii_is_cylinder(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int64), allocatable :: a(:), b(:)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, ma, mb
+        real(real64), parameter :: p1(3) = [0.15_real64, 0.2_real64, 0.8_real64]
+        real(real64), parameter :: p2(3) = [0.85_real64, 0.7_real64, 0.1_real64]
+
+        n = 3000_int64
+        call make_cloud(n, 1.0_real64, .false., x, y, z)
+        call sx%build(x, y, z, radius=0.13_real64)
+        allocate (a(n), b(n))
+        ma = sx%within_cylinder(p1, p2, 0.13_real64, a)
+        mb = sx%within_cone(p1, p2, 0.13_real64, 0.13_real64, b)
+        call check(error, ma > 0_int64, "the fixture must find some points")
+        if (allocated(error)) return
+        call check(error, mb == ma, "a cone with equal radii must find as many points as the cylinder")
+        if (allocated(error)) return
+        call check(error, all(a(1:ma) == b(1:mb)), &
+            "a cone with equal radii must return the cylinder's rows in the same order")
+    end subroutine test_cone_equal_radii_is_cylinder
+
+    !> A zero-length axis reduces to a ball, in all three shapes, exactly as `%within` reports it.
+    !>
+    !> A documented reduction rather than an accident, so it is asserted rather than assumed -- and
+    !> against `%within`, which reaches the answer by a completely different walk.
+    subroutine test_axis_degenerate_is_a_ball(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int64), allocatable :: ball(:), seg(:), cyl(:), cone(:)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, mb, ms, mc, mk
+        real(real64), parameter :: p(3) = [0.4_real64, 0.55_real64, 0.6_real64]
+
+        n = 3000_int64
+        call make_cloud(n, 1.0_real64, .false., x, y, z)
+        call sx%build(x, y, z, radius=0.15_real64)
+        allocate (ball(n), seg(n), cyl(n), cone(n))
+        mb = sx%within(p, 0.15_real64, ball)
+        ms = sx%within_segment(p, p, 0.15_real64, seg)
+        mc = sx%within_cylinder(p, p, 0.15_real64, cyl)
+        ! The cone takes the LARGER of its two radii when the axis has no length.
+        mk = sx%within_cone(p, p, 0.05_real64, 0.15_real64, cone)
+        call check(error, mb > 0_int64, "the fixture must find some points")
+        if (allocated(error)) return
+        call check(error, same_rows(seg, ms, ball, mb), &
+            "a zero-length segment must return exactly the ball's rows")
+        if (allocated(error)) return
+        call check(error, same_rows(cyl, mc, ball, mb), &
+            "a zero-length cylinder must return exactly the ball's rows")
+        if (allocated(error)) return
+        call check(error, same_rows(cone, mk, ball, mb), &
+            "a zero-length cone must return the ball of its larger radius")
+    end subroutine test_axis_degenerate_is_a_ball
+
+    !> An axis that misses the cloud finds nothing; one far longer than the box finds the same
+    !> points as one that merely spans it.
+    !>
+    !> The overlong case is what a bounding-box walk gets wrong: the region's AABB is then the
+    !> whole grid, so the walk degenerates to a full scan exactly where the shape is most
+    !> selective. Answers cannot see that, which is why the cheap cell-count check is here too.
+    subroutine test_axis_outside_and_overlong(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int64), allocatable :: got(:), want(:), long(:)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, m, mw, ml
+
+        n = 3000_int64
+        call make_cloud(n, 1.0_real64, .false., x, y, z)
+        call sx%build(x, y, z, radius=0.1_real64)
+        allocate (got(n), long(n))
+        ! Wholly outside, and parallel to the cloud rather than pointing away from it.
+        m = sx%within_segment([-5.0_real64, -5.0_real64, -5.0_real64], &
+                              [-5.0_real64, -5.0_real64, 5.0_real64], 0.1_real64, got)
+        call check(error, m == 0_int64, "an axis that misses the cloud entirely must find nothing")
+        if (allocated(error)) return
+        ! Spanning the cloud, then the same line extended far past it in both directions.
+        m = sx%within_cylinder([0.0_real64, 0.5_real64, 0.5_real64], &
+                               [1.0_real64, 0.5_real64, 0.5_real64], 0.1_real64, got)
+        ml = sx%within_cylinder([-50.0_real64, 0.5_real64, 0.5_real64], &
+                                [51.0_real64, 0.5_real64, 0.5_real64], 0.1_real64, long)
+        call brute_axis(x, y, z, [-50.0_real64, 0.5_real64, 0.5_real64], &
+                        [51.0_real64, 0.5_real64, 0.5_real64], 0.1_real64, 0.1_real64, .false., want, mw)
+        call check(error, m > 0_int64, "the spanning cylinder must find some points")
+        if (allocated(error)) return
+        call check(error, same_rows(long, ml, want, mw), &
+            "an axis far longer than the box must still agree with a full scan")
+        if (allocated(error)) return
+        call check(error, same_rows(long, ml, got, m), &
+            "extending an axis past the cloud must not change which points it holds")
+    end subroutine test_axis_outside_and_overlong
+
+    !> A 2D index answers an axis query, with the third coordinate never entering it.
+    subroutine test_axis_2d(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int64), allocatable :: got(:), want(:)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, m, mw
+
+        n = 2000_int64
+        call make_cloud(n, 1.0_real64, .true., x, y, z)
+        call sx%build(x, y, radius=0.12_real64)
+        allocate (got(n))
+        m = sx%within_segment([0.1_real64, 0.2_real64], [0.9_real64, 0.8_real64], 0.12_real64, got)
+        ! `z` is all zeros from `make_cloud`, so the 3D oracle answers the 2D question unchanged.
+        call brute_axis(x, y, z, [0.1_real64, 0.2_real64, 0.0_real64], &
+                        [0.9_real64, 0.8_real64, 0.0_real64], 0.12_real64, 0.12_real64, .true., want, mw)
+        call check(error, mw > 0_int64, "the 2D axis fixture must find some points")
+        if (allocated(error)) return
+        call check(error, same_rows(got, m, want, mw), &
+            "a 2D axis query must return exactly what a full scan returns")
+    end subroutine test_axis_2d
+
+    !> `dist` reports the distance to the axis, and a short buffer still reports the true count.
+    subroutine test_axis_dist_and_short_buffer(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:), dd(:)
+        integer(int64), allocatable :: got(:)
+        integer(int32), allocatable :: got32(:)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, m, mshort, k
+        real(real64) :: want
+        real(real64), parameter :: p1(3) = [0.1_real64, 0.5_real64, 0.5_real64]
+        real(real64), parameter :: p2(3) = [0.9_real64, 0.5_real64, 0.5_real64]
+
+        n = 2000_int64
+        call make_cloud(n, 1.0_real64, .false., x, y, z)
+        call sx%build(x, y, z, radius=0.15_real64)
+        allocate (got(n), dd(n), got32(n))
+        m = sx%within_cylinder(p1, p2, 0.15_real64, got, dist=dd)
+        call check(error, m > 0_int64, "the fixture must find some points")
+        if (allocated(error)) return
+        do k = 1_int64, m
+            ! The axis is parallel to x here, so the distance to it is the distance in (y, z) --
+            ! computed without reference to the implementation's projection.
+            want = sqrt((y(got(k)) - 0.5_real64)**2 + (z(got(k)) - 0.5_real64)**2)
+            call check(error, abs(dd(k) - want) < 1.0e-12_real64, &
+                "dist must report the perpendicular distance to the axis")
+            if (allocated(error)) return
+        end do
+        ! An int32 buffer finds the same rows, and a short one still reports the true count.
+        mshort = sx%within_cylinder(p1, p2, 0.15_real64, got32(1:2))
+        call check(error, mshort == m, &
+            "a short buffer must still report the true count so a caller can size and retry")
+        if (allocated(error)) return
+        mshort = sx%within_cylinder(p1, p2, 0.15_real64, got32)
+        call check(error, mshort == m .and. all(int(got32(1:m), kind=int64) == got(1:m)), &
+            "an int32 buffer must return the same rows as an int64 one")
+    end subroutine test_axis_dist_and_short_buffer
+
+    ! ---- The sky metric ----
+
+    !> A sky index agrees with a haversine scan, at both poles and across 0h.
+    !>
+    !> **Those two regions are the whole reason the conversion exists.** A query written directly
+    !> in `(ra, dec)` -- comparing right ascensions as if they were a Cartesian coordinate -- passes
+    !> perfectly well in the middle of the sky and fails at exactly these two places, so a fixture
+    !> that avoids them proves nothing. The assertions below therefore also check that the answers
+    !> SPAN the discontinuity: a 0h query must return points on both sides of it, and a polar query
+    !> must return points whose right ascensions are far apart.
+    subroutine test_sky_matches_brute_force(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:)
+        integer(int64), allocatable :: got(:), want(:)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, m, mw, k, lowside, highside
+        integer :: c
+        real(real64) :: ra0, dec0, rq, lo_ra, hi_ra
+
+        n = 6000_int64
+        call make_sky(n, ra, dec)
+        call sx%build_sky(ra, dec, radius_deg=1.5_real64)
+        allocate (got(n))
+        do c = 1, 6
+            rq = 1.5_real64
+            select case (c)
+            case (1)
+                ra0 = 0.5_real64          ! just east of 0h
+                dec0 = 0.0_real64
+            case (2)
+                ra0 = 359.5_real64        ! just west of 0h
+                dec0 = 0.0_real64
+            case (3)
+                ra0 = 0.0_real64          ! the north pole itself
+                dec0 = 90.0_real64
+            case (4)
+                ra0 = 217.0_real64        ! the south pole, approached from a different meridian
+                dec0 = -90.0_real64
+            case (5)
+                ra0 = 123.4_real64        ! an ordinary place, as a control
+                dec0 = 45.6_real64
+                ! The scattered background is thin -- a quarter of the catalogue over the whole
+                ! sky -- so a 1.5-degree circle there is usually empty. A wider one keeps the
+                ! control meaningful without leaving the band the index was tuned for.
+                rq = 10.0_real64
+            case default
+                ra0 = 88.0_real64
+                dec0 = 88.5_real64        ! near, but not at, the pole
+            end select
+            m = sx%within_sky(ra0, dec0, rq, got)
+            call brute_sky(ra, dec, ra0, dec0, rq, want, mw)
+            call check(error, mw > 0_int64, "every sky fixture must find some points")
+            if (allocated(error)) return
+            call check(error, same_rows(got, m, want, mw), &
+                "a sky query must return exactly what a haversine scan returns")
+            if (allocated(error)) return
+        end do
+
+        ! The 0h query must straddle the seam, or it is not testing the seam.
+        m = sx%within_sky(0.0_real64, 0.0_real64, 1.5_real64, got)
+        lowside = 0_int64
+        highside = 0_int64
+        do k = 1_int64, m
+            if (ra(got(k)) < 180.0_real64) lowside = lowside + 1_int64
+            if (ra(got(k)) >= 180.0_real64) highside = highside + 1_int64
+        end do
+        call check(error, lowside > 0_int64 .and. highside > 0_int64, &
+            "a query at 0h must find points on both sides of the wrap, or the fixture tests nothing")
+        if (allocated(error)) return
+
+        ! The polar query must gather points from right ascensions far apart, which is the other
+        ! case a naive (ra, dec) comparison gets wrong.
+        m = sx%within_sky(0.0_real64, 90.0_real64, 2.0_real64, got)
+        call check(error, m > 0_int64, "the polar query must find points")
+        if (allocated(error)) return
+        lo_ra = minval(ra(got(1:m)))
+        hi_ra = maxval(ra(got(1:m)))
+        call check(error, hi_ra - lo_ra > 180.0_real64, &
+            "a query at the pole must reach every meridian, or the fixture tests nothing")
+    end subroutine test_sky_matches_brute_force
+
+    !> `dist_deg` is an angular separation in degrees, never a chord.
+    subroutine test_sky_distances_are_degrees(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), dd(:)
+        integer(int64), allocatable :: got(:)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, m, k
+        real(real64) :: want
+        real(real64), parameter :: ra0 = 12.0_real64, dec0 = -30.0_real64, rsky = 2.0_real64
+
+        n = 3000_int64
+        call make_sky(n, ra, dec)
+        call sx%build_sky(ra, dec, radius_deg=rsky)
+        allocate (got(n), dd(n))
+        m = sx%within_sky(ra0, dec0, rsky, got, dist_deg=dd)
+        call check(error, m > 0_int64, "the fixture must find some points")
+        if (allocated(error)) return
+        do k = 1_int64, m
+            want = sky_sep(ra0, dec0, ra(got(k)), dec(got(k)))
+            call check(error, abs(dd(k) - want) < 1.0e-9_real64, &
+                "dist_deg must equal the haversine separation in degrees")
+            if (allocated(error)) return
+            ! A chord would be numerically smaller than the angle in degrees for any radius this
+            ! size, so this also catches a conversion that was simply left out.
+            call check(error, dd(k) <= rsky + 1.0e-9_real64, &
+                "every reported separation must be within the requested angular radius")
+            if (allocated(error)) return
+        end do
+    end subroutine test_sky_distances_are_degrees
+
+    !> A sky index reports its metric, and its effective radius back in degrees.
+    subroutine test_sky_metadata(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:)
+        type(pf_spatial_index) :: sx, eu
+        real(real64), allocatable :: x(:), y(:), z(:)
+
+        call make_sky(1000_int64, ra, dec)
+        call sx%build_sky(ra, dec, radius_deg=1.25_real64)
+        call check(error, sx%metric() == PF_METRIC_SKY, "%build_sky must set the sky metric")
+        if (allocated(error)) return
+        call check(error, sx%ndim() == 3, "a sky index is a 3D index over unit vectors")
+        if (allocated(error)) return
+        call check(error, .not. sx%is_periodic(), "a sky index has no periodic box")
+        if (allocated(error)) return
+        ! One radius, so the moment ratio is that radius -- and it must come back in the units it
+        ! was given, not as the chord the index actually tunes on.
+        call check(error, abs(sx%effective_radius() - 1.25_real64) < 1.0e-9_real64, &
+            "%effective_radius must report degrees on a sky index")
+        if (allocated(error)) return
+        call check(error, sx%cell_size() > 0.0_real64 .and. sx%cell_size() < 2.0_real64, &
+            "%cell_size stays in unit-vector space, so it cannot exceed the sphere's diameter")
+        if (allocated(error)) return
+        call make_cloud(500_int64, 1.0_real64, .false., x, y, z)
+        call eu%build(x, y, z, radius=0.2_real64)
+        call check(error, eu%metric() == PF_METRIC_EUCLIDEAN, "%build must leave the Euclidean metric")
+    end subroutine test_sky_metadata
 
     !> A threaded bulk sweep answers exactly as the serial one.
     !>

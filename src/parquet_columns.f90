@@ -186,7 +186,7 @@ module parquet_columns
         type(parquet_date), allocatable :: dtv(:,:)   !! PK_DATE_VEC storage, vector (width, nrows).
         type(parquet_time), allocatable :: tmv(:,:)   !! PK_TIME_VEC storage, vector (width, nrows).
         type(parquet_timestamp), allocatable :: tsv(:,:)   !! PK_TIMESTAMP_VEC storage, vector (width, nrows).
-        class(*), allocatable :: container(:)          !! reserved payload for PK_LIST/PK_MAP/PK_STRUCT.
+        class(*), allocatable :: container             !! reserved payload for PK_LIST/PK_MAP/PK_STRUCT.
     contains
         ! --- lifecycle ---
         procedure :: init                              !! Set kind/geometry and allocate empty storage.
@@ -534,10 +534,13 @@ module parquet_columns
         !! `nrows` does not change.
         !!
         !! This is the counterpart of `append` for a column whose final row count is known up
-        !! front: `init` it once at full size, then paste each piece into place. Assembling a
-        !! column from k pieces with `append` instead costs O(k^2) copying, because every append
-        !! reallocates the whole column exact-fit and copies everything already in it (see
-        !! `grow_storage`) -- which is why `parquet_table`'s slice regime uses this.
+        !! front: `init` it once at full size, then paste each piece into place. `append` is not
+        !! slow -- it grows geometrically through `ensure_capacity`, so appending k pieces is
+        !! amortised O(1) per row, not O(k^2) -- but it copies each piece into a column that may
+        !! reallocate under it, and it can only ever extend the end. `%paste` allocates once,
+        !! copies each piece exactly once into its final position, and is the only form that lets
+        !! independent pieces be written OUT OF ORDER and CONCURRENTLY, which is what
+        !! `parquet_table`'s slice regime uses it for (see `paste_row_group_safely`).
         !!
         !! `from`/`count` default to 1 and `src%nrows`, i.e. all of `src`. Passing them copies a
         !! sub-range directly, so a caller trimming a piece to a row window does not need to build

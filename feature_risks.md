@@ -217,16 +217,70 @@ something a reader is expected to have.
 | [Risk-149](#risk-149--a-per-point-r_inner-on-the-pair-sweep-would-silently-drop-pairs) | A per-point `r_inner` on the pair sweep would silently drop pairs | 4 — covered |
 | [Risk-150](#risk-150--a-nearest-that-stopped-at-k-candidates-rather-than-at-a-radius-would-be-plausibly-wrong) | A `%nearest` that stopped at k CANDIDATES rather than at a radius would be plausibly wrong | 4 — covered |
 | [Risk-151](#risk-151--axis_point-taken-as-the-infinite-line-projection-disagrees-with-dist-and-both-look-right) | `axis_point` taken as the infinite-line projection disagrees with `dist`, and both look right | 4 — covered |
+| [Risk-152](#risk-152--two-tables-over-one-file-disagree-about-a-plain-list-columns-kind-and-both-answer-quietly) | Two tables over one file disagree about a plain `LIST` column's KIND, and both answer quietly | 1 — new |
 
 ---
 
 ## 1. New risks
 
-*Nothing here.* A risk lands in this section when it is first identified — before anyone has
+A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number —
 **one above the highest in the [Index](#index)**, read from there rather than from any number
 written in prose — state what breaks and why the failure is quiet, and leave the **Test** half to
 whoever triages it into one of the three sections below.
+
+### Risk-152 — Two tables over one file disagree about a plain LIST column's KIND, and both answer quietly
+
+A plain `LIST`/`LARGE_LIST` column — one this library never writes, but any other tool can — has no
+width in its schema, so `table_classify` (`src/parquet_tables_read.f90`) marks it `width_pending`
+and `table_resolve_width` measures it on first touch. **It measures over the slice's own row
+groups**: `resolve_width_row_groups` passes `rg_covering_range`'s bounds for a `REGIME_SLICE` table
+and `0/0` ("every row group") otherwise. `list_width_verified` (`src/parquet_wrapper.cpp`) then
+returns the uniform width if one exists over that range and **`1` if the rows are ragged**, and
+`table_kind_from_type` sets `vec = col_size > 1` — so **a ragged range yields the SCALAR kind at
+width 1**, not a vector kind and not an error.
+
+So on one globally-ragged file, two tables disagree about the same column:
+
+| table | `%kind()` | `%width()` |
+|---|---|---|
+| a slice whose row groups happen to be uniform | `PK_INT32_VEC` | 3 |
+| the whole file, or a slice that is ragged | `PK_INT32` | 1 |
+
+**Both are metadata queries and neither aborts.** Code branching on `%kind()` is correct on one and
+wrong on the other, and the scalar answer is not merely inconvenient — it is untrue of a list
+column. The abort arrives later, if and when the column is actually read, at a call site that has
+no visible connection to the disagreement.
+
+**Why this is not simply the documented width-is-a-slice-property behaviour.** `CLAUDE.md` records,
+deliberately, that *"a slice measures over its own row groups, so a globally-ragged file can present
+a uniform width within one slice and two tables over the same file can legitimately disagree"* — and
+that is accepted for **width**. What is not covered by it is that the same mechanism moves the
+**kind**, across the scalar/vector boundary, which is a different class of statement about the
+column and the thing callers dispatch on.
+
+**Two paths make it worse rather than better.** `%kind`/`%width` reach `table_resolve_width`
+*directly*, without going through `table_touch`, so a caller can provoke the wrong answer without
+ever reading a value. And the measurement is memoised on the descriptor (`width_pending` is cleared),
+so the first range a column is asked about wins for that table's lifetime.
+
+**What must NOT be the fix.** Making `table_resolve_width` abort on a ragged range would break files
+that read correctly today — a table over a *uniform* file is unaffected, and a slice over a
+uniform region of a ragged file is exactly the case that currently works. The decided fix is
+`feature_map_list_struct.md`'s **T5**: an explicit `list_columns=` argument on `parquet_open_table`,
+with the default flipping at 3.0.0 to resolving the KIND over **every** row group while the WIDTH
+keeps being measured over the slice's own — which removes the disagreement without changing what a
+slice's width means.
+
+**Testability, for whoever triages this.** It is testable in principle — open a whole-file table and
+a slice over a fixture whose raggedness is slice-dependent, and assert `%kind()` differs — but two
+things stand in the way of writing that test now, and neither is a reason to file it under
+"not testable". **No fixture exists**: `test/fixtures/list_widths.parquet` covers the width screen's
+own cases, not a file that is uniform within one row-group range and ragged across the whole, which
+has to be authored by placing specific row lengths in specific row groups. And **a test asserting
+today's disagreement is rewritten by the T5 default flip**, so per `CLAUDE.md` it would have to say
+what to assert once the refusal lifts. The natural home for both is the phase that implements
+`list_columns=`.
 
 ## 2. Risks with a proposed testing scenario
 

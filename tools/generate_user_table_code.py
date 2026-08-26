@@ -75,6 +75,13 @@ TYPES = {
     "timestamp": ("PK_TIMESTAMP", "PK_TIMESTAMP_VEC", "type(parquet_timestamp)",  "num"),
 }
 
+# The three container data_types the LIBRARY accepts but a GENERATED table type declines, so the
+# rejection can say which of the two drew the line. Deliberately NOT in TYPES: a field reaching
+# that map would get five array-shaped accessors emitted for it. See feature_map_list_struct.md
+# T12 -- this refusal is a decision, not a gap, and lifting it means a new emission path rather
+# than another row above.
+CONTAINER_TYPES = {"list", "map", "struct"}
+
 # Every type-bound procedure name `parquet_table` already occupies, INCLUDING the private
 # per-kind specifics -- a field called `col_ptr_i32` would collide just as surely as one called
 # `get`. A field name matching any of these cannot become an accessor.
@@ -347,6 +354,15 @@ def parse_maml(text, path):
         if not dtype_raw:
             raise MamlError(f"{where}:{ln}: field '{name}' has no `data_type:`")
         base = dtype_raw.split("[")[0].strip().lower()
+        if base in CONTAINER_TYPES:
+            raise MamlError(f"{where}:{ln}: field '{name}' declares a container type "
+                            f"(`data_type: {dtype_raw}`). That is a valid MAML data_type, but a "
+                            f"GENERATED table type cannot give it a named accessor: an accessor "
+                            f"for a container column hands back a handle or a standalone column "
+                            f"object rather than an array, which is a different shape from the "
+                            f"five specifics this script emits per field. The column itself is "
+                            f"still reachable -- drop the field from this schema and use the "
+                            f"inherited %col/%get/%set under its file name")
         if base not in TYPES:
             raise MamlError(f"{where}:{ln}: field '{name}' has an unsupported "
                             f"`data_type: {dtype_raw}`; expected one of "
@@ -1480,6 +1496,16 @@ def self_test():
              "  data_type: int32\n", "differ only in case", "two fields differing only in case"),
             ("dataset: m\ntable: t\nfields:\n- name: a\n  data_type: banana\n",
              "unsupported", "an unknown data_type"),
+            # The three container tokens are refused by their OWN arm, not by the unknown-token
+            # one above: they are valid MAML, so the message has to say the limit is this
+            # script's rather than the format's. Both cases are kept so a future edit cannot
+            # collapse one into the other without a test noticing.
+            ("dataset: m\ntable: t\nfields:\n- name: a\n  data_type: list[int32]\n",
+             "declares a container type", "a list[] data_type"),
+            ("dataset: m\ntable: t\nfields:\n- name: a\n  data_type: map[int32]\n",
+             "declares a container type", "a map[] data_type"),
+            ("dataset: m\ntable: t\nfields:\n- name: a\n  data_type: struct\n",
+             "declares a container type", "a struct data_type"),
             ("dataset: m\ntable: t\nfields:\n- name: a\n  data_type: int32\n  col_size: auto\n",
              "cannot be used in a table-type schema", "col_size: auto"),
             ("dataset: m\ntable: t\nfields:\n- name: a b\n  data_type: int32\n",

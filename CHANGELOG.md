@@ -35,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now an error. A copied file previously carried a second entry for each, and for `column.*` that
   second entry was the one a reader got back.
 
+### Fixed
+
+- Many other minor fixes and improvements.
+
 ## [2.0.0] - 2026-08-24
 
 **Toolchain floor:** gfortran ≥ 13 (13 on CI; 15.2.0 the primary development target), and —

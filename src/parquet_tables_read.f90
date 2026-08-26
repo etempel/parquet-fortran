@@ -67,11 +67,12 @@ contains
         case ("timestamp")
             kind = merge(PK_TIMESTAMP_VEC, PK_TIMESTAMP, vec)
         case default
-            ! Both call sites (table_classify, table_resolve_width) only ever pass a type_name
-            ! that already came back from parquet_get_column_type, which itself either returns
-            ! one of exactly these 9 canonical tokens or error stops -- see
-            ! "parquet_get_column_type on a column outside the 9 canonical types aborts" in
-            ! test_errors.f90. There is no path that reaches this select with any other token.
+            ! Not reachable, and the guarantee comes from table_classify's
+            ! parquet_column_exists(types=...) probe rather than from parquet_get_column_type
+            ! itself -- that query answers "unknown" for an unreadable type instead of aborting.
+            ! table_classify probes before it asks, and table_resolve_width only ever runs for a
+            ! column table_classify already accepted, so both call sites pass one of exactly the
+            ! 9 tokens above. There is no path that reaches this select with any other token.
             kind = PK_NONE ! GCOVR_EXCL_LINE
             ok = .false. ! GCOVR_EXCL_LINE -- gcov attribution artifact: shows a large positive
                 ! hit count under -O0 despite gcov's own unexecuted_block flag agreeing with
@@ -85,10 +86,13 @@ contains
         logical :: ok
         !
         associate (slot => cache%cols(idx))
-            ! Ask whether the type is readable BEFORE asking what it is: parquet_get_column_type
-            ! error stops on a type outside its nine canonical tokens, so probing with
-            ! parquet_column_exists(types=...) first is what keeps one exotic column from making
-            ! the whole file unopenable.
+            ! Ask whether the type is readable BEFORE asking what it is. parquet_get_column_type
+            ! does NOT abort on a type this library cannot read -- it answers "unknown", by
+            ! design (see its own doc-comment in parquet_read.f90, and the `default:` arm of
+            ! parquet_reader_get_column_type_name in parquet_wrapper.cpp). So it is the
+            ! parquet_column_exists(types=...) probe, not that query, that keeps one exotic column
+            ! from making the whole file unopenable AND restricts type_name to exactly the nine
+            ! tokens table_kind_from_type recognizes.
             if (.not. parquet_column_exists(cache%reader, slot%file_name, &
                     types="int32,int64,float32,float64,string,boolean,date,time,timestamp")) then
                 slot%supported = .false.

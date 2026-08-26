@@ -30,6 +30,19 @@ contains
         integer(int32) :: w
         call self%clear()
         if (kind == PK_NONE) error stop EP//"init: PK_NONE is not a storable kind"
+        ! THE SINGLE GATE for the three reserved container kinds, and the reason no other storage
+        ! operation carries a container arm of its own. `self%kind` has exactly four writers: this
+        ! one, `clear` (writes PK_NONE), `move_from` (copies from a column that cannot itself hold
+        ! a container kind), and the sixteen `adopt_*` specifics (each hard-codes one non-container
+        ! kind). So while this refusal stands, a container kind cannot enter a parquet_column at
+        ! all, and every `case default` further down the storage layer -- gather_storage,
+        ! ensure_capacity, copy_storage, append_storage, append_row_of, paste_storage -- is
+        ! unreachable defence rather than a live guard. `grow_storage` does not dispatch on kind
+        ! and would abort through ensure_capacity's arm; `shrink_storage`'s default is a
+        ! deliberate no-op. Those messages all read "column has no active storage", which is not
+        ! what a container column's problem would be -- they are left as they are because opening
+        ! this gate (feature_map_list_struct.md, Phase 1) replaces every one of them with
+        ! delegation to the container object rather than improving the wording.
         if (kind == PK_LIST .or. kind == PK_MAP .or. kind == PK_STRUCT) then
             error stop EP//"init: container kinds are reserved and not implemented yet"
         end if

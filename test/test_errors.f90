@@ -1466,6 +1466,23 @@ contains
             new_unittest("rebuilding a sky index aborts", test_spatial_sky_rebuild_aborts), &
             new_unittest("an axis query before build aborts", test_spatial_axis_before_build_aborts), &
             new_unittest("a negative cone radius aborts", test_spatial_axis_radius_aborts), &
+            new_unittest("an inner radius above the outer one aborts", test_spatial_annulus_inner_aborts), &
+            new_unittest("a negative inner radius aborts", test_spatial_annulus_negative_aborts), &
+            new_unittest("a mis-sized bulk inner radius aborts", test_spatial_bulk_inner_length_aborts), &
+            new_unittest("a bulk inner radius above an outer one aborts", test_spatial_bulk_inner_exceeds_aborts), &
+            new_unittest("an inner angular radius above the outer one aborts", test_spatial_sky_annulus_aborts), &
+            new_unittest("a mis-shaped axis_point buffer aborts", test_spatial_axis_point_rank_aborts), &
+            new_unittest("nearest with k below one aborts", test_spatial_nearest_k_aborts), &
+            new_unittest("a periodic nearest past half the box aborts", test_spatial_nearest_periodic_aborts), &
+            new_unittest("nearest_sky on a Euclidean index aborts", test_spatial_nearest_sky_euclidean_aborts), &
+            new_unittest("kth_distance with k below one aborts", test_spatial_kth_k_low_aborts), &
+            new_unittest("kth_distance with k at the size aborts", test_spatial_kth_k_high_aborts), &
+            new_unittest("kth_distance on a sky index aborts", test_spatial_kth_on_sky_aborts), &
+            new_unittest("kth_distance_sky on a Euclidean index aborts", test_spatial_kth_sky_euclidean_aborts), &
+            new_unittest("mismatched component endpoints abort", test_spatial_components_length_aborts), &
+            new_unittest("an out-of-range edge endpoint aborts", test_spatial_components_range_aborts), &
+            new_unittest("min_size = 0 aborts", test_spatial_components_min_size_aborts), &
+            new_unittest("a negative vertex count aborts", test_spatial_components_nvert_aborts), &
             new_unittest("the automatic-rebuild warning is said, and can be silenced", &
                 test_spatial_rebuild_warning) &
             ]
@@ -2347,6 +2364,125 @@ contains
             failure_message="a negative cone radius was expected to abort", &
             required_stderr="every radius must be >= 0")
     end subroutine test_spatial_axis_radius_aborts
+
+    subroutine test_spatial_annulus_inner_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_annulus_inner_exceeds_outer", expect_abort=.true., &
+            failure_message="an inner radius above the outer one was expected to abort", &
+            required_stderr="the inner radius must not exceed the outer radius")
+    end subroutine test_spatial_annulus_inner_aborts
+
+    subroutine test_spatial_annulus_negative_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_annulus_inner_negative", expect_abort=.true., &
+            failure_message="a negative inner radius was expected to abort", &
+            required_stderr="the inner radius must be >= 0")
+    end subroutine test_spatial_annulus_negative_aborts
+
+    subroutine test_spatial_bulk_inner_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_bulk_inner_length", expect_abort=.true., &
+            failure_message="a mis-sized bulk inner radius was expected to abort", &
+            required_stderr="the inner radius must be one value or one per point")
+    end subroutine test_spatial_bulk_inner_length_aborts
+
+    subroutine test_spatial_bulk_inner_exceeds_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_bulk_inner_exceeds_outer", expect_abort=.true., &
+            failure_message="a bulk inner radius above one point's outer radius was expected to abort", &
+            required_stderr="must not exceed the outer radius for that point")
+    end subroutine test_spatial_bulk_inner_exceeds_aborts
+
+    subroutine test_spatial_sky_annulus_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_sky_annulus_too_large", expect_abort=.true., &
+            failure_message="an inner angular radius above the outer one was expected to abort", &
+            required_stderr="the inner angular radius must not exceed the outer one")
+    end subroutine test_spatial_sky_annulus_aborts
+
+    subroutine test_spatial_axis_point_rank_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_axis_point_rank", expect_abort=.true., &
+            failure_message="a mis-shaped axis_point buffer was expected to abort", &
+            required_stderr="axis_point's first extent must equal %ndim()")
+    end subroutine test_spatial_axis_point_rank_aborts
+
+    subroutine test_spatial_nearest_k_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_nearest_k_below_one", expect_abort=.true., &
+            failure_message="k below one was expected to abort", &
+            required_stderr="nearest: k must be >= 1")
+    end subroutine test_spatial_nearest_k_aborts
+
+    subroutine test_spatial_nearest_periodic_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_nearest_periodic_unreachable", expect_abort=.true., &
+            failure_message="a periodic nearest needing more than half the box was expected to abort", &
+            required_stderr="half the box does not hold that many neighbours")
+    end subroutine test_spatial_nearest_periodic_aborts
+
+    subroutine test_spatial_nearest_sky_euclidean_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_nearest_sky_on_euclidean", expect_abort=.true., &
+            failure_message="%nearest_sky on a Euclidean index was expected to abort", &
+            required_stderr="not %build_sky; use %nearest")
+    end subroutine test_spatial_nearest_sky_euclidean_aborts
+
+    subroutine test_spatial_kth_k_low_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_kth_k_below_one", expect_abort=.true., &
+            failure_message="kth_distance with k below one was expected to abort", &
+            required_stderr="kth_distance: k must be >= 1")
+    end subroutine test_spatial_kth_k_low_aborts
+
+    subroutine test_spatial_kth_k_high_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_kth_k_too_large", expect_abort=.true., &
+            failure_message="kth_distance with k at the catalogue size was expected to abort", &
+            required_stderr="k must be at most %size()-1")
+    end subroutine test_spatial_kth_k_high_aborts
+
+    subroutine test_spatial_kth_on_sky_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_kth_on_sky_index", expect_abort=.true., &
+            failure_message="%kth_distance on a sky index was expected to abort", &
+            required_stderr="use %kth_distance_sky")
+    end subroutine test_spatial_kth_on_sky_aborts
+
+    subroutine test_spatial_kth_sky_euclidean_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_kth_sky_on_euclidean", expect_abort=.true., &
+            failure_message="%kth_distance_sky on a Euclidean index was expected to abort", &
+            required_stderr="this is a Euclidean index; use %kth_distance")
+    end subroutine test_spatial_kth_sky_euclidean_aborts
+
+    subroutine test_spatial_components_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_components_length", expect_abort=.true., &
+            failure_message="mismatched endpoint arrays were expected to abort", &
+            required_stderr="the two endpoint arrays must be the same length")
+    end subroutine test_spatial_components_length_aborts
+
+    subroutine test_spatial_components_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_components_endpoint_range", expect_abort=.true., &
+            failure_message="an out-of-range edge endpoint was expected to abort", &
+            required_stderr="every edge endpoint must be a vertex in 1..nvert")
+    end subroutine test_spatial_components_range_aborts
+
+    subroutine test_spatial_components_min_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_components_min_size_zero", expect_abort=.true., &
+            failure_message="min_size = 0 was expected to abort", &
+            required_stderr="min_size must be >= 1")
+    end subroutine test_spatial_components_min_size_aborts
+
+    subroutine test_spatial_components_nvert_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_components_nvert_negative", expect_abort=.true., &
+            failure_message="a negative vertex count was expected to abort", &
+            required_stderr="nvert must be >= 0")
+    end subroutine test_spatial_components_nvert_aborts
 
     subroutine test_spatial_rebuild_needs_copy_aborts(error)
         type(error_type), allocatable, intent(out) :: error

@@ -28,6 +28,7 @@
 module test_spatial
     use parquet
     use iso_fortran_env, only : int32, int64, real64
+    use, intrinsic :: ieee_arithmetic, only : ieee_get_flag, ieee_set_flag, ieee_support_flag, ieee_invalid
     use testdrive, only : new_unittest, unittest_type, error_type, check, skip_test
     implicit none
     private
@@ -70,12 +71,46 @@ contains
             new_unittest("an axis outside the cloud, and one longer than it", test_axis_outside_and_overlong), &
             new_unittest("an axis query works on a 2D index", test_axis_2d), &
             new_unittest("axis distances and a short buffer behave", test_axis_dist_and_short_buffer), &
+            new_unittest("axis_point and axis_t satisfy their three invariants", &
+                         test_axis_outputs_satisfy_their_invariants), &
+            new_unittest("a capsule's foot clamps to the ends", test_axis_point_clamps_at_the_ends), &
+            new_unittest("axis outputs on a 2D index and a zero-length axis", &
+                         test_axis_point_2d_and_degenerate), &
+            new_unittest("short axis buffers stay inside themselves and still correspond", &
+                         test_axis_outputs_truncate_together), &
             new_unittest("a sky index matches a haversine scan at the poles and across 0h", &
                          test_sky_matches_brute_force), &
             new_unittest("sky separations come back in degrees", test_sky_distances_are_degrees), &
             new_unittest("a sky index reports its radius in degrees", test_sky_metadata), &
             new_unittest("the sky self-join reproduces N single sky queries", test_sky_bulk_matches_singles), &
             new_unittest("sky pairs and counts agree, and pairs stay symmetric", test_sky_bulk_pairs_and_counts), &
+            new_unittest("an annulus is the outer ball minus the inner one", &
+                         test_annulus_is_the_difference_of_two_balls), &
+            new_unittest("the annulus works in bulk, in pairs and on the sky", &
+                         test_annulus_in_bulk_and_on_the_sky), &
+            new_unittest("sorted= orders by distance and keeps the same rows", &
+                         test_sorted_orders_by_distance), &
+            new_unittest("an exact tie is broken by ascending row index", test_sorted_breaks_ties_by_row), &
+            new_unittest("nearest matches a full sort of every distance", &
+                         test_nearest_matches_a_full_sort), &
+            new_unittest("nearest handles k at and beyond the catalogue size", &
+                         test_nearest_k_at_and_beyond_the_size), &
+            new_unittest("the shell's starting radius changes rounds, not answers", &
+                         test_nearest_shell_start_does_not_change_answers), &
+            new_unittest("nearest on the sky and on a periodic index", test_nearest_sky_and_periodic), &
+            new_unittest("kth_distance matches a full per-point sort", &
+                         test_kth_distance_matches_a_full_sort), &
+            new_unittest("kth_distance on the sky, and with coincident points", &
+                         test_kth_distance_sky_and_duplicates), &
+            new_unittest("a threaded kth_distance sweep equals the serial one", &
+                         test_kth_distance_threaded_matches_serial), &
+            new_unittest("the carried radius saves expansion rounds", &
+                         test_kth_distance_carry_over_saves_rounds), &
+            new_unittest("connected components on hand-built graphs", test_components_hand_built_graphs), &
+            new_unittest("min_size thresholds components, and 1 restores singletons", &
+                         test_components_min_size_threshold), &
+            new_unittest("Friends-of-Friends matches a label-propagation scan", &
+                         test_components_friends_of_friends), &
             new_unittest("a threaded bulk sweep equals the serial one", test_bulk_threaded_matches_serial), &
             new_unittest("a periodic index matches a minimum-image scan", test_periodic_matches_brute_force), &
             new_unittest("a periodic index is translation invariant", test_periodic_translation_invariant), &
@@ -119,6 +154,39 @@ contains
             end if
         end do
     end subroutine make_cloud
+
+    !> A deterministic CLUSTERED cloud: tight clumps scattered through the unit box.
+    !>
+    !> Where `make_cloud` is uniform and so has one density everywhere, this one's local density
+    !> varies by orders of magnitude -- which is what any test about a density-derived starting
+    !> radius has to have, since on a uniform cloud that radius is already right everywhere.
+    subroutine make_clustered_cloud(n, x, y, z)
+        integer(int64), intent(in) :: n !! how many points.
+        real(real64), allocatable, intent(out) :: x(:) !! x of every point.
+        real(real64), allocatable, intent(out) :: y(:) !! y of every point.
+        real(real64), allocatable, intent(out) :: z(:) !! z of every point.
+        integer(int64) :: i, c
+        real(real64) :: cx, cy, cz
+
+        allocate (x(n), y(n), z(n))
+        do i = 1_int64, n
+            if (mod(i, 10_int64) == 0_int64) then
+                ! One point in ten is scattered, so the clumps sit in a sparse background rather
+                ! than in a vacuum -- which is where a carried-over radius has to cope with both.
+                x(i) = pf_random_at(fixture_seed + 51_int64, i, 1_int64)
+                y(i) = pf_random_at(fixture_seed + 51_int64, i, 2_int64)
+                z(i) = pf_random_at(fixture_seed + 51_int64, i, 3_int64)
+                cycle
+            end if
+            c = 1_int64 + mod(i, 20_int64)
+            cx = pf_random_at(fixture_seed + 52_int64, c, 1_int64)
+            cy = pf_random_at(fixture_seed + 52_int64, c, 2_int64)
+            cz = pf_random_at(fixture_seed + 52_int64, c, 3_int64)
+            x(i) = cx + 0.02_real64 * (pf_random_at(fixture_seed + 53_int64, i, 1_int64) - 0.5_real64)
+            y(i) = cy + 0.02_real64 * (pf_random_at(fixture_seed + 53_int64, i, 2_int64) - 0.5_real64)
+            z(i) = cz + 0.02_real64 * (pf_random_at(fixture_seed + 53_int64, i, 3_int64) - 0.5_real64)
+        end do
+    end subroutine make_clustered_cloud
 
     !> Every row within `r` of `p`, found by scanning every point. The only oracle here that does
     !> not go through the grid, and so the only one a defect in the cell walk cannot satisfy.
@@ -290,6 +358,119 @@ contains
             end if
         end do
     end subroutine brute_sky
+
+    ! ---- Oracles for the Tier 2 queries ----
+
+    !> The rows nearest `p`, in increasing distance with ties by ascending row, found by a full
+    !> sort of every distance. Independent of the grid, of the expanding ball and of its cap.
+    subroutine brute_nearest(x, y, z, p, wrap, rows, dists)
+        real(real64), intent(in) :: x(:) !! x of every point.
+        real(real64), intent(in) :: y(:) !! y of every point.
+        real(real64), intent(in) :: z(:) !! z of every point.
+        real(real64), intent(in) :: p(3) !! the query point.
+        real(real64), intent(in) :: wrap(3) !! box length per periodic axis, 0 on a free one.
+        integer(int64), allocatable, intent(out) :: rows(:) !! every row, nearest first.
+        real(real64), allocatable, intent(out) :: dists(:) !! the matching distances.
+        integer(int64), allocatable :: perm(:)
+        real(real64), allocatable :: d(:)
+        real(real64) :: dx, dy, dz
+        integer(int64) :: i, n
+
+        n = size(x, kind=int64)
+        allocate (d(n))
+        do i = 1_int64, n
+            dx = x(i) - p(1)
+            dy = y(i) - p(2)
+            dz = z(i) - p(3)
+            if (wrap(1) > 0.0_real64) dx = dx - wrap(1) * anint(dx / wrap(1))
+            if (wrap(2) > 0.0_real64) dy = dy - wrap(2) * anint(dy / wrap(2))
+            if (wrap(3) > 0.0_real64) dz = dz - wrap(3) * anint(dz / wrap(3))
+            d(i) = sqrt(dx * dx + dy * dy + dz * dz)
+        end do
+        ! Stable, so an exact tie comes back in ascending row order -- which is the same tie-break
+        ! the library contracts for, so the two lists are comparable entry by entry.
+        call pf_argsort(d, perm)
+        allocate (rows(n), dists(n))
+        do i = 1_int64, n
+            rows(i) = perm(i)
+            dists(i) = d(perm(i))
+        end do
+    end subroutine brute_nearest
+
+    !> Every point's distance to its `k`-th nearest OTHER point, by a full per-point sort.
+    subroutine brute_kth(x, y, z, k, dist)
+        real(real64), intent(in) :: x(:) !! x of every point.
+        real(real64), intent(in) :: y(:) !! y of every point.
+        real(real64), intent(in) :: z(:) !! z of every point.
+        integer(int64), intent(in) :: k !! which neighbour to report.
+        real(real64), allocatable, intent(out) :: dist(:) !! length n, in row order.
+        real(real64), allocatable :: d(:), sorted_d(:)
+        integer(int64) :: i, j, n, w
+
+        n = size(x, kind=int64)
+        allocate (dist(n), d(n - 1_int64))
+        do i = 1_int64, n
+            w = 0_int64
+            do j = 1_int64, n
+                if (j == i) cycle
+                w = w + 1_int64
+                d(w) = sqrt((x(i) - x(j)) ** 2 + (y(i) - y(j)) ** 2 + (z(i) - z(j)) ** 2)
+            end do
+            call pf_sort(d, sorted_d)
+            dist(i) = sorted_d(k)
+        end do
+    end subroutine brute_kth
+
+    !> Component labels by LABEL PROPAGATION over an O(n^2) adjacency, which shares no machinery
+    !> with the union-find under test -- only the definition of "connected".
+    subroutine brute_components(x, y, z, r, lab)
+        real(real64), intent(in) :: x(:) !! x of every point.
+        real(real64), intent(in) :: y(:) !! y of every point.
+        real(real64), intent(in) :: z(:) !! z of every point.
+        real(real64), intent(in) :: r !! the linking length.
+        integer(int64), allocatable, intent(out) :: lab(:) !! a label per vertex; values are arbitrary.
+        integer(int64) :: i, j, n, lo
+        real(real64) :: d2
+        logical :: moved
+
+        n = size(x, kind=int64)
+        allocate (lab(n))
+        do i = 1_int64, n
+            lab(i) = i
+        end do
+        moved = .true.
+        do while (moved)
+            moved = .false.
+            do i = 1_int64, n
+                do j = i + 1_int64, n
+                    d2 = (x(i) - x(j)) ** 2 + (y(i) - y(j)) ** 2 + (z(i) - z(j)) ** 2
+                    if (d2 > r * r) cycle
+                    lo = min(lab(i), lab(j))
+                    if (lab(i) /= lo .or. lab(j) /= lo) moved = .true.
+                    lab(i) = lo
+                    lab(j) = lo
+                end do
+            end do
+        end do
+    end subroutine brute_components
+
+    !> Whether two labellings induce the same PARTITION, whatever numbers each one chose.
+    logical function same_partition(a, b) result(same)
+        integer(int64), intent(in) :: a(:) !! one labelling.
+        integer(int64), intent(in) :: b(:) !! the other, over the same vertices.
+        integer(int64) :: i, j, n
+
+        same = .true.
+        n = size(a, kind=int64)
+        do i = 1_int64, n
+            do j = i + 1_int64, n
+                if ((a(i) == a(j)) .neqv. (b(i) == b(j))) then
+                    same = .false.
+                    return
+                end if
+            end do
+        end do
+    end function same_partition
 
     ! ---- Ball search ----
 
@@ -1029,6 +1210,220 @@ contains
             "an int32 buffer must return the same rows as an int64 one")
     end subroutine test_axis_dist_and_short_buffer
 
+    ! ---- Where on the axis a returned point sits ----
+
+    !> The three `axis_point`/`axis_t` invariants, on all three shapes.
+    !>
+    !> **The first is the one that can be silently wrong**: `axis_point` must be the point `dist`
+    !> was measured FROM, which for a capsule is the closest point on the SEGMENT and not the
+    !> projection onto the infinite line. The second ties the two outputs to each other, so a clamp
+    !> applied to one and not the other has nowhere to hide.
+    subroutine test_axis_outputs_satisfy_their_invariants(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:)
+        real(real64), allocatable :: dd(:), ap(:,:), at(:)
+        integer(int64), allocatable :: got(:)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, m, k, row
+        integer :: shape_id
+        real(real64) :: p1(3), p2(3), foot(3), sep, want
+
+        n = 900_int64
+        call make_cloud(n, 1.0_real64, .false., x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64)
+        allocate (got(n), dd(n), ap(3, n), at(n))
+        p1 = [0.15_real64, 0.20_real64, 0.30_real64]
+        p2 = [0.85_real64, 0.70_real64, 0.55_real64]
+        do shape_id = 1, 3
+            select case (shape_id)
+            case (1)
+                m = sx%within_segment(p1, p2, 0.12_real64, got, dist=dd, axis_point=ap, axis_t=at)
+            case (2)
+                m = sx%within_cylinder(p1, p2, 0.12_real64, got, dist=dd, axis_point=ap, axis_t=at)
+            case default
+                m = sx%within_cone(p1, p2, 0.05_real64, 0.20_real64, got, dist=dd, axis_point=ap, axis_t=at)
+            end select
+            call check(error, m > 20_int64, "each axis fixture must return a useful number of points")
+            if (allocated(error)) return
+            do k = 1_int64, m
+                row = got(k)
+                sep = sqrt((x(row) - ap(1, k)) ** 2 + (y(row) - ap(2, k)) ** 2 + (z(row) - ap(3, k)) ** 2)
+                call check(error, abs(sep - dd(k)) <= 1.0e-12_real64, &
+                    "axis_point must be the point dist was measured from")
+                if (allocated(error)) return
+                call check(error, at(k) >= 0.0_real64 .and. at(k) <= 1.0_real64, &
+                    "axis_t must be a normalised position in [0, 1], never signed and never past the far end")
+                if (allocated(error)) return
+                foot = p1 + at(k) * (p2 - p1)
+                want = maxval(abs(foot - ap(1:3, k)))
+                call check(error, want <= 1.0e-12_real64, &
+                    "axis_point must equal p1 + axis_t*(p2 - p1), so the two outputs agree")
+                if (allocated(error)) return
+            end do
+        end do
+    end subroutine test_axis_outputs_satisfy_their_invariants
+
+    !> A capsule whose points lie beyond BOTH ends: the reported foot is the end itself.
+    !>
+    !> **This is the only case that distinguishes the clamped foot from the infinite-line
+    !> projection**, and an unclamped implementation passes every other test here: it would report
+    !> a point past the end, at a distance that is not `dist`, with `axis_t` outside `[0, 1]`.
+    subroutine test_axis_point_clamps_at_the_ends(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64) :: x(4), y(4), z(4)
+        real(real64) :: dd(4), ap(3, 4), at(4)
+        integer(int64) :: got(4), m, k
+        type(pf_spatial_index) :: sx
+        real(real64) :: p1(3), p2(3)
+
+        p1 = [0.0_real64, 0.0_real64, 0.0_real64]
+        p2 = [1.0_real64, 0.0_real64, 0.0_real64]
+        ! Two points beyond p1, two beyond p2, each offset sideways so the capsule keeps them and
+        ! `dist` is a genuine distance rather than zero.
+        x = [-0.30_real64, -0.10_real64, 1.10_real64, 1.30_real64]
+        y = [0.10_real64, 0.20_real64, 0.20_real64, 0.10_real64]
+        z = 0.0_real64
+        call sx%build(x, y, z, radius=0.5_real64)
+        m = sx%within_segment(p1, p2, 0.5_real64, got, dist=dd, axis_point=ap, axis_t=at, sorted=.true.)
+        call check(error, m == 4_int64, "every point of this fixture is inside the capsule")
+        if (allocated(error)) return
+        do k = 1_int64, m
+            if (x(got(k)) < 0.0_real64) then
+                call check(error, at(k) == 0.0_real64, "a point before p1 must report axis_t exactly 0")
+                if (allocated(error)) return
+                call check(error, all(ap(1:3, k) == p1), "a point before p1 must report p1 itself as its foot")
+            else
+                call check(error, at(k) == 1.0_real64, "a point beyond p2 must report axis_t exactly 1")
+                if (allocated(error)) return
+                call check(error, all(ap(1:3, k) == p2), "a point beyond p2 must report p2 itself as its foot")
+            end if
+            if (allocated(error)) return
+            call check(error, abs(dd(k) - sqrt((x(got(k)) - ap(1, k)) ** 2 + (y(got(k)) - ap(2, k)) ** 2)) &
+                <= 1.0e-14_real64, "dist must be measured from the clamped foot, not from the axis line")
+            if (allocated(error)) return
+        end do
+        ! The cylinder rejects every one of them, which is what makes the capsule's clamp visible
+        ! at all: the two shapes differ exactly where the clamp bites.
+        m = sx%within_cylinder(p1, p2, 0.5_real64, got)
+        call check(error, m == 0_int64, "the cylinder must reject every point that lies beyond an end")
+    end subroutine test_axis_point_clamps_at_the_ends
+
+    !> A 2D index reports `(1:2, :)`, and a zero-length axis reports `p1` and 0 for every point.
+    subroutine test_axis_point_2d_and_degenerate(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:)
+        real(real64) :: ap2(2, 64), at(64), dd(64)
+        real(real64), allocatable :: ap3(:,:)
+        integer(int64) :: got(64), m, k
+        type(pf_spatial_index) :: sx, s3
+        real(real64) :: p1(2), q1(3)
+
+        call make_cloud(400_int64, 1.0_real64, .true., x, y, z)
+        call sx%build(x, y, radius=0.2_real64)
+        p1 = [0.2_real64, 0.3_real64]
+        m = sx%within_segment(p1, [0.8_real64, 0.6_real64], 0.05_real64, got, dist=dd, &
+            axis_point=ap2, axis_t=at)
+        call check(error, m > 5_int64 .and. m <= 64_int64, &
+            "the 2D capsule fixture must return points, and must fit the buffers")
+        if (allocated(error)) return
+        do k = 1_int64, m
+            call check(error, abs(sqrt((x(got(k)) - ap2(1, k)) ** 2 + (y(got(k)) - ap2(2, k)) ** 2) - dd(k)) &
+                <= 1.0e-12_real64, "a 2D axis_point must be the two-coordinate foot dist was measured from")
+            if (allocated(error)) return
+        end do
+        ! A zero-length axis is a ball, so every foot is p1 and every parameter is 0 -- the
+        ! reduction the three shapes share, carried through to the new outputs.
+        call make_cloud(400_int64, 1.0_real64, .false., x, y, z)
+        call s3%build(x, y, z, radius=0.2_real64)
+        allocate (ap3(3, 64))
+        q1 = [0.5_real64, 0.5_real64, 0.5_real64]
+        m = s3%within_cone(q1, q1, 0.15_real64, 0.15_real64, got, dist=dd, axis_point=ap3, axis_t=at)
+        call check(error, m > 0_int64, "a zero-length cone must still find the ball's points")
+        if (allocated(error)) return
+        do k = 1_int64, min(m, 64_int64)
+            call check(error, all(ap3(1:3, k) == q1), "a zero-length axis must report p1 as every foot")
+            if (allocated(error)) return
+            call check(error, at(k) == 0.0_real64, "a zero-length axis must report axis_t 0 for every point")
+            if (allocated(error)) return
+        end do
+    end subroutine test_axis_point_2d_and_degenerate
+
+    !> Short axis buffers: nothing is written past any of them, and what comes back corresponds.
+    !>
+    !> **What this deliberately does NOT assert is that `dist` stopped at the common cap rather
+    !> than at its own length.** Every output here is `intent(out)`, so an element the library did
+    !> not write is UNDEFINED on return and reading it is not conforming. An earlier version of
+    !> this test read `dist(6)` after five entries had been filled; nagfor's `-nan` had put a
+    !> signalling NaN there, the comparison raised `FE_INVALID` and the test failed -- correctly,
+    !> against a library that was doing exactly the right thing. The common cap is an
+    !> implementation guarantee with no conforming observer.
+    !>
+    !> So it is checked the two ways that ARE observable: **canaries outside the sections passed
+    !> in** show nothing was written past any buffer's own extent, and the entries that are
+    !> returned agree with each other. Both arms below make a different buffer the shortest one, so
+    !> each of the four takes a turn at being the binding constraint.
+    subroutine test_axis_outputs_truncate_together(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:)
+        real(real64) :: dd(64), ap(3, 64), at(64), sentinel
+        integer(int64) :: got(64), m, k, nfill
+        type(pf_spatial_index) :: sx
+        real(real64) :: p1(3), p2(3), foot(3)
+        integer :: arm
+
+        call make_cloud(900_int64, 1.0_real64, .false., x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64)
+        p1 = [0.15_real64, 0.20_real64, 0.30_real64]
+        p2 = [0.85_real64, 0.70_real64, 0.55_real64]
+        sentinel = -99.0_real64
+        do arm = 1, 2
+            got = -1_int64
+            dd = sentinel
+            ap = sentinel
+            at = sentinel
+            if (arm == 1) then
+                ! axis_t is the shortest at 5; every other buffer has room for 8.
+                nfill = 5_int64
+                m = sx%within_segment(p1, p2, 0.12_real64, got(1:8), dist=dd(1:8), &
+                    axis_point=ap(:, 1:8), axis_t=at(1:5))
+            else
+                ! dist is the shortest at 3, so a different buffer decides the cap.
+                nfill = 3_int64
+                m = sx%within_segment(p1, p2, 0.12_real64, got(1:8), dist=dd(1:3), &
+                    axis_point=ap(:, 1:8), axis_t=at(1:8))
+            end if
+            call check(error, m > 8_int64, "this fixture must overflow every buffer passed in")
+            if (allocated(error)) return
+            ! The canaries: everything outside the sections handed to the library still holds the
+            ! sentinel, so no output ran past its own extent.
+            call check(error, all(got(9:) == -1_int64), "out must not be written past its own extent")
+            if (allocated(error)) return
+            call check(error, all(dd(9:) == sentinel), "dist must not be written past its own extent")
+            if (allocated(error)) return
+            call check(error, all(ap(:, 9:) == sentinel), &
+                "axis_point must not be written past its own extent")
+            if (allocated(error)) return
+            call check(error, all(at(9:) == sentinel), "axis_t must not be written past its own extent")
+            if (allocated(error)) return
+            ! And every entry up to the common cap is filled, and the four agree with each other.
+            do k = 1_int64, nfill
+                call check(error, got(k) >= 1_int64, "every slot up to the common cap must hold a row")
+                if (allocated(error)) return
+                call check(error, dd(k) /= sentinel .and. at(k) /= sentinel, &
+                    "every slot up to the common cap must hold a distance and an axis position")
+                if (allocated(error)) return
+                foot = p1 + at(k) * (p2 - p1)
+                call check(error, maxval(abs(foot - ap(1:3, k))) <= 1.0e-12_real64, &
+                    "the entries returned must still satisfy axis_point == p1 + axis_t*(p2 - p1)")
+                if (allocated(error)) return
+                call check(error, abs(sqrt((x(got(k)) - ap(1, k)) ** 2 + (y(got(k)) - ap(2, k)) ** 2 &
+                    + (z(got(k)) - ap(3, k)) ** 2) - dd(k)) <= 1.0e-12_real64, &
+                    "and must still have dist measured from the reported foot")
+                if (allocated(error)) return
+            end do
+        end do
+    end subroutine test_axis_outputs_truncate_together
+
     ! ---- The sky metric ----
 
     !> A sky index agrees with a haversine scan, at both poles and across 0h.
@@ -1118,6 +1513,7 @@ contains
         type(pf_spatial_index) :: sx
         integer(int64) :: n, m, k
         real(real64) :: want
+        logical :: had_invalid, raised
         real(real64), parameter :: ra0 = 12.0_real64, dec0 = -30.0_real64, rsky = 2.0_real64
 
         n = 3000_int64
@@ -1136,6 +1532,41 @@ contains
             ! size, so this also catches a conversion that was simply left out.
             call check(error, dd(k) <= rsky + 1.0e-9_real64, &
                 "every reported separation must be within the requested angular radius")
+            if (allocated(error)) return
+        end do
+        ! **A SHORT `out` beside a LONG `dist_deg`**, which is the shape that makes the chords-to-
+        ! degrees conversion walk past what the scan actually wrote. Queried at 0h, where this
+        ! fixture piles a band of points, so three slots really do overflow -- the sparse
+        ! background around (ra0, dec0) holds barely one point at this radius.
+        !
+        ! **The entries past the cap cannot be read**: they are elements of an `intent(out)` array
+        ! the library never assigned, so they are undefined and reading them is not conforming.
+        ! What IS observable is that the call performed no invalid floating-point operation --
+        ! converting an unwritten entry means `asin` of whatever was there, which under nagfor's
+        ! `-nan` is a signalling NaN and raises the flag. The flag is saved and restored around the
+        ! call so that a raise from anywhere else in the run is neither hidden nor blamed on this.
+        if (ieee_support_flag(ieee_invalid, 0.0_real64)) then
+            call ieee_get_flag(ieee_invalid, had_invalid)
+            call ieee_set_flag(ieee_invalid, .false.)
+        else
+            had_invalid = .false. ! GCOVR_EXCL_LINE
+        end if
+        m = sx%within_sky(0.0_real64, 0.0_real64, rsky, got(1:3), dist_deg=dd)
+        raised = .false.
+        if (ieee_support_flag(ieee_invalid, 0.0_real64)) then
+            call ieee_get_flag(ieee_invalid, raised)
+            call ieee_set_flag(ieee_invalid, had_invalid .or. raised)
+        end if
+        call check(error, .not. raised, &
+            "converting chords to degrees must stop where the SHORTEST buffer stopped; reading " // &
+            "further means asin over an entry the walk never wrote")
+        if (allocated(error)) return
+        call check(error, m > 3_int64, "this fixture must overflow the three-slot row buffer")
+        if (allocated(error)) return
+        do k = 1_int64, 3_int64
+            want = sky_sep(0.0_real64, 0.0_real64, ra(got(k)), dec(got(k)))
+            call check(error, abs(dd(k) - want) < 1.0e-9_real64, &
+                "the entries a short buffer does hold must still be converted to degrees")
             if (allocated(error)) return
         end do
     end subroutine test_sky_distances_are_degrees
@@ -1310,6 +1741,730 @@ contains
         if (allocated(error)) return
         call check(error, all(n1 == n2), "a threaded sweep must produce the same neighbours as a serial one")
     end subroutine test_bulk_threaded_matches_serial
+
+    ! ---- The annulus, and ordered results ----
+
+    !> An annulus is the outer ball minus the inner one, checked against the outer ball's own rows.
+    !>
+    !> **The oracle is assembled from an already-tested query rather than restating the new one**:
+    !> take every row within `r`, keep those whose distance reaches `r_inner`, and demand exactly
+    !> that set back. A fixture with random coordinates has no point sitting exactly on the inner
+    !> surface, which is where the two readings would differ -- both bounds are inclusive here, so
+    !> such a point would belong to the annulus and to the inner ball alike.
+    subroutine test_annulus_is_the_difference_of_two_balls(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:), balld(:), annd(:)
+        integer(int64), allocatable :: ballrows(:), annrows(:), plain(:)
+        logical, allocatable :: mask(:)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, mball, mann, mplain, k, q
+        real(real64) :: p(3), r, rin
+
+        n = 900_int64
+        r = 0.30_real64
+        rin = 0.18_real64
+        call make_cloud(n, 1.0_real64, .false., x, y, z)
+        call sx%build(x, y, z, radius=r)
+        allocate (ballrows(n), annrows(n), plain(n), balld(n), annd(n), mask(n))
+        do q = 1_int64, 12_int64
+            p(1) = pf_random_at(fixture_seed + 11_int64, q, 1_int64)
+            p(2) = pf_random_at(fixture_seed + 11_int64, q, 2_int64)
+            p(3) = pf_random_at(fixture_seed + 11_int64, q, 3_int64)
+            mball = sx%within(p, r, ballrows, dist=balld)
+            mann = sx%within(p, r, annrows, dist=annd, r_inner=rin)
+            mask = .false.
+            do k = 1_int64, mball
+                if (balld(k) >= rin) mask(ballrows(k)) = .true.
+            end do
+            call check(error, count(mask) == int(mann), &
+                "the annulus must hold exactly the outer ball's rows that reach the inner radius")
+            if (allocated(error)) return
+            do k = 1_int64, mann
+                call check(error, mask(annrows(k)), "every annulus row must be one of those rows")
+                if (allocated(error)) return
+                call check(error, annd(k) >= rin .and. annd(k) <= r, &
+                    "every annulus distance must lie between the two radii")
+                if (allocated(error)) return
+            end do
+            call check(error, sx%count_within(p, r, r_inner=rin) == mann, &
+                "count_within with an inner radius must agree with within")
+            if (allocated(error)) return
+            ! The negative control: a zero inner radius must leave the plain ball untouched, or
+            ! every assertion above would pass just as well against a query that ignored r_inner.
+            mplain = sx%within(p, r, plain, r_inner=0.0_real64)
+            call check(error, same_rows(plain, mplain, ballrows, mball), &
+                "r_inner = 0 must reproduce the plain ball row for row")
+            if (allocated(error)) return
+            call check(error, mann < mball, "this fixture must have the inner radius actually remove rows")
+            if (allocated(error)) return
+        end do
+    end subroutine test_annulus_is_the_difference_of_two_balls
+
+    !> The annulus in the bulk forms, in the pair sweep, and on the sky.
+    subroutine test_annulus_in_bulk_and_on_the_sky(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:), ra(:), dec(:), dsky(:)
+        integer(int64), allocatable :: counts(:), offsets(:), neigh(:), pi(:), pj(:), qi(:), qj(:)
+        integer(int64), allocatable :: rowsky(:)
+        type(pf_spatial_index) :: sx, sk
+        integer(int64) :: n, i, k, kept, m
+        real(real64) :: p(3), r, rin, d2
+
+        n = 700_int64
+        r = 0.25_real64
+        rin = 0.15_real64
+        call make_cloud(n, 1.0_real64, .false., x, y, z)
+        call sx%build(x, y, z, radius=r)
+        call sx%count_all_within(r, counts, r_inner=rin)
+        call sx%all_within(r, offsets, neigh, r_inner=rin)
+        do i = 1_int64, n
+            p = [x(i), y(i), z(i)]
+            call check(error, counts(i) == sx%count_within(p, r, r_inner=rin), &
+                "the bulk annulus count must reproduce the single-query one for every row")
+            if (allocated(error)) return
+            call check(error, offsets(i + 1_int64) - offsets(i) == counts(i), &
+                "the CSR row lengths must match the counts under an inner radius")
+            if (allocated(error)) return
+        end do
+        ! The pair sweep drops exactly the pairs the inner radius excludes, and nothing else.
+        call sx%pairs_within(r, pi, pj)
+        call sx%pairs_within(r, qi, qj, r_inner=rin)
+        kept = 0_int64
+        do k = 1_int64, size(pi, kind=int64)
+            d2 = (x(pi(k)) - x(pj(k))) ** 2 + (y(pi(k)) - y(pj(k))) ** 2 + (z(pi(k)) - z(pj(k))) ** 2
+            if (d2 >= rin * rin) kept = kept + 1_int64
+        end do
+        call check(error, kept == size(qi, kind=int64), &
+            "an inner radius must drop exactly the pairs closer than it")
+        if (allocated(error)) return
+        call check(error, size(qi, kind=int64) < size(pi, kind=int64), &
+            "this fixture must have the inner radius actually drop pairs")
+        if (allocated(error)) return
+        ! On the sky the same rule applies in degrees, and the chord being monotone is what makes
+        ! the conversion invisible to any of it.
+        ! The north polar cap, which is where this fixture is dense enough for an annulus to
+        ! remove a visible number of rows rather than a fraction of one.
+        call make_sky(600_int64, ra, dec)
+        call sk%build_sky(ra, dec, radius_deg=3.0_real64)
+        allocate (rowsky(600), dsky(600))
+        m = sk%within_sky(0.0_real64, 90.0_real64, 3.0_real64, rowsky, dist_deg=dsky, r_inner_deg=1.0_real64)
+        call check(error, m > 0_int64, "the sky annulus fixture must return points")
+        if (allocated(error)) return
+        do k = 1_int64, m
+            call check(error, dsky(k) >= 1.0_real64 .and. dsky(k) <= 3.0_real64, &
+                "every sky annulus separation must lie between the two angular radii")
+            if (allocated(error)) return
+            call check(error, abs(sky_sep(0.0_real64, 90.0_real64, ra(rowsky(k)), dec(rowsky(k))) &
+                - dsky(k)) <= 1.0e-9_real64, "a sky annulus separation must match a haversine one")
+            if (allocated(error)) return
+        end do
+        k = sk%within_sky(0.0_real64, 90.0_real64, 3.0_real64, rowsky)
+        call check(error, m < k, "this sky fixture must have the inner radius actually remove rows")
+    end subroutine test_annulus_in_bulk_and_on_the_sky
+
+    !> `sorted=` returns increasing distances, the same SET, and a machine-independent tie order.
+    subroutine test_sorted_orders_by_distance(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:), ra(:), dec(:)
+        real(real64), allocatable :: dd(:)
+        integer(int64), allocatable :: got(:), plain(:), offsets(:), neigh(:)
+        type(pf_spatial_index) :: sx, sk
+        integer(int64) :: n, m, mp, k, i, s0, e0
+        real(real64) :: p(3), r, prev, d
+
+        n = 900_int64
+        r = 0.25_real64
+        call make_cloud(n, 1.0_real64, .false., x, y, z)
+        call sx%build(x, y, z, radius=r)
+        allocate (got(n), plain(n), dd(n))
+        p = [0.4_real64, 0.5_real64, 0.6_real64]
+        m = sx%within(p, r, got, dist=dd, sorted=.true.)
+        mp = sx%within(p, r, plain)
+        call check(error, m > 10_int64, "the ordering fixture must return a useful number of points")
+        if (allocated(error)) return
+        call check(error, same_rows(got, m, plain, mp), &
+            "sorting must not change which rows come back, only their order")
+        if (allocated(error)) return
+        do k = 2_int64, m
+            call check(error, dd(k) >= dd(k - 1_int64), "sorted distances must be non-decreasing")
+            if (allocated(error)) return
+        end do
+        ! Ordering must work when the caller wants no distances at all, which is the case that
+        ! needs a buffer of the library's own.
+        got = -1_int64
+        m = sx%within(p, r, got, sorted=.true.)
+        prev = -1.0_real64
+        do k = 1_int64, m
+            d = sqrt((x(got(k)) - p(1)) ** 2 + (y(got(k)) - p(2)) ** 2 + (z(got(k)) - p(3)) ** 2)
+            call check(error, d >= prev, "sorted= must order the rows even when dist= is absent")
+            if (allocated(error)) return
+            prev = d
+        end do
+        ! A CSR bulk sweep orders WITHIN each row.
+        call sx%all_within(r, offsets, neigh, sorted=.true.)
+        do i = 1_int64, n
+            s0 = offsets(i)
+            e0 = offsets(i + 1_int64) - 1_int64
+            prev = -1.0_real64
+            do k = s0, e0
+                d = sqrt((x(neigh(k)) - x(i)) ** 2 + (y(neigh(k)) - y(i)) ** 2 + (z(neigh(k)) - z(i)) ** 2)
+                call check(error, d >= prev, "each CSR row must come back ordered by increasing distance")
+                if (allocated(error)) return
+                prev = d
+            end do
+        end do
+        ! And on the sky, where the walk orders chords and the caller reads degrees.
+        call make_sky(600_int64, ra, dec)
+        call sk%build_sky(ra, dec, radius_deg=5.0_real64)
+        m = sk%within_sky(0.0_real64, 0.0_real64, 5.0_real64, got, dist_deg=dd, sorted=.true.)
+        call check(error, m > 5_int64, "the sky ordering fixture must return points")
+        if (allocated(error)) return
+        do k = 2_int64, m
+            call check(error, dd(k) >= dd(k - 1_int64), "sorted sky separations must be non-decreasing")
+            if (allocated(error)) return
+        end do
+    end subroutine test_sorted_orders_by_distance
+
+    !> Exact ties come back in ascending ROW index, with a control proving the walk did not.
+    !>
+    !> **Without an explicit tie-break the order among equal distances is cell order**, which
+    !> depends on the tuned cell size and so on the machine -- exactly what a caller asking for a
+    !> canonical order does not want. Six points at distance exactly 1 from the origin make that
+    !> visible: their coordinates are integers, so the distances are equal to the last bit rather
+    !> than nearly, and they are numbered against the grid's own z-major traversal so the walk
+    !> produces them backwards.
+    !>
+    !> The filler points are not padding: with only six points the cell-count clamp puts them all
+    !> in ONE cell, where the bucketing sort's stability hands them back in row order already and
+    !> the control below would pass for the wrong reason.
+    subroutine test_sorted_breaks_ties_by_row(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64) :: x(400), y(400), z(400), dd(400)
+        integer(int64) :: got(400), unsorted(400), m, k, ntie
+        type(pf_spatial_index) :: sx
+        real(real64) :: q(3), rad
+        logical :: walk_was_ascending
+
+        do k = 1_int64, 394_int64
+            rad = 0.85_real64 * pf_random_at(fixture_seed + 31_int64, k, 1_int64) ** (1.0_real64 / 3.0_real64)
+            q(1) = 2.0_real64 * pf_random_at(fixture_seed + 31_int64, k, 2_int64) - 1.0_real64
+            q(2) = 2.0_real64 * pf_random_at(fixture_seed + 31_int64, k, 3_int64) - 1.0_real64
+            q(3) = 2.0_real64 * pf_random_at(fixture_seed + 31_int64, k, 4_int64) - 1.0_real64
+            q = q / max(sqrt(sum(q * q)), 1.0e-12_real64)
+            x(k) = rad * q(1)
+            y(k) = rad * q(2)
+            z(k) = rad * q(3)
+        end do
+        ! Numbered in REVERSE traversal order, so the walk emits 400 first and 395 last.
+        x(395:400) = [0.0_real64, 0.0_real64, 1.0_real64, -1.0_real64, 0.0_real64, 0.0_real64]
+        y(395:400) = [0.0_real64, 1.0_real64, 0.0_real64, 0.0_real64, -1.0_real64, 0.0_real64]
+        z(395:400) = [1.0_real64, 0.0_real64, 0.0_real64, 0.0_real64, 0.0_real64, -1.0_real64]
+        ! The cell is FORCED, so the control below cannot start passing for the wrong reason when
+        ! the tuner's own choice moves: a cell coarse enough to hold several tied points at once
+        ! hands them back in row order already, since the bucketing sort is stable.
+        call parquet_debug_set_spatial_cell(0.5_real64)
+        call sx%build(x, y, z, radius=1.0_real64)
+        q = 0.0_real64
+        m = sx%within(q, 1.0_real64, unsorted)
+        walk_was_ascending = .true.
+        do k = 2_int64, m
+            if (unsorted(k) < unsorted(k - 1_int64)) walk_was_ascending = .false.
+        end do
+        m = sx%within(q, 1.0_real64, got, dist=dd, sorted=.true.)
+        call parquet_debug_set_spatial_cell(-1.0_real64)
+        call check(error, m == 400_int64, "every point of the tie fixture is within the unit ball")
+        if (allocated(error)) return
+        call check(error, .not. walk_was_ascending, &
+            "the control: the unsorted walk must NOT already be in row order, or the tie-break is untested")
+        if (allocated(error)) return
+        do k = 2_int64, m
+            call check(error, dd(k) >= dd(k - 1_int64), "sorted distances must be non-decreasing")
+            if (allocated(error)) return
+        end do
+        ! The six tied rows sit at the end, all at distance exactly 1, and must come back in
+        ! ascending row order however the walk found them.
+        ntie = 0_int64
+        do k = 1_int64, m
+            if (dd(k) /= 1.0_real64) cycle
+            ntie = ntie + 1_int64
+            if (ntie > 1_int64) then
+                call check(error, got(k) > got(k - 1_int64), &
+                    "an exact tie must be broken by ascending row index, so the order is the same everywhere")
+                if (allocated(error)) return
+            end if
+        end do
+        call check(error, ntie == 6_int64, "the fixture must present exactly six exactly-tied rows")
+    end subroutine test_sorted_breaks_ties_by_row
+
+    ! ---- k nearest neighbours, and the k-th neighbour distance ----
+
+    !> `%nearest` against a full sort of every distance, over several k and several query points.
+    subroutine test_nearest_matches_a_full_sort(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:), wd(:), gd(:)
+        integer(int64), allocatable :: wrows(:)
+        integer(int64) :: got(64), n, m, k, q, kk
+        type(pf_spatial_index) :: sx
+        real(real64) :: p(3), free(3)
+        integer :: ik
+
+        n = 500_int64
+        free = 0.0_real64
+        call make_cloud(n, 1.0_real64, .false., x, y, z)
+        call sx%build(x, y, z, radius=0.15_real64)
+        allocate (gd(64))
+        do ik = 1, 3
+            select case (ik)
+            case (1)
+                kk = 1_int64
+            case (2)
+                kk = 7_int64
+            case default
+                kk = 40_int64
+            end select
+            do q = 1_int64, 8_int64
+                p(1) = pf_random_at(fixture_seed + 41_int64, q, 1_int64)
+                p(2) = pf_random_at(fixture_seed + 41_int64, q, 2_int64)
+                p(3) = pf_random_at(fixture_seed + 41_int64, q, 3_int64)
+                m = sx%nearest(p, kk, got, dist=gd)
+                call check(error, m == kk, "%nearest must report min(k, %size()) as the true count")
+                if (allocated(error)) return
+                call brute_nearest(x, y, z, p, free, wrows, wd)
+                do k = 1_int64, m
+                    call check(error, got(k) == wrows(k), &
+                        "%nearest must return the same rows, in the same order, as a full sort of every distance")
+                    if (allocated(error)) return
+                    call check(error, abs(gd(k) - wd(k)) <= 1.0e-12_real64, &
+                        "%nearest's distances must match the full sort's")
+                    if (allocated(error)) return
+                end do
+            end do
+        end do
+        ! A query point sitting exactly on a catalogue row must find it, at distance zero.
+        p = [x(37), y(37), z(37)]
+        m = sx%nearest(p, 3_int32, got, dist=gd)
+        call check(error, got(1) == 37_int64 .and. gd(1) == 0.0_real64, &
+            "a query coincident with a row must return that row first, at distance zero")
+    end subroutine test_nearest_matches_a_full_sort
+
+    !> `k` at and beyond the catalogue size, and a one-point index.
+    subroutine test_nearest_k_at_and_beyond_the_size(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int64) :: got(200), n, m
+        real(real64) :: gd(200), one(1)
+        type(pf_spatial_index) :: sx, s1
+
+        n = 120_int64
+        call make_cloud(n, 1.0_real64, .false., x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64)
+        m = sx%nearest([0.5_real64, 0.5_real64, 0.5_real64], n, got, dist=gd)
+        call check(error, m == n, "k = n must return every row")
+        if (allocated(error)) return
+        ! Every row, so the last distance is the farthest point in the cloud -- which is what the
+        ! expanding ball's own cap has to have reached.
+        m = sx%nearest([0.5_real64, 0.5_real64, 0.5_real64], 5000_int64, got, dist=gd)
+        call check(error, m == n, "k beyond the catalogue size must return every row rather than failing")
+        if (allocated(error)) return
+        one = 0.0_real64
+        call s1%build(one, one, one, radius=1.0_real64)
+        m = s1%nearest([3.0_real64, 0.0_real64, 0.0_real64], 4_int32, got, dist=gd)
+        call check(error, m == 1_int64 .and. got(1) == 1_int64, &
+            "a one-point index must return its single row")
+        if (allocated(error)) return
+        call check(error, abs(gd(1) - 3.0_real64) <= 1.0e-12_real64, &
+            "and the distance to it, however far outside the cloud the query sits")
+    end subroutine test_nearest_k_at_and_beyond_the_size
+
+    !> The expanding ball's starting radius changes the ROUNDS and never the answers.
+    !>
+    !> **A shell that never expands passes every correctness test ever written for it**, because
+    !> the answers do not depend on how many rounds it took. Forcing a deliberately tiny start
+    !> against a deliberately generous one, and asserting the round counter moved, is what
+    !> separates "the expansion works" from "the expansion never happened".
+    subroutine test_nearest_shell_start_does_not_change_answers(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int64) :: tiny_rows(12), big_rows(12), auto_rows(12), m, k
+        integer(int64) :: rounds_tiny, rounds_big
+        real(real64) :: p(3)
+        type(pf_spatial_index) :: sx
+
+        call make_cloud(600_int64, 1.0_real64, .false., x, y, z)
+        call sx%build(x, y, z, radius=0.15_real64)
+        p = [0.5_real64, 0.5_real64, 0.5_real64]
+        m = sx%nearest(p, 12_int32, auto_rows)
+        call parquet_debug_reset_spatial_counters()
+        call parquet_debug_set_spatial_shell_start(0.0005_real64)
+        m = sx%nearest(p, 12_int32, tiny_rows)
+        rounds_tiny = parquet_debug_spatial_shell_rounds()
+        call parquet_debug_reset_spatial_counters()
+        call parquet_debug_set_spatial_shell_start(0.9_real64)
+        m = sx%nearest(p, 12_int32, big_rows)
+        rounds_big = parquet_debug_spatial_shell_rounds()
+        call parquet_debug_reset_spatial_counters()
+        do k = 1_int64, 12_int64
+            call check(error, tiny_rows(k) == big_rows(k) .and. tiny_rows(k) == auto_rows(k), &
+                "the starting radius must change how long the search takes and never what it returns")
+            if (allocated(error)) return
+        end do
+        call check(error, rounds_big == 1_int64, "a generous start must converge in one round")
+        if (allocated(error)) return
+        call check(error, rounds_tiny > rounds_big, &
+            "a tiny start must take more rounds, which is what proves the ball expanded at all")
+    end subroutine test_nearest_shell_start_does_not_change_answers
+
+    !> `%nearest_sky` against a haversine sort, and `%nearest` on a periodic index.
+    subroutine test_nearest_sky_and_periodic(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), x(:), y(:), z(:), wd(:), sep(:)
+        integer(int64), allocatable :: wrows(:), perm(:)
+        integer(int64) :: got(16), n, m, k
+        real(real64) :: gd(16), p(3), box(3)
+        type(pf_spatial_index) :: sk, sx
+
+        n = 600_int64
+        call make_sky(n, ra, dec)
+        call sk%build_sky(ra, dec, radius_deg=3.0_real64)
+        allocate (sep(n))
+        ! At the north pole, across 0h and in the sparse background alike: the last of those is
+        ! what needs the shell to grow well past the radius the index was tuned for.
+        do k = 1_int64, n
+            sep(k) = sky_sep(0.0_real64, 90.0_real64, ra(k), dec(k))
+        end do
+        call pf_argsort(sep, perm)
+        m = sk%nearest_sky(0.0_real64, 90.0_real64, 9_int32, got, dist_deg=gd)
+        call check(error, m == 9_int64, "%nearest_sky must report the true count")
+        if (allocated(error)) return
+        do k = 1_int64, m
+            call check(error, got(k) == perm(k), &
+                "%nearest_sky must return the rows a haversine sort puts first")
+            if (allocated(error)) return
+            call check(error, abs(gd(k) - sep(perm(k))) <= 1.0e-9_real64, &
+                "%nearest_sky must report the separation in degrees")
+            if (allocated(error)) return
+        end do
+        do k = 1_int64, n
+            sep(k) = sky_sep(200.0_real64, -75.0_real64, ra(k), dec(k))
+        end do
+        call pf_argsort(sep, perm)
+        m = sk%nearest_sky(200.0_real64, -75.0_real64, 5_int32, got, dist_deg=gd)
+        do k = 1_int64, m
+            call check(error, got(k) == perm(k), &
+                "%nearest_sky must be right in the sparse background too, where the ball must grow")
+            if (allocated(error)) return
+        end do
+        ! Periodic: the minimum image decides which neighbours are nearest, and the shell is
+        ! capped at half the box.
+        box = 1.0_real64
+        call make_cloud(400_int64, 1.0_real64, .false., x, y, z)
+        call sx%build(x, y, z, radius=0.15_real64, box_lo=[0.0_real64, 0.0_real64, 0.0_real64], &
+            box_hi=[1.0_real64, 1.0_real64, 1.0_real64])
+        p = [0.02_real64, 0.98_real64, 0.5_real64]
+        m = sx%nearest(p, 6_int32, got, dist=gd)
+        call brute_nearest(x, y, z, p, box, wrows, wd)
+        do k = 1_int64, m
+            call check(error, got(k) == wrows(k), &
+                "a periodic %nearest must agree with a minimum-image sort, including across the faces")
+            if (allocated(error)) return
+        end do
+    end subroutine test_nearest_sky_and_periodic
+
+    !> `%kth_distance` against a full per-point sort that excludes self.
+    subroutine test_kth_distance_matches_a_full_sort(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:), got(:), want(:), gd(:)
+        integer(int64) :: n, i, m
+        integer(int64) :: rows(8)
+        type(pf_spatial_index) :: sx
+        integer :: ik
+        integer(int64) :: k
+
+        n = 300_int64
+        call make_cloud(n, 1.0_real64, .false., x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64)
+        allocate (gd(8))
+        do ik = 1, 3
+            select case (ik)
+            case (1)
+                k = 1_int64
+            case (2)
+                k = 5_int64
+            case default
+                k = n - 1_int64
+            end select
+            call sx%kth_distance(k, got)
+            call brute_kth(x, y, z, k, want)
+            call check(error, size(got, kind=int64) == n, &
+                "%kth_distance must report one distance per row, in the caller's row order")
+            if (allocated(error)) return
+            call check(error, maxval(abs(got - want)) <= 1.0e-12_real64, &
+                "%kth_distance must match a per-point sort that excludes the point itself")
+            if (allocated(error)) return
+        end do
+        ! A second, independent oracle: the (k+1)-th nearest INCLUDING self is the k-th excluding
+        ! it, valid here because no two points of this fixture coincide.
+        call sx%kth_distance(3_int32, got)
+        do i = 1_int64, n
+            m = sx%nearest([x(i), y(i), z(i)], 4_int32, rows, dist=gd)
+            call check(error, abs(got(i) - gd(4)) <= 1.0e-12_real64, &
+                "%kth_distance must agree with a loop of %nearest(p, k+1) taking the last distance")
+            if (allocated(error)) return
+        end do
+    end subroutine test_kth_distance_matches_a_full_sort
+
+    !> `%kth_distance_sky` answers in degrees, and coincident points give zero rather than failing.
+    subroutine test_kth_distance_sky_and_duplicates(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), got(:)
+        real(real64) :: x(6), y(6), z(6)
+        real(real64), allocatable :: kd(:)
+        integer(int64) :: n, i, j, k
+        real(real64) :: best, sep
+        type(pf_spatial_index) :: sk, sx
+
+        n = 400_int64
+        call make_sky(n, ra, dec)
+        call sk%build_sky(ra, dec, radius_deg=3.0_real64)
+        call sk%kth_distance_sky(1_int32, got)
+        do i = 1_int64, n
+            best = 1.0e30_real64
+            do j = 1_int64, n
+                if (j == i) cycle
+                sep = sky_sep(ra(i), dec(i), ra(j), dec(j))
+                if (sep < best) best = sep
+            end do
+            call check(error, abs(got(i) - best) <= 1.0e-9_real64, &
+                "%kth_distance_sky must report the nearest neighbour's separation in degrees")
+            if (allocated(error)) return
+        end do
+        ! Four points share one position: self must be excluded by IDENTITY rather than by
+        ! distance, or a duplicate would be mistaken for the point itself.
+        x = [0.0_real64, 0.0_real64, 0.0_real64, 0.0_real64, 1.0_real64, 2.0_real64]
+        y = 0.0_real64
+        z = 0.0_real64
+        call sx%build(x, y, z, radius=1.0_real64)
+        call sx%kth_distance(1_int32, kd)
+        do k = 1_int64, 4_int64
+            call check(error, kd(k) == 0.0_real64, &
+                "a point with a coincident twin has a nearest neighbour at distance zero, not itself")
+            if (allocated(error)) return
+        end do
+        call check(error, kd(5) == 1.0_real64, "and a point with no twin reports its real neighbour")
+        if (allocated(error)) return
+        call sx%kth_distance(4_int32, kd)
+        call check(error, kd(1) == 1.0_real64, &
+            "the 4th neighbour of one of four coincident points is the first point outside the clump")
+    end subroutine test_kth_distance_sky_and_duplicates
+
+    !> A threaded k-th neighbour sweep returns exactly the serial answer.
+    subroutine test_kth_distance_threaded_matches_serial(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:), one(:), many(:)
+        type(pf_spatial_index) :: sx
+
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it both arms run the same serial sweep, so the " // &
+            "equality below would hold for the wrong reason")
+        return
+#endif
+        call make_clustered_cloud(1200_int64, x, y, z)
+        call sx%build(x, y, z, radius=0.05_real64)
+        call sx%kth_distance(4_int32, one, threads=1)
+        call sx%kth_distance(4_int32, many, threads=4)
+        call check(error, maxval(abs(one - many)) == 0.0_real64, &
+            "a threaded k-th neighbour sweep must return exactly the serial answer, bit for bit")
+    end subroutine test_kth_distance_threaded_matches_serial
+
+    !> The radius carried from one point to the next saves expansion rounds.
+    !>
+    !> **This is what stops the carry-over silently ceasing to work.** It changes only the starting
+    !> radius, so no answer can ever reveal that it stopped -- only a counter can, and the cost of
+    !> losing it is several times the runtime with nothing failing. The fixture is CLUSTERED on
+    !> purpose: on a uniform cloud the density-derived start is already right everywhere and there
+    !> is nothing for a carried radius to improve on.
+    subroutine test_kth_distance_carry_over_saves_rounds(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:), kd(:)
+        integer(int64) :: n, i, m, rounds_swept, rounds_cold
+        integer(int64) :: rows(8)
+        real(real64) :: gd(8)
+        type(pf_spatial_index) :: sx
+
+        n = 1200_int64
+        call make_clustered_cloud(n, x, y, z)
+        call sx%build(x, y, z, radius=0.05_real64)
+        ! The sweep runs in stored order, so each query starts from the radius the previous one
+        ! converged to. A loop of %nearest starts every query from the density-derived radius
+        ! instead, which is the cold-start comparison.
+        call parquet_debug_reset_spatial_counters()
+        call sx%kth_distance(4_int32, kd, threads=1)
+        rounds_swept = parquet_debug_spatial_shell_rounds()
+        call parquet_debug_reset_spatial_counters()
+        do i = 1_int64, n
+            m = sx%nearest([x(i), y(i), z(i)], 5_int32, rows, dist=gd)
+        end do
+        rounds_cold = parquet_debug_spatial_shell_rounds()
+        call parquet_debug_reset_spatial_counters()
+        call check(error, rounds_cold >= n, "the control: a cold start takes at least one round per point")
+        if (allocated(error)) return
+        call check(error, rounds_swept < rounds_cold, &
+            "carrying the converged radius from one point to the next must save expansion rounds")
+    end subroutine test_kth_distance_carry_over_saves_rounds
+
+    ! ---- Connected components ----
+
+    !> Hand-built graphs whose components are known by inspection.
+    !>
+    !> **Isolated vertices sit at the END of the numbering on purpose.** That is the case a `nvert`
+    !> derived from the edge list gets wrong: an isolated vertex never appears in an edge list, so
+    !> `max(maxval(i), maxval(j))` would silently return a shorter `labels` array than the
+    !> catalogue has rows -- a wrong answer with no symptom.
+    subroutine test_components_hand_built_graphs(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        integer(int64) :: ei(9), ej(9), pi(9), pj(9)
+        integer(int64), allocatable :: labels(:), other(:), sizes(:)
+        integer(int64) :: ncomp, k
+
+        ! A chain on 1-4, a star on 5-7, a two-vertex component on 8-9, and 10, 11, 12 isolated.
+        ! The list carries a duplicate edge and a reversed one, both of which must be harmless.
+        ei = [1_int64, 2_int64, 3_int64, 5_int64, 5_int64, 8_int64, 9_int64, 3_int64, 2_int64]
+        ej = [2_int64, 3_int64, 4_int64, 6_int64, 7_int64, 9_int64, 8_int64, 2_int64, 1_int64]
+        call pf_connected_components(ei, ej, 12_int32, labels, ncomp=ncomp, sizes=sizes)
+        call check(error, size(labels, kind=int64) == 12_int64, &
+            "labels must be as long as the vertex count, isolated vertices included")
+        if (allocated(error)) return
+        call check(error, ncomp == 3_int64, "this graph has three components of at least two vertices")
+        if (allocated(error)) return
+        ! Numbered by ascending vertex of first appearance, which is a contract rather than a
+        ! detail: left to the union-find's own roots it would depend on tie-breaking inside it.
+        call check(error, all(labels(1:4) == 1_int64), "the component containing vertex 1 must be label 1")
+        if (allocated(error)) return
+        call check(error, all(labels(5:7) == 2_int64), "the next component in vertex order must be label 2")
+        if (allocated(error)) return
+        call check(error, all(labels(8:9) == 3_int64), "and the next after that must be label 3")
+        if (allocated(error)) return
+        call check(error, all(labels(10:12) == 0_int64), &
+            "an isolated vertex must be labelled 0 under the default min_size of 2")
+        if (allocated(error)) return
+        call check(error, size(sizes, kind=int64) == 3_int64, "sizes must be as long as ncomp")
+        if (allocated(error)) return
+        call check(error, all(sizes == [4_int64, 3_int64, 2_int64]), &
+            "sizes must follow the same label order")
+        if (allocated(error)) return
+        ! Edge ORDER must not reach the answer: reversing the list exercises a different sequence
+        ! of unions and so a different internal root for every component.
+        do k = 1_int64, 9_int64
+            pi(k) = ei(10_int64 - k)
+            pj(k) = ej(10_int64 - k)
+        end do
+        call pf_connected_components(pi, pj, 12_int64, other)
+        call check(error, all(other == labels), &
+            "the labels must not depend on the order the edges arrived in")
+        if (allocated(error)) return
+        ! An int64 vertex count must agree with an int32 one.
+        call pf_connected_components(ei, ej, 12_int64, other)
+        call check(error, all(other == labels), "both vertex-count kinds must give the same labels")
+    end subroutine test_components_hand_built_graphs
+
+    !> `min_size` thresholds components, with `min_size = 1` as the negative control.
+    subroutine test_components_min_size_threshold(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        integer(int64) :: ei(5), ej(5), none_i(0), none_j(0)
+        integer(int64), allocatable :: labels(:), sizes(:)
+        integer(int64) :: ncomp, k
+
+        ! Components of size 2, 3 and 4, plus vertex 10 isolated with a self-loop on it.
+        ei = [1_int64, 3_int64, 4_int64, 6_int64, 10_int64]
+        ej = [2_int64, 4_int64, 5_int64, 7_int64, 10_int64]
+        ei(4) = 6_int64
+        ej(4) = 7_int64
+        call pf_connected_components([ei(1), ei(2), ei(3), 6_int64, 7_int64, 10_int64], &
+            [ej(1), ej(2), ej(3), 7_int64, 8_int64, 10_int64], 10_int64, labels, ncomp=ncomp, sizes=sizes)
+        call check(error, ncomp == 3_int64, "three components reach the default min_size of 2")
+        if (allocated(error)) return
+        call check(error, all(sizes == [2_int64, 3_int64, 3_int64]), &
+            "their sizes are 2, 3 and 3, in ascending first-vertex order")
+        if (allocated(error)) return
+        ! **A self-loop is not company.** "Isolated" means component size 1, not "has no edge" --
+        ! the two differ exactly here, and a vertex whose only edge is to itself is alone.
+        call check(error, labels(10) == 0_int64, "a vertex whose only edge is a self-loop is still isolated")
+        if (allocated(error)) return
+        call check(error, labels(9) == 0_int64, "and so is one with no edge at all")
+        if (allocated(error)) return
+        ! min_size = 3 drops the pair; min_size = 1 restores the strict graph-theoretic reading, in
+        ! which every vertex belongs to some component. The second is the negative control that
+        ! proves the default is doing something rather than nothing.
+        call pf_connected_components([ei(1), ei(2), ei(3), 6_int64, 7_int64, 10_int64], &
+            [ej(1), ej(2), ej(3), 7_int64, 8_int64, 10_int64], 10_int64, labels, ncomp=ncomp, min_size=3)
+        call check(error, ncomp == 2_int64, "min_size = 3 must drop the two-vertex component")
+        if (allocated(error)) return
+        call check(error, labels(1) == 0_int64 .and. labels(2) == 0_int64, &
+            "and must unlabel both its vertices")
+        if (allocated(error)) return
+        call pf_connected_components([ei(1), ei(2), ei(3), 6_int64, 7_int64, 10_int64], &
+            [ej(1), ej(2), ej(3), 7_int64, 8_int64, 10_int64], 10_int64, labels, ncomp=ncomp, min_size=1)
+        call check(error, ncomp == 5_int64, &
+            "min_size = 1 must count every vertex, singletons included: three groups plus vertices 9 and 10")
+        if (allocated(error)) return
+        call check(error, all(labels > 0_int64), "and must leave no vertex unlabelled")
+        if (allocated(error)) return
+        ! An empty edge list is every vertex on its own.
+        call pf_connected_components(none_i, none_j, 5_int64, labels, ncomp=ncomp, sizes=sizes)
+        call check(error, ncomp == 0_int64 .and. all(labels == 0_int64) .and. size(sizes) == 0, &
+            "an empty edge list has no component of two or more, so every label is 0")
+        if (allocated(error)) return
+        call pf_connected_components(none_i, none_j, 5_int64, labels, ncomp=ncomp, sizes=sizes, min_size=1)
+        call check(error, ncomp == 5_int64, "under min_size = 1 an empty edge list is five components")
+        if (allocated(error)) return
+        do k = 1_int64, 5_int64
+            call check(error, labels(k) == k, "each of which is its own vertex, numbered in vertex order")
+            if (allocated(error)) return
+        end do
+        call check(error, all(sizes == 1_int64), "and each of size one")
+        if (allocated(error)) return
+        ! Zero vertices is an answer, not a failure.
+        call pf_connected_components(none_i, none_j, 0_int64, labels, ncomp=ncomp, sizes=sizes)
+        call check(error, size(labels) == 0 .and. ncomp == 0_int64 .and. size(sizes) == 0, &
+            "an empty graph has no vertices, no components and no sizes")
+    end subroutine test_components_min_size_threshold
+
+    !> Friends-of-Friends end to end: `%pairs_within` then `pf_connected_components`.
+    !>
+    !> The oracle is LABEL PROPAGATION over an O(n^2) adjacency, which shares no machinery with
+    !> either half of what is under test -- only the definition of "connected". Partitions are
+    !> compared rather than label values, since the oracle numbers its groups differently.
+    subroutine test_components_friends_of_friends(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int64), allocatable :: pi(:), pj(:), labels(:), want(:), sizes(:)
+        type(pf_spatial_index) :: sx
+        integer(int64) :: n, ncomp, k, total
+
+        n = 400_int64
+        call make_clustered_cloud(n, x, y, z)
+        call sx%build(x, y, z, radius=0.02_real64)
+        call sx%pairs_within(0.02_real64, pi, pj)
+        call pf_connected_components(pi, pj, n, labels, ncomp=ncomp, sizes=sizes, min_size=1)
+        call brute_components(x, y, z, 0.02_real64, want)
+        call check(error, same_partition(labels, want), &
+            "Friends-of-Friends must recover exactly the components a label-propagation scan finds")
+        if (allocated(error)) return
+        call check(error, ncomp > 1_int64 .and. ncomp < n, &
+            "this fixture must produce several groups rather than one blob or n singletons")
+        if (allocated(error)) return
+        total = 0_int64
+        do k = 1_int64, ncomp
+            total = total + sizes(k)
+        end do
+        call check(error, total == n, "under min_size = 1 the component sizes must add up to every vertex")
+        if (allocated(error)) return
+        do k = 1_int64, n
+            call check(error, sizes(labels(k)) == count(labels == labels(k)), &
+                "each reported size must be how many vertices actually carry that label")
+            if (allocated(error)) return
+        end do
+    end subroutine test_components_friends_of_friends
 
     ! ---- Periodic boundaries ----
 

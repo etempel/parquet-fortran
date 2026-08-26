@@ -98,6 +98,41 @@ The query point is a 2- or 3-element array and must match the rank the index was
 output buffer may be `integer(int32)` or `integer(int64)`; the indices are rows of the arrays you
 built from, in the caller's own order, whether or not the index copied them.
 
+Optional arguments are shown in square brackets below; they are ordinary Fortran optionals, not
+literal syntax.
+
+### An annulus, with `r_inner=`
+
+`r_inner=` puts a hole in the ball, so a point qualifies when `r_inner <= d <= r`:
+
+```fortran
+m = sx%within(p, 0.05_real64, found, r_inner=0.02_real64)
+m = sx%count_within(p, 0.05_real64, r_inner=0.02_real64)
+```
+
+**Both bounds are inclusive.** A point sitting exactly on the inner surface therefore belongs to
+the annulus and to the inner ball alike, so "annulus = outer ball minus inner ball" holds
+everywhere except on that surface itself. `r_inner = 0` is exactly the plain ball.
+
+It is available on every form that takes a radius — the bulk sweeps, and the sky queries as
+`r_inner_deg=`. The one restriction is on `%pairs_within` and `%pairs_within_sky`, where it must be
+a **scalar** even when the outer radius is a vector; see [Limitations](#limitations).
+
+### Ordered results, with `sorted=`
+
+`sorted=.true.` returns the rows by increasing distance, with **ties broken by ascending row
+index** so that the order is the same on every machine:
+
+```fortran
+m = sx%within(p, 0.05_real64, found, dist=d, sorted=.true.)
+call sx%all_within(0.05_real64, offsets, neighbours, sorted=.true.)   ! orders within each row
+```
+
+Two things to know. It needs the distances even when `dist=` is absent, so asking for it without
+wanting them still pays for them. And a buffer shorter than `m` keeps the rows the walk found
+*first*, and `sorted=` orders only those — it does not make a short buffer hold the **nearest**
+rows. [`%nearest`](#the-k-nearest-neighbours) is the query that does that.
+
 ## Every point's neighbours at once
 
 Three bulk forms sweep the whole catalogue, allocate their output once, and thread internally.
@@ -119,6 +154,14 @@ call sx%all_within(link_length, offsets, neighbours)    ! link_length(n): one pe
 
 `%all_within` reports a point as its own neighbour; `%pairs_within` does not, since a point is not
 a pair with itself.
+
+All three take `r_inner=` and the two list-producing ones take `sorted=`:
+
+```fortran
+call sx%all_within(0.05_real64, offsets, neighbours, r_inner=0.02_real64, sorted=.true.)
+call sx%count_all_within(0.05_real64, counts, r_inner=0.02_real64)
+call sx%pairs_within(0.05_real64, i, j, r_inner=0.02_real64)
+```
 
 On a sky index these three are spelled `%all_within_sky`, `%pairs_within_sky` and
 `%count_all_within_sky`, and take their radii in degrees — see
@@ -174,6 +217,34 @@ rather than a cylinder.
 A zero-length axis (`p1 == p2`) reduces to a ball — of radius `r`, or of `max(r1, r2)` for the
 cone. That is the documented answer rather than an error.
 
+### Where on the axis each point sits
+
+All three take two further outputs, and `sorted=`:
+
+```fortran
+real(real64) :: foot(3, 64), along(64)
+
+m = sx%within_segment(p1, p2, r, found, dist=d, axis_point=foot, axis_t=along, sorted=.true.)
+```
+
+- **`axis_point`** is shaped `(ndim, m)` — `(1:3, :)` on a 3D index, `(1:2, :)` on a 2D one — and
+  column `k` is **the point `dist(k)` was measured from**. For the capsule that is the closest
+  point on the *segment*, not the projection onto the infinite line: a point beyond `p2` has its
+  distance measured from `p2` itself, and `p2` is what comes back. For the cylinder and the cone
+  the distinction never arises, since both reject anything falling outside the ends.
+- **`axis_t`** is where that point sits along the axis, **normalised to `[0, 1]`** — 0 at `p1`, 1
+  at `p2`, and never outside, so a point before `p1` reports exactly 0. Multiply by
+  `norm(p2 - p1)` for a length in the index's own coordinate units.
+
+The two are redundant by construction — `axis_point == p1 + axis_t*(p2 - p1)` — and both are
+offered because a caller usually wants one or the other and never wants to reconstruct it. A
+zero-length axis reports `p1` and 0 for every point.
+
+Every output buffer, `axis_point`'s second extent and `axis_t`'s length included, truncates at the
+same place: the shortest one you pass. (The one exception is a zero-length axis, where the shape is
+a ball and every foot is `p1`, so each buffer is simply filled to its own extent.) `m` is still the
+true count, so this is a size-and-retry rather than an error.
+
 ## Search on the sky
 
 A sky index stores `(ra, dec)` in degrees as unit vectors and answers by angular radius.
@@ -226,6 +297,93 @@ Two further notes. `%effective_radius()` comes back in **degrees**, because that
 it, while `%cell_size()` and `cell=` are both in unit-vector space — they are a matched pair, so a
 value read from one can be fed back into the other. And `%build_sky` has no `copy=`: the stored
 coordinates are unit vectors it computes, so there is nothing of yours to borrow.
+
+## The k nearest neighbours
+
+`%nearest` answers the other question a spatial index is asked: not "what is within `r`" but "which
+`k` are closest".
+
+```fortran
+integer(int64) :: found(20)
+real(real64) :: d(20)
+
+m = sx%nearest(p, 20, found)                 ! nearest first, always
+m = sx%nearest(p, 20, found, dist=d)
+m = sky%nearest_sky(120.5_real64, -35.0_real64, 20, found, dist_deg=sep)
+```
+
+Results are **always ordered by increasing distance**, ties by ascending row index. `m` is
+`min(k, %size())`, so asking for more neighbours than the catalogue holds returns them all rather
+than failing, and a buffer shorter than `m` gets the *nearest* `m` — the ordering happens before
+the copy, which is the difference from `%within(sorted=.true.)`.
+
+The result is exact. A ball grows until it holds at least `k` points, after which the `k` nearest
+are exactly the `k` smallest of what that ball returned — every point closer than the `k`-th is
+inside the ball by construction. The starting radius comes from the density the index measured when
+it was built, and each miss rescales from the count it actually saw, so on ordinary data the
+expansion converges in one or two rounds.
+
+The query point need not be one of the catalogue's own: a point coincident with a stored row simply
+finds it at distance zero.
+
+### Every point's k-th neighbour distance
+
+```fortran
+real(real64), allocatable :: dk(:)
+
+call sx%kth_distance(5, dk)               ! length n, in the caller's row order
+call sky%kth_distance_sky(5, dk)          ! in degrees
+```
+
+For each point, the distance to its `k`-th nearest **other** point — self excluded, which is the
+whole reason the call exists: an adaptive-kernel density estimator wants the `k`-th neighbour, and
+counting the point itself shifts every bandwidth by one rank. `k` must be at most `%size() - 1`,
+checked up front rather than reported per row.
+
+This is cheaper than the loop of `%nearest` you would otherwise write, because the sweep runs in
+the index's own stored order: consecutive points are spatially adjacent, so the radius that
+converged for one seeds the next. That changes only how many rounds the expansion takes and never
+an answer. It threads like the other bulk forms.
+
+## Connected components, and Friends-of-Friends
+
+`pf_connected_components` labels the connected components of an undirected graph given as an edge
+list — which is exactly what `%pairs_within` returns, so a **Friends-of-Friends group finder is
+these two calls**:
+
+```fortran
+integer(int64), allocatable :: i(:), j(:), labels(:), sizes(:)
+integer(int64) :: ncomp
+
+call sx%pairs_within(link_length, i, j)
+call pf_connected_components(i, j, sx%size(), labels, ncomp=ncomp, sizes=sizes, [min_size=])
+```
+
+- `i`, `j` are the edge list. Neither direction nor `i < j` is required, and duplicate edges and
+  self-loops are harmless.
+- **`nvert` is required and must not be derived from the edge list.** An isolated vertex never
+  appears in an edge list, so taking the vertex count from `maxval` would silently drop every
+  trailing isolated point and return a `labels` array shorter than the catalogue.
+- `labels` comes back length `nvert`. A vertex in a qualifying component gets a label in
+  `1..ncomp`; **everything else gets 0**.
+- `min_size` (default 2) is the smallest component that earns a label. `min_size = 1` restores the
+  strict graph-theoretic reading in which every vertex belongs to some component.
+- `sizes` is length `ncomp`, in label order.
+
+**The default is deliberately not the textbook definition.** Mathematically a singleton *is* a
+connected component; here an isolated vertex is unlabelled, because in a group catalogue a galaxy
+with no neighbours is not a group of one, it is a field galaxy. `labels > 0` is then the mask that
+selects group members and `ncomp` is the number of groups anyone would quote.
+
+**Labels are assigned by ascending vertex index of first appearance**, so the qualifying component
+containing the lowest-numbered vertex is 1, and so on. That is a contract rather than an
+implementation detail: without it the numbering would fall out of the union-find's internal choices
+and the same catalogue could come back numbered differently on another compiler.
+
+It is a module procedure rather than a type-bound one, and it has no spatial content at all — a
+union-find over an edge list is pure graph work. It lives here so that a group finder needs one
+`use` rather than two, and because this module is a much smaller import than anywhere else it could
+sensibly go.
 
 ## Periodic boundaries
 
@@ -307,8 +465,14 @@ against a swept optimum, and thread scaling, if you want numbers for your own ma
 - **The number of cells is capped** at a fraction of the number of points. A very small `cell=` is
   coarsened to stay under it, with a warning: below that ceiling the bucketing keeps a fast path
   that a finer grid would lose, which costs more than the finer cells save.
-- **There is no k-nearest-neighbour query.** A uniform grid answers a fixed-radius question
-  directly; `k` nearest needs an expanding shell, which is a different algorithm.
+- **`r_inner=` is scalar-only on `%pairs_within` and `%pairs_within_sky`.** Everywhere else it
+  takes one value or one per point. With per-point inner radii a pair would qualify when it lies in
+  *i*'s annulus **or** in *j*'s, and the union of two different annuli is not an annulus — which
+  breaks the ranking that makes each pair be emitted from exactly one endpoint, and would leave the
+  edge list quietly incomplete. Passing one is refused rather than approximated.
+- **`%nearest` on a periodic index cannot look past half the box.** A periodic ball beyond `L/2` is
+  undefined rather than merely imprecise, so a `k` that cannot be reached inside that radius is an
+  error naming `k` and the box, not a shorter answer.
 - **The index does not know its coordinates have moved.** Nothing detects a mutated array behind a
   `copy=.false.` index, and with `copy=.true.` only `%rebuild` looks. A stale index returns wrong
   answers silently, so call `%rebuild` after anything that may have changed the data.

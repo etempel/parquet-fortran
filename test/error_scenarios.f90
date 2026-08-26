@@ -1870,6 +1870,40 @@ program error_scenarios
         call scenario_spatial_axis_before_build()
     case ("spatial_axis_radius_negative")
         call scenario_spatial_axis_radius_negative()
+    case ("spatial_annulus_inner_exceeds_outer")
+        call scenario_spatial_annulus_inner_exceeds_outer()
+    case ("spatial_annulus_inner_negative")
+        call scenario_spatial_annulus_inner_negative()
+    case ("spatial_bulk_inner_length")
+        call scenario_spatial_bulk_inner_length()
+    case ("spatial_bulk_inner_exceeds_outer")
+        call scenario_spatial_bulk_inner_exceeds_outer()
+    case ("spatial_sky_annulus_too_large")
+        call scenario_spatial_sky_annulus_too_large()
+    case ("spatial_axis_point_rank")
+        call scenario_spatial_axis_point_rank()
+    case ("spatial_nearest_k_below_one")
+        call scenario_spatial_nearest_k_below_one()
+    case ("spatial_nearest_periodic_unreachable")
+        call scenario_spatial_nearest_periodic_unreachable()
+    case ("spatial_nearest_sky_on_euclidean")
+        call scenario_spatial_nearest_sky_on_euclidean()
+    case ("spatial_kth_k_below_one")
+        call scenario_spatial_kth_k_below_one()
+    case ("spatial_kth_k_too_large")
+        call scenario_spatial_kth_k_too_large()
+    case ("spatial_kth_on_sky_index")
+        call scenario_spatial_kth_on_sky_index()
+    case ("spatial_kth_sky_on_euclidean")
+        call scenario_spatial_kth_sky_on_euclidean()
+    case ("spatial_components_length")
+        call scenario_spatial_components_length()
+    case ("spatial_components_endpoint_range")
+        call scenario_spatial_components_endpoint_range()
+    case ("spatial_components_min_size_zero")
+        call scenario_spatial_components_min_size_zero()
+    case ("spatial_components_nvert_negative")
+        call scenario_spatial_components_nvert_negative()
     case ("spatial_rebuild_warning_on")
         call scenario_spatial_rebuild_warning(warn=.true.)
     case ("spatial_rebuild_warning_off")
@@ -16550,6 +16584,199 @@ contains
     end subroutine scenario_spatial_axis_radius_negative
 
     !> A deterministic sky catalogue for the scenarios below.
+    !> An inner radius above the outer one is a shape with nothing in it, not an empty answer.
+    subroutine scenario_spatial_annulus_inner_exceeds_outer()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int64) :: got(8), m
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64)
+        m = sx%within([0.5_real64, 0.5_real64, 0.5_real64], 0.2_real64, got, r_inner=0.5_real64)   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted an inner radius above the outer one, m=", m
+    end subroutine scenario_spatial_annulus_inner_exceeds_outer
+
+    !> A negative inner radius.
+    subroutine scenario_spatial_annulus_inner_negative()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int64) :: got(8), m
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64)
+        m = sx%within([0.5_real64, 0.5_real64, 0.5_real64], 0.2_real64, got, r_inner=-0.1_real64)  ! -> aborts
+        print '(a,i0)', "unexpectedly accepted a negative inner radius, m=", m
+    end subroutine scenario_spatial_annulus_inner_negative
+
+    !> A bulk inner-radius vector that is neither one value nor one per point.
+    subroutine scenario_spatial_bulk_inner_length()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int64), allocatable :: counts(:)
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64)
+        call sx%count_all_within(spread(0.2_real64, 1, 64), counts, &
+            r_inner=[0.1_real64, 0.1_real64, 0.1_real64])                                          ! -> aborts
+        print '(a,i0)', "unexpectedly accepted a three-entry inner radius for 64 points, n=", size(counts)
+    end subroutine scenario_spatial_bulk_inner_length
+
+    !> A scalar inner radius above the SMALLEST of a per-point outer radius vector.
+    subroutine scenario_spatial_bulk_inner_exceeds_outer()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:), radii(:)
+        integer(int64), allocatable :: counts(:)
+
+        call spatial_cloud(64, x, y, z)
+        allocate (radii(64))
+        radii = 0.3_real64
+        radii(17) = 0.05_real64
+        call sx%build(x, y, z, radius=radii)
+        call sx%count_all_within(radii, counts, r_inner=[0.1_real64])                              ! -> aborts
+        print '(a,i0)', "unexpectedly accepted an inner radius above one point's outer one, n=", size(counts)
+    end subroutine scenario_spatial_bulk_inner_exceeds_outer
+
+    !> An inner angular radius above the outer one.
+    subroutine scenario_spatial_sky_annulus_too_large()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: ra(:), dec(:)
+        integer(int64) :: got(8), m
+
+        call spatial_sky_cloud(64, ra, dec)
+        call sx%build_sky(ra, dec, radius_deg=5.0_real64)
+        m = sx%within_sky(10.0_real64, 10.0_real64, 5.0_real64, got, r_inner_deg=6.0_real64)       ! -> aborts
+        print '(a,i0)', "unexpectedly accepted an inner angular radius above the outer one, m=", m
+    end subroutine scenario_spatial_sky_annulus_too_large
+
+    !> An `axis_point` buffer whose first extent is not the index's rank.
+    subroutine scenario_spatial_axis_point_rank()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+        real(real64) :: ap(2, 8)
+        integer(int64) :: got(8), m
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64)
+        m = sx%within_segment([0.2_real64, 0.2_real64, 0.2_real64], &
+            [0.8_real64, 0.8_real64, 0.8_real64], 0.1_real64, got, axis_point=ap)                  ! -> aborts
+        print '(a,i0)', "unexpectedly accepted a two-row axis_point on a 3D index, m=", m
+    end subroutine scenario_spatial_axis_point_rank
+
+    !> `%nearest` with k below one.
+    subroutine scenario_spatial_nearest_k_below_one()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int64) :: got(8), m
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64)
+        m = sx%nearest([0.5_real64, 0.5_real64, 0.5_real64], 0_int32, got)                          ! -> aborts
+        print '(a,i0)', "unexpectedly accepted k = 0, m=", m
+    end subroutine scenario_spatial_nearest_k_below_one
+
+    !> A periodic index asked for more neighbours than half the box can hold.
+    subroutine scenario_spatial_nearest_periodic_unreachable()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int64) :: got(64), m
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64, box_lo=[0.0_real64, 0.0_real64, 0.0_real64], &
+            box_hi=[1.0_real64, 1.0_real64, 1.0_real64])
+        ! The inscribed sphere is about 52% of the box, so 63 of 64 points cannot be reached
+        ! without a radius past L/2 -- where a periodic ball is undefined rather than imprecise.
+        m = sx%nearest([0.5_real64, 0.5_real64, 0.5_real64], 63_int32, got)                         ! -> aborts
+        print '(a,i0)', "unexpectedly answered a periodic nearest past half the box, m=", m
+    end subroutine scenario_spatial_nearest_periodic_unreachable
+
+    !> `%nearest_sky` on a Euclidean index.
+    subroutine scenario_spatial_nearest_sky_on_euclidean()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int64) :: got(8), m
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64)
+        m = sx%nearest_sky(10.0_real64, 10.0_real64, 3_int32, got)                                  ! -> aborts
+        print '(a,i0)', "unexpectedly answered a sky nearest on a Euclidean index, m=", m
+    end subroutine scenario_spatial_nearest_sky_on_euclidean
+
+    !> `%kth_distance` with k below one.
+    subroutine scenario_spatial_kth_k_below_one()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:), d(:)
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64)
+        call sx%kth_distance(0_int32, d)                                                            ! -> aborts
+        print '(a,i0)', "unexpectedly accepted k = 0 for kth_distance, n=", size(d)
+    end subroutine scenario_spatial_kth_k_below_one
+
+    !> `%kth_distance` with k at the catalogue size, where no point has that many OTHERS.
+    subroutine scenario_spatial_kth_k_too_large()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:), d(:)
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64)
+        call sx%kth_distance(64_int32, d)                                                           ! -> aborts
+        print '(a,i0)', "unexpectedly accepted k = n for kth_distance, n=", size(d)
+    end subroutine scenario_spatial_kth_k_too_large
+
+    !> `%kth_distance` on a sky index, which would answer in chords to a caller reading degrees.
+    subroutine scenario_spatial_kth_on_sky_index()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: ra(:), dec(:), d(:)
+
+        call spatial_sky_cloud(64, ra, dec)
+        call sx%build_sky(ra, dec, radius_deg=5.0_real64)
+        call sx%kth_distance(2_int32, d)                                                            ! -> aborts
+        print '(a,i0)', "unexpectedly answered kth_distance in chords on a sky index, n=", size(d)
+    end subroutine scenario_spatial_kth_on_sky_index
+
+    !> `%kth_distance_sky` on a Euclidean index.
+    subroutine scenario_spatial_kth_sky_on_euclidean()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:), d(:)
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64)
+        call sx%kth_distance_sky(2_int32, d)                                                        ! -> aborts
+        print '(a,i0)', "unexpectedly answered kth_distance_sky on a Euclidean index, n=", size(d)
+    end subroutine scenario_spatial_kth_sky_on_euclidean
+
+    !> Two endpoint arrays of different lengths.
+    subroutine scenario_spatial_components_length()
+        integer(int64), allocatable :: labels(:)
+
+        call pf_connected_components([1_int64, 2_int64, 3_int64], [2_int64, 3_int64], 4_int64, labels)
+        print '(a,i0)', "unexpectedly accepted mismatched endpoint arrays, n=", size(labels)
+    end subroutine scenario_spatial_components_length
+
+    !> An edge naming a vertex the graph does not have.
+    subroutine scenario_spatial_components_endpoint_range()
+        integer(int64), allocatable :: labels(:)
+
+        call pf_connected_components([1_int64, 2_int64], [2_int64, 9_int64], 4_int64, labels)
+        print '(a,i0)', "unexpectedly accepted an out-of-range edge endpoint, n=", size(labels)
+    end subroutine scenario_spatial_components_endpoint_range
+
+    !> `min_size = 0`, which would label a component with no vertices in it.
+    subroutine scenario_spatial_components_min_size_zero()
+        integer(int64), allocatable :: labels(:)
+
+        call pf_connected_components([1_int64], [2_int64], 4_int64, labels, min_size=0)
+        print '(a,i0)', "unexpectedly accepted min_size = 0, n=", size(labels)
+    end subroutine scenario_spatial_components_min_size_zero
+
+    !> A negative vertex count.
+    subroutine scenario_spatial_components_nvert_negative()
+        integer(int64), allocatable :: labels(:)
+
+        call pf_connected_components([1_int64], [2_int64], -3_int64, labels)
+        print '(a,i0)', "unexpectedly accepted a negative vertex count, n=", size(labels)
+    end subroutine scenario_spatial_components_nvert_negative
+
     subroutine spatial_sky_cloud(n, ra, dec)
         integer, intent(in) :: n !! how many points.
         real(real64), allocatable, intent(out) :: ra(:) !! right ascension, degrees.

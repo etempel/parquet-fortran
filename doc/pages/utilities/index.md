@@ -25,10 +25,11 @@ coordinate arrays, and the two generators meant to be copied into your own proje
   draws without replacement. Those last live in `parquet_sampling`, the sibling module for drawing
   from a *population* rather than drawing a number.
 - [Spatial neighbour search with `pf_spatial_index`](spatial.html) — a uniform-grid index over
-  plain coordinate arrays: ball search into a buffer you own, the self-join as CSR or as an edge
-  list, segment, cylinder and cone shapes around an axis, and search on the sky by angular radius.
-  Two or three dimensions, optional periodic boundaries, and a cell size the library measures for
-  itself rather than asking you to pick.
+  plain coordinate arrays: ball and annulus search into a buffer you own, the self-join as CSR or
+  as an edge list, the `k` nearest neighbours, segment, cylinder and cone shapes around an axis,
+  and search on the sky by angular radius. Two or three dimensions, optional periodic boundaries,
+  connected components for a Friends-of-Friends group finder, and a cell size the library measures
+  for itself rather than asking you to pick.
 - [Generated table types](generated-tables.html) — `tools/generate_user_table_code.py`: named,
   typed accessors on your own `parquet_table` extension, generated from a MAML schema. Opening one
   from a file, from a slice, or from nothing at all (`%init`, `%init_slice`, `%init_empty`);

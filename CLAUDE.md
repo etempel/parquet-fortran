@@ -3373,6 +3373,39 @@ warning output needs its own triage, and both are covered in
   Write the rule out instead: `(a < b) .neqv. ((a < 0) .neqv. (b < 0))`. A most-negative constant
   used only inside `ieor` whose result is **stored** rather than compared — `SORT_SIGN_BIT` in the
   sort's radix keys — is safe, and safe for that reason alone. See `feature_risks.md` Risk-125.
+- **`-nan` poisons every undefined `real`, INCLUDING the tail of an `intent(out)` array — so
+  reading past what a procedure actually wrote is caught, in library code and in a test alike.**
+  `fpm.toml`'s `nagfor` feature passes `-nan`, so an element of an `intent(out)` real array that
+  the callee never assigned comes back as a **signalling** NaN (`7FF0000000000001`). That is
+  correct and it is the point: F2018 leaves such an element undefined, so reading it is
+  non-conforming however reasonable it looks. gfortran and flang were both checked directly and
+  leave the caller's prior value in place, which is why this class survives everywhere else --
+  nothing but a poisoning build can see it.
+
+  Two shapes, both confirmed here. **In a test**: a buffer-filling API reports the TRUE count `m`
+  and fills only up to the shortest buffer passed, so an assertion about `dist(cap+1)` — "the
+  library did not write here" — reads a NaN, fails, and blames a library that was doing exactly
+  the right thing. The conforming substitutes are a **canary outside the section passed in** (pass
+  `dd(1:8)` out of a longer `dd` and assert `dd(9:)` still holds its sentinel) and an assertion
+  that the entries which WERE returned agree with each other. **The stronger property — that one
+  output stopped at the common cap rather than at its own length — has no conforming observer at
+  all**; say so in the test rather than reaching for it.
+
+  **In library code**: a second pass that converts or post-processes a filled buffer must use the
+  SAME cap the filling pass used, not that buffer's own length. `sky_scan` and `near_sky_scan`
+  both converted chords to degrees over `min(m, size(dist_deg))` while the walk had stopped at the
+  minimum over `out32`/`out64`/`dist_deg` — so a short `out` beside a long `dist_deg` ran `asin`
+  over undefined memory. Under nagfor that raises `FE_INVALID` on the spot; everywhere else it
+  returns plausible garbage in elements the contract says are not filled. **Grep for a loop bound
+  of `min(m, size(<one buffer>))` after a multi-buffer fill** — that shape is the bug.
+
+  **A raised IEEE flag is reported only as a line at STOP, which nobody correlates with anything.**
+  Turn it into a failing assertion instead: save `ieee_invalid`, clear it, make the one call, read
+  it, and restore `saved .or. raised` so a flag raised elsewhere in the run is neither hidden nor
+  blamed on this call. `test_sky_distances_are_degrees` (`test/test_spatial.f90`) is the worked
+  example, and it is the only assertion available when the entries that would prove the bug are
+  themselves undefined. Guard it with `ieee_support_flag`.
+
 - **A compile-time fork needs a check that RUNS under every compiler that selects an arm.**
   `tools/check_random_kernels.sh` could not run under nagfor at all (it hardcoded gfortran's `-cpp`;
   NAG spells it `-fpp`), so the one arm nagfor ships had only ever been verified by a gfortran

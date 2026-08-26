@@ -194,7 +194,7 @@ end module test_module_surface_sampling
 !! importing `parquet_settings`, which would drag in `parquet_bindings` and with it Arrow.
 module test_module_surface_spatial
     use parquet_spatial                ! THE ONLY library import.
-    use iso_fortran_env, only : int64, real64
+    use iso_fortran_env, only : int32, int64, real64
     implicit none
     private
     public :: check_spatial_surface
@@ -207,7 +207,8 @@ contains
         character(len=:), allocatable :: tok
         type(pf_spatial_index) :: sx
         real(real64) :: x(8), y(8), z(8)
-        integer(int64) :: got(8), m
+        integer(int64) :: got(8), m, ncomp
+        integer(int64), allocatable :: labels(:)
         integer :: n_spatial, i
         logical :: warn
 
@@ -252,6 +253,13 @@ contains
         call sx%build(x, y, z, radius=1.5_real64)
         m = sx%within([3.0_real64, 0.0_real64, 0.0_real64], 1.5_real64, got)
         if (what == "" .and. m /= 3_int64) what = "pf_spatial_index%within"
+        m = sx%nearest([3.2_real64, 0.0_real64, 0.0_real64], 2_int32, got)
+        if (what == "" .and. (m /= 2_int64 .or. got(1) /= 3_int64)) what = "pf_spatial_index%nearest"
+        ! The module procedure, not a binding: a facade that re-exported only the type would
+        ! satisfy every assertion above and leave Friends-of-Friends needing a second import.
+        call pf_connected_components([1_int64, 2_int64], [2_int64, 3_int64], 5_int64, labels, ncomp=ncomp)
+        if (what == "" .and. (ncomp /= 1_int64 .or. size(labels) /= 5 .or. labels(5) /= 0_int64)) &
+            what = "pf_connected_components"
         if (what == "" .and. sx%metric() /= PF_METRIC_EUCLIDEAN) what = "PF_METRIC_EUCLIDEAN"
 
         call parquet_set_spatial_threads(n_spatial)

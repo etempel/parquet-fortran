@@ -11,15 +11,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`parquet_spatial`: `pf_spatial_index`, a uniform-grid spatial index over plain coordinate
   arrays.** Ball search into a caller-owned buffer, the self-join as CSR, the pair list and
-  count-only forms, all threaded; segment, cylinder and truncated-cone searches around an axis;
-  search on the sky by angular radius (`%build_sky`/`%within_sky` plus the three bulk forms
-  `%all_within_sky`/`%pairs_within_sky`/`%count_all_within_sky`, degrees in and degrees out);
-  two or three dimensions; optional periodic boundaries with the minimum-image convention; and an
-  automatically chosen cell size. Every bulk query takes one radius or one per point; the pair
-  list is symmetric under a per-point radius (a pair qualifies when either ball reaches the other)
-  while the CSR and count forms are directed. A new Arrow-free entry module
-  (`use parquet_spatial` compiles nine Fortran files), with `spatial_threads` and
-  `spatial_rebuild_warning` joining the process-global settings.
+  count-only forms, all threaded; `k`-nearest search (`%nearest`) and every point's `k`-th
+  neighbour distance at once (`%kth_distance`); segment, cylinder and truncated-cone searches
+  around an axis, reporting where on the axis each point sits (`axis_point=`/`axis_t=`);
+  search on the sky by angular radius (`%build_sky`/`%within_sky`/`%nearest_sky`/
+  `%kth_distance_sky` plus the three bulk forms `%all_within_sky`/`%pairs_within_sky`/
+  `%count_all_within_sky`, degrees in and degrees out); two or three dimensions; optional periodic
+  boundaries with the minimum-image convention; and an automatically chosen cell size. Every
+  radius query takes an optional inner radius (`r_inner=`), making the ball an annulus, and can
+  return its rows ordered by distance (`sorted=`). Every bulk query takes one radius or one per
+  point; the pair list is symmetric under a per-point radius (a pair qualifies when either ball
+  reaches the other) while the CSR and count forms are directed. `pf_connected_components` labels
+  an edge list's connected components, so a Friends-of-Friends group finder is `%pairs_within`
+  followed by one more call. A new Arrow-free entry module (`use parquet_spatial` compiles nine
+  Fortran files), with `spatial_threads` and `spatial_rebuild_warning` joining the process-global
+  settings.
 
 ### Changed
 

@@ -84,9 +84,10 @@ contains
         integer(int64) :: nc(3), a(3), cnt(3)
         integer(int64) :: ii, jj, kk, jc, kc, base, s0, e0, t, cap, row, minkey
         integer(int64) :: run_lo(2), run_hi(2), ilo, ihi
-        real(real64) :: r2, dx, dy, dz, d2, p1, p2, p3
+        real(real64) :: r2, r2in, dx, dy, dz, d2, p1, p2, p3
         real(real64) :: w1, w2, w3, wi1, wi2, wi3
-        logical :: has32, has64, hasd, want_min, direct
+        real(real64), allocatable :: dwork(:)
+        logical :: has32, has64, hasd, want_min, direct, want_sort, usework
         integer :: d, nrun, ir
 
         m = 0_int64
@@ -112,6 +113,24 @@ contains
         if (has32) cap = min(cap, size(out32, kind=int64))
         if (has64) cap = min(cap, size(out64, kind=int64))
         if (hasd) cap = min(cap, size(dist, kind=int64))
+        ! An absent inner radius is stored as zero rather than behind a flag, so the accept test
+        ! is one comparison against a squared bound in both cases: `d2 < 0` is never true, so the
+        ! plain ball pays a compare it can never fail and needs no second code path.
+        r2in = 0.0_real64
+        if (present(r_inner)) then
+            if (.not. (r_inner >= 0.0_real64)) error stop &
+                "pf_spatial_index: the inner radius must be >= 0 and not NaN"
+            if (r_inner > r) error stop &
+                "pf_spatial_index: the inner radius must not exceed the outer radius"
+            r2in = r_inner * r_inner
+        end if
+        want_sort = .false.
+        if (present(sorted)) want_sort = sorted
+        ! Ordering needs the distances the walk computes, so when the caller did not ask for them
+        ! they go into a buffer of our own. Sizing it to `cap` is exact: nothing past `cap` is
+        ! written, and nothing past `cap` can be ordered.
+        usework = want_sort .and. .not. hasd .and. cap > 0_int64 .and. cap < huge(0_int64)
+        if (usework) allocate (dwork(cap))
 
         nc = self%grid_n
         ! An index that owns its coordinates holds them in cell order; one that borrows them must
@@ -148,6 +167,7 @@ contains
                             dz = zs(t) - p3
                             d2 = dx * dx + dy * dy + dz * dz
                             if (d2 <= r2) then
+                                if (d2 < r2in) cycle
                                 if (want_min) then
                                     if (keys(t) <= minkey) cycle
                                 end if
@@ -157,6 +177,7 @@ contains
                                     if (has32) out32(m) = int(row, kind=int32)
                                     if (has64) out64(m) = row
                                     if (hasd) dist(m) = sqrt(d2)
+                                    if (usework) dwork(m) = sqrt(d2)
                                 end if
                             end if
                         end do
@@ -168,6 +189,7 @@ contains
                             dz = zs(row) - p3
                             d2 = dx * dx + dy * dy + dz * dz
                             if (d2 <= r2) then
+                                if (d2 < r2in) cycle
                                 if (want_min) then
                                     if (keys(t) <= minkey) cycle
                                 end if
@@ -176,12 +198,14 @@ contains
                                     if (has32) out32(m) = int(row, kind=int32)
                                     if (has64) out64(m) = row
                                     if (hasd) dist(m) = sqrt(d2)
+                                    if (usework) dwork(m) = sqrt(d2)
                                 end if
                             end if
                         end do
                     end if
                 end do
             end do
+            call scan_finish(want_sort, m, cap, dist, dwork, out32, out64)
             return
         end if
 
@@ -245,6 +269,7 @@ contains
                             dz = dz - w3 * anint(dz * wi3)
                             d2 = dx * dx + dy * dy + dz * dz
                             if (d2 <= r2) then
+                                if (d2 < r2in) cycle
                                 if (want_min) then
                                     if (keys(t) <= minkey) cycle
                                 end if
@@ -254,6 +279,7 @@ contains
                                     if (has32) out32(m) = int(row, kind=int32)
                                     if (has64) out64(m) = row
                                     if (hasd) dist(m) = sqrt(d2)
+                                    if (usework) dwork(m) = sqrt(d2)
                                 end if
                             end if
                         end do
@@ -268,6 +294,7 @@ contains
                             dz = dz - w3 * anint(dz * wi3)
                             d2 = dx * dx + dy * dy + dz * dz
                             if (d2 <= r2) then
+                                if (d2 < r2in) cycle
                                 if (want_min) then
                                     if (keys(t) <= minkey) cycle
                                 end if
@@ -276,6 +303,7 @@ contains
                                     if (has32) out32(m) = int(row, kind=int32)
                                     if (has64) out64(m) = row
                                     if (hasd) dist(m) = sqrt(d2)
+                                    if (usework) dwork(m) = sqrt(d2)
                                 end if
                             end if
                         end do
@@ -283,17 +311,45 @@ contains
                 end do
             end do
         end do
+        call scan_finish(want_sort, m, cap, dist, dwork, out32, out64)
     end procedure spatial_scan
+
+    !> Applies `sorted=` at the end of a ball walk, from whichever buffer holds the distances.
+    !>
+    !> Two exits reach this rather than one, because the free and periodic walks are separate loop
+    !> nests -- see this file's header for why they are kept apart.
+    subroutine scan_finish(want_sort, m, cap, dist, dwork, out32, out64)
+        logical, intent(in) :: want_sort !! whether the caller asked for an ordered result.
+        integer(int64), intent(in) :: m !! the true count, which may exceed the buffers.
+        integer(int64), intent(in) :: cap !! how many entries were actually written.
+        real(real64), intent(inout), optional :: dist(:) !! the caller's distance buffer, if any.
+        real(real64), intent(inout), optional :: dwork(:) !! our own, when the caller wanted none.
+        integer(int32), intent(inout), optional :: out32(:) !! int32 rows, permuted with the keys.
+        integer(int64), intent(inout), optional :: out64(:) !! int64 rows, permuted with the keys.
+        integer(int64) :: nfill
+
+        if (.not. want_sort) return
+        nfill = min(m, cap)
+        if (nfill < 2_int64) return
+        if (present(dist)) then
+            call spatial_order_by_dist(nfill, dist, out32=out32, out64=out64)
+        else if (present(dwork)) then
+            ! An unallocated `dwork` arrives here ABSENT (F2018 15.5.2.12), which is exactly the
+            ! "the caller wanted no distances and no ordering either" case.
+            call spatial_order_by_dist(nfill, dwork, out32=out32, out64=out64)
+        end if
+    end subroutine scan_finish
 
     module procedure spatial_scan_axis
         real(real64), pointer, contiguous :: xs(:), ys(:), zs(:)
         integer(int64) :: nc(3), sa(3), sc(3), ia, alo, acnt, jj, kk, base, s0, e0, t, cap, row
-        integer(int64) :: ilo, ihi
+        integer(int64) :: ilo, ihi, nfill
         real(real64) :: dv(3), c0(3), c1(3)
         real(real64) :: dd, ddinv, rmax, dr, w0, w1, ta, tb, tlo, thi, rloc, ctr, half
         real(real64) :: vx, vy, vz, b1, b2, b3, qx, qy, qz, wx, wy, wz, tp, d2, rad
-        logical :: has32, has64, hasd, direct
-        integer :: k, da
+        real(real64), allocatable :: dwork(:)
+        logical :: has32, has64, hasd, direct, hasap, hasat, want_sort, usework
+        integer :: k, da, nd
 
         m = 0_int64
         if (.not. self%built_ok) error stop "pf_spatial_index%" // what // &
@@ -309,14 +365,27 @@ contains
         has32 = present(out32)
         has64 = present(out64)
         hasd = present(dist)
+        hasap = present(axis_point)
+        hasat = present(axis_t)
+        nd = self%ncoord
+        if (hasap) then
+            if (size(axis_point, 1) /= nd) error stop "pf_spatial_index%" // what // &
+                ": axis_point's first extent must equal %ndim(), the rank the index was built with"
+        end if
         if (has32 .and. self%npts > int(huge(0_int32), kind=int64)) error stop &
             "pf_spatial_index%" // what // &
             ": this index holds more rows than an int32 buffer can name; use an int64 one"
         cap = 0_int64
-        if (has32 .or. has64 .or. hasd) cap = huge(0_int64)
+        if (has32 .or. has64 .or. hasd .or. hasap .or. hasat) cap = huge(0_int64)
         if (has32) cap = min(cap, size(out32, kind=int64))
         if (has64) cap = min(cap, size(out64, kind=int64))
         if (hasd) cap = min(cap, size(dist, kind=int64))
+        if (hasap) cap = min(cap, size(axis_point, 2, kind=int64))
+        if (hasat) cap = min(cap, size(axis_t, kind=int64))
+        want_sort = .false.
+        if (present(sorted)) want_sort = sorted
+        usework = want_sort .and. .not. hasd .and. cap > 0_int64 .and. cap < huge(0_int64)
+        if (usework) allocate (dwork(cap))
 
         dv = p2 - p1
         dd = dv(1) * dv(1) + dv(2) * dv(2) + dv(3) * dv(3)
@@ -324,7 +393,16 @@ contains
         ! A zero-length axis has no direction to project onto, so all three shapes collapse to the
         ! same ball. Documented on each binding rather than left to be discovered.
         if (.not. (dd > 0.0_real64)) then
-            call spatial_scan(self, p1, rmax, m, out32=out32, out64=out64, dist=dist)
+            call spatial_scan(self, p1, rmax, m, out32=out32, out64=out64, dist=dist, sorted=sorted)
+            ! Every returned point has the SAME foot -- `p1` is the whole segment -- so the axis
+            ! outputs are constant and any ordering the ball applied leaves them correct. That is
+            ! also why they may be filled to their own extent here rather than to a common cap.
+            if (hasap) then
+                do k = 1, int(min(m, size(axis_point, 2, kind=int64)))
+                    axis_point(1:nd, k) = p1(1:nd)
+                end do
+            end if
+            if (hasat) axis_t(1:int(min(m, size(axis_t, kind=int64)))) = 0.0_real64
             return
         end if
         ddinv = 1.0_real64 / dd
@@ -410,6 +488,9 @@ contains
                                     if (has32) out32(m) = int(row, kind=int32)
                                     if (has64) out64(m) = row
                                     if (hasd) dist(m) = sqrt(d2)
+                                    if (usework) dwork(m) = sqrt(d2)
+                                    if (hasap) axis_point(1:nd, m) = p1(1:nd) + tp * dv(1:nd)
+                                    if (hasat) axis_t(m) = tp
                                 end if
                             end if
                         end do
@@ -436,6 +517,9 @@ contains
                                     if (has32) out32(m) = int(row, kind=int32)
                                     if (has64) out64(m) = row
                                     if (hasd) dist(m) = sqrt(d2)
+                                    if (usework) dwork(m) = sqrt(d2)
+                                    if (hasap) axis_point(1:nd, m) = p1(1:nd) + tp * dv(1:nd)
+                                    if (hasat) axis_t(m) = tp
                                 end if
                             end if
                         end do
@@ -443,7 +527,118 @@ contains
                 end do
             end do
         end do
+        if (want_sort) then
+            nfill = min(m, cap)
+            if (nfill >= 2_int64) then
+                if (hasd) then
+                    call spatial_order_by_dist(nfill, dist, out32=out32, out64=out64, &
+                        axis_point=axis_point, axis_t=axis_t)
+                else if (usework) then
+                    call spatial_order_by_dist(nfill, dwork, out32=out32, out64=out64, &
+                        axis_point=axis_point, axis_t=axis_t)
+                end if
+            end if
+        end if
     end procedure spatial_scan_axis
+
+    !> Orders a query's results by increasing distance, ties broken by ascending row index.
+    module procedure spatial_order_by_dist
+        integer(int64), allocatable :: perm(:), tmp64(:)
+        integer(int32), allocatable :: tmp32(:)
+        real(real64), allocatable :: tmpr(:), tmpp(:,:)
+        integer(int64) :: k, e
+        integer :: nd
+
+        if (nfill < 2_int64) return
+        ! Serial by construction: this runs per query, and a bulk sweep calls it from inside its
+        ! own parallel region, where a nested team would be the caller's business rather than ours.
+        call pf_argsort(d(1:nfill), perm, threads=1)
+        ! The sort is stable, so an exact tie comes back in the order the WALK produced -- which is
+        ! cell order, and cell order depends on the tuned cell size, which depends on the machine.
+        ! Re-ordering each tied run by ascending row index is what makes `sorted=` mean the same
+        ! thing everywhere. Exact ties are rare, so this is a scan and almost never a swap.
+        if (present(out32) .or. present(out64)) then
+            k = 1_int64
+            do while (k < nfill)
+                e = k
+                do while (e < nfill)
+                    if (d(perm(e + 1_int64)) /= d(perm(k))) exit
+                    e = e + 1_int64
+                end do
+                if (e > k) call sort_run_by_row(perm(k:e), out32, out64)
+                k = e + 1_int64
+            end do
+        end if
+        allocate (tmpr(nfill))
+        do k = 1_int64, nfill
+            tmpr(k) = d(perm(k))
+        end do
+        d(1:nfill) = tmpr
+        if (present(out32)) then
+            allocate (tmp32(nfill))
+            do k = 1_int64, nfill
+                tmp32(k) = out32(perm(k))
+            end do
+            out32(1:nfill) = tmp32
+        end if
+        if (present(out64)) then
+            allocate (tmp64(nfill))
+            do k = 1_int64, nfill
+                tmp64(k) = out64(perm(k))
+            end do
+            out64(1:nfill) = tmp64
+        end if
+        if (present(axis_t)) then
+            do k = 1_int64, nfill
+                tmpr(k) = axis_t(perm(k))
+            end do
+            axis_t(1:nfill) = tmpr
+        end if
+        if (present(axis_point)) then
+            nd = size(axis_point, 1)
+            allocate (tmpp(nd, nfill))
+            do k = 1_int64, nfill
+                tmpp(:, k) = axis_point(:, perm(k))
+            end do
+            axis_point(:, 1:nfill) = tmpp
+        end if
+    end procedure spatial_order_by_dist
+
+    !> Sorts one run of tied positions into ascending row order, in place.
+    !>
+    !> An insertion sort because a run of EXACTLY equal distances is nearly always one element and
+    !> essentially never long; the loop above only calls this when a run has at least two.
+    subroutine sort_run_by_row(run, out32, out64)
+        integer(int64), intent(inout) :: run(:) !! positions into the result buffers.
+        integer(int32), intent(in), optional :: out32(:) !! int32 rows, when that is the buffer in use.
+        integer(int64), intent(in), optional :: out64(:) !! int64 rows, when that is the buffer in use.
+        integer(int64) :: a, b, hold, key
+
+        do a = 2_int64, size(run, kind=int64)
+            hold = run(a)
+            key = row_at(hold, out32, out64)
+            b = a - 1_int64
+            do while (b >= 1_int64)
+                if (row_at(run(b), out32, out64) <= key) exit
+                run(b + 1_int64) = run(b)
+                b = b - 1_int64
+            end do
+            run(b + 1_int64) = hold
+        end do
+    end subroutine sort_run_by_row
+
+    !> The caller's row index sitting at result position `k`, from whichever buffer holds it.
+    integer(int64) function row_at(k, out32, out64) result(row)
+        integer(int64), intent(in) :: k !! the result position.
+        integer(int32), intent(in), optional :: out32(:) !! int32 rows.
+        integer(int64), intent(in), optional :: out64(:) !! int64 rows.
+
+        if (present(out64)) then
+            row = out64(k)
+        else
+            row = int(out32(k), kind=int64)
+        end if
+    end function row_at
 
     !> Counts the cells a ball would visit and the points it would distance-test.
     module procedure spatial_scan_work
@@ -494,5 +689,104 @@ contains
             end do
         end do
     end procedure spatial_scan_work
+
+    !> The `kk` nearest points to `p`, by a ball that expands until it holds enough of them.
+    module procedure spatial_shell_search
+        integer(int64) :: cnt, cnt2, rounds
+        real(real64) :: r, rcap, cd, grow, ext, ss
+        integer :: dm, ax
+
+        if (kk < 1_int64) error stop "pf_spatial_index%" // what // ": k must be >= 1"
+        dm = max(self%dims_eff, 1)
+
+        ! How far the ball may ever grow, and the three metrics answer it differently. A periodic
+        ! ball beyond half the box is undefined rather than imprecise, so that is a hard stop and a
+        ! failure to reach `kk` inside it is an error. The other two caps are simply "everything is
+        ! already inside", so reaching them cannot leave the search short.
+        if (self%periodic_on) then
+            rcap = huge(0.0_real64)
+            do ax = 1, self%ncoord
+                if (self%wrap(ax) > 0.0_real64) rcap = min(rcap, 0.5_real64 * self%wrap(ax))
+            end do
+        else if (self%metric_id == PF_METRIC_SKY) then
+            ! The chord of 180 degrees, NOT the 90-degree limit %within_sky enforces: that limit
+            ! judges a radius the caller chose, and this one is derived.
+            rcap = 2.0_real64
+        else
+            ss = 0.0_real64
+            do ax = 1, self%ncoord
+                ext = max(abs(p(ax) - self%lo(ax)), abs(p(ax) - self%hi(ax)))
+                ss = ss + ext * ext
+            end do
+            rcap = sqrt(ss)
+        end if
+
+        ! Where to start. A forced start wins outright (that is what it is for); otherwise a radius
+        ! carried over from a neighbouring query, which is what makes the bulk sweep cheap; failing
+        ! both, the radius that would hold `kk+1` points at the density the tuner already measured.
+        if (dbg_shell_start > 0.0_real64) then
+            r = dbg_shell_start
+        else if (r_seed > 0.0_real64) then
+            r = r_seed
+        else if (self%rho > 0.0_real64) then
+            select case (dm)
+            case (1)
+                cd = 2.0_real64
+            case (2)
+                cd = 3.141592653589793_real64
+            case default
+                cd = 4.1887902047863905_real64
+            end select
+            r = spatial_shell_safety * (real(kk + 1_int64, kind=real64) / (cd * self%rho)) &
+                ** (1.0_real64 / real(dm, kind=real64))
+        else
+            r = self%cell_side ! GCOVR_EXCL_LINE
+        end if
+        if (.not. (r > 0.0_real64)) r = 1.0_real64
+        if (r > rcap) r = rcap
+
+        rounds = 0_int64
+        do
+            call spatial_scan(self, p, r, cnt)
+            rounds = rounds + 1_int64
+            if (cnt >= kk) exit
+            if (r >= rcap) exit
+            ! Rescaled from what the ball actually held rather than doubled: the count grows as
+            ! r**dm, so this lands close in one further round where a fixed factor takes several.
+            grow = (real(kk, kind=real64) / real(max(cnt, 1_int64), kind=real64)) &
+                ** (1.0_real64 / real(dm, kind=real64))
+            r = r * max(grow, 1.0_real64) * spatial_shell_grow
+            if (r > rcap) r = rcap
+        end do
+        if (cnt < kk) then
+            if (self%periodic_on) error stop "pf_spatial_index%" // what // &
+                ": a periodic index cannot answer for this k -- half the box does not hold that " // &
+                "many neighbours, and a periodic ball beyond half the box is undefined"
+            ! Unreachable: on a free or sky index the cap encloses every point, so the last scan
+            ! saw all npts and the caller has already clamped kk to that.
+            error stop "pf_spatial_index%" // what // ": the expanding ball did not reach k" ! GCOVR_EXCL_LINE
+        end if
+
+        if (.not. allocated(rows)) then
+            allocate (rows(max(cnt, 1_int64)))
+        else if (size(rows, kind=int64) < cnt) then
+            deallocate (rows)
+            allocate (rows(cnt))
+        end if
+        if (.not. allocated(dists)) then
+            allocate (dists(max(cnt, 1_int64)))
+        else if (size(dists, kind=int64) < cnt) then
+            deallocate (dists)
+            allocate (dists(cnt))
+        end if
+        ! The second pass is what makes the result exact: the ball at `r` holds every point closer
+        ! than the kk-th, so ordering what it returned and keeping the first kk is the answer.
+        call spatial_scan(self, p, r, cnt2, out64=rows(1:cnt), dist=dists(1:cnt), sorted=.true.)
+        if (cnt2 /= cnt) error stop "pf_spatial_index%" // what // & ! GCOVR_EXCL_LINE
+            ": the index changed between the two passes of one query" ! GCOVR_EXCL_LINE
+        r_seed = r
+        !$omp atomic
+        dbg_shell_rounds = dbg_shell_rounds + rounds
+    end procedure spatial_shell_search
 
 end submodule parquet_spatial_query ! GCOVR_EXCL_LINE

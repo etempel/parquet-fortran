@@ -9,8 +9,9 @@
 !! **The engine choice was measured, not assumed** (`feature_pandas_S3.md`): against nanoflann's
 !! KD-tree over 1M uniform points in a 100^3 box, a grid built in 0.025 s against 0.18-0.20 s and
 !! answered a radius query in 4.27 us against 6.74 -- on a uniform cloud, a clustered one and a
-!! sparse wedge alike. The one operation a tree does better is k-nearest, which is deliberately
-!! deferred rather than allowed to reopen the engine question.
+!! sparse wedge alike. The one operation a tree does better is k-nearest, and `%nearest` answers it
+!! on this grid rather than reopening the engine question -- by a ball that expands until it holds
+!! enough points, which is exact for the reason `spatial_shell_search` sets out.
 !!
 !! **This module is Arrow-free by construction and that is the point of its tier.** It reaches
 !! `parquet_argsort` and `parquet_settings_base` and nothing else, so `use parquet_spatial` in a
@@ -47,6 +48,7 @@ module parquet_spatial
     private
 
     public :: pf_spatial_index
+    public :: pf_connected_components
     public :: PF_METRIC_EUCLIDEAN, PF_METRIC_SKY
     !
     ! ---- Test-only observation and override hooks ----
@@ -56,6 +58,8 @@ module parquet_spatial
     public :: parquet_debug_spatial_rebuilds
     public :: parquet_debug_spatial_threads_used
     public :: parquet_debug_set_spatial_cell
+    public :: parquet_debug_set_spatial_shell_start
+    public :: parquet_debug_spatial_shell_rounds
     public :: parquet_debug_reset_spatial_counters
     !
     ! ---- Settings this module's own code reads, re-exported so a narrow import can configure it ----
@@ -74,6 +78,19 @@ module parquet_spatial
     !> The output pair, because the automatic-rebuild warning emits from this module.
     public :: parquet_set_verbosity, parquet_get_verbosity
     public :: parquet_set_message_stream, parquet_get_message_stream
+
+    !> Labels the connected components of an undirected graph given as an edge list -- which is
+    !! exactly what `%pairs_within` returns, so **Friends-of-Friends is these two calls**.
+    !!
+    !! **A module procedure rather than a type-bound one, and it lives here despite having no
+    !! spatial content at all.** A union-find over an edge list is pure graph work; it is in this
+    !! module because `use parquet_spatial` costs nine Fortran files against `parquet_sorting`'s
+    !! twenty-one, so a caller who wants only connected components pays less here than anywhere
+    !! else it could sensibly go -- and because a group finder then needs one `use` rather than two.
+    interface pf_connected_components
+        module procedure components_n32
+        module procedure components_n64
+    end interface pf_connected_components
 
     ! ---- Metric identifiers ----
 
@@ -154,6 +171,19 @@ module parquet_spatial
     !! the winner halve that granularity for about a third of one extra build, which is the
     !! cheapest accuracy available anywhere in this module.
     real(real64), parameter :: spatial_refine_step = 1.4142135623730951_real64
+    !> Safety factor on the expanding ball's first radius.
+    !!
+    !! The radius that would hold `k+1` points at the index's measured density, times this. Above 1
+    !! because overshooting costs a few extra distance tests and undershooting costs a whole round;
+    !! **not a setting**, because it changes how many rounds the expansion takes and never what it
+    !! returns, so nothing a caller can observe distinguishes one value from another.
+    real(real64), parameter :: spatial_shell_safety = 1.25_real64
+    !> Extra growth applied on top of the count-based rescale when the ball came back short.
+    !!
+    !! The rescale alone can stall: a ball holding `k-1` points asks for a factor of about 1, so
+    !! without this the radius would creep and the loop would not terminate in bounded time. Same
+    !! reasoning as `spatial_shell_safety` for why it is not a setting.
+    real(real64), parameter :: spatial_shell_grow = 1.15_real64
     !> How far the cell a query radius would choose may drift from the cell in use before a bulk
     !! query rebuilds the index. A factor on the CELL, not on the radius; `h` goes as the fourth
     !! root of `r`, so this is a very wide band in radius terms and is meant to be.
@@ -288,6 +318,27 @@ module parquet_spatial
         procedure, private :: bind_count_all_sky_r1 !! %count_all_within_sky with one per point.
         !> How many neighbours each point has on the sky. Radii in degrees.
         generic :: count_all_within_sky => bind_count_all_sky_r0, bind_count_all_sky_r1
+        procedure, private :: bind_near_k32_i32 !! %nearest, int32 k, int32 buffer.
+        procedure, private :: bind_near_k32_i64 !! %nearest, int32 k, int64 buffer.
+        procedure, private :: bind_near_k64_i32 !! %nearest, int64 k, int32 buffer.
+        procedure, private :: bind_near_k64_i64 !! %nearest, int64 k, int64 buffer.
+        !> The `k` points nearest `p`, always ordered by increasing distance.
+        generic :: nearest => bind_near_k32_i32, bind_near_k32_i64, bind_near_k64_i32, bind_near_k64_i64
+        procedure, private :: bind_near_sky_k32_i32 !! %nearest_sky, int32 k, int32 buffer.
+        procedure, private :: bind_near_sky_k32_i64 !! %nearest_sky, int32 k, int64 buffer.
+        procedure, private :: bind_near_sky_k64_i32 !! %nearest_sky, int64 k, int32 buffer.
+        procedure, private :: bind_near_sky_k64_i64 !! %nearest_sky, int64 k, int64 buffer.
+        !> The `k` points nearest `(ra, dec)` on the sky, ordered by increasing separation.
+        generic :: nearest_sky => bind_near_sky_k32_i32, bind_near_sky_k32_i64, &
+            bind_near_sky_k64_i32, bind_near_sky_k64_i64
+        procedure, private :: bind_kth_k32 !! %kth_distance with an int32 k.
+        procedure, private :: bind_kth_k64 !! %kth_distance with an int64 k.
+        !> Every point's distance to its `k`-th nearest OTHER point, at once.
+        generic :: kth_distance => bind_kth_k32, bind_kth_k64
+        procedure, private :: bind_kth_sky_k32 !! %kth_distance_sky with an int32 k.
+        procedure, private :: bind_kth_sky_k64 !! %kth_distance_sky with an int64 k.
+        !> Every point's angular distance to its `k`-th nearest OTHER point, in degrees.
+        generic :: kth_distance_sky => bind_kth_sky_k32, bind_kth_sky_k64
     end type pf_spatial_index
 
     ! ---- Test-only state. Process-global by necessity: a hook over Fortran-side state has no ----
@@ -301,6 +352,10 @@ module parquet_spatial
     integer(int64), save :: dbg_rebuilds = 0_int64
     !> The team size the most recent bulk query resolved.
     integer, save :: dbg_threads_used = 0
+    !> Initial shell radius forced by `parquet_debug_set_spatial_shell_start`; <= 0 means "not forced".
+    real(real64), save :: dbg_shell_start = -1.0_real64
+    !> Expansion rounds accumulated by every shell search since the counters were reset.
+    integer(int64), save :: dbg_shell_rounds = 0_int64
 
     ! ---- Build, rebuild and the grid itself (parquet_spatial_build.f90) ----
 
@@ -503,7 +558,7 @@ module parquet_spatial
         !! caller's row index as the key; a per-point-radius sweep passes a rank that orders the
         !! points by DESCENDING radius, which is what makes the endpoint doing the searching always
         !! the one whose ball is large enough to reach the other. See `spatial_pairs_within_worker`.
-        module subroutine spatial_scan(self, p, r, m, out32, out64, dist, min_key, keys)
+        module subroutine spatial_scan(self, p, r, m, out32, out64, dist, min_key, keys, r_inner, sorted)
             type(pf_spatial_index), intent(in), target :: self !! the index to search.
             real(real64), intent(in) :: p(3) !! the query point; p(3) is ignored by a 2D index.
             real(real64), intent(in) :: r !! the search radius; must be >= 0.
@@ -513,6 +568,8 @@ module parquet_spatial
             real(real64), intent(inout), optional :: dist(:) !! distance to each reported point.
             integer(int64), intent(in), optional :: min_key !! accept only points whose key is above this.
             integer(int64), intent(in), optional :: keys(:) !! order key per STORED position; needs `min_key`.
+            real(real64), intent(in), optional :: r_inner !! an inner radius; makes the ball an annulus.
+            logical, intent(in), optional :: sorted !! .true. orders the result by increasing distance.
         end subroutine spatial_scan
 
         !> Walks the cells an axis-shaped region can reach and reports what it finds.
@@ -528,7 +585,8 @@ module parquet_spatial
         !! intersects the axis, pads the sub-segment by the largest radius over that slab's own
         !! parameter range, and derives the other two axes' cell ranges from that alone -- so every
         !! cell is visited at most once and there is nothing to de-duplicate.
-        module subroutine spatial_scan_axis(self, p1, p2, r1, r2, clamp, what, m, out32, out64, dist)
+        module subroutine spatial_scan_axis(self, p1, p2, r1, r2, clamp, what, m, out32, out64, dist, &
+            axis_point, axis_t, sorted)
             type(pf_spatial_index), intent(in), target :: self !! the index to search.
             real(real64), intent(in) :: p1(3) !! one end of the axis; p1(3) is 0 on a 2D index.
             real(real64), intent(in) :: p2(3) !! the other end of the axis.
@@ -540,7 +598,45 @@ module parquet_spatial
             integer(int32), intent(inout), optional :: out32(:) !! caller's row indices, int32 buffer.
             integer(int64), intent(inout), optional :: out64(:) !! caller's row indices, int64 buffer.
             real(real64), intent(inout), optional :: dist(:) !! distance to the axis, or to the segment.
+            real(real64), intent(inout), optional :: axis_point(:,:) !! `(ndim, m)`: the point `dist` was measured from.
+            real(real64), intent(inout), optional :: axis_t(:) !! where on the axis that point sits, in [0, 1].
+            logical, intent(in), optional :: sorted !! .true. orders the result by increasing distance.
         end subroutine spatial_scan_axis
+
+        !> Orders a query's results by increasing distance, ties broken by ascending row index.
+        !!
+        !! **The tie-break is explicit and is a CONTRACT, not a detail.** Without it the order
+        !! among equal distances is the order the walk produced, which is cell order -- and cell
+        !! order depends on the tuned cell size, which depends on the machine. A caller who asks
+        !! for a canonical order would then get a different one on a different machine.
+        module subroutine spatial_order_by_dist(nfill, d, out32, out64, axis_point, axis_t)
+            integer(int64), intent(in) :: nfill !! how many leading entries were actually written.
+            real(real64), intent(inout) :: d(:) !! the distances: the sort key, permuted in place.
+            integer(int32), intent(inout), optional :: out32(:) !! int32 row buffer, permuted with it.
+            integer(int64), intent(inout), optional :: out64(:) !! int64 row buffer, permuted with it.
+            real(real64), intent(inout), optional :: axis_point(:,:) !! axis feet, permuted with it.
+            real(real64), intent(inout), optional :: axis_t(:) !! axis parameters, permuted with it.
+        end subroutine spatial_order_by_dist
+
+        !> The `kk` nearest points to `p`, by a ball that expands until it holds enough of them.
+        !!
+        !! **Exact, and the argument is worth keeping in front of whoever changes this.** Once a
+        !! ball of radius `r` has returned `m >= kk` points, the `kk`-th smallest of their
+        !! distances is at most `r`; every point closer than that is therefore inside `r` and was
+        !! found; so the `kk` nearest are exactly the `kk` smallest of what the ball returned.
+        !! **A walk that expanded in rings of CELLS and stopped at `kk` candidates would be
+        !! wrong**, because a cell's far corner is further away than an unvisited cell's near
+        !! face. The accept test here is an exact ball at a known radius, which is what makes the
+        !! argument hold; do not replace it with a cell-count criterion.
+        module subroutine spatial_shell_search(self, p, kk, r_seed, rows, dists, what)
+            type(pf_spatial_index), intent(in), target :: self !! the index to search.
+            real(real64), intent(in) :: p(3) !! the query point, already widened to three coordinates.
+            integer(int64), intent(in) :: kk !! how many neighbours are wanted; must be 1 <= kk <= npts.
+            real(real64), intent(inout) :: r_seed !! in: a starting radius, or <= 0 to derive one. out: what converged.
+            integer(int64), allocatable, intent(inout) :: rows(:) !! scratch, grown as needed; `rows(1:kk)` on return.
+            real(real64), allocatable, intent(inout) :: dists(:) !! scratch, grown as needed; `dists(1:kk)` on return.
+            character(len=*), intent(in) :: what !! the calling procedure, for any message.
+        end subroutine spatial_shell_search
 
         !> Counts the cells a ball would visit and the points it would distance-test, without
         !! testing any of them. The probe's whole measurement.
@@ -561,33 +657,58 @@ module parquet_spatial
 
     interface
         !> Every point's neighbours as CSR: row `i` occupies `neighbours(offsets(i):offsets(i+1)-1)`.
-        module subroutine spatial_all_within_worker(self, radii, offsets, neighbours, expect_metric, threads)
+        module subroutine spatial_all_within_worker(self, radii, offsets, neighbours, expect_metric, &
+            threads, radii_inner, sorted)
             type(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
             real(real64), intent(in) :: radii(:) !! one radius, or one per point, in the index's own units.
             integer(int64), allocatable, intent(out) :: offsets(:) !! length n+1, `offsets(1) == 1`.
             integer(int64), allocatable, intent(out) :: neighbours(:) !! the concatenated neighbour lists.
             integer, intent(in) :: expect_metric !! the metric this call's radii are stated in.
             integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+            real(real64), intent(in), optional :: radii_inner(:) !! inner radii, making each ball an annulus.
+            logical, intent(in), optional :: sorted !! .true. orders each row by increasing distance.
         end subroutine spatial_all_within_worker
 
         !> Every neighbouring pair exactly once, with `i < j` in the caller's row numbering.
-        module subroutine spatial_pairs_within_worker(self, radii, ii, jj, expect_metric, threads)
+        module subroutine spatial_pairs_within_worker(self, radii, ii, jj, expect_metric, threads, r_inner)
             type(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
             real(real64), intent(in) :: radii(:) !! one radius, or one per point, in the index's own units.
             integer(int64), allocatable, intent(out) :: ii(:) !! the lower row index of each pair.
             integer(int64), allocatable, intent(out) :: jj(:) !! the higher row index of each pair.
             integer, intent(in) :: expect_metric !! the metric this call's radii are stated in.
             integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+            real(real64), intent(in), optional :: r_inner !! an inner radius; SCALAR only, see the worker.
         end subroutine spatial_pairs_within_worker
 
         !> How many neighbours each point has, in the caller's row order.
-        module subroutine spatial_count_all_worker(self, radii, counts, expect_metric, threads)
+        module subroutine spatial_count_all_worker(self, radii, counts, expect_metric, threads, radii_inner)
             type(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
             real(real64), intent(in) :: radii(:) !! one radius, or one per point, in the index's own units.
             integer(int64), allocatable, intent(out) :: counts(:) !! length n, in the caller's row order.
             integer, intent(in) :: expect_metric !! the metric this call's radii are stated in.
             integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+            real(real64), intent(in), optional :: radii_inner(:) !! inner radii, making each ball an annulus.
         end subroutine spatial_count_all_worker
+
+        !> The distance from every point to its `k`-th nearest OTHER point, in the caller's row order.
+        module subroutine spatial_kth_worker(self, k, dist, expect_metric, threads)
+            type(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
+            integer(int64), intent(in) :: k !! which neighbour to report; 1 <= k <= npts-1.
+            real(real64), allocatable, intent(out) :: dist(:) !! length n, in the index's own units.
+            integer, intent(in) :: expect_metric !! the metric the caller stated `k` for.
+            integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        end subroutine spatial_kth_worker
+
+        !> Labels the connected components of an undirected graph given as an edge list.
+        module subroutine spatial_components_worker(i, j, nvert, labels, ncomp, sizes, min_size)
+            integer(int64), intent(in) :: i(:) !! one endpoint of each edge.
+            integer(int64), intent(in) :: j(:) !! the other endpoint of each edge.
+            integer(int64), intent(in) :: nvert !! how many vertices the graph has.
+            integer(int64), allocatable, intent(out) :: labels(:) !! length nvert; 0 where nothing qualifies.
+            integer(int64), intent(out), optional :: ncomp !! how many components earned a label.
+            integer(int64), allocatable, intent(out), optional :: sizes(:) !! length ncomp, in label order.
+            integer, intent(in), optional :: min_size !! smallest component that earns a label; default 2.
+        end subroutine spatial_components_worker
 
         !> Rebuilds `self` when `radii` would choose a cell more than `spatial_rebuild_factor` from
         !! the one in use, warning once per index unless the warning is switched off.
@@ -842,34 +963,54 @@ contains
     ! ---- Single queries ----
 
     !> `%within` into an `int32` buffer.
-    integer(int64) function bind_within_i32(self, p, r, out, dist) result(m)
+    !>
+    !> **`r_inner=` makes the ball an annulus**, `r_inner <= d <= r`, with BOTH bounds inclusive.
+    !> A point sitting exactly on the inner surface is therefore in the annulus and in the inner
+    !> ball alike, so "annulus = outer ball minus inner ball" holds everywhere except on that
+    !> surface itself.
+    !>
+    !> **`sorted=.true.` returns the rows by increasing distance**, ties broken by ascending row
+    !> index so the order is the same on every machine. It needs the distances even when `dist=`
+    !> is absent, so asking for it without wanting them still pays for them. With a buffer shorter
+    !> than `m` the rows kept are the first `m` the walk found and `sorted=` orders *those* -- it
+    !> does not make a short buffer hold the NEAREST rows. `%nearest` is the query that does that.
+    integer(int64) function bind_within_i32(self, p, r, out, dist, r_inner, sorted) result(m)
         class(pf_spatial_index), intent(in), target :: self !! the index to search.
         real(real64), intent(in) :: p(:) !! the query point; 2 or 3 coordinates.
         real(real64), intent(in) :: r !! the search radius.
         integer(int32), intent(out) :: out(:) !! caller's row indices of the points found.
         real(real64), intent(out), optional :: dist(:) !! distance to each reported point.
+        real(real64), intent(in), optional :: r_inner !! an inner radius; makes the ball an annulus.
+        logical, intent(in), optional :: sorted !! .true. orders the result by increasing distance.
 
-        call spatial_scan(self, query_point(self, p, "within"), r, m, out32=out, dist=dist)
+        call spatial_scan(self, query_point(self, p, "within"), r, m, out32=out, dist=dist, &
+            r_inner=r_inner, sorted=sorted)
     end function bind_within_i32
 
-    !> `%within` into an `int64` buffer.
-    integer(int64) function bind_within_i64(self, p, r, out, dist) result(m)
+    !> `%within` into an `int64` buffer. See `bind_within_i32` for `r_inner=` and `sorted=`.
+    integer(int64) function bind_within_i64(self, p, r, out, dist, r_inner, sorted) result(m)
         class(pf_spatial_index), intent(in), target :: self !! the index to search.
         real(real64), intent(in) :: p(:) !! the query point; 2 or 3 coordinates.
         real(real64), intent(in) :: r !! the search radius.
         integer(int64), intent(out) :: out(:) !! caller's row indices of the points found.
         real(real64), intent(out), optional :: dist(:) !! distance to each reported point.
+        real(real64), intent(in), optional :: r_inner !! an inner radius; makes the ball an annulus.
+        logical, intent(in), optional :: sorted !! .true. orders the result by increasing distance.
 
-        call spatial_scan(self, query_point(self, p, "within"), r, m, out64=out, dist=dist)
+        call spatial_scan(self, query_point(self, p, "within"), r, m, out64=out, dist=dist, &
+            r_inner=r_inner, sorted=sorted)
     end function bind_within_i64
 
     !> How many points lie within `r` of `p`, without materialising them.
-    integer(int64) function bind_count_within(self, p, r) result(m)
+    !>
+    !> `r_inner=` counts an annulus instead, on the same inclusive rule as `%within`.
+    integer(int64) function bind_count_within(self, p, r, r_inner) result(m)
         class(pf_spatial_index), intent(in), target :: self !! the index to search.
         real(real64), intent(in) :: p(:) !! the query point; 2 or 3 coordinates.
         real(real64), intent(in) :: r !! the search radius.
+        real(real64), intent(in), optional :: r_inner !! an inner radius; counts an annulus.
 
-        call spatial_scan(self, query_point(self, p, "count_within"), r, m)
+        call spatial_scan(self, query_point(self, p, "count_within"), r, m, r_inner=r_inner)
     end function bind_count_within
 
     !> `%within_sky` into an `int32` buffer.
@@ -881,31 +1022,40 @@ contains
     !> Refused on a Euclidean index, and every Euclidean query is refused on a sky one. That guard
     !> is the entire reason the metric is a property of the INDEX rather than of the call: without
     !> it, `%within` on a sky index would quietly answer in chords to someone who asked in degrees.
-    integer(int64) function bind_sky_i32(self, ra, dec, rsky_deg, out, dist_deg) result(m)
+    integer(int64) function bind_sky_i32(self, ra, dec, rsky_deg, out, dist_deg, r_inner_deg, sorted) result(m)
         class(pf_spatial_index), intent(in), target :: self !! the sky index to search.
         real(real64), intent(in) :: ra !! right ascension of the query point, in degrees.
         real(real64), intent(in) :: dec !! declination of the query point, in degrees.
         real(real64), intent(in) :: rsky_deg !! the angular search radius, in degrees.
         integer(int32), intent(out) :: out(:) !! caller's row indices of the points found.
         real(real64), intent(out), optional :: dist_deg(:) !! angular separation, in degrees.
+        real(real64), intent(in), optional :: r_inner_deg !! an inner angular radius; gives an annulus.
+        logical, intent(in), optional :: sorted !! .true. orders the result by increasing separation.
 
-        call sky_scan(self, ra, dec, rsky_deg, m, out32=out, dist_deg=dist_deg)
+        call sky_scan(self, ra, dec, rsky_deg, m, out32=out, dist_deg=dist_deg, &
+            r_inner_deg=r_inner_deg, sorted=sorted)
     end function bind_sky_i32
 
     !> `%within_sky` into an `int64` buffer. See `bind_sky_i32`.
-    integer(int64) function bind_sky_i64(self, ra, dec, rsky_deg, out, dist_deg) result(m)
+    integer(int64) function bind_sky_i64(self, ra, dec, rsky_deg, out, dist_deg, r_inner_deg, sorted) result(m)
         class(pf_spatial_index), intent(in), target :: self !! the sky index to search.
         real(real64), intent(in) :: ra !! right ascension of the query point, in degrees.
         real(real64), intent(in) :: dec !! declination of the query point, in degrees.
         real(real64), intent(in) :: rsky_deg !! the angular search radius, in degrees.
         integer(int64), intent(out) :: out(:) !! caller's row indices of the points found.
         real(real64), intent(out), optional :: dist_deg(:) !! angular separation, in degrees.
+        real(real64), intent(in), optional :: r_inner_deg !! an inner angular radius; gives an annulus.
+        logical, intent(in), optional :: sorted !! .true. orders the result by increasing separation.
 
-        call sky_scan(self, ra, dec, rsky_deg, m, out64=out, dist_deg=dist_deg)
+        call sky_scan(self, ra, dec, rsky_deg, m, out64=out, dist_deg=dist_deg, &
+            r_inner_deg=r_inner_deg, sorted=sorted)
     end function bind_sky_i64
 
     !> The shared body of both `%within_sky` forms: guard, convert, scan, convert back.
-    subroutine sky_scan(self, ra, dec, rsky_deg, m, out32, out64, dist_deg)
+    !>
+    !> **Sorting happens on CHORDS and needs no undoing**, because the chord is strictly
+    !> increasing in the angle -- so ordering by chord and ordering by degrees are the same order.
+    subroutine sky_scan(self, ra, dec, rsky_deg, m, out32, out64, dist_deg, r_inner_deg, sorted)
         type(pf_spatial_index), intent(in), target :: self !! the sky index to search.
         real(real64), intent(in) :: ra !! right ascension of the query point, in degrees.
         real(real64), intent(in) :: dec !! declination of the query point, in degrees.
@@ -914,7 +1064,9 @@ contains
         integer(int32), intent(inout), optional :: out32(:) !! int32 output buffer.
         integer(int64), intent(inout), optional :: out64(:) !! int64 output buffer.
         real(real64), intent(out), optional :: dist_deg(:) !! angular separation, in degrees.
-        real(real64) :: p(3), half
+        real(real64), intent(in), optional :: r_inner_deg !! an inner angular radius; gives an annulus.
+        logical, intent(in), optional :: sorted !! .true. orders the result by increasing separation.
+        real(real64) :: p(3), half, chord_in
         integer(int64) :: k, nfill
 
         if (.not. self%built_ok) error stop &
@@ -927,11 +1079,29 @@ contains
             "pf_spatial_index%within_sky: an angular radius above 90 degrees is not a neighbour " // &
             "search; the ball then covers most of the sky and the grid has nothing to prune"
         p = sky_vector(ra, dec)
-        call spatial_scan(self, p, sky_chord(rsky_deg), m, out32=out32, out64=out64, dist=dist_deg)
+        if (present(r_inner_deg)) then
+            if (.not. (r_inner_deg >= 0.0_real64)) error stop &
+                "pf_spatial_index%within_sky: the inner angular radius must be >= 0 and not NaN"
+            if (r_inner_deg > rsky_deg) error stop &
+                "pf_spatial_index%within_sky: the inner angular radius must not exceed the outer one"
+            chord_in = sky_chord(r_inner_deg)
+            call spatial_scan(self, p, sky_chord(rsky_deg), m, out32=out32, out64=out64, &
+                dist=dist_deg, r_inner=chord_in, sorted=sorted)
+        else
+            call spatial_scan(self, p, sky_chord(rsky_deg), m, out32=out32, out64=out64, &
+                dist=dist_deg, sorted=sorted)
+        end if
         if (.not. present(dist_deg)) return
-        ! Chords back to degrees, over the entries actually written -- `m` is the true count and
-        ! can exceed the buffer, which is the whole point of reporting it.
-        nfill = min(m, size(dist_deg, kind=int64))
+        ! Chords back to degrees, over the entries actually written -- which is the true count
+        ! capped by the SHORTEST buffer, not by this one. `out` has to enter the minimum: the walk
+        ! stops at the common cap, so a caller passing a short `out` beside a long `dist_deg`
+        ! leaves the tail of `dist_deg` unwritten, and converting it would read an undefined value
+        ! and hand back a plausible number. nagfor's `-nan` turns that into a visible NaN; every
+        ! other compiler in the fleet returns garbage silently.
+        nfill = m
+        if (present(out32)) nfill = min(nfill, size(out32, kind=int64))
+        if (present(out64)) nfill = min(nfill, size(out64, kind=int64))
+        nfill = min(nfill, size(dist_deg, kind=int64))
         do k = 1_int64, nfill
             half = min(0.5_real64 * dist_deg(k), 1.0_real64)
             dist_deg(k) = 2.0_real64 * asin(half) * spatial_rad2deg
@@ -946,31 +1116,44 @@ contains
     !>
     !> `p1 == p2` degenerates to a ball of radius `r` about `p1` -- the right answer rather than a
     !> special case, and the same reduction `%within_cone` makes.
-    integer(int64) function bind_seg_i32(self, p1, p2, r, out, dist) result(m)
+    !>
+    !> **`axis_point=` is the point `dist` was measured FROM**, which for a capsule is the closest
+    !> point on the SEGMENT and not the projection onto the infinite line: a point beyond `p2` has
+    !> its distance measured from `p2` itself. `axis_t=` says where that point sits along the axis,
+    !> normalised to `[0, 1]` -- 0 at `p1`, 1 at `p2`, never outside -- so
+    !> `axis_point == p1 + axis_t*(p2 - p1)`. Multiply `axis_t` by `norm(p2 - p1)` for a length
+    !> along the axis in the index's own units. See `spatial_scan_axis` for the full contract.
+    integer(int64) function bind_seg_i32(self, p1, p2, r, out, dist, axis_point, axis_t, sorted) result(m)
         class(pf_spatial_index), intent(in), target :: self !! the index to search.
         real(real64), intent(in) :: p1(:) !! one end of the segment; 2 or 3 coordinates.
         real(real64), intent(in) :: p2(:) !! the other end; as many coordinates as `p1`.
         real(real64), intent(in) :: r !! the search radius about the segment.
         integer(int32), intent(out) :: out(:) !! caller's row indices of the points found.
         real(real64), intent(out), optional :: dist(:) !! distance to the segment, per reported point.
+        real(real64), intent(out), optional :: axis_point(:,:) !! `(ndim, m)`: where `dist` was measured from.
+        real(real64), intent(out), optional :: axis_t(:) !! where that point sits along the axis, in [0, 1].
+        logical, intent(in), optional :: sorted !! .true. orders the result by increasing distance.
 
         call spatial_scan_axis(self, query_point(self, p1, "within_segment"), &
             query_point(self, p2, "within_segment"), r, r, .true., "within_segment", m, &
-            out32=out, dist=dist)
+            out32=out, dist=dist, axis_point=axis_point, axis_t=axis_t, sorted=sorted)
     end function bind_seg_i32
 
     !> `%within_segment` into an `int64` buffer. See `bind_seg_i32` for the shape.
-    integer(int64) function bind_seg_i64(self, p1, p2, r, out, dist) result(m)
+    integer(int64) function bind_seg_i64(self, p1, p2, r, out, dist, axis_point, axis_t, sorted) result(m)
         class(pf_spatial_index), intent(in), target :: self !! the index to search.
         real(real64), intent(in) :: p1(:) !! one end of the segment; 2 or 3 coordinates.
         real(real64), intent(in) :: p2(:) !! the other end; as many coordinates as `p1`.
         real(real64), intent(in) :: r !! the search radius about the segment.
         integer(int64), intent(out) :: out(:) !! caller's row indices of the points found.
         real(real64), intent(out), optional :: dist(:) !! distance to the segment, per reported point.
+        real(real64), intent(out), optional :: axis_point(:,:) !! `(ndim, m)`: where `dist` was measured from.
+        real(real64), intent(out), optional :: axis_t(:) !! where that point sits along the axis, in [0, 1].
+        logical, intent(in), optional :: sorted !! .true. orders the result by increasing distance.
 
         call spatial_scan_axis(self, query_point(self, p1, "within_segment"), &
             query_point(self, p2, "within_segment"), r, r, .true., "within_segment", m, &
-            out64=out, dist=dist)
+            out64=out, dist=dist, axis_point=axis_point, axis_t=axis_t, sorted=sorted)
     end function bind_seg_i64
 
     !> `%within_cylinder` into an `int32` buffer.
@@ -980,31 +1163,40 @@ contains
     !>
     !> `p1 == p2` degenerates to a ball of radius `r` about `p1`, exactly as `%within_segment`
     !> does -- with no axis there is no "between the ends" left to test.
-    integer(int64) function bind_cyl_i32(self, p1, p2, r, out, dist) result(m)
+    !>
+    !> `axis_point=` and `axis_t=` behave as on `%within_segment`; here the clamp never bites,
+    !> since a point whose axis parameter falls outside `[0, 1]` is rejected rather than clamped.
+    integer(int64) function bind_cyl_i32(self, p1, p2, r, out, dist, axis_point, axis_t, sorted) result(m)
         class(pf_spatial_index), intent(in), target :: self !! the index to search.
         real(real64), intent(in) :: p1(:) !! one end of the axis; 2 or 3 coordinates.
         real(real64), intent(in) :: p2(:) !! the other end; as many coordinates as `p1`.
         real(real64), intent(in) :: r !! the cylinder radius.
         integer(int32), intent(out) :: out(:) !! caller's row indices of the points found.
         real(real64), intent(out), optional :: dist(:) !! distance to the axis, per reported point.
+        real(real64), intent(out), optional :: axis_point(:,:) !! `(ndim, m)`: the foot of that distance.
+        real(real64), intent(out), optional :: axis_t(:) !! where that foot sits along the axis, in [0, 1].
+        logical, intent(in), optional :: sorted !! .true. orders the result by increasing distance.
 
         call spatial_scan_axis(self, query_point(self, p1, "within_cylinder"), &
             query_point(self, p2, "within_cylinder"), r, r, .false., "within_cylinder", m, &
-            out32=out, dist=dist)
+            out32=out, dist=dist, axis_point=axis_point, axis_t=axis_t, sorted=sorted)
     end function bind_cyl_i32
 
     !> `%within_cylinder` into an `int64` buffer. See `bind_cyl_i32` for the shape.
-    integer(int64) function bind_cyl_i64(self, p1, p2, r, out, dist) result(m)
+    integer(int64) function bind_cyl_i64(self, p1, p2, r, out, dist, axis_point, axis_t, sorted) result(m)
         class(pf_spatial_index), intent(in), target :: self !! the index to search.
         real(real64), intent(in) :: p1(:) !! one end of the axis; 2 or 3 coordinates.
         real(real64), intent(in) :: p2(:) !! the other end; as many coordinates as `p1`.
         real(real64), intent(in) :: r !! the cylinder radius.
         integer(int64), intent(out) :: out(:) !! caller's row indices of the points found.
         real(real64), intent(out), optional :: dist(:) !! distance to the axis, per reported point.
+        real(real64), intent(out), optional :: axis_point(:,:) !! `(ndim, m)`: the foot of that distance.
+        real(real64), intent(out), optional :: axis_t(:) !! where that foot sits along the axis, in [0, 1].
+        logical, intent(in), optional :: sorted !! .true. orders the result by increasing distance.
 
         call spatial_scan_axis(self, query_point(self, p1, "within_cylinder"), &
             query_point(self, p2, "within_cylinder"), r, r, .false., "within_cylinder", m, &
-            out64=out, dist=dist)
+            out64=out, dist=dist, axis_point=axis_point, axis_t=axis_t, sorted=sorted)
     end function bind_cyl_i64
 
     !> `%within_cone` into an `int32` buffer.
@@ -1020,7 +1212,8 @@ contains
     !>
     !> `dist` reports the perpendicular distance to the axis, not to the sloping surface.
     !> `p1 == p2` degenerates to a ball of radius `max(r1, r2)` about `p1`.
-    integer(int64) function bind_cone_i32(self, p1, p2, r1, r2, out, dist) result(m)
+    !> `axis_point=` and `axis_t=` behave as on `%within_cylinder`.
+    integer(int64) function bind_cone_i32(self, p1, p2, r1, r2, out, dist, axis_point, axis_t, sorted) result(m)
         class(pf_spatial_index), intent(in), target :: self !! the index to search.
         real(real64), intent(in) :: p1(:) !! one end of the axis; 2 or 3 coordinates.
         real(real64), intent(in) :: p2(:) !! the other end; as many coordinates as `p1`.
@@ -1028,14 +1221,17 @@ contains
         real(real64), intent(in) :: r2 !! the radius at `p2`.
         integer(int32), intent(out) :: out(:) !! caller's row indices of the points found.
         real(real64), intent(out), optional :: dist(:) !! distance to the axis, per reported point.
+        real(real64), intent(out), optional :: axis_point(:,:) !! `(ndim, m)`: the foot of that distance.
+        real(real64), intent(out), optional :: axis_t(:) !! where that foot sits along the axis, in [0, 1].
+        logical, intent(in), optional :: sorted !! .true. orders the result by increasing distance.
 
         call spatial_scan_axis(self, query_point(self, p1, "within_cone"), &
             query_point(self, p2, "within_cone"), r1, r2, .false., "within_cone", m, &
-            out32=out, dist=dist)
+            out32=out, dist=dist, axis_point=axis_point, axis_t=axis_t, sorted=sorted)
     end function bind_cone_i32
 
     !> `%within_cone` into an `int64` buffer. See `bind_cone_i32` for the shape.
-    integer(int64) function bind_cone_i64(self, p1, p2, r1, r2, out, dist) result(m)
+    integer(int64) function bind_cone_i64(self, p1, p2, r1, r2, out, dist, axis_point, axis_t, sorted) result(m)
         class(pf_spatial_index), intent(in), target :: self !! the index to search.
         real(real64), intent(in) :: p1(:) !! one end of the axis; 2 or 3 coordinates.
         real(real64), intent(in) :: p2(:) !! the other end; as many coordinates as `p1`.
@@ -1043,23 +1239,37 @@ contains
         real(real64), intent(in) :: r2 !! the radius at `p2`.
         integer(int64), intent(out) :: out(:) !! caller's row indices of the points found.
         real(real64), intent(out), optional :: dist(:) !! distance to the axis, per reported point.
+        real(real64), intent(out), optional :: axis_point(:,:) !! `(ndim, m)`: the foot of that distance.
+        real(real64), intent(out), optional :: axis_t(:) !! where that foot sits along the axis, in [0, 1].
+        logical, intent(in), optional :: sorted !! .true. orders the result by increasing distance.
 
         call spatial_scan_axis(self, query_point(self, p1, "within_cone"), &
             query_point(self, p2, "within_cone"), r1, r2, .false., "within_cone", m, &
-            out64=out, dist=dist)
+            out64=out, dist=dist, axis_point=axis_point, axis_t=axis_t, sorted=sorted)
     end function bind_cone_i64
 
     ! ---- Bulk queries ----
 
     !> `%all_within` with one radius for every point.
-    subroutine bind_all_within_r0(self, radius, offsets, neighbours, threads)
+    !>
+    !> `r_inner=` makes each ball an annulus, on `%within`'s inclusive rule. `sorted=.true.`
+    !> orders every row by increasing distance, ties by ascending row index.
+    subroutine bind_all_within_r0(self, radius, offsets, neighbours, threads, r_inner, sorted)
         class(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
         real(real64), intent(in) :: radius !! the search radius, the same for every point.
         integer(int64), allocatable, intent(out) :: offsets(:) !! length n+1; `offsets(1) == 1`.
         integer(int64), allocatable, intent(out) :: neighbours(:) !! the concatenated neighbour lists.
         integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), intent(in), optional :: r_inner !! one inner radius for every point.
+        logical, intent(in), optional :: sorted !! .true. orders each row by increasing distance.
 
-        call spatial_all_within_worker(self, [radius], offsets, neighbours, PF_METRIC_EUCLIDEAN, threads)
+        if (present(r_inner)) then
+            call spatial_all_within_worker(self, [radius], offsets, neighbours, PF_METRIC_EUCLIDEAN, &
+                threads, radii_inner=[r_inner], sorted=sorted)
+        else
+            call spatial_all_within_worker(self, [radius], offsets, neighbours, PF_METRIC_EUCLIDEAN, &
+                threads, sorted=sorted)
+        end if
     end subroutine bind_all_within_r0
 
     !> `%all_within` with an independent radius per point.
@@ -1067,14 +1277,19 @@ contains
     !> **Directed**: row `i`'s neighbour list holds what lies within `radius(i)` of it, so `j` can
     !> appear in `i`'s list without `i` appearing in `j`'s. That is the meaning of the query, not a
     !> defect -- `%pairs_within` is the symmetric form.
-    subroutine bind_all_within_r1(self, radius, offsets, neighbours, threads)
+    !> `r_inner=` takes one value or one per point, matching `radius`. `sorted=` is as on the
+    !> single-radius form.
+    subroutine bind_all_within_r1(self, radius, offsets, neighbours, threads, r_inner, sorted)
         class(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
         real(real64), intent(in) :: radius(:) !! one radius per point, in the caller's row order.
         integer(int64), allocatable, intent(out) :: offsets(:) !! length n+1; `offsets(1) == 1`.
         integer(int64), allocatable, intent(out) :: neighbours(:) !! the concatenated neighbour lists.
         integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), intent(in), optional :: r_inner(:) !! inner radii; one value or one per point.
+        logical, intent(in), optional :: sorted !! .true. orders each row by increasing distance.
 
-        call spatial_all_within_worker(self, radius, offsets, neighbours, PF_METRIC_EUCLIDEAN, threads)
+        call spatial_all_within_worker(self, radius, offsets, neighbours, PF_METRIC_EUCLIDEAN, &
+            threads, radii_inner=r_inner, sorted=sorted)
     end subroutine bind_all_within_r1
 
     !> `%pairs_within` with one radius for every point.
@@ -1082,14 +1297,15 @@ contains
     !> Every neighbouring pair appears exactly once, with `i < j`. With one radius the relation is
     !> symmetric by construction, so there is nothing to choose: either endpoint's ball reaches the
     !> other or neither does.
-    subroutine bind_pairs_within_r0(self, radius, i, j, threads)
+    subroutine bind_pairs_within_r0(self, radius, i, j, threads, r_inner)
         class(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
         real(real64), intent(in) :: radius !! the search radius, the same for every point.
         integer(int64), allocatable, intent(out) :: i(:) !! the lower row index of each pair.
         integer(int64), allocatable, intent(out) :: j(:) !! the higher row index of each pair.
         integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), intent(in), optional :: r_inner !! an inner radius; pairs closer than this are dropped.
 
-        call spatial_pairs_within_worker(self, [radius], i, j, PF_METRIC_EUCLIDEAN, threads)
+        call spatial_pairs_within_worker(self, [radius], i, j, PF_METRIC_EUCLIDEAN, threads, r_inner)
     end subroutine bind_pairs_within_r0
 
     !> `%pairs_within` with an independent radius per point.
@@ -1107,34 +1323,48 @@ contains
     !> Two other conventions are common for a per-point radius and neither is what this gives:
     !> `d <= min(r_i, r_j)` (both must agree) and `d <= r_i + r_j` (the balls touch). Either can be
     !> had by filtering this result, since both are subsets of it.
-    subroutine bind_pairs_within_r1(self, radius, i, j, threads)
+    !>
+    !> **`r_inner=` is SCALAR here even though `radius` is a vector, and that is a correctness
+    !> constraint rather than a simplification.** With per-point radii a pair qualifies when it
+    !> lies in *i*'s annulus OR in *j*'s, and the union of two different annuli is not an annulus
+    !> -- so the descending-radius ranking that makes each pair be emitted from exactly one
+    !> endpoint no longer covers it, and the edge list would be quietly incomplete. Passing a
+    !> per-point `r_inner` here is refused.
+    subroutine bind_pairs_within_r1(self, radius, i, j, threads, r_inner)
         class(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
         real(real64), intent(in) :: radius(:) !! one radius per point, in the caller's row order.
         integer(int64), allocatable, intent(out) :: i(:) !! the lower row index of each pair.
         integer(int64), allocatable, intent(out) :: j(:) !! the higher row index of each pair.
         integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), intent(in), optional :: r_inner !! one inner radius for every pair; scalar only.
 
-        call spatial_pairs_within_worker(self, radius, i, j, PF_METRIC_EUCLIDEAN, threads)
+        call spatial_pairs_within_worker(self, radius, i, j, PF_METRIC_EUCLIDEAN, threads, r_inner)
     end subroutine bind_pairs_within_r1
 
     !> `%count_all_within` with one radius for every point.
-    subroutine bind_count_all_r0(self, radius, counts, threads)
+    subroutine bind_count_all_r0(self, radius, counts, threads, r_inner)
         class(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
         real(real64), intent(in) :: radius !! the search radius, the same for every point.
         integer(int64), allocatable, intent(out) :: counts(:) !! length n, in the caller's row order.
         integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), intent(in), optional :: r_inner !! one inner radius for every point.
 
-        call spatial_count_all_worker(self, [radius], counts, PF_METRIC_EUCLIDEAN, threads)
+        if (present(r_inner)) then
+            call spatial_count_all_worker(self, [radius], counts, PF_METRIC_EUCLIDEAN, threads, [r_inner])
+        else
+            call spatial_count_all_worker(self, [radius], counts, PF_METRIC_EUCLIDEAN, threads)
+        end if
     end subroutine bind_count_all_r0
 
     !> `%count_all_within` with an independent radius per point.
-    subroutine bind_count_all_r1(self, radius, counts, threads)
+    subroutine bind_count_all_r1(self, radius, counts, threads, r_inner)
         class(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
         real(real64), intent(in) :: radius(:) !! one radius per point, in the caller's row order.
         integer(int64), allocatable, intent(out) :: counts(:) !! length n, in the caller's row order.
         integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), intent(in), optional :: r_inner(:) !! inner radii; one value or one per point.
 
-        call spatial_count_all_worker(self, radius, counts, PF_METRIC_EUCLIDEAN, threads)
+        call spatial_count_all_worker(self, radius, counts, PF_METRIC_EUCLIDEAN, threads, r_inner)
     end subroutine bind_count_all_r1
 
     ! ---- Bulk queries on the sky ----
@@ -1148,42 +1378,66 @@ contains
     !>
     !> The catalogue self-match: for each row, every row within `radius_deg` degrees of it, as one
     !> CSR structure. DIRECTED under a per-point radius, exactly as `%all_within` is.
-    subroutine bind_all_sky_r0(self, radius_deg, offsets, neighbours, threads)
+    subroutine bind_all_sky_r0(self, radius_deg, offsets, neighbours, threads, r_inner_deg, sorted)
         class(pf_spatial_index), intent(inout), target :: self !! the sky index to sweep.
         real(real64), intent(in) :: radius_deg !! the angular radius, in degrees.
         integer(int64), allocatable, intent(out) :: offsets(:) !! length n+1, `offsets(1) == 1`.
         integer(int64), allocatable, intent(out) :: neighbours(:) !! the concatenated neighbour lists.
         integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), intent(in), optional :: r_inner_deg !! an inner angular radius, in degrees.
+        logical, intent(in), optional :: sorted !! .true. orders each row by increasing separation.
 
-        call spatial_all_within_worker(self, sky_chords([radius_deg], "all_within_sky"), &
-            offsets, neighbours, PF_METRIC_SKY, threads)
+        if (present(r_inner_deg)) then
+            call spatial_all_within_worker(self, sky_chords([radius_deg], "all_within_sky"), &
+                offsets, neighbours, PF_METRIC_SKY, threads, &
+                sky_chords([r_inner_deg], "all_within_sky"), sorted)
+        else
+            call spatial_all_within_worker(self, sky_chords([radius_deg], "all_within_sky"), &
+                offsets, neighbours, PF_METRIC_SKY, threads, sorted=sorted)
+        end if
     end subroutine bind_all_sky_r0
 
     !> `%all_within_sky` with an independent angular radius per point, in the caller's row order.
-    subroutine bind_all_sky_r1(self, radius_deg, offsets, neighbours, threads)
+    subroutine bind_all_sky_r1(self, radius_deg, offsets, neighbours, threads, r_inner_deg, sorted)
         class(pf_spatial_index), intent(inout), target :: self !! the sky index to sweep.
         real(real64), intent(in) :: radius_deg(:) !! one angular radius per point, in degrees.
         integer(int64), allocatable, intent(out) :: offsets(:) !! length n+1, `offsets(1) == 1`.
         integer(int64), allocatable, intent(out) :: neighbours(:) !! the concatenated neighbour lists.
         integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), intent(in), optional :: r_inner_deg(:) !! inner angular radii, in degrees.
+        logical, intent(in), optional :: sorted !! .true. orders each row by increasing separation.
 
-        call spatial_all_within_worker(self, sky_chords(radius_deg, "all_within_sky"), &
-            offsets, neighbours, PF_METRIC_SKY, threads)
+        if (present(r_inner_deg)) then
+            call spatial_all_within_worker(self, sky_chords(radius_deg, "all_within_sky"), &
+                offsets, neighbours, PF_METRIC_SKY, threads, &
+                sky_chords(r_inner_deg, "all_within_sky"), sorted)
+        else
+            call spatial_all_within_worker(self, sky_chords(radius_deg, "all_within_sky"), &
+                offsets, neighbours, PF_METRIC_SKY, threads, sorted=sorted)
+        end if
     end subroutine bind_all_sky_r1
 
     !> `%pairs_within_sky` with one angular radius for every point.
     !>
     !> Every close pair once, with `i < j` -- the shape a group finder or a duplicate-source search
     !> wants.
-    subroutine bind_pairs_sky_r0(self, radius_deg, i, j, threads)
+    subroutine bind_pairs_sky_r0(self, radius_deg, i, j, threads, r_inner_deg)
         class(pf_spatial_index), intent(inout), target :: self !! the sky index to sweep.
         real(real64), intent(in) :: radius_deg !! the angular radius, in degrees.
         integer(int64), allocatable, intent(out) :: i(:) !! the lower row index of each pair.
         integer(int64), allocatable, intent(out) :: j(:) !! the higher row index of each pair.
         integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), intent(in), optional :: r_inner_deg !! an inner angular radius, in degrees.
+        real(real64), allocatable :: cin(:)
 
-        call spatial_pairs_within_worker(self, sky_chords([radius_deg], "pairs_within_sky"), &
-            i, j, PF_METRIC_SKY, threads)
+        if (present(r_inner_deg)) then
+            cin = sky_chords([r_inner_deg], "pairs_within_sky")
+            call spatial_pairs_within_worker(self, sky_chords([radius_deg], "pairs_within_sky"), &
+                i, j, PF_METRIC_SKY, threads, cin(1))
+        else
+            call spatial_pairs_within_worker(self, sky_chords([radius_deg], "pairs_within_sky"), &
+                i, j, PF_METRIC_SKY, threads)
+        end if
     end subroutine bind_pairs_sky_r0
 
     !> `%pairs_within_sky` with an independent angular radius per point.
@@ -1193,41 +1447,367 @@ contains
     !> increasing in the angle, the chord of the larger angle IS the larger chord -- so ranking the
     !> points by descending chord ranks them by descending angle, and the sweep needs no knowledge
     !> of which metric it is running under.
-    subroutine bind_pairs_sky_r1(self, radius_deg, i, j, threads)
+    !>
+    !> **`r_inner_deg=` is SCALAR here for the same reason `%pairs_within`'s is**, and the chord
+    !> being a monotone reparameterisation of the angle changes nothing about that argument: the
+    !> union of two different annuli is still not an annulus.
+    subroutine bind_pairs_sky_r1(self, radius_deg, i, j, threads, r_inner_deg)
         class(pf_spatial_index), intent(inout), target :: self !! the sky index to sweep.
         real(real64), intent(in) :: radius_deg(:) !! one angular radius per point, in degrees.
         integer(int64), allocatable, intent(out) :: i(:) !! the lower row index of each pair.
         integer(int64), allocatable, intent(out) :: j(:) !! the higher row index of each pair.
         integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), intent(in), optional :: r_inner_deg !! one inner angular radius; scalar only.
+        real(real64), allocatable :: cin(:)
 
-        call spatial_pairs_within_worker(self, sky_chords(radius_deg, "pairs_within_sky"), &
-            i, j, PF_METRIC_SKY, threads)
+        if (present(r_inner_deg)) then
+            cin = sky_chords([r_inner_deg], "pairs_within_sky")
+            call spatial_pairs_within_worker(self, sky_chords(radius_deg, "pairs_within_sky"), &
+                i, j, PF_METRIC_SKY, threads, cin(1))
+        else
+            call spatial_pairs_within_worker(self, sky_chords(radius_deg, "pairs_within_sky"), &
+                i, j, PF_METRIC_SKY, threads)
+        end if
     end subroutine bind_pairs_sky_r1
 
     !> `%count_all_within_sky` with one angular radius for every point.
     !>
     !> Counts without materialising the lists, which on a crowded field is the difference between
     !> a length-n array and one that does not fit in memory. DIRECTED, as `%all_within_sky` is.
-    subroutine bind_count_all_sky_r0(self, radius_deg, counts, threads)
+    subroutine bind_count_all_sky_r0(self, radius_deg, counts, threads, r_inner_deg)
         class(pf_spatial_index), intent(inout), target :: self !! the sky index to sweep.
         real(real64), intent(in) :: radius_deg !! the angular radius, in degrees.
         integer(int64), allocatable, intent(out) :: counts(:) !! length n, in the caller's row order.
         integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), intent(in), optional :: r_inner_deg !! an inner angular radius, in degrees.
 
-        call spatial_count_all_worker(self, sky_chords([radius_deg], "count_all_within_sky"), &
-            counts, PF_METRIC_SKY, threads)
+        if (present(r_inner_deg)) then
+            call spatial_count_all_worker(self, sky_chords([radius_deg], "count_all_within_sky"), &
+                counts, PF_METRIC_SKY, threads, sky_chords([r_inner_deg], "count_all_within_sky"))
+        else
+            call spatial_count_all_worker(self, sky_chords([radius_deg], "count_all_within_sky"), &
+                counts, PF_METRIC_SKY, threads)
+        end if
     end subroutine bind_count_all_sky_r0
 
     !> `%count_all_within_sky` with an independent angular radius per point.
-    subroutine bind_count_all_sky_r1(self, radius_deg, counts, threads)
+    subroutine bind_count_all_sky_r1(self, radius_deg, counts, threads, r_inner_deg)
         class(pf_spatial_index), intent(inout), target :: self !! the sky index to sweep.
         real(real64), intent(in) :: radius_deg(:) !! one angular radius per point, in degrees.
         integer(int64), allocatable, intent(out) :: counts(:) !! length n, in the caller's row order.
         integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        real(real64), intent(in), optional :: r_inner_deg(:) !! inner angular radii, in degrees.
 
-        call spatial_count_all_worker(self, sky_chords(radius_deg, "count_all_within_sky"), &
-            counts, PF_METRIC_SKY, threads)
+        if (present(r_inner_deg)) then
+            call spatial_count_all_worker(self, sky_chords(radius_deg, "count_all_within_sky"), &
+                counts, PF_METRIC_SKY, threads, sky_chords(r_inner_deg, "count_all_within_sky"))
+        else
+            call spatial_count_all_worker(self, sky_chords(radius_deg, "count_all_within_sky"), &
+                counts, PF_METRIC_SKY, threads)
+        end if
     end subroutine bind_count_all_sky_r1
+
+    ! ---- k nearest neighbours ----
+
+    !> `%nearest` with an `int32` k into an `int32` buffer.
+    !>
+    !> **The `k` points nearest `p`, always ordered by increasing distance**, ties broken by
+    !> ascending row index. The result is EXACT: a ball is grown until it holds at least `k`
+    !> points, and the `k` nearest are then the `k` smallest of what that ball returned -- see
+    !> `spatial_shell_search`, which carries the argument and the trap it avoids.
+    !>
+    !> `m` is `min(k, %size())`, so asking for more neighbours than the index holds returns them
+    !> all rather than failing. A buffer shorter than `m` is filled as far as it reaches, and
+    !> because the ordering happens before the copy those ARE the nearest ones -- unlike
+    !> `%within(sorted=.true.)`, whose short buffer holds whatever the walk found first.
+    !>
+    !> The query point need not be one of the catalogue's own: a point coincident with a stored
+    !> row simply finds it at distance zero.
+    integer(int64) function bind_near_k32_i32(self, p, k, out, dist) result(m)
+        class(pf_spatial_index), intent(in), target :: self !! the index to search.
+        real(real64), intent(in) :: p(:) !! the query point; 2 or 3 coordinates.
+        integer(int32), intent(in) :: k !! how many neighbours to report; must be >= 1.
+        integer(int32), intent(out) :: out(:) !! caller's row indices, nearest first.
+        real(real64), intent(out), optional :: dist(:) !! distance to each reported point.
+
+        call near_scan(self, query_point(self, p, "nearest"), int(k, kind=int64), m, &
+            out32=out, dist=dist)
+    end function bind_near_k32_i32
+
+    !> `%nearest` with an `int32` k into an `int64` buffer. See `bind_near_k32_i32`.
+    integer(int64) function bind_near_k32_i64(self, p, k, out, dist) result(m)
+        class(pf_spatial_index), intent(in), target :: self !! the index to search.
+        real(real64), intent(in) :: p(:) !! the query point; 2 or 3 coordinates.
+        integer(int32), intent(in) :: k !! how many neighbours to report; must be >= 1.
+        integer(int64), intent(out) :: out(:) !! caller's row indices, nearest first.
+        real(real64), intent(out), optional :: dist(:) !! distance to each reported point.
+
+        call near_scan(self, query_point(self, p, "nearest"), int(k, kind=int64), m, &
+            out64=out, dist=dist)
+    end function bind_near_k32_i64
+
+    !> `%nearest` with an `int64` k into an `int32` buffer. See `bind_near_k32_i32`.
+    integer(int64) function bind_near_k64_i32(self, p, k, out, dist) result(m)
+        class(pf_spatial_index), intent(in), target :: self !! the index to search.
+        real(real64), intent(in) :: p(:) !! the query point; 2 or 3 coordinates.
+        integer(int64), intent(in) :: k !! how many neighbours to report; must be >= 1.
+        integer(int32), intent(out) :: out(:) !! caller's row indices, nearest first.
+        real(real64), intent(out), optional :: dist(:) !! distance to each reported point.
+
+        call near_scan(self, query_point(self, p, "nearest"), k, m, out32=out, dist=dist)
+    end function bind_near_k64_i32
+
+    !> `%nearest` with an `int64` k into an `int64` buffer. See `bind_near_k32_i32`.
+    integer(int64) function bind_near_k64_i64(self, p, k, out, dist) result(m)
+        class(pf_spatial_index), intent(in), target :: self !! the index to search.
+        real(real64), intent(in) :: p(:) !! the query point; 2 or 3 coordinates.
+        integer(int64), intent(in) :: k !! how many neighbours to report; must be >= 1.
+        integer(int64), intent(out) :: out(:) !! caller's row indices, nearest first.
+        real(real64), intent(out), optional :: dist(:) !! distance to each reported point.
+
+        call near_scan(self, query_point(self, p, "nearest"), k, m, out64=out, dist=dist)
+    end function bind_near_k64_i64
+
+    !> The shared body of every `%nearest` form: guard, expanding ball, copy out.
+    subroutine near_scan(self, p, k, m, out32, out64, dist)
+        type(pf_spatial_index), intent(in), target :: self !! the index to search.
+        real(real64), intent(in) :: p(3) !! the query point, already widened to three coordinates.
+        integer(int64), intent(in) :: k !! how many neighbours to report.
+        integer(int64), intent(out) :: m !! `min(k, %size())`, whatever the buffer holds.
+        integer(int32), intent(out), optional :: out32(:) !! int32 output buffer.
+        integer(int64), intent(out), optional :: out64(:) !! int64 output buffer.
+        real(real64), intent(out), optional :: dist(:) !! distance to each reported point.
+        integer(int64), allocatable :: rows(:)
+        real(real64), allocatable :: ds(:)
+        integer(int64) :: cap, t
+        real(real64) :: rseed
+
+        m = 0_int64
+        if (k < 1_int64) error stop "pf_spatial_index%nearest: k must be >= 1"
+        if (present(out32) .and. self%npts > int(huge(0_int32), kind=int64)) error stop &
+            "pf_spatial_index%nearest: this index holds more rows than an int32 buffer can name; use an int64 one"
+        m = min(k, self%npts)
+        if (m == 0_int64) return
+        rseed = -1.0_real64
+        call spatial_shell_search(self, p, m, rseed, rows, ds, "nearest")
+        cap = huge(0_int64)
+        if (present(out32)) cap = min(cap, size(out32, kind=int64))
+        if (present(out64)) cap = min(cap, size(out64, kind=int64))
+        if (present(dist)) cap = min(cap, size(dist, kind=int64))
+        do t = 1_int64, min(m, cap)
+            if (present(out32)) out32(t) = int(rows(t), kind=int32)
+            if (present(out64)) out64(t) = rows(t)
+            if (present(dist)) dist(t) = ds(t)
+        end do
+    end subroutine near_scan
+
+    !> `%nearest_sky` with an `int32` k into an `int32` buffer.
+    !>
+    !> `%nearest` on the sky: the `k` rows nearest `(ra, dec)` in angular separation, ordered by
+    !> increasing separation, with `dist_deg` in DEGREES.
+    !>
+    !> **The expanding ball caps at 180 degrees here, not at the 90 that `%within_sky` enforces.**
+    !> That limit is a usefulness judgement about a radius the caller chose; this radius is derived
+    !> rather than chosen, and a sparse catalogue may legitimately need a wide one to reach `k`.
+    integer(int64) function bind_near_sky_k32_i32(self, ra, dec, k, out, dist_deg) result(m)
+        class(pf_spatial_index), intent(in), target :: self !! the sky index to search.
+        real(real64), intent(in) :: ra !! right ascension of the query point, in degrees.
+        real(real64), intent(in) :: dec !! declination of the query point, in degrees.
+        integer(int32), intent(in) :: k !! how many neighbours to report; must be >= 1.
+        integer(int32), intent(out) :: out(:) !! caller's row indices, nearest first.
+        real(real64), intent(out), optional :: dist_deg(:) !! angular separation, in degrees.
+
+        call near_sky_scan(self, ra, dec, int(k, kind=int64), m, out32=out, dist_deg=dist_deg)
+    end function bind_near_sky_k32_i32
+
+    !> `%nearest_sky` with an `int32` k into an `int64` buffer. See `bind_near_sky_k32_i32`.
+    integer(int64) function bind_near_sky_k32_i64(self, ra, dec, k, out, dist_deg) result(m)
+        class(pf_spatial_index), intent(in), target :: self !! the sky index to search.
+        real(real64), intent(in) :: ra !! right ascension of the query point, in degrees.
+        real(real64), intent(in) :: dec !! declination of the query point, in degrees.
+        integer(int32), intent(in) :: k !! how many neighbours to report; must be >= 1.
+        integer(int64), intent(out) :: out(:) !! caller's row indices, nearest first.
+        real(real64), intent(out), optional :: dist_deg(:) !! angular separation, in degrees.
+
+        call near_sky_scan(self, ra, dec, int(k, kind=int64), m, out64=out, dist_deg=dist_deg)
+    end function bind_near_sky_k32_i64
+
+    !> `%nearest_sky` with an `int64` k into an `int32` buffer. See `bind_near_sky_k32_i32`.
+    integer(int64) function bind_near_sky_k64_i32(self, ra, dec, k, out, dist_deg) result(m)
+        class(pf_spatial_index), intent(in), target :: self !! the sky index to search.
+        real(real64), intent(in) :: ra !! right ascension of the query point, in degrees.
+        real(real64), intent(in) :: dec !! declination of the query point, in degrees.
+        integer(int64), intent(in) :: k !! how many neighbours to report; must be >= 1.
+        integer(int32), intent(out) :: out(:) !! caller's row indices, nearest first.
+        real(real64), intent(out), optional :: dist_deg(:) !! angular separation, in degrees.
+
+        call near_sky_scan(self, ra, dec, k, m, out32=out, dist_deg=dist_deg)
+    end function bind_near_sky_k64_i32
+
+    !> `%nearest_sky` with an `int64` k into an `int64` buffer. See `bind_near_sky_k32_i32`.
+    integer(int64) function bind_near_sky_k64_i64(self, ra, dec, k, out, dist_deg) result(m)
+        class(pf_spatial_index), intent(in), target :: self !! the sky index to search.
+        real(real64), intent(in) :: ra !! right ascension of the query point, in degrees.
+        real(real64), intent(in) :: dec !! declination of the query point, in degrees.
+        integer(int64), intent(in) :: k !! how many neighbours to report; must be >= 1.
+        integer(int64), intent(out) :: out(:) !! caller's row indices, nearest first.
+        real(real64), intent(out), optional :: dist_deg(:) !! angular separation, in degrees.
+
+        call near_sky_scan(self, ra, dec, k, m, out64=out, dist_deg=dist_deg)
+    end function bind_near_sky_k64_i64
+
+    !> The shared body of every `%nearest_sky` form: guard, convert, search, convert back.
+    subroutine near_sky_scan(self, ra, dec, k, m, out32, out64, dist_deg)
+        type(pf_spatial_index), intent(in), target :: self !! the sky index to search.
+        real(real64), intent(in) :: ra !! right ascension of the query point, in degrees.
+        real(real64), intent(in) :: dec !! declination of the query point, in degrees.
+        integer(int64), intent(in) :: k !! how many neighbours to report.
+        integer(int64), intent(out) :: m !! `min(k, %size())`, whatever the buffer holds.
+        integer(int32), intent(out), optional :: out32(:) !! int32 output buffer.
+        integer(int64), intent(out), optional :: out64(:) !! int64 output buffer.
+        real(real64), intent(out), optional :: dist_deg(:) !! angular separation, in degrees.
+        integer(int64) :: t, nfill
+        real(real64) :: half
+
+        m = 0_int64
+        if (.not. self%built_ok) error stop &
+            "pf_spatial_index%nearest_sky: this index has not been built; call %build_sky first"
+        if (self%metric_id /= PF_METRIC_SKY) error stop &
+            "pf_spatial_index%nearest_sky: this index was built with %build, not %build_sky; use %nearest"
+        call near_scan(self, sky_vector(ra, dec), k, m, out32=out32, out64=out64, dist=dist_deg)
+        if (.not. present(dist_deg)) return
+        ! The same rule as `sky_scan`: only the entries `near_scan` filled, which is the true count
+        ! capped by the shortest buffer of the three, `out` included.
+        nfill = m
+        if (present(out32)) nfill = min(nfill, size(out32, kind=int64))
+        if (present(out64)) nfill = min(nfill, size(out64, kind=int64))
+        nfill = min(nfill, size(dist_deg, kind=int64))
+        do t = 1_int64, nfill
+            half = min(0.5_real64 * dist_deg(t), 1.0_real64)
+            dist_deg(t) = 2.0_real64 * asin(half) * spatial_rad2deg
+        end do
+    end subroutine near_sky_scan
+
+    ! ---- The k-th neighbour distance, for every point at once ----
+
+    !> `%kth_distance` with an `int32` k.
+    !>
+    !> **For every point, the distance to its `k`-th nearest OTHER point** -- self excluded, which
+    !> is the whole reason the operation exists: an adaptive-kernel density estimator wants the
+    !> `k`-th neighbour, and counting the point itself shifts every bandwidth by one rank.
+    !>
+    !> `dist` comes back length `%size()` in the CALLER's row order. `k <= %size() - 1` is a
+    !> precondition and is checked up front, which is better than returning a sentinel for points
+    !> that cannot answer.
+    !>
+    !> **Cheaper than a loop of `%nearest`**, because the sweep runs in the index's own stored
+    !> order: consecutive points are spatially adjacent, so the radius that converged for one seeds
+    !> the next. That changes only the starting radius, never an answer.
+    subroutine bind_kth_k32(self, k, dist, threads)
+        class(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
+        integer(int32), intent(in) :: k !! which neighbour to report; 1 <= k <= %size()-1.
+        real(real64), allocatable, intent(out) :: dist(:) !! length n, in the caller's row order.
+        integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+
+        call spatial_kth_worker(self, int(k, kind=int64), dist, PF_METRIC_EUCLIDEAN, threads)
+    end subroutine bind_kth_k32
+
+    !> `%kth_distance` with an `int64` k. See `bind_kth_k32`.
+    subroutine bind_kth_k64(self, k, dist, threads)
+        class(pf_spatial_index), intent(inout), target :: self !! the index to sweep.
+        integer(int64), intent(in) :: k !! which neighbour to report; 1 <= k <= %size()-1.
+        real(real64), allocatable, intent(out) :: dist(:) !! length n, in the caller's row order.
+        integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+
+        call spatial_kth_worker(self, k, dist, PF_METRIC_EUCLIDEAN, threads)
+    end subroutine bind_kth_k64
+
+    !> `%kth_distance_sky` with an `int32` k. Answers in DEGREES.
+    subroutine bind_kth_sky_k32(self, k, dist_deg, threads)
+        class(pf_spatial_index), intent(inout), target :: self !! the sky index to sweep.
+        integer(int32), intent(in) :: k !! which neighbour to report; 1 <= k <= %size()-1.
+        real(real64), allocatable, intent(out) :: dist_deg(:) !! length n, in degrees, caller's row order.
+        integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+
+        call kth_sky(self, int(k, kind=int64), dist_deg, threads)
+    end subroutine bind_kth_sky_k32
+
+    !> `%kth_distance_sky` with an `int64` k. See `bind_kth_sky_k32`.
+    subroutine bind_kth_sky_k64(self, k, dist_deg, threads)
+        class(pf_spatial_index), intent(inout), target :: self !! the sky index to sweep.
+        integer(int64), intent(in) :: k !! which neighbour to report; 1 <= k <= %size()-1.
+        real(real64), allocatable, intent(out) :: dist_deg(:) !! length n, in degrees, caller's row order.
+        integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+
+        call kth_sky(self, k, dist_deg, threads)
+    end subroutine bind_kth_sky_k64
+
+    !> The shared body of both `%kth_distance_sky` forms: sweep in chords, report in degrees.
+    subroutine kth_sky(self, k, dist_deg, threads)
+        type(pf_spatial_index), intent(inout), target :: self !! the sky index to sweep.
+        integer(int64), intent(in) :: k !! which neighbour to report.
+        real(real64), allocatable, intent(out) :: dist_deg(:) !! length n, in degrees.
+        integer, intent(in), optional :: threads !! team size; absent resolves automatically.
+        integer(int64) :: t
+        real(real64) :: half
+
+        call spatial_kth_worker(self, k, dist_deg, PF_METRIC_SKY, threads)
+        do t = 1_int64, size(dist_deg, kind=int64)
+            half = min(0.5_real64 * dist_deg(t), 1.0_real64)
+            dist_deg(t) = 2.0_real64 * asin(half) * spatial_rad2deg
+        end do
+    end subroutine kth_sky
+
+    ! ---- Connected components ----
+
+    !> `pf_connected_components` with an `int32` vertex count.
+    !>
+    !> **`nvert` is required and must not be derived from the edge list.** An isolated vertex never
+    !> appears in an edge list, so `max(maxval(i), maxval(j))` silently drops every trailing
+    !> isolated point and returns a `labels` array shorter than the catalogue -- a wrong answer
+    !> with no symptom.
+    !>
+    !> `labels` comes back length `nvert`: a vertex in a qualifying component gets a label in
+    !> `1..ncomp`, and **everything else gets 0**. `min_size` (default 2) is the smallest component
+    !> that earns one, so by default an isolated vertex is unlabelled: in a group catalogue a
+    !> galaxy with no neighbours is not a group of one, it is a field galaxy. `min_size = 1`
+    !> restores the strict graph-theoretic reading in which every vertex belongs to a component.
+    !>
+    !> **Note this differs from the textbook definition on purpose**: mathematically a singleton
+    !> *is* a connected component, so a reader who knows the graph theory and not this default will
+    !> be surprised that `ncomp` omits them.
+    !>
+    !> **Labels are assigned by ascending vertex index of first appearance**, which is a contract
+    !> rather than a detail: without it the numbering would fall out of the union-find's internal
+    !> root choices and a group catalogue would differ between compilers. `sizes` follows the same
+    !> order.
+    !>
+    !> `min_size` is a plain default `integer` and has no `_int64` form: a component-size threshold
+    !> above two billion would select nothing any real catalogue contains.
+    subroutine components_n32(i, j, nvert, labels, ncomp, sizes, min_size)
+        integer(int64), intent(in) :: i(:) !! one endpoint of each edge, in `1..nvert`.
+        integer(int64), intent(in) :: j(:) !! the other endpoint of each edge, in `1..nvert`.
+        integer(int32), intent(in) :: nvert !! how many vertices the graph has; >= 0.
+        integer(int64), allocatable, intent(out) :: labels(:) !! length nvert; 0 where nothing qualifies.
+        integer(int64), intent(out), optional :: ncomp !! how many components earned a label.
+        integer(int64), allocatable, intent(out), optional :: sizes(:) !! length ncomp, in label order.
+        integer, intent(in), optional :: min_size !! smallest component that earns a label; default 2.
+
+        call spatial_components_worker(i, j, int(nvert, kind=int64), labels, ncomp, sizes, min_size)
+    end subroutine components_n32
+
+    !> `pf_connected_components` with an `int64` vertex count. See `components_n32`.
+    subroutine components_n64(i, j, nvert, labels, ncomp, sizes, min_size)
+        integer(int64), intent(in) :: i(:) !! one endpoint of each edge, in `1..nvert`.
+        integer(int64), intent(in) :: j(:) !! the other endpoint of each edge, in `1..nvert`.
+        integer(int64), intent(in) :: nvert !! how many vertices the graph has; >= 0.
+        integer(int64), allocatable, intent(out) :: labels(:) !! length nvert; 0 where nothing qualifies.
+        integer(int64), intent(out), optional :: ncomp !! how many components earned a label.
+        integer(int64), allocatable, intent(out), optional :: sizes(:) !! length ncomp, in label order.
+        integer, intent(in), optional :: min_size !! smallest component that earns a label; default 2.
+
+        call spatial_components_worker(i, j, nvert, labels, ncomp, sizes, min_size)
+    end subroutine components_n64
 
     ! ---- Shared argument checking ----
 
@@ -1325,6 +1905,31 @@ contains
         n = dbg_probe_count
     end function parquet_debug_spatial_probe_count
 
+    !> Forces the initial radius every later expanding-ball search starts from.
+    !>
+    !> **Test-only, and required rather than convenient.** A shell that never expands passes every
+    !> correctness test ever written for it, because the answers do not depend on how many rounds
+    !> it took -- so this is what lets a test-sized fixture exercise a many-round expansion at all,
+    !> and lets a deliberately tiny start be checked against a deliberately generous one. Public
+    !> for the same reason `parquet_debug_set_spatial_cell` is: the state it forces is private to
+    !> this module and there is no `bind(C)` boundary to hide the hook behind. No library code
+    !> calls it.
+    subroutine parquet_debug_set_spatial_shell_start(r)
+        real(real64), intent(in) :: r !! the initial radius to force; <= 0 restores the derived one.
+
+        dbg_shell_start = r
+    end subroutine parquet_debug_set_spatial_shell_start
+
+    !> How many expansion rounds every shell search has taken since the counters were reset.
+    !>
+    !> **A running total, not the last call's count** -- which is what makes it usable for the bulk
+    !> sweep, where the interesting quantity is whether the radius carried over from one point to
+    !> the next actually saved rounds. Test-only, public for the same reason as the setter above.
+    integer(int64) function parquet_debug_spatial_shell_rounds() result(n)
+
+        n = dbg_shell_rounds
+    end function parquet_debug_spatial_shell_rounds
+
     !> How many automatic rebuilds have happened since the counters were reset.
     integer(int64) function parquet_debug_spatial_rebuilds() result(n)
 
@@ -1344,6 +1949,8 @@ contains
         dbg_rebuilds = 0_int64
         dbg_threads_used = 0
         dbg_cell = -1.0_real64
+        dbg_shell_start = -1.0_real64
+        dbg_shell_rounds = 0_int64
     end subroutine parquet_debug_reset_spatial_counters
 
 end module parquet_spatial ! GCOVR_EXCL_LINE

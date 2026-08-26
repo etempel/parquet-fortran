@@ -212,6 +212,11 @@ something a reader is expected to have.
 | [Risk-144](#risk-144--a-per-point-radius-makes-a-pair-sweep-asymmetric-and-the-wrong-answer-looks-ordinary) | A per-point radius makes a pair sweep asymmetric, and the wrong answer looks ordinary | 4 — covered |
 | [Risk-145](#risk-145--the-slab-walks-padding-is-what-makes-it-complete-and-dropping-it-loses-only-boundary-points) | The slab walk's padding is what makes it complete, and dropping it loses only boundary points | 4 — covered |
 | [Risk-146](#risk-146--a-sky-index-answers-in-chords-and-a-euclidean-query-on-one-looks-perfectly-reasonable) | A sky index answers in chords, and a Euclidean query on one looks perfectly reasonable | 4 — covered |
+| [Risk-147](#risk-147--pf_connected_components-deriving-nvert-drops-the-trailing-isolated-vertices) | `pf_connected_components` deriving `nvert` drops the trailing isolated vertices | 4 — covered |
+| [Risk-148](#risk-148--sorted-without-an-explicit-row-index-tie-break-gives-a-different-order-on-a-different-machine) | `sorted=` without an explicit row-index tie-break gives a different order on a different machine | 4 — covered |
+| [Risk-149](#risk-149--a-per-point-r_inner-on-the-pair-sweep-would-silently-drop-pairs) | A per-point `r_inner` on the pair sweep would silently drop pairs | 4 — covered |
+| [Risk-150](#risk-150--a-nearest-that-stopped-at-k-candidates-rather-than-at-a-radius-would-be-plausibly-wrong) | A `%nearest` that stopped at k CANDIDATES rather than at a radius would be plausibly wrong | 4 — covered |
+| [Risk-151](#risk-151--axis_point-taken-as-the-infinite-line-projection-disagrees-with-dist-and-both-look-right) | `axis_point` taken as the infinite-line projection disagrees with `dist`, and both look right | 4 — covered |
 
 ---
 
@@ -6095,3 +6100,138 @@ discontinuities — a query at 0h must return points on both sides of the wrap, 
 must reach every meridian. A fixture in the middle of the sky passes with an implementation that
 compares right ascensions as if they were a Cartesian coordinate, which is the defect the whole
 conversion exists to prevent.
+
+### Risk-147 — `pf_connected_components` deriving `nvert` drops the trailing isolated vertices
+
+An isolated vertex never appears in an edge list. So the obvious economy -- taking the vertex
+count from `max(maxval(i), maxval(j))` and dropping the required `nvert` argument -- returns a
+`labels` array **shorter than the catalogue**, silently, with every label it does contain correct.
+
+Nothing announces it. The caller indexes their own rows by `labels(k)`, which is in bounds for
+every vertex that has an edge, and the vertices that vanished are exactly the ones a group finder
+was going to discard anyway -- until someone writes `count(labels == 0)` and gets a number that is
+too small, or pairs `labels` with a column and runs off the end.
+
+**What this still forbids:**
+
+- **`nvert` stays REQUIRED.** It is the one argument someone will try to remove, and the
+  doc-comment on `components_n32` says so at the declaration.
+- **A test for this needs isolated vertices at the END of the numbering.** Isolated vertices in the
+  middle are still covered by `maxval`, so a fixture that puts them anywhere else passes against
+  the defect.
+
+**Covered by** `test_components_hand_built_graphs` (`test/test_spatial.f90`), whose fixture leaves
+vertices 10, 11 and 12 isolated and asserts `size(labels) == 12`. Confirmed by mutation: deriving
+the count from the edge list fails that assertion and one more in
+`test_components_friends_of_friends`.
+
+### Risk-148 — `sorted=` without an explicit row-index tie-break gives a different order on a different machine
+
+`pf_argsort` is stable, so ordering a query's distances leaves exactly-tied rows in the order the
+walk produced them -- which is **cell order**. Cell order depends on the tuned cell size, the cell
+size is measured per machine by a work-count probe, and the probe's answer depends on the
+processor. So a `sorted=` result would be reproducible on one machine and different on another,
+for the same input.
+
+That is the opposite of what a caller asking for a canonical order wants, and it fails no test:
+the rows are right, the distances are right, only the order among equals moves.
+
+**What this still forbids:**
+
+- **The tie-break is a CONTRACT and must stay explicit.** `spatial_order_by_dist` re-orders each
+  run of exactly-equal distances by ascending row index; `sorted=`'s documented meaning includes
+  it, and "the sort is stable, so ties are already deterministic" is the reasoning to reject.
+- **A test needs EXACT ties, not near ones.** Integer coordinates give distances equal to the last
+  bit; anything derived from a random cloud does not tie at all and the pass is vacuous.
+- **And it needs a control that the WALK order differs from row order**, or the assertion holds
+  whether or not the tie-break ran. The fixture must therefore FORCE the cell size: with few enough
+  points the cell-count clamp puts them all in one cell, where the bucketing sort's own stability
+  hands them back in row order already and the control passes for the wrong reason.
+
+**Covered by** `test_sorted_breaks_ties_by_row` (`test/test_spatial.f90`), which carries all three
+properties. Confirmed by mutation: disabling the tie-break fails it.
+
+### Risk-149 — A per-point `r_inner` on the pair sweep would silently drop pairs
+
+`%pairs_within` emits each pair from exactly one of its two endpoints, chosen by ranking the
+points by **descending radius**: a pair qualifies when `d <= max(r_i, r_j)`, and only the endpoint
+with the larger ball is guaranteed to walk far enough to see its partner at all.
+
+An inner radius breaks that argument as soon as it varies per point. The qualifying condition
+becomes "in *i*'s annulus **or** in *j*'s", and the union of two different annuli is not an
+annulus -- so the endpoint with the larger *outer* radius need not be the one whose annulus
+actually contains the pair, and the pair is emitted by neither. The result is an edge list that is
+quietly incomplete: every edge in it is real, and some real edges are missing.
+
+**What this still forbids:**
+
+- **`r_inner=` is scalar-only on `%pairs_within` and `%pairs_within_sky`**, enforced by the
+  signature rather than by a runtime check, so the combination cannot be written at all.
+- **The sky twin is not an exception.** The chord is a monotone reparameterisation of the angle,
+  which is exactly why it changes nothing about the argument above.
+- **The general fix is known and deliberately not taken**: gather *j*'s two radii and test both
+  annuli in the accept test, at the cost of two gathers per candidate on the hottest path in the
+  module. Do not adopt it without measuring, and do not widen the signature without adopting it.
+
+**Covered by** the signature itself and by `test_annulus_in_bulk_and_on_the_sky`
+(`test/test_spatial.f90`), which checks that a scalar `r_inner` drops exactly the pairs closer than
+it and no others.
+
+### Risk-150 — A `%nearest` that stopped at k CANDIDATES rather than at a radius would be plausibly wrong
+
+The expanding ball is exact because of one argument: once a ball of radius `r` holds `m >= k`
+points, the `k`-th smallest of their distances is at most `r`, so every point closer than it is
+inside `r` and was found. The `k` nearest are then the `k` smallest of what the ball returned.
+
+**The natural "optimisation" destroys it.** Walking outward in rings of CELLS and stopping as soon
+as `k` candidates have been seen is wrong, because a cell's far corner is further from the query
+point than an unvisited cell's near face -- so a point in a ring not yet visited can be closer than
+one already collected. The result is a plausible neighbour list, in increasing distance, of points
+that really are nearby, and not the nearest `k`.
+
+**What this still forbids:**
+
+- **The accept test stays an exact ball at a known radius.** A cell-count or candidate-count
+  criterion is the defect, however it is spelled.
+- **The two-pass shape is load-bearing**: the first pass counts at the converged radius and the
+  second collects and orders. Collecting during the expansion would order candidates the earlier,
+  smaller balls found against ones the last one did.
+- **The debug hooks are required, not convenience.** A shell that never expands passes every
+  correctness test ever written for it, because the answers do not depend on how many rounds it
+  took -- `parquet_debug_spatial_shell_rounds` is the negative control, and
+  `parquet_debug_set_spatial_shell_start` is what lets a test-sized fixture reach a many-round
+  expansion at all.
+
+**Covered by** `test_nearest_matches_a_full_sort` (against a full sort of every distance) and
+`test_nearest_shell_start_does_not_change_answers` (tiny start against generous, same rows,
+different round counts). Confirmed by mutation: dropping the ordering from the collection pass
+fails six tests.
+
+### Risk-151 — `axis_point` taken as the infinite-line projection disagrees with `dist`, and both look right
+
+`axis_point` is defined as **the point `dist` was measured from**. For `%within_segment` that is
+the closest point on the SEGMENT, which for a point beyond an end is the end itself. The
+projection onto the infinite line is a different point, further along, and reporting it hands back
+a location that is not at `dist` from the returned row.
+
+Neither number looks wrong on its own. The foot is on the axis, the distance is small and
+positive, and only computing `norm(coords(row) - axis_point)` and comparing it with `dist` shows
+the disagreement. `axis_t` inherits the same defect in a quieter form still, as a small negative
+parameter where 0 was meant.
+
+**What this still forbids:**
+
+- **The clamp applies to BOTH outputs or to neither.** They are tied to each other by
+  `axis_point == p1 + axis_t*(p2 - p1)`, which is the invariant that catches a clamp applied to one
+  and not the other.
+- **`axis_t` is normalised to `[0, 1]`, never signed and never past 1.** A caller wanting a length
+  multiplies by `norm(p2 - p1)`; the library does not offer the signed form, because a negative
+  value would mean the foot was not on the segment.
+- **Only the CAPSULE distinguishes the two implementations.** `%within_cylinder` and `%within_cone`
+  reject anything whose parameter falls outside `[0, 1]`, so a test written against either of them
+  passes with the unclamped foot. The fixture must put points beyond BOTH ends of a capsule.
+
+**Covered by** `test_axis_outputs_satisfy_their_invariants` (all three invariants, all three
+shapes) and `test_axis_point_clamps_at_the_ends` (points past both ends, asserting the foot is
+exactly `p1` or `p2` and `axis_t` exactly 0 or 1). Confirmed by mutation: reporting the unclamped
+projection fails three tests.

@@ -23,15 +23,17 @@ module parquet_core
     use parquet_settings, only: parquet_max_filter_rule_len, parquet_max_filter_depth, parquet_max_filter_nodes, &
         parquet_max_sort_keys, parquet_max_sort_key_len
     use parquet_maml_base, only: parquet_maml_file
-    use parquet_strings, only: parquet_string_column, parquet_string
+    use parquet_strings, only: parquet_string_column, parquet_string, parquet_string_column_raw_buffers
     ! parquet_list for the container type the LIST read specifics fill; parquet_columns for the
     ! payload column they build inside it, and the PK_* kinds they map a file's element family
     ! onto. Both are default-private here, so neither is re-exported from parquet_core -- a user
     ! reaches them through the `parquet` facade's own `use parquet_list`/`use parquet_columns`.
     ! The dependency runs THIS WAY ONLY: parquet_list must never import parquet_core, which is
     ! what keeps it (and every tier below it) clear of parquet_bindings and hence of Arrow.
-    use parquet_list, only: parquet_list_column
+    use parquet_list, only: parquet_list_column, parquet_list_column_offsets, parquet_list_column_payload, &
+        parquet_list_column_row_validity
     use parquet_columns, only: parquet_column, parquet_column_set_null, parquet_column_string_column, &
+        parquet_column_data_ptr, parquet_column_is_null, parquet_kind_name, &
         PK_INT32, PK_INT64, PK_FLOAT32, PK_FLOAT64, PK_LOGICAL, PK_STRING, PK_DATE, PK_TIME, PK_TIMESTAMP
     use parquet_temporal, only: parquet_date, parquet_time, parquet_timestamp, &
         parquet_unit_seconds, parquet_unit_millis, parquet_unit_micros, parquet_unit_nanos, &
@@ -712,6 +714,7 @@ module parquet_core
         module procedure parquet_write_string_column
         module procedure parquet_write_string_matrix_column
         module procedure parquet_write_string_column_compact
+        module procedure parquet_write_list_column
         module procedure parquet_write_date_column
         module procedure parquet_write_date_matrix_column
         module procedure parquet_write_time_column
@@ -765,6 +768,7 @@ module parquet_core
         module procedure parquet_write_string_column_chunk
         module procedure parquet_write_string_matrix_column_chunk
         module procedure parquet_write_string_column_chunk_compact
+        module procedure parquet_write_list_column_chunk
         module procedure parquet_write_date_column_chunk
         module procedure parquet_write_date_matrix_column_chunk
         module procedure parquet_write_time_column_chunk
@@ -1550,6 +1554,22 @@ module parquet_core
         !> is_temporal=.false. and valid=.true. -- validity of those is decided elsewhere). On a
         !> valid temporal token, `base` is "date"/"time"/"timestamp", `unit_sel` a parquet_unit_*
         !> selector (0 for date), and `is_utc` the UTC flag.
+        !> Splits a `list[<elemtype>]` data_type token into its element base type plus, for a
+        !> temporal element, that element's unit/UTC flag. `is_list` reports whether the token is
+        !> a list token at all (so a caller can fall through to the scalar rules), and `valid`
+        !> whether it is a WELL-FORMED one -- a malformed list token is `is_list=.true.` with
+        !> `valid=.false.`, exactly as a malformed temporal token is for parquet_parse_temporal_type.
+        !>
+        !> The element type is REQUIRED: a bare `list` is malformed. A declared-but-unwritten list
+        !> column has to be written with zero rows at close, and that cannot invent a payload kind.
+        module subroutine parquet_parse_list_type(token, elem_base, unit_sel, is_utc, is_list, valid)
+            character(len=*), intent(in) :: token !! the data_type token, e.g. "list[timestamp[ms,utc]]".
+            character(len=:), allocatable, intent(out) :: elem_base !! element base type, e.g. "timestamp".
+            integer, intent(out) :: unit_sel !! element's temporal unit selector, 0 for a non-temporal element.
+            logical, intent(out) :: is_utc !! .true. for a UTC-adjusted timestamp element.
+            logical, intent(out) :: is_list !! .true. if the token names a list column at all.
+            logical, intent(out) :: valid !! .true. if the token is well-formed.
+        end subroutine parquet_parse_list_type
         module subroutine parquet_parse_temporal_type(token, base, unit_sel, is_utc, is_temporal, valid)
             character(len=*), intent(in) :: token !! lowercased data_type token.
             character(len=:), allocatable, intent(out) :: base !! base type, or the token itself if non-temporal.
@@ -2336,6 +2356,23 @@ module parquet_core
             type(parquet_string_column), intent(in), target :: values !! one value (or Null) per row;
             !! target so raw_buffers can be called on it without copying.
         end subroutine parquet_write_string_column_compact
+        !> Variable-length LIST specific of parquet_write_column: writes `values` as a genuine
+        !> `LIST` column, with its per-row lengths, its null rows and its null elements intact.
+        !>
+        !> There is no is_valid argument, and none is needed: a parquet_list_column carries its own
+        !> nullness at both levels, so a second channel for the same fact could only disagree with
+        !> the first -- the same reasoning that keeps one off parquet_write_string_column_compact
+        !> and off every temporal specific.
+        !>
+        !> On a schema-enforced writer the column must be declared `list[<elemtype>]` with an
+        !> element type matching this column's payload kind exactly; there is no widening between
+        !> element kinds the way a scalar numeric column has (see parquet_is_type_compatible).
+        module subroutine parquet_write_list_column(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_list_column), intent(in), target :: values !! one list (or null list) per row;
+            !! target so the write path can alias its offsets and payload rather than copying them.
+        end subroutine parquet_write_list_column
         !> Scalar date specific of parquet_write_column. Null elements (see parquet_date%is_null)
         !> are written as genuine Parquet Nulls; there is no is_valid argument -- validity lives
         !> in the elements themselves.
@@ -2505,6 +2542,47 @@ module parquet_core
             type(parquet_string_column), intent(in), target :: values !! one value (or Null) per row of the
             !! open row group; target so raw_buffers can be called on it without copying.
         end subroutine parquet_write_string_column_chunk_compact
+        !> Variable-length LIST specific of parquet_write_column_chunk; see
+        !> parquet_write_list_column above for the shared notes. `values` holds exactly this row
+        !> group's rows.
+        !>
+        !> A streamed list column's field is nullable at BOTH levels unless the column is
+        !> protected, because a parquet_list_column carries its null state inside itself and this
+        !> row group therefore says nothing about what a later one will hold -- the same rule that
+        !> already applies to a temporal column and to a parquet_string_column.
+        module subroutine parquet_write_list_column_chunk(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer, with a row group open.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_list_column), intent(in), target :: values !! this row group's rows; target for
+            !! the same reason as parquet_write_list_column's own values argument.
+        end subroutine parquet_write_list_column_chunk
+        !> Writes a declared-but-never-written `list[<elemtype>]` column with ZERO rows, at close.
+        !>
+        !> Takes the element BASE token (`"int32"`, `"timestamp"`, ...) rather than a `PK_*` kind,
+        !> so that the caller -- `parquet_write_empty_columns_if_none_written`, in the intermediate
+        !> `parquet_write` submodule -- needs no `parquet_columns` name of its own. That is a
+        !> compiler constraint, not a preference: nagfor 7.2 cannot compile a sibling descendant of
+        !> an intermediate submodule whose own code references a `PK_*` constant use-associated
+        !> into `parquet_core` ("Bad module file format for PARQUET_WRITE, could not ref PK_INT32").
+        module subroutine parquet_write_empty_list_column(writer, name, elem_base)
+            type(parquet_writer), intent(inout) :: writer !! open writer being closed.
+            character(len=*), intent(in) :: name !! column name.
+            character(len=*), intent(in) :: elem_base !! element base token from parquet_parse_list_type.
+        end subroutine parquet_write_empty_list_column
+        !> Resolves the file unit (a parquet_unit_* selector) and UTC flag a temporal write uses:
+        !> the schema-declared unit/utc when the column comes from a MAML/schema, else the fixed
+        !> default (microseconds, timezone-naive).
+        !>
+        !> Declared here, and implemented in parquet_write_temporal, so that parquet_write_list can
+        !> apply the same rule to a temporal PAYLOAD. It cannot live in the shared parquet_write
+        !> parent -- see the implementation's own comment for the nagfor constraint that rules that
+        !> out.
+        module subroutine resolve_temporal_write_unit(writer, idx, unit, is_utc)
+            type(parquet_writer), intent(in) :: writer !! open writer.
+            integer, intent(in) :: idx !! schema column index, or 0 for schema-less.
+            integer, intent(out) :: unit !! resolved unit selector.
+            integer(c_int32_t), intent(out) :: is_utc !! 1 if UTC-adjusted, else 0.
+        end subroutine resolve_temporal_write_unit
     end interface
 
     ! ---- Reader lifecycle & queries ----

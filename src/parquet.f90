@@ -130,6 +130,13 @@ module parquet
     private :: parquet_string_column_is_null, parquet_string_column_append_from, parquet_string_column_set
     private :: parquet_string_column_set_null, parquet_string_column_reindex, parquet_string_column_reindex_trusted
     private :: parquet_string_column_gather, parquet_string_column_append_nulls
+    private :: parquet_string_column_raw_buffers
+    ! parquet_list's own two internal accessors, hidden for the same reason again: they are how
+    ! the LIST write path reaches a list column's offsets and payload without a per-row allocation,
+    ! and they duplicate no user-facing capability (%length/%view/%get already answer both
+    ! questions one row at a time, which is what a user calls).
+    private :: parquet_list_column_offsets, parquet_list_column_payload
+    private :: parquet_list_column_row_validity
     !
     ! ---- The sorting tiers' internals need NO `private ::` here, and that is worth stating ----
     !

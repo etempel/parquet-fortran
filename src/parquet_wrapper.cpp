@@ -1927,6 +1927,14 @@ extern "C"
 	// <= 0 (the default) means "use the real production limit".
 	static int64_t g_debug_string_offset_limit = -1;
 
+	// Test-only override of kArrowInt32OffsetLimit for a variable-length LIST column's own offsets
+	// buffer -- the list counterpart of g_debug_string_offset_limit above, and a process-global for
+	// exactly the same reason. Kept SEPARATE from the string one rather than shared: the scenario
+	// that forces a list column onto large_list must not also push every string column in the same
+	// process onto large_utf8, or it would be testing two things and reporting one. <= 0 (the
+	// default) means "use the real production limit". See effective_list_offset_limit.
+	static int64_t g_debug_list_offset_limit = -1;
+
 	// True if `n_values` string entries of up to `item_len` bytes each might overflow `limit`
 	// once built as a flat STRING/LARGE_STRING array. Uses item_len (the declared max length)
 	// as a safe upper bound on actual (trimmed) value bytes, so this can never *under*-estimate
@@ -2007,6 +2015,82 @@ extern "C"
 			if (col_size > max_col_size) max_col_size = col_size;
 		}
 		return max_col_size;
+	}
+
+	// One row of a LIST/LARGE_LIST array's element count, by its own offsets. A variable-length
+	// list column has no col_size to reason about, so everything below has to read the data.
+	//
+	// Takes a raw pointer rather than a shared_ptr: max_list_row_length calls it twice per ROW, and
+	// a shared_ptr parameter on a per-element helper costs two atomic refcount operations per call
+	// (CLAUDE.md, "A `shared_ptr` parameter on a per-row helper"). The caller owns the array for
+	// the whole walk, so there is nothing to share.
+	static int64_t list_array_value_offset(const arrow::Array *array, int64_t i)
+	{
+		if (array->type_id() == arrow::Type::LARGE_LIST)
+		{
+			return static_cast<const arrow::LargeListArray *>(array)->value_offset(i);
+		}
+		return static_cast<const arrow::ListArray *>(array)->value_offset(i);
+	}
+
+	// The longest single row across every variable-length LIST column in `arrays` (0 if there are
+	// none) -- the list column's analogue of max_fixed_size_list_col_size above, and used the same
+	// way: close_parquet_writer clamps an AUTO-SIZED row group down by it, so that a row group's
+	// element count cannot exceed kArrowInt32ListElementCountLimit.
+	//
+	// Conservative by construction (chunk_size * longest_row is an upper bound on any window's
+	// element count, usually a loose one), which is the safe direction for a clamp: it can only
+	// produce smaller row groups than strictly necessary, never a row group that overflows. An
+	// EXPLICIT chunk_size is validated exactly instead, by check_explicit_chunk_size_fits_list_limit
+	// below -- clamping is silent and must not be wrong, while aborting is loud and must not be
+	// wrong EITHER WAY, so it cannot use an over-estimate.
+	static int64_t max_list_row_length(const std::vector<std::shared_ptr<arrow::Array>> &arrays)
+	{
+		int64_t longest = 0;
+		for (const auto &array : arrays)
+		{
+			if (!array) continue;
+			auto id = array->type_id();
+			if (id != arrow::Type::LIST && id != arrow::Type::LARGE_LIST) continue;
+			for (int64_t i = 0; i < array->length(); ++i)
+			{
+				int64_t len = list_array_value_offset(array.get(), i + 1) - list_array_value_offset(array.get(), i);
+				if (len > longest) longest = len;
+			}
+		}
+		return longest;
+	}
+
+	// Aborts if any row group an EXPLICIT chunk_size would produce holds more list elements than
+	// kArrowInt32ListElementCountLimit. Walks each list column's actual offsets at chunk_size
+	// stride, so it is exact: a caller whose chunk_size really does fit is never refused, however
+	// ragged the column. The vector-column counterpart is check_explicit_chunk_size_fits_arrow_limit,
+	// which needs no data because col_size is a constant.
+	static void check_explicit_chunk_size_fits_list_limit(int64_t chunk_size,
+		const std::vector<std::shared_ptr<arrow::Field>> &fields,
+		const std::vector<std::shared_ptr<arrow::Array>> &arrays, const char *context)
+	{
+		int64_t limit = g_debug_list_element_count_limit > 0 ? g_debug_list_element_count_limit : kArrowInt32ListElementCountLimit;
+		for (size_t c = 0; c < arrays.size(); ++c)
+		{
+			const auto &array = arrays[c];
+			if (!array) continue;
+			auto id = array->type_id();
+			if (id != arrow::Type::LIST && id != arrow::Type::LARGE_LIST) continue;
+			int64_t n = array->length();
+			for (int64_t lo = 0; lo < n; lo += chunk_size)
+			{
+				int64_t hi = std::min(lo + chunk_size, n);
+				int64_t elems = list_array_value_offset(array.get(), hi) - list_array_value_offset(array.get(), lo);
+				if (elems <= limit) continue;
+				std::string name = c < fields.size() && fields[c] ? fields[c]->name() : std::string("(unnamed)");
+				report_fatal_error(context, "column '" + name + "': chunk_size (" + std::to_string(chunk_size) + // GCOVR_EXCL_LINE
+					") would put " + std::to_string(elems) + " list elements in one row group, exceeding " + // GCOVR_EXCL_LINE
+					std::to_string(kArrowInt32ListElementCountLimit) + ", the maximum per-row-group element count " // GCOVR_EXCL_LINE
+					"Arrow/Parquet's list-column level generation supports -- pass a smaller chunk_size to " // GCOVR_EXCL_LINE
+					"parquet_open_writer, or omit it to auto-size safely"); // GCOVR_EXCL_LINE
+			}
+		}
 	}
 
 	// Applies BYTE_STREAM_SPLIT to every float32/float64 column in `fields`, on `builder` --
@@ -11976,6 +12060,303 @@ static void append_typed_column_chunk(void *handle, const char *name, const Valu
 	writer_handle->pending_chunk_arrays[static_cast<int>(idx)] = align_array_to_field(writer_handle->fields[idx], array);
 }
 
+// ==== Variable-length LIST column writes ====
+//
+// The path a Fortran parquet_list_column takes into a Parquet file, and the mirror image of the
+// "Variable-length LIST column reads" section further above. It sits BESIDE the vector
+// (FIXED_SIZE_LIST) write rather than replacing it: a 2-D array still writes a fixed-width vector
+// column, and the caller's chosen VALUE TYPE is what picks which physical shape the file gets.
+//
+// ONE CROSSING PER COLUMN, AND NOTHING ARROW-OWNED CROSSES IT. A read needs two crossings because
+// the reader cannot know the counts before Arrow has been asked; a write needs none of that --
+// Fortran already knows nrows, the element count, the payload kind and the temporal unit, so it
+// hands all of them over at once, in buffers it owns and which stay alive for the duration of the
+// call. Everything below COPIES out of those buffers into Arrow's own, exactly as every other
+// append entry point in this file does.
+//
+// TWO NULLABILITY LEVELS, NOT ONE. A list column can hold a null ROW (an absent list) and a null
+// ELEMENT inside a present row, and the two are independent -- so the Arrow field has a
+// `nullable` flag at the outer list level AND on its child, where every other column type here
+// has one flag. build_field cannot express that (its col_size > 1 form puts the caller's
+// nullability on the CHILD and forces the outer field non-nullable, which is right for a vector
+// column and wrong at both levels for a list), so this section has its own build_list_field.
+//
+// The whole-column path decides both flags FROM THE VALUES, having seen all of them. The streamed
+// path cannot -- a parquet_list_column carries its null state inside itself, with no
+// caller-supplied mask whose presence could stand in for "might this column contain a Null?" --
+// so a streamed list column is in the ALWAYS-NULLABLE class alongside temporal columns and
+// parquet_string_column, and is nullable at both levels unless the column is protected. See
+// resolve_chunk_nullability.
+//
+// The SAFETY INVARIANT build_field's own comment states -- a field declared non-nullable must
+// never receive an array containing nulls -- holds at both levels by construction: the
+// whole-column path derives each flag from the very buffer it is about to build the array from,
+// and the streamed path only declares non-nullable under protection, which parquet_write_list.f90
+// enforces before calling in (at BOTH levels, so a protected list column may hold neither a null
+// row nor a null element).
+
+// Arrow's `list<T>` addresses its child with an int32 offsets buffer, exactly as `utf8` addresses
+// its bytes; `large_list<T>` is the int64 form, exactly as `large_utf8` is. So a list column's
+// element count is bounded by the same 2^31-1 as a string column's byte count, and the answer is
+// the same one parquet_append_string_column already gives: use the NARROW type unless the data
+// cannot fit in it, which produces the conventional Arrow type for essentially every real file
+// while keeping the int64 escape hatch for the one that does not.
+//
+// The choice is invisible in the Parquet file itself -- measured: a `list` and a `large_list`
+// carrying the same data produce byte-identical schemas, the same leaf path `<col>.list.element`,
+// the same max repetition and definition levels. It shows up only in the ARROW:schema metadata
+// blob, i.e. in what pyarrow reports and what tools ignoring that blob never see.
+//
+// A STREAMED list column is always the narrow form and provably so: a row group's element count
+// is already capped at kArrowInt32ListElementCountLimit by check_list_chunk_elements_fit_arrow_limit
+// below, and that limit is this same 2^31-1. Only a whole-column write can ever produce large_list.
+static int64_t effective_list_offset_limit()
+{
+	return g_debug_list_offset_limit > 0 ? g_debug_list_offset_limit : kArrowInt32OffsetLimit;
+}
+
+// The longest row of a list column described by `nrows` and its nrows+1 offsets.
+static int64_t list_max_row_length(int64_t nrows, const int64_t *offsets)
+{
+	int64_t longest = 0;
+	for (int64_t i = 0; i < nrows; ++i)
+	{
+		int64_t len = offsets[i + 1] - offsets[i];
+		if (len > longest) longest = len;
+	}
+	return longest;
+}
+
+// Aborts if a SINGLE row of a list column holds more elements than Parquet's own
+// repetition/definition-level generation can address (see kArrowInt32ListElementCountLimit). This
+// is the one case no row-group size can rescue -- a row cannot be split across row groups -- so it
+// is checked where the array is built rather than at close, and it is the list column's
+// counterpart to check_col_size_fits_arrow_limit for a vector column.
+static void check_list_row_length_fits_arrow_limit(int64_t max_row_len, const std::string &name, const char *context)
+{
+	int64_t limit = g_debug_list_element_count_limit > 0 ? g_debug_list_element_count_limit : kArrowInt32ListElementCountLimit;
+	if (max_row_len > limit)
+	{
+		report_fatal_error(context, "column '" + name + "': one row holds " + std::to_string(max_row_len) + // GCOVR_EXCL_LINE
+			" elements, exceeding " + std::to_string(kArrowInt32ListElementCountLimit) + // GCOVR_EXCL_LINE
+			", the maximum per-row-group element count Arrow/Parquet's list-column level generation " // GCOVR_EXCL_LINE
+			"supports -- no row-group size can accommodate this, since a row is never split across " // GCOVR_EXCL_LINE
+			"row groups"); // GCOVR_EXCL_LINE
+	}
+}
+
+// Aborts if ONE STREAMED ROW GROUP's element count exceeds the same limit. The caller chose this
+// row group's row count through parquet_new_row_group, so -- exactly like an explicit chunk_size
+// on the batch path -- it is validated rather than silently overridden, and the message names the
+// thing to make smaller. The whole-column path has no equivalent call site: there the row-group
+// boundaries are not known until close, where close_parquet_writer checks them instead.
+static void check_list_chunk_elements_fit_arrow_limit(int64_t nelems, const std::string &name, const char *context)
+{
+	int64_t limit = g_debug_list_element_count_limit > 0 ? g_debug_list_element_count_limit : kArrowInt32ListElementCountLimit;
+	if (nelems > limit)
+	{
+		report_fatal_error(context, "column '" + name + "': this row group holds " + std::to_string(nelems) + // GCOVR_EXCL_LINE
+			" elements, exceeding " + std::to_string(kArrowInt32ListElementCountLimit) + // GCOVR_EXCL_LINE
+			", the maximum per-row-group element count Arrow/Parquet's list-column level generation " // GCOVR_EXCL_LINE
+			"supports -- pass a smaller nrows to parquet_new_row_group"); // GCOVR_EXCL_LINE
+	}
+}
+
+// The field a list column is written with. Deliberately NOT build_field: see this section's
+// banner for why a list needs two independent nullability flags where every other column here
+// needs one.
+//
+// The child field is named "item", which is what arrow::list()/arrow::large_list()'s own
+// DataType-taking constructors supply. That name is invisible in the written file -- measured:
+// Arrow normalises every list child to `element` in the Parquet schema's leaf paths, whatever the
+// Arrow field is called, for fixed_size_list and list alike -- so the choice is free, and matching
+// build_field is the only reason to prefer one spelling. What the name DOES govern is
+// arrow::DataType::Equals, which compares the child's name and nullability as well as its type:
+// the array assembled below is stamped with THIS type, so the two agree by construction and
+// align_array_to_field is the no-op it is designed to be.
+static std::shared_ptr<arrow::Field> build_list_field(const std::string &name,
+	const std::shared_ptr<arrow::DataType> &elem_type, bool row_nullable, bool elem_nullable, bool large)
+{
+	auto item = arrow::field("item", elem_type, elem_nullable);
+	auto type = large ? arrow::large_list(item) : arrow::list(item);
+	return arrow::field(name, type, row_nullable);
+}
+
+// Assembles the list array itself from Fortran's offsets, its per-ROW validity and an already-built
+// child array. `list_type` is the field's own type, so the offsets buffer's width follows the field
+// rather than being recomputed -- which is what keeps a STREAMED column's later row groups
+// consistent with the field its first row group locked in.
+//
+// A null ROW whose offsets still span elements is left exactly as Fortran handed it over.
+// parquet_list_column's %set_null leaves a nulled row's elements physically present and
+// unreachable, and rebuilding the column to remove them here would be an O(nelems) pass to buy
+// back memory the caller can already reclaim with %gather_rows. Measured: Arrow accepts such an
+// array (ValidateFull and Table::Validate both pass), writes it, and reads it back as a null row
+// with the unreachable elements dropped from the child -- Parquet emits a definition level for the
+// null row and never visits its values.
+static std::shared_ptr<arrow::Array> assemble_list_array(const std::shared_ptr<arrow::DataType> &list_type,
+	int64_t nrows, int64_t nelems, const int64_t *offsets, const int8_t *row_valid,
+	const std::shared_ptr<arrow::Array> &child, const std::string &name, const char *context)
+{
+	bool large = list_type->id() == arrow::Type::LARGE_LIST;
+	if (!large && nelems > kArrowInt32OffsetLimit)
+	{ // GCOVR_EXCL_START -- unreachable safety net: the whole-column path picks large_list above
+	  // this many elements, and the streamed path cannot reach it at all (a row group is capped at
+	  // the same 2^31-1 by check_list_chunk_elements_fit_arrow_limit).
+		report_fatal_error(context, "column '" + name + "': " + std::to_string(nelems) +
+			" elements do not fit an int32 list offsets buffer");
+	}
+	// GCOVR_EXCL_STOP
+
+	std::shared_ptr<arrow::Buffer> offsets_buf;
+	if (large)
+	{
+		offsets_buf = arrow::AllocateBuffer((nrows + 1) * static_cast<int64_t>(sizeof(int64_t))).ValueOrDie();
+		std::memcpy(offsets_buf->mutable_data(), offsets, static_cast<size_t>(nrows + 1) * sizeof(int64_t));
+	}
+	else
+	{
+		offsets_buf = arrow::AllocateBuffer((nrows + 1) * static_cast<int64_t>(sizeof(int32_t))).ValueOrDie();
+		auto p = reinterpret_cast<int32_t *>(offsets_buf->mutable_data());
+		for (int64_t i = 0; i <= nrows; ++i) p[i] = static_cast<int32_t>(offsets[i]);
+	}
+
+	std::shared_ptr<arrow::Buffer> null_bitmap;
+	int64_t null_count = 0;
+	if (row_valid != nullptr)
+	{
+		for (int64_t i = 0; i < nrows; ++i)
+		{
+			if (row_valid[i] == 0) ++null_count;
+		}
+		if (null_count > 0)
+		{
+			null_bitmap = arrow::AllocateEmptyBitmap(nrows).ValueOrDie();
+			for (int64_t i = 0; i < nrows; ++i)
+			{
+				if (row_valid[i] != 0) arrow::bit_util::SetBit(null_bitmap->mutable_data(), i);
+			}
+		}
+	}
+
+	auto data = arrow::ArrayData::Make(list_type, nrows, {null_bitmap, offsets_buf}, {child->data()}, null_count);
+	return arrow::MakeArray(data);
+}
+
+// Builds the CHILD array of a list column from Fortran's flat value buffer and its per-ELEMENT
+// validity, for every family whose Arrow builder takes plain AppendValues (int32, int64, float32,
+// float64, bool8, date). Time, timestamp and string each need their own construction and go
+// through build_time_array/build_timestamp_array/build_list_string_child instead.
+//
+// Declared outside extern "C" for the same reason append_typed_column is: a function template
+// cannot have C language linkage.
+template <typename BuilderType, typename ValueType>
+static std::shared_ptr<arrow::Array> build_list_child_array(const ValueType *values, int64_t nelems,
+	const int8_t *elem_valid)
+{
+	BuilderType builder;
+	auto status = builder.AppendValues(values, nelems, reinterpret_cast<const uint8_t *>(elem_valid));
+	if (!status.ok())
+		throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
+	std::shared_ptr<arrow::Array> array;
+	status = builder.Finish(&array);
+	if (!status.ok())
+		throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
+	return array;
+}
+
+// The string family's child array, built from the same packed offsets+bytes layout a
+// parquet_string_column stores natively (nelems+1 int64 offsets over `data`'s nchars bytes).
+// Picks arrow::utf8() or arrow::large_utf8() by the same rule parquet_append_string_column uses
+// for a whole string column -- narrow unless the byte payload cannot fit it.
+static std::shared_ptr<arrow::Array> build_list_string_child(const int64_t *str_offsets, const char *data,
+	int64_t nelems, int64_t nchars, const int8_t *elem_valid)
+{
+	int64_t limit = g_debug_string_offset_limit > 0 ? g_debug_string_offset_limit : kArrowInt32OffsetLimit;
+	bool use_large = nchars > limit;
+
+	auto append_all = [&](auto &builder) -> std::shared_ptr<arrow::Array>
+	{
+		auto status = arrow::Status::OK();
+		for (int64_t i = 0; i < nelems; ++i)
+		{
+			if (elem_valid != nullptr && elem_valid[i] == 0)
+			{
+				status = builder.AppendNull();
+			}
+			else
+			{
+				auto lo = str_offsets[i];
+				status = builder.Append(data + lo, static_cast<int32_t>(str_offsets[i + 1] - lo));
+			}
+			if (!status.ok())
+				throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
+		}
+		std::shared_ptr<arrow::Array> array;
+		status = builder.Finish(&array);
+		if (!status.ok())
+			throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
+		return array;
+	};
+
+	if (use_large)
+	{
+		arrow::LargeStringBuilder builder;
+		return append_all(builder);
+	}
+	arrow::StringBuilder builder;
+	return append_all(builder);
+}
+
+// The shared tail of every whole-column list append: check the one ceiling a row-group size cannot
+// rescue, decide both nullability flags from the values, build the field and the array, and store
+// them. `child` has already been built by the caller's own family-specific step.
+static void append_list_column_common(void *handle, const char *name, int64_t nrows, int64_t nelems,
+	const int64_t *offsets, const int8_t *row_valid, const int8_t *elem_valid,
+	const std::shared_ptr<arrow::Array> &child, const char *context)
+{
+	auto writer_handle = as_handle(handle);
+	check_list_row_length_fits_arrow_limit(list_max_row_length(nrows, offsets), name, context);
+	bool large = nelems > effective_list_offset_limit();
+	auto field = build_list_field(name, child->type(), has_any_null(row_valid, nrows),
+		has_any_null(elem_valid, nelems), large);
+	auto array = assemble_list_array(field->type(), nrows, nelems, offsets, row_valid, child, name, context);
+	append_column(writer_handle, name, field, array);
+}
+
+// Streaming counterpart to append_list_column_common: same array, stashed into
+// pending_chunk_arrays instead of arrays, with the field built once on the column's first chunk.
+//
+// Both nullability flags come from ONE resolve_chunk_nullability call with always_nullable set,
+// because for a list column the two answers are the same answer: nullable at both levels unless
+// the column is protected, in which case neither level may hold a Null and both are non-nullable.
+// There is no first-chunk consistency rule to enforce, because the answer does not depend on the
+// chunk -- which is exactly what always_nullable means.
+static void append_list_column_chunk_common(void *handle, const char *name, int64_t nrows, int64_t nelems,
+	const int64_t *offsets, const int8_t *row_valid, const std::shared_ptr<arrow::Array> &child,
+	const char *context)
+{
+	auto writer_handle = as_handle(handle);
+	bool first_chunk_ever;
+	size_t idx = check_column_chunk_write_preconditions(writer_handle, name, first_chunk_ever);
+	check_list_row_length_fits_arrow_limit(list_max_row_length(nrows, offsets), name, context);
+	check_list_chunk_elements_fit_arrow_limit(nelems, name, context);
+
+	bool nullable = resolve_chunk_nullability(writer_handle, name, idx, first_chunk_ever,
+		/*mask_present=*/true, /*always_nullable=*/true);
+	if (first_chunk_ever)
+	{
+		if (writer_handle->fields.size() <= idx) writer_handle->fields.resize(idx + 1);
+		writer_handle->fields[idx] = build_list_field(name, child->type(), nullable, nullable,
+			nelems > effective_list_offset_limit());
+	}
+	if (writer_handle->arrays.size() <= idx) writer_handle->arrays.resize(idx + 1);
+	auto array = assemble_list_array(writer_handle->fields[idx]->type(), nrows, nelems, offsets, row_valid,
+		child, name, context);
+	writer_handle->pending_chunk_arrays[static_cast<int>(idx)] =
+		align_array_to_field(writer_handle->fields[idx], array);
+}
+
 extern "C"
 {
 
@@ -12204,6 +12585,113 @@ extern "C"
 
 		append_column(writer_handle, name, build_field(name, arrow::large_utf8(), 1, any_null), array);
 	}
+
+	// ==== Variable-length LIST column writes (see the section banner above) ====
+	//
+	// One entry point per element family, mirroring parquet_read_list_<family>_fill's argument
+	// order and vocabulary exactly, so the two halves of this feature read side by side:
+	//
+	//   nrows       rows in this column
+	//   nelems      elements those rows hold between them
+	//   offsets     nrows+1 int64 entries, 0-based, offsets[0] == 0
+	//   row_valid   per-ROW validity (1 = present, 0 = a NULL list), or null for a null-free column
+	//   values      the flattened elements, in row order
+	//   elem_valid  per-ELEMENT validity, or null when no element is Null
+	//
+	// row_valid and elem_valid are POINTERS rather than the read side's plain buffers, because on
+	// the write side absence is meaningful: a null row_valid is what declares the outer field
+	// non-nullable, exactly as valid_in does for every other append entry point here.
+	void parquet_append_list_int32_column(void *handle, const char *name, int64_t nrows, int64_t nelems,
+		const int64_t *offsets, const int8_t *row_valid, const int32_t *values, const int8_t *elem_valid)
+	{
+		auto child = build_list_child_array<arrow::Int32Builder>(values, nelems, elem_valid);
+		append_list_column_common(handle, name, nrows, nelems, offsets, row_valid, elem_valid, child,
+			"parquet_write_column");
+	}
+
+	// Same as parquet_append_list_int32_column, but for an int64 payload.
+	void parquet_append_list_int64_column(void *handle, const char *name, int64_t nrows, int64_t nelems,
+		const int64_t *offsets, const int8_t *row_valid, const int64_t *values, const int8_t *elem_valid)
+	{
+		auto child = build_list_child_array<arrow::Int64Builder>(values, nelems, elem_valid);
+		append_list_column_common(handle, name, nrows, nelems, offsets, row_valid, elem_valid, child,
+			"parquet_write_column");
+	}
+
+	// Same as parquet_append_list_int32_column, but for a float32 payload.
+	void parquet_append_list_float32_column(void *handle, const char *name, int64_t nrows, int64_t nelems,
+		const int64_t *offsets, const int8_t *row_valid, const float *values, const int8_t *elem_valid)
+	{
+		auto child = build_list_child_array<arrow::FloatBuilder>(values, nelems, elem_valid);
+		append_list_column_common(handle, name, nrows, nelems, offsets, row_valid, elem_valid, child,
+			"parquet_write_column");
+	}
+
+	// Same as parquet_append_list_int32_column, but for a float64 payload.
+	void parquet_append_list_float64_column(void *handle, const char *name, int64_t nrows, int64_t nelems,
+		const int64_t *offsets, const int8_t *row_valid, const double *values, const int8_t *elem_valid)
+	{
+		auto child = build_list_child_array<arrow::DoubleBuilder>(values, nelems, elem_valid);
+		append_list_column_common(handle, name, nrows, nelems, offsets, row_valid, elem_valid, child,
+			"parquet_write_column");
+	}
+
+	// Same as parquet_append_list_int32_column, but for a boolean payload (one int8 per element).
+	void parquet_append_list_bool8_column(void *handle, const char *name, int64_t nrows, int64_t nelems,
+		const int64_t *offsets, const int8_t *row_valid, const int8_t *values, const int8_t *elem_valid)
+	{
+		auto child = build_list_child_array<arrow::BooleanBuilder>(
+			reinterpret_cast<const uint8_t *>(values), nelems, elem_valid);
+		append_list_column_common(handle, name, nrows, nelems, offsets, row_valid, elem_valid, child,
+			"parquet_write_column");
+	}
+
+	// Same as parquet_append_list_int32_column, but for a date payload (int32 days since the epoch).
+	void parquet_append_list_date_column(void *handle, const char *name, int64_t nrows, int64_t nelems,
+		const int64_t *offsets, const int8_t *row_valid, const int32_t *values, const int8_t *elem_valid)
+	{
+		auto child = build_list_child_array<arrow::Date32Builder>(values, nelems, elem_valid);
+		append_list_column_common(handle, name, nrows, nelems, offsets, row_valid, elem_valid, child,
+			"parquet_write_column");
+	}
+
+	// Same as parquet_append_list_int32_column, but for a time payload -- values are canonical
+	// nanoseconds-of-day and build_time_array scales them down to `unit`, aborting on a value with
+	// finer precision than the column's declared unit, exactly as a scalar time column's write does.
+	void parquet_append_list_time_column(void *handle, const char *name, int64_t nrows, int64_t nelems,
+		const int64_t *offsets, const int8_t *row_valid, const int64_t *values, const int8_t *elem_valid,
+		int32_t unit)
+	{
+		auto child = build_time_array(values, nelems, 1, unit, elem_valid, name, "parquet_write_column");
+		append_list_column_common(handle, name, nrows, nelems, offsets, row_valid, elem_valid, child,
+			"parquet_write_column");
+	}
+
+	// Same as parquet_append_list_int32_column, but for a timestamp payload -- values are already
+	// expressed in `unit`'s own unit (Fortran did the conversion and its range check), and `is_utc`
+	// selects the UTC-adjusted vs timezone-naive Arrow type.
+	void parquet_append_list_timestamp_column(void *handle, const char *name, int64_t nrows, int64_t nelems,
+		const int64_t *offsets, const int8_t *row_valid, const int64_t *values, const int8_t *elem_valid,
+		int32_t unit, int32_t is_utc)
+	{
+		auto child = build_timestamp_array(values, nelems, 1, unit, is_utc, elem_valid, name,
+			"parquet_write_column");
+		append_list_column_common(handle, name, nrows, nelems, offsets, row_valid, elem_valid, child,
+			"parquet_write_column");
+	}
+
+	// Same as parquet_append_list_int32_column, but for a string payload. The elements arrive in the
+	// same packed offsets+bytes layout a parquet_string_column stores natively: `str_offsets` is
+	// nelems+1 int64 entries over `data`'s `nchars` bytes.
+	void parquet_append_list_string_column(void *handle, const char *name, int64_t nrows, int64_t nelems,
+		int64_t nchars, const int64_t *offsets, const int8_t *row_valid, const int64_t *str_offsets,
+		const char *data, const int8_t *elem_valid)
+	{
+		auto child = build_list_string_child(str_offsets, data, nelems, nchars, elem_valid);
+		append_list_column_common(handle, name, nrows, nelems, offsets, row_valid, elem_valid, child,
+			"parquet_write_column");
+	}
+
 
 	// --- Streaming row-group API: parquet_new_row_group / parquet_write_*_column_chunk /
 	// parquet_finish_row_group. See close_parquet_writer for how a streaming writer's close
@@ -12474,6 +12962,98 @@ extern "C"
 	// established by then -- see the comment on ParquetWriterHandle::row_group_writer), then
 	// writes one column chunk per column, in schema order, as parquet::arrow::FileWriter::
 	// WriteColumnChunk requires.
+
+	// ==== Variable-length LIST column writes, streamed (see the section banner further above) ====
+	//
+	// Row-group-scoped counterparts of parquet_append_list_<family>_column, taking exactly the same
+	// arguments -- each call covers one row group's rows rather than the whole column. See
+	// append_list_column_chunk_common for the nullability rule, which differs from the whole-column
+	// path's: a streamed list column is nullable at both levels unless it is protected.
+	void parquet_append_list_int32_column_chunk(void *handle, const char *name, int64_t nrows, int64_t nelems,
+		const int64_t *offsets, const int8_t *row_valid, const int32_t *values, const int8_t *elem_valid)
+	{
+		auto child = build_list_child_array<arrow::Int32Builder>(values, nelems, elem_valid);
+		append_list_column_chunk_common(handle, name, nrows, nelems, offsets, row_valid, child,
+			"parquet_write_column_chunk");
+	}
+
+	// Same as parquet_append_list_int32_column_chunk, but for an int64 payload.
+	void parquet_append_list_int64_column_chunk(void *handle, const char *name, int64_t nrows, int64_t nelems,
+		const int64_t *offsets, const int8_t *row_valid, const int64_t *values, const int8_t *elem_valid)
+	{
+		auto child = build_list_child_array<arrow::Int64Builder>(values, nelems, elem_valid);
+		append_list_column_chunk_common(handle, name, nrows, nelems, offsets, row_valid, child,
+			"parquet_write_column_chunk");
+	}
+
+	// Same as parquet_append_list_int32_column_chunk, but for a float32 payload.
+	void parquet_append_list_float32_column_chunk(void *handle, const char *name, int64_t nrows, int64_t nelems,
+		const int64_t *offsets, const int8_t *row_valid, const float *values, const int8_t *elem_valid)
+	{
+		auto child = build_list_child_array<arrow::FloatBuilder>(values, nelems, elem_valid);
+		append_list_column_chunk_common(handle, name, nrows, nelems, offsets, row_valid, child,
+			"parquet_write_column_chunk");
+	}
+
+	// Same as parquet_append_list_int32_column_chunk, but for a float64 payload.
+	void parquet_append_list_float64_column_chunk(void *handle, const char *name, int64_t nrows, int64_t nelems,
+		const int64_t *offsets, const int8_t *row_valid, const double *values, const int8_t *elem_valid)
+	{
+		auto child = build_list_child_array<arrow::DoubleBuilder>(values, nelems, elem_valid);
+		append_list_column_chunk_common(handle, name, nrows, nelems, offsets, row_valid, child,
+			"parquet_write_column_chunk");
+	}
+
+	// Same as parquet_append_list_int32_column_chunk, but for a boolean payload.
+	void parquet_append_list_bool8_column_chunk(void *handle, const char *name, int64_t nrows, int64_t nelems,
+		const int64_t *offsets, const int8_t *row_valid, const int8_t *values, const int8_t *elem_valid)
+	{
+		auto child = build_list_child_array<arrow::BooleanBuilder>(
+			reinterpret_cast<const uint8_t *>(values), nelems, elem_valid);
+		append_list_column_chunk_common(handle, name, nrows, nelems, offsets, row_valid, child,
+			"parquet_write_column_chunk");
+	}
+
+	// Same as parquet_append_list_int32_column_chunk, but for a date payload.
+	void parquet_append_list_date_column_chunk(void *handle, const char *name, int64_t nrows, int64_t nelems,
+		const int64_t *offsets, const int8_t *row_valid, const int32_t *values, const int8_t *elem_valid)
+	{
+		auto child = build_list_child_array<arrow::Date32Builder>(values, nelems, elem_valid);
+		append_list_column_chunk_common(handle, name, nrows, nelems, offsets, row_valid, child,
+			"parquet_write_column_chunk");
+	}
+
+	// Same as parquet_append_list_int32_column_chunk, but for a time payload.
+	void parquet_append_list_time_column_chunk(void *handle, const char *name, int64_t nrows, int64_t nelems,
+		const int64_t *offsets, const int8_t *row_valid, const int64_t *values, const int8_t *elem_valid,
+		int32_t unit)
+	{
+		auto child = build_time_array(values, nelems, 1, unit, elem_valid, name, "parquet_write_column_chunk");
+		append_list_column_chunk_common(handle, name, nrows, nelems, offsets, row_valid, child,
+			"parquet_write_column_chunk");
+	}
+
+	// Same as parquet_append_list_int32_column_chunk, but for a timestamp payload.
+	void parquet_append_list_timestamp_column_chunk(void *handle, const char *name, int64_t nrows, int64_t nelems,
+		const int64_t *offsets, const int8_t *row_valid, const int64_t *values, const int8_t *elem_valid,
+		int32_t unit, int32_t is_utc)
+	{
+		auto child = build_timestamp_array(values, nelems, 1, unit, is_utc, elem_valid, name,
+			"parquet_write_column_chunk");
+		append_list_column_chunk_common(handle, name, nrows, nelems, offsets, row_valid, child,
+			"parquet_write_column_chunk");
+	}
+
+	// Same as parquet_append_list_int32_column_chunk, but for a string payload.
+	void parquet_append_list_string_column_chunk(void *handle, const char *name, int64_t nrows, int64_t nelems,
+		int64_t nchars, const int64_t *offsets, const int8_t *row_valid, const int64_t *str_offsets,
+		const char *data, const int8_t *elem_valid)
+	{
+		auto child = build_list_string_child(str_offsets, data, nelems, nchars, elem_valid);
+		append_list_column_chunk_common(handle, name, nrows, nelems, offsets, row_valid, child,
+			"parquet_write_column_chunk");
+	}
+
 	void parquet_finish_row_group(void *handle)
 	{
 		auto writer_handle = as_handle(handle);
@@ -12602,6 +13182,16 @@ extern "C"
 	void parquet_debug_set_string_offset_limit(int64_t n)
 	{
 		g_debug_string_offset_limit = n;
+	}
+
+	// Test-only: overrides g_debug_list_offset_limit (see its own comment) so an error scenario can
+	// exercise a variable-length LIST column's arrow::large_list() write/read path with a tiny
+	// fixture instead of needing a genuine 2-billion-element column. Safe as a process-global for
+	// the same reason as the string one above: the scenario that sets it runs as its own isolated
+	// subprocess. <= 0 restores the real limit.
+	void parquet_debug_set_list_offset_limit(int64_t n)
+	{
+		g_debug_list_offset_limit = n;
 	}
 
 	// Test-only: overrides g_debug_col_size_limit (see its own comment) so
@@ -13273,10 +13863,24 @@ extern "C"
 				int64_t limit = g_debug_list_element_count_limit > 0 ? g_debug_list_element_count_limit : kArrowInt32ListElementCountLimit;
 				effective_chunk_size = std::min(effective_chunk_size, std::max<int64_t>(limit / max_col_size, 1));
 			}
+
+			// The same ceiling for a VARIABLE-LENGTH list column, whose per-row element count is
+			// the data's rather than a declared col_size -- so this one has to read the offsets.
+			// See max_list_row_length for why the clamp uses the longest row (conservative, and
+			// clamping may only ever be conservative) while the explicit-chunk_size branch below
+			// walks the actual row-group windows instead (exact, and aborting must be).
+			auto max_list_len = max_list_row_length(writer_handle->arrays);
+			if (max_list_len > 1)
+			{
+				int64_t limit = g_debug_list_element_count_limit > 0 ? g_debug_list_element_count_limit : kArrowInt32ListElementCountLimit;
+				effective_chunk_size = std::min(effective_chunk_size, std::max<int64_t>(limit / max_list_len, 1));
+			}
 		}
 		else
 		{
 			check_explicit_chunk_size_fits_arrow_limit(effective_chunk_size, writer_handle->fields, "close_parquet_writer");
+			check_explicit_chunk_size_fits_list_limit(effective_chunk_size, writer_handle->fields,
+				writer_handle->arrays, "close_parquet_writer");
 		}
 
 		parquet::ArrowWriterProperties::Builder arrow_writer_builder;

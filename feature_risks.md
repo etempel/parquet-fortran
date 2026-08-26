@@ -1432,6 +1432,22 @@ timestamp control. The two consistency aborts have their own scenarios
   always-nullable set**, or its first null-free row group will declare a field that a later row
   group cannot fill. `date` was nearly missed here precisely because it is int32-backed and reaches
   the generic template rather than the temporal one.
+- **A variable-length `LIST` column has TWO nullability flags, and collapsing them into one is the
+  same defect by a new route.** Its outer field says whether a ROW may be an absent list and its
+  child field says whether an ELEMENT inside a present row may be Null; the two are independent, and
+  every other column kind here has one flag. `build_field` cannot express it — its `col_size > 1`
+  form puts the caller's nullability on the CHILD and forces the outer field non-nullable, which is
+  right for a vector column and wrong at both levels for a list — so `build_list_field` exists
+  beside it and a list write must never be routed through `build_field`. The whole-column path
+  derives each flag from the buffer it is about to build the array from; the streamed path is in the
+  **always-nullable** set (a `parquet_list_column` carries its null state inside itself, so mask
+  presence predicts nothing) and is nullable at both levels unless the column is protected.
+  `protected_cols:` on a list column therefore has to mean **no Null at either level** — the weaker
+  reading would declare a non-nullable element field for a column that can hold a null element,
+  which is this entry's invariant break exactly. Covered by `test_all_three_null_levels` and
+  `test_rewrite_fixture` (`test/test_list_write.f90`), which fail on a collapse in either direction,
+  and by the `list_write_protected_row_null`/`list_write_protected_element_null` scenarios plus their
+  shared `list_write_protected_ok` negative control.
 
 ### Risk-81 — Two individually valid ranges that describe different parts of the file
 

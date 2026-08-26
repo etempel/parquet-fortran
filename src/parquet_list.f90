@@ -71,6 +71,21 @@ module parquet_list
     public :: PK_DATE, PK_TIME, PK_TIMESTAMP, PK_LIST
     public :: parquet_date, parquet_time, parquet_timestamp
     !
+    ! INTERNAL API, on the same terms as parquet_columns' own `parquet_column_*` tier: a list
+    ! column's offsets and its payload column, as pointers, so that the WRITE path
+    ! (src/parquet_write_list.f90) can hand contiguous buffers to Arrow without copying and
+    ! without a per-row allocation. `parquet_list_column`'s components are private, so there is no
+    ! other route; the alternatives are a row handle per row (one allocation each, the shape
+    ! CLAUDE.md's per-element-allocation ratchet exists to push back on) or a bulk exporter per
+    ! payload kind that copies a payload which is already contiguous.
+    !
+    ! `src/parquet.f90` privatises both again, so the `use parquet` surface is unchanged. Both take
+    ! a `type(parquet_list_column)` dummy rather than a `class` one, for the reason the import
+    ! comment above gives.
+    public :: parquet_list_column_offsets
+    public :: parquet_list_column_payload
+    public :: parquet_list_column_row_validity
+    !
     !> Error-message prefix for every `error stop` raised by this module.
     character(len=*), parameter :: EP = "parquet_list: "
     !
@@ -1544,5 +1559,62 @@ contains
         write(buf, '(i0)') n
         out = trim(buf)
     end subroutine i2s
+    !
+    !> The live `offsets(1:nrows+1)` of `col`, as a pointer -- the internal accessor
+    !! `src/parquet_write_list.f90` reaches a list column's shape through.
+    !!
+    !! Trimmed to the meaningful entries: the allocation carries slack (row capacity is
+    !! `size(offsets) - 1` and growth is geometric), so handing back the whole array would hand
+    !! back uninitialised memory past row `nrows`. Same rule as `parquet_column_data_ptr`, which
+    !! trims to `1:nrows` for the same reason.
+    subroutine parquet_list_column_offsets(col, p)
+        type(parquet_list_column), intent(in), target :: col !! the column.
+        integer(int64), pointer, intent(out) :: p(:)         !! alias to offsets(1:nrows+1).
+        if (.not. allocated(col%offsets)) error stop EP//"offsets: this column has not been initialized"
+        p => col%offsets(1_int64:col%nrows_ + 1_int64)
+    end subroutine parquet_list_column_offsets
+    !
+    !> The live payload column of `col`, as a pointer -- every element of every row, flattened,
+    !! carrying its own kind, per-ELEMENT validity and unit.
+    !!
+    !! Deliberately hands back the `parquet_column` itself rather than a per-kind value array: the
+    !! caller then reaches the values through `parquet_column_data_ptr` /
+    !! `parquet_column_string_column` and the element nulls through `parquet_column_is_null`, all
+    !! of which already exist, so no new `parquet_columns` surface is needed to write a list column.
+    subroutine parquet_list_column_payload(col, p)
+        type(parquet_list_column), intent(in), target :: col !! the column.
+        type(parquet_column), pointer, intent(out) :: p      !! alias to the payload column.
+        p => col%payload
+    end subroutine parquet_list_column_payload
+    !
+    !> Writes `col`'s per-ROW validity into `valid(1:nrows)` (`.true.` = a present list) and
+    !! reports whether any row is null, in ONE call rather than `nrows` calls of `%is_null(i)`.
+    !!
+    !! That is the whole reason it exists: `%is_null(i)` is a binding, so calling it per row from
+    !! another compilation unit hands a `type(parquet_list_column)` actual to a `class`
+    !! passed-object dummy on every iteration, which is exactly the per-call runtime-descriptor
+    !! cost the typed tier above is here to avoid. `any_null` comes back alongside because the
+    !! write path needs it to decide the field's nullability and can then skip the buffer entirely.
+    subroutine parquet_list_column_row_validity(col, valid, any_null)
+        type(parquet_list_column), intent(in) :: col !! the column.
+        logical, intent(out) :: valid(:)             !! receives nrows entries; must be at least that long.
+        logical, intent(out) :: any_null             !! .true. if at least one row is a null list.
+        integer(int64) :: i
+        logical :: has_bitmap
+        any_null = .false.
+        if (size(valid, kind=int64) < col%nrows_) error stop EP//"row_validity: destination is too short"
+        has_bitmap = col%has_nulls_
+        if (has_bitmap) has_bitmap = allocated(col%validity)
+        if (.not. has_bitmap) then
+            ! No row was ever nulled, so the bitmap does not exist at all -- the lazy-allocation
+            ! state the module doc describes, and the common case.
+            valid(1_int64:col%nrows_) = .true.
+            return
+        end if
+        do i = 1_int64, col%nrows_
+            valid(i) = .not. bit_test(col%validity, i)
+            if (.not. valid(i)) any_null = .true.
+        end do
+    end subroutine parquet_list_column_row_validity
     !
 end module parquet_list ! GCOVR_EXCL_LINE

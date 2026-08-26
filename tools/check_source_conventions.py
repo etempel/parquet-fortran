@@ -2483,6 +2483,13 @@ def check_module_tables_match_the_measured_footprints():
 
     Both tables are checked against the measurement INDEPENDENTLY rather than against each other, so
     a one-sided edit cannot pass by making the two agree on a wrong number.
+
+    The guide page's opening PROSE count is checked too, and it is the reason this check grew: the
+    page said `use parquet` "compiles **66** of this library's Fortran files" while its own table
+    two screens below said 73. It had been written once and never revisited while the table moved
+    twice, and nothing looked at it -- exactly CLAUDE.md's "A count written out beside the list it
+    counts ... needs a check". Only the bolded numeric form is covered; the page's other prose
+    count spells its number as a word, and a regex for that would cost more than it protects.
     """
     problems = []
     measured = _footprint_counts()
@@ -2517,6 +2524,20 @@ def check_module_tables_match_the_measured_footprints():
                 "%s: `%s` is measured in tools/module_footprints.txt but has no row in the table. "
                 "Every advertised entry module needs one, or a reader cannot compare imports."
                 % (label, mod))
+
+    page = REPO_ROOT / "doc" / "pages" / "operating" / "choosing-a-module.md"
+    prose = re.search(r"compiles \*\*(\d+)\*\* of this library's Fortran files", page.read_text())
+    if not prose:
+        problems.append("doc/pages/operating/choosing-a-module.md: the opening sentence's "
+                        "\"compiles **N** of this library's Fortran files\" no longer matches -- "
+                        "either it moved or its wording changed, and this check needs updating")
+    elif "parquet" in measured and int(prose.group(1)) != measured["parquet"]:
+        problems.append(
+            "doc/pages/operating/choosing-a-module.md: the opening sentence says `use parquet` "
+            "compiles %s Fortran files; tools/module_footprints.txt measures %d. This prose count "
+            "is separate from the table below it and had already drifted by seven before it was "
+            "checked -- correct it together with the table."
+            % (prose.group(1), measured["parquet"]))
     return problems
 
 

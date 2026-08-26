@@ -291,9 +291,86 @@ the request, and the same column may be ragged in next month's file.
 [`parquet_get_column_shape`](../io/reading.html) answers which kind of container a column is
 (`"scalar"`, `"vector"`, `"list"`, `"map"`, `"struct"`), from the schema alone.
 
+## Writing a list column to a file
+
+`parquet_write_column` writes a whole `parquet_list_column` as a genuine variable-length `LIST`
+column, and `parquet_write_column_chunk` writes one row group of it:
+
+```fortran
+use parquet
+type(parquet_writer) :: w
+type(parquet_list_column) :: lc
+
+call lc%init(PK_INT32)
+call lc%append_row([1_int32, 2_int32, 3_int32])
+call lc%append_null_row()
+call lc%append_row([integer(int32) ::])    ! present but empty -- not the same thing
+call lc%append_row([7_int32])
+
+call parquet_open_writer(w, "ragged.parquet")
+call parquet_write_column(w, "flux", lc)
+call parquet_close_writer(w)
+```
+
+**There is no `is_valid=` argument**, for the same reason there is none on the read: the column
+carries its own nullness at both levels. A null row is one you appended with `%append_null_row` or
+marked with `%set_null(i)`; a null element is one you passed `is_valid=` to `%append_row` for.
+Both survive the write, and both come back distinct — the table in
+[Reading a list column from a file](#reading-a-list-column-from-a-file) reads the same in either
+direction.
+
+**A list column is always written as a `LIST`, never as a vector**, even when every row happens to
+hold the same number of elements. The type you pass decides the column's physical shape: a
+`parquet_list_column` writes a variable-length list and a 2-D array writes a fixed-width
+`FIXED_SIZE_LIST`, and neither is substituted for the other. That is the deliberate mirror image of
+the reading rule above, where a file's column may be read *either* way — a reader is interpreting a
+file it did not write, so every lossless reading is allowed; a writer is choosing what the file
+will be, so what was asked for is what is written. `parquet_get_column_shape` on the result answers
+`"list"` in both cases.
+
+**A whole-file row mask applies.** `parquet_write_row_mask` drops whole rows before the column is
+written, and the surviving rows keep their own lengths, their nullness and their elements — the
+dropped rows' elements go with them.
+
+### Declaring one in a schema
+
+A schema-enforced writer declares a list column with the `list[<elemtype>]` data type, where
+`<elemtype>` is one of the nine payload kinds:
+
+```
+fields:
+  - name: flux
+    data_type: list[float32]
+  - name: observed
+    data_type: list[timestamp[ms,utc]]
+```
+
+The element type is **required** — a bare `list` is rejected — and it must match the column's
+payload kind **exactly**: there is no widening between list element kinds the way there is between
+scalar numeric kinds, so a `PK_INT32` column cannot be written into a `list[int64]` declaration.
+
+`col_size:` does not apply and is rejected: a list row's length comes from the data. `qc: min:`/
+`max:` is rejected too, on the same terms as for a `date`/`time`/`timestamp` column; `qc: miss:`
+does apply, and counts **null rows**. `extra: protected_cols:` applies and means the column holds
+no Null at *either* level — neither a null row nor a null element — which is also what makes a
+streamed list column's fields non-nullable.
+
+A declared list column that is never written is written with zero rows when the writer closes, like
+any other declared column.
+
+### Very large list columns
+
+Parquet's own repetition/definition-level generation addresses a row group's flattened elements
+with a 32-bit counter, so **one row group may hold at most 2,147,483,647 list elements**. This is
+handled for you: `parquet_close_writer`'s automatic row-group sizing accounts for the column's
+longest row and picks a smaller row group when it needs to, so a column's *total* element count can
+exceed that freely. Only two cases abort rather than being silently resized — an explicitly chosen
+`chunk_size` that would overflow a row group, and a `parquet_new_row_group` whose rows do — because
+both are values the caller chose and neither should be silently overridden. A **single row** longer
+than the limit aborts too, since no row-group size can help: a row is never split across row groups.
+
 ## What this module does not do yet
 
-- **No writing.** A list column can be read from a Parquet file but not yet written to one.
 - **No nesting.** A list of lists, a list of structs, and the `MAP`/`STRUCT` containers themselves
   are not available; the payload must be one of the nine scalar kinds.
 - **No `parquet_table` integration.** A table cannot yet hold a list column.

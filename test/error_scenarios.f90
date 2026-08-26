@@ -101,6 +101,36 @@ program error_scenarios
         call scenario_list_adopt_rows_bad_payload_kind()
     case ("list_adopt_rows_mask_length")
         call scenario_list_adopt_rows_mask_length()
+    case ("list_write_type_mismatch")
+        call scenario_list_write_type_mismatch()
+    case ("list_write_uninitialized")
+        call scenario_list_write_uninitialized()
+    case ("list_write_col_size_rejected")
+        call scenario_list_write_col_size_rejected()
+    case ("list_write_qc_rejected")
+        call scenario_list_write_qc_rejected()
+    case ("list_write_bad_token")
+        call scenario_list_write_bad_token()
+    case ("list_write_unknown_element")
+        call scenario_list_write_unknown_element()
+    case ("list_write_protected_row_null")
+        call scenario_list_write_protected_row_null()
+    case ("list_write_protected_element_null")
+        call scenario_list_write_protected_element_null()
+    case ("list_write_protected_ok")
+        call scenario_list_write_protected_ok()
+    case ("list_write_row_too_long")
+        call scenario_list_write_row_too_long()
+    case ("list_write_chunk_too_many_elements")
+        call scenario_list_write_chunk_too_many_elements()
+    case ("list_write_explicit_chunk_size_too_big")
+        call scenario_list_write_explicit_chunk_size_too_big()
+    case ("list_write_ceiling_ok")
+        call scenario_list_write_ceiling_ok()
+    case ("list_write_large_list_roundtrip")
+        call scenario_list_write_large_list_roundtrip()
+    case ("list_write_large_list_chunked")
+        call scenario_list_write_large_list_chunked()
     case ("whole_column_read_forced_error_control")
         call scenario_whole_column_read_forced_error_control()
     case ("read_array_full_bool_type_mismatch")
@@ -17261,5 +17291,357 @@ contains
         offsets = [0_int64, 1_int64, 2_int64, 3_int64]
         call lc%adopt_rows(offsets, payload, row_valid=[.true., .true.])
     end subroutine scenario_list_adopt_rows_mask_length
+
+    !> Writing a list column into a schema column declared with a DIFFERENT element type. There is
+    !> deliberately no widening between list element kinds the way there is between scalar numeric
+    !> kinds (parquet_is_type_compatible), so this is a clean refusal naming both tokens rather
+    !> than a silent conversion of the payload.
+    subroutine scenario_list_write_type_mismatch()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_list_column) :: lc
+        call schema%init(table="list_write_mismatch")
+        call schema%add_field("lst", "list[int64]")
+        call parquet_parse_maml(schema)
+        call lc%init(PK_INT32)
+        call lc%append_row([1_int32, 2_int32])
+        call parquet_open_writer(writer, "test_run/error_scenario_list_mismatch.parquet", schema)
+        call parquet_write_column(writer, "lst", lc)
+        call parquet_close_writer(writer)
+    end subroutine scenario_list_write_type_mismatch
+
+    !> Writing a list column that was never %init'd. Its payload kind is PK_NONE, so there is no
+    !> element type to declare, no buffer to hand over and nothing to write -- reported as such
+    !> rather than as a type mismatch against a token nobody wrote.
+    subroutine scenario_list_write_uninitialized()
+        type(parquet_writer) :: writer
+        type(parquet_list_column) :: lc
+        call parquet_open_writer(writer, "test_run/error_scenario_list_uninit.parquet")
+        call parquet_write_column(writer, "lst", lc)
+        call parquet_close_writer(writer)
+    end subroutine scenario_list_write_uninitialized
+
+    !> `col_size:` on a list column. A list row's length comes from the data, so there is nothing
+    !> for the key to declare -- and accepting it would leave a file claiming a width no row has
+    !> to honour. Rejected at schema-validation time, before a writer can ever see it.
+    subroutine scenario_list_write_col_size_rejected()
+        type(parquet_schema) :: schema
+        call schema%init(table="list_write_colsize")
+        call schema%add_field("lst", "list[int32]", col_size=3)
+        call parquet_parse_maml(schema)
+    end subroutine scenario_list_write_col_size_rejected
+
+    !> `qc: min:`/`max:` on a list column, refused on the same terms a temporal column's is: qc
+    !> stays scalar-leaf-only by design, and refusing here is what keeps the read and write sides
+    !> agreeing -- with no such declaration possible, a reader can never be handed one.
+    subroutine scenario_list_write_qc_rejected()
+        type(parquet_schema) :: schema
+        call schema%init(table="list_write_qc")
+        call schema%add_field("lst", "list[int32]", qc_min="0")
+        call parquet_parse_maml(schema)
+    end subroutine scenario_list_write_qc_rejected
+
+    !> A malformed list token. `list[]` names no element type, and the element type is REQUIRED --
+    !> a declared-but-unwritten list column has to be written with zero rows at close, which
+    !> cannot invent a payload kind.
+    subroutine scenario_list_write_bad_token()
+        type(parquet_schema) :: schema
+        call schema%init(table="list_write_badtoken")
+        call schema%add_field("lst", "list[]")
+        call parquet_parse_maml(schema)
+    end subroutine scenario_list_write_bad_token
+
+    !> An unknown element type inside an otherwise well-formed list token. Kept separate from
+    !> scenario_list_write_bad_token so the two malformed shapes -- no element type, and an
+    !> element type nothing recognises -- are both known to be refused.
+    subroutine scenario_list_write_unknown_element()
+        type(parquet_schema) :: schema
+        call schema%init(table="list_write_unknownelem")
+        call schema%add_field("lst", "list[complex64]")
+        call parquet_parse_maml(schema)
+    end subroutine scenario_list_write_unknown_element
+
+    !> A protected list column holding a null ROW. `protected_cols:` declares that the column
+    !> contains no Null at all, and a null row is one.
+    subroutine scenario_list_write_protected_row_null()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_list_column) :: lc
+        call schema%init(table="list_write_protrow")
+        call schema%add_field("lst", "list[int32]")
+        call parquet_parse_maml(schema)
+        call schema%set_protected("lst")
+        call lc%init(PK_INT32)
+        call lc%append_row([1_int32])
+        call lc%append_null_row()
+        call parquet_open_writer(writer, "test_run/error_scenario_list_protrow.parquet", schema)
+        call parquet_write_column(writer, "lst", lc)
+        call parquet_close_writer(writer)
+    end subroutine scenario_list_write_protected_row_null
+
+    !> A protected list column holding a null ELEMENT inside a present row. At the Parquet level a
+    !> null element IS a Null in the same leaf column the row nullness lives in, so the weaker
+    !> reading of `protected_cols:` would declare a non-nullable element field for a column that
+    !> can contain null elements -- exactly the invariant build_field's safety comment forbids.
+    !> Its own message, separate from the row-level one, so a caller is not sent looking at rows.
+    subroutine scenario_list_write_protected_element_null()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_list_column) :: lc
+        call schema%init(table="list_write_protelem")
+        call schema%add_field("lst", "list[int32]")
+        call parquet_parse_maml(schema)
+        call schema%set_protected("lst")
+        call lc%init(PK_INT32)
+        call lc%append_row([1_int32, 2_int32], is_valid=[.true., .false.])
+        call parquet_open_writer(writer, "test_run/error_scenario_list_protelem.parquet", schema)
+        call parquet_write_column(writer, "lst", lc)
+        call parquet_close_writer(writer)
+    end subroutine scenario_list_write_protected_element_null
+
+    !> A protected list column with no Null at either level: the NEGATIVE CONTROL for the two
+    !> scenarios above. Without it, a guard that fired unconditionally would pass both of them
+    !> while making every protected list column unwritable.
+    subroutine scenario_list_write_protected_ok()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_list_column) :: lc, back
+        call schema%init(table="list_write_protok")
+        call schema%add_field("lst", "list[int32]")
+        call parquet_parse_maml(schema)
+        call schema%set_protected("lst")
+        call lc%init(PK_INT32)
+        call lc%append_row([1_int32, 2_int32])
+        call lc%append_row([3_int32])
+        call parquet_open_writer(writer, "test_run/error_scenario_list_protok.parquet", schema)
+        call parquet_write_column(writer, "lst", lc)
+        call parquet_close_writer(writer)
+        call parquet_open_reader(reader, "test_run/error_scenario_list_protok.parquet")
+        call parquet_read_column(reader, "lst", back)
+        call parquet_close_reader(reader)
+        if (back%size() /= 2_int64) error stop "a protected null-free list column must write normally"
+        if (back%length(1_int64) /= 2_int64) error stop "its first row must keep both elements"
+    end subroutine scenario_list_write_protected_ok
+
+    !> One list ROW holding more elements than Parquet's own repetition/definition-level
+    !> generation can address. A row is never split across row groups, so no row-group size can
+    !> rescue this and it must abort where the array is built -- the list column's counterpart to
+    !> a vector column's col_size ceiling. Reached with a tiny fixture by shrinking the limit
+    !> through parquet_debug_set_list_element_count_limit, a process-global test-only hook that is
+    !> safe here because this scenario is its own isolated subprocess.
+    subroutine scenario_list_write_row_too_long()
+        interface
+            subroutine parquet_debug_set_list_element_count_limit(n) &
+                bind(C, name="parquet_debug_set_list_element_count_limit")
+                use iso_c_binding, only : c_int64_t
+                integer(c_int64_t), value :: n !! element ceiling to use instead of 2^31-1; <=0 restores it.
+            end subroutine parquet_debug_set_list_element_count_limit
+        end interface
+        type(parquet_writer) :: writer
+        type(parquet_list_column) :: lc
+        call parquet_debug_set_list_element_count_limit(3_int64)
+        call lc%init(PK_INT32)
+        call lc%append_row([1_int32, 2_int32, 3_int32, 4_int32])
+        call parquet_open_writer(writer, "test_run/error_scenario_list_rowlong.parquet")
+        call parquet_write_column(writer, "lst", lc)
+        call parquet_close_writer(writer)
+    end subroutine scenario_list_write_row_too_long
+
+    !> One STREAMED row group holding more elements than that same ceiling. The caller chose this
+    !> row group's row count through parquet_new_row_group, so -- like an explicit chunk_size --
+    !> it is validated rather than silently overridden, and the message names what to make smaller.
+    subroutine scenario_list_write_chunk_too_many_elements()
+        interface
+            subroutine parquet_debug_set_list_element_count_limit(n) &
+                bind(C, name="parquet_debug_set_list_element_count_limit")
+                use iso_c_binding, only : c_int64_t
+                integer(c_int64_t), value :: n !! element ceiling to use instead of 2^31-1; <=0 restores it.
+            end subroutine parquet_debug_set_list_element_count_limit
+        end interface
+        type(parquet_writer) :: writer
+        type(parquet_list_column) :: lc
+        call parquet_debug_set_list_element_count_limit(3_int64)
+        call lc%init(PK_INT32)
+        call lc%append_row([1_int32, 2_int32])
+        call lc%append_row([3_int32, 4_int32])
+        call parquet_open_writer(writer, "test_run/error_scenario_list_chunkelems.parquet")
+        call parquet_new_row_group(writer, 2_int64)
+        call parquet_write_column_chunk(writer, "lst", lc)
+        call parquet_finish_row_group(writer)
+        call parquet_close_writer(writer)
+    end subroutine scenario_list_write_chunk_too_many_elements
+
+    !> An EXPLICIT chunk_size that would put too many list elements in one row group. Checked at
+    !> close, by walking the column's actual offsets at chunk_size stride -- exact, so a caller
+    !> whose chunk_size really does fit is never refused however ragged the column is.
+    subroutine scenario_list_write_explicit_chunk_size_too_big()
+        interface
+            subroutine parquet_debug_set_list_element_count_limit(n) &
+                bind(C, name="parquet_debug_set_list_element_count_limit")
+                use iso_c_binding, only : c_int64_t
+                integer(c_int64_t), value :: n !! element ceiling to use instead of 2^31-1; <=0 restores it.
+            end subroutine parquet_debug_set_list_element_count_limit
+        end interface
+        type(parquet_writer) :: writer
+        type(parquet_list_column) :: lc
+        integer(int64) :: i
+        call parquet_debug_set_list_element_count_limit(5_int64)
+        call lc%init(PK_INT32)
+        do i = 1_int64, 8_int64
+            call lc%append_row([int(i, int32), int(i, int32) + 100_int32])
+        end do
+        call parquet_open_writer(writer, "test_run/error_scenario_list_chunksize.parquet", chunk_size=8)
+        call parquet_write_column(writer, "lst", lc)
+        call parquet_close_writer(writer)
+    end subroutine scenario_list_write_explicit_chunk_size_too_big
+
+    !> The NEGATIVE CONTROL for the three ceiling scenarios above: the same shrunk limit with a
+    !> chunk_size that fits. Without it, a guard that fired unconditionally would pass all three
+    !> while making every list column unwritable.
+    subroutine scenario_list_write_ceiling_ok()
+        interface
+            subroutine parquet_debug_set_list_element_count_limit(n) &
+                bind(C, name="parquet_debug_set_list_element_count_limit")
+                use iso_c_binding, only : c_int64_t
+                integer(c_int64_t), value :: n !! element ceiling to use instead of 2^31-1; <=0 restores it.
+            end subroutine parquet_debug_set_list_element_count_limit
+        end interface
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_list_column) :: lc, back
+        integer(int64) :: i
+        call parquet_debug_set_list_element_count_limit(5_int64)
+        call lc%init(PK_INT32)
+        do i = 1_int64, 8_int64
+            call lc%append_row([int(i, int32), int(i, int32) + 100_int32])
+        end do
+        call parquet_open_writer(writer, "test_run/error_scenario_list_ceilok.parquet", chunk_size=2)
+        call parquet_write_column(writer, "lst", lc)
+        call parquet_close_writer(writer)
+        call parquet_debug_set_list_element_count_limit(0_int64)
+        call parquet_open_reader(reader, "test_run/error_scenario_list_ceilok.parquet")
+        call parquet_read_column(reader, "lst", back)
+        call parquet_close_reader(reader)
+        if (back%size() /= 8_int64) error stop "a chunk_size within the ceiling must write every row"
+        if (back%total_elements() /= 16_int64) error stop "and every element"
+    end subroutine scenario_list_write_ceiling_ok
+
+    !> Proves the arrow::large_list() write path round-trips, rather than merely not crashing. A
+    !> genuine 2-billion-element column is far too large for the suite, so this shrinks the int32
+    !> offsets threshold through parquet_debug_set_list_offset_limit -- the list counterpart of
+    !> scenario_large_string_roundtrip's own parquet_debug_set_string_offset_limit use, and safe
+    !> as a process-global for the same reason: this scenario is its own isolated subprocess.
+    !>
+    !> The shape query is what makes the assertion meaningful: a large_list and a list are
+    !> indistinguishable in the Parquet file itself (same leaf path, same repetition and definition
+    !> levels), so only the values coming back correctly says the wider offsets were written and
+    !> read correctly.
+    subroutine scenario_list_write_large_list_roundtrip()
+        interface
+            subroutine parquet_debug_set_list_offset_limit(n) &
+                bind(C, name="parquet_debug_set_list_offset_limit")
+                use iso_c_binding, only : c_int64_t
+                integer(c_int64_t), value :: n !! element threshold to use instead of 2^31-1; <=0 restores it.
+            end subroutine parquet_debug_set_list_offset_limit
+        end interface
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        ! TARGET on `back`: %view hands back a handle whose %col points at it, and F2018 15.5.2.4
+        ! leaves that pointer UNDEFINED on return when the actual argument is not a target. Only
+        ! nagfor's -C=dangling sees it (CLAUDE.md, "-C=dangling and -C=calls are BOTH in the set").
+        type(parquet_list_column) :: lc
+        type(parquet_list_column), target :: back
+        type(parquet_list_row) :: row
+        integer(int32), allocatable :: v(:)
+        character(len=:), allocatable :: shape
+        call parquet_debug_set_list_offset_limit(3_int64)
+        call lc%init(PK_INT32)
+        call lc%append_row([10_int32, 11_int32])
+        call lc%append_null_row()
+        call lc%append_row([30_int32, 31_int32, 32_int32])
+        call parquet_open_writer(writer, "test_run/error_scenario_list_large.parquet")
+        call parquet_write_column(writer, "lst", lc)
+        call parquet_close_writer(writer)
+        call parquet_debug_set_list_offset_limit(0_int64)
+
+        call parquet_open_reader(reader, "test_run/error_scenario_list_large.parquet")
+        call parquet_get_column_shape(reader, "lst", shape)
+        call parquet_read_column(reader, "lst", back)
+        call parquet_close_reader(reader)
+        if (shape /= "list") error stop "a large_list column must still report shape 'list'"
+        if (back%size() /= 3_int64) error stop "the large_list write did not round-trip its rows"
+        if (.not. back%is_null(2_int64)) error stop "the large_list write lost a null row"
+        row = back%view(3_int64)
+        call row%get(v)
+        if (size(v) /= 3) error stop "the large_list write lost an element"
+        if (v(1) /= 30_int32 .or. v(3) /= 32_int32) error stop "the large_list write lost a value"
+    end subroutine scenario_list_write_large_list_roundtrip
+
+    !> The large_list arm across TWO row groups, where the first is narrow enough for int32 offsets
+    !> and the second is not. This is the case that makes the streamed path's rule -- assemble every
+    !> chunk with the type the FIELD already carries, fixed by the first row group, rather than
+    !> recomputing an offset width per chunk -- observable at all.
+    !>
+    !> Recomputing per chunk is not a compile error and not a wrong flag: align_array_to_field would
+    !> restamp the second chunk's large_list array as a list, leaving its int64 offsets buffer to be
+    !> read as int32. Every value in that row group is then garbage while the file still validates.
+    !> A mutation doing exactly that survived the whole suite until this scenario existed, because
+    !> nothing else ever crosses the threshold twice in one column.
+    subroutine scenario_list_write_large_list_chunked()
+        interface
+            subroutine parquet_debug_set_list_offset_limit(n) &
+                bind(C, name="parquet_debug_set_list_offset_limit")
+                use iso_c_binding, only : c_int64_t
+                integer(c_int64_t), value :: n !! element threshold to use instead of 2^31-1; <=0 restores it.
+            end subroutine parquet_debug_set_list_offset_limit
+        end interface
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_list_column) :: g1, g2
+        type(parquet_list_column), target :: back !! TARGET because %view is called on it; see above.
+        type(parquet_list_row) :: row
+        integer(int32), allocatable :: v(:)
+        integer(int64) :: i
+        character(len=*), parameter :: out_file = "test_run/error_scenario_list_large_chunked.parquet"
+
+        ! Two elements in the first row group, four in the second, with the threshold between them.
+        call parquet_debug_set_list_offset_limit(2_int64)
+        call g1%init(PK_INT32)
+        call g1%append_row([10_int32])
+        call g1%append_row([20_int32])
+        call g2%init(PK_INT32)
+        call g2%append_row([30_int32, 31_int32])
+        call g2%append_row([40_int32, 41_int32])
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_new_row_group(writer, 2_int64)
+        call parquet_write_column_chunk(writer, "lst", g1)
+        call parquet_finish_row_group(writer)
+        call parquet_new_row_group(writer, 2_int64)
+        call parquet_write_column_chunk(writer, "lst", g2)
+        call parquet_finish_row_group(writer)
+        call parquet_close_writer(writer)
+        call parquet_debug_set_list_offset_limit(0_int64)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "lst", back)
+        call parquet_close_reader(reader)
+        if (back%size() /= 4_int64) error stop "the chunked large_list write lost a row"
+        if (back%total_elements() /= 6_int64) error stop "the chunked large_list write lost an element"
+        do i = 1_int64, 2_int64
+            row = back%view(i)
+            call row%get(v)
+            if (size(v) /= 1) error stop "a first-row-group row changed length"
+            if (v(1) /= int(i, int32)*10_int32) error stop "a first-row-group value is wrong"
+        end do
+        row = back%view(3_int64)
+        call row%get(v)
+        if (size(v) /= 2) error stop "a second-row-group row changed length"
+        if (v(1) /= 30_int32 .or. v(2) /= 31_int32) error stop "a second-row-group value is wrong"
+        row = back%view(4_int64)
+        call row%get(v)
+        if (v(1) /= 40_int32 .or. v(2) /= 41_int32) error stop "a second-row-group value is wrong"
+    end subroutine scenario_list_write_large_list_chunked
 
 end program error_scenarios

@@ -1060,11 +1060,15 @@ parquet_core                    (module — core API + cross-subtree private-hel
 ├─ parquet_read                 (submodule — reader lifecycle, queries, shared read helpers)
 │   ├─ parquet_read_numeric     (int32/int64/float32/float64/logical, all access modes)
 │   ├─ parquet_read_string
-│   └─ parquet_read_temporal    (date/time/timestamp)
+│   ├─ parquet_read_temporal    (date/time/timestamp)
+│   ├─ parquet_read_filter      (filter/sort-key lexing and parsing)
+│   ├─ parquet_read_sort        (read-time sort key installation)
+│   └─ parquet_read_list        (variable-length LIST -> parquet_list_column)
 ├─ parquet_write                (submodule — writer lifecycle, shared write helpers)
 │   ├─ parquet_write_numeric
 │   ├─ parquet_write_string
-│   └─ parquet_write_temporal
+│   ├─ parquet_write_temporal
+│   └─ parquet_write_list       (parquet_list_column -> variable-length LIST)
 └─ parquet_metadata             (submodule — parse/build orchestration + shared metadata helpers)
     ├─ parquet_metadata_base    (format-agnostic column_info/table_metadata plumbing)
     ├─ parquet_metadata_get     (parquet_get_metadata queries)
@@ -1814,9 +1818,18 @@ applied **wherever a field and an array are stored together**, which is `append_
 branches plus every chunk site's `pending_chunk_arrays` assignment. Restamping is safe because the
 difference is pure metadata, and it is a deliberate no-op when the types already match.
 
-**The child field's name must stay `item`.** That is what Arrow's own
-`FixedSizeListType(DataType)` constructor supplies (`arrow/type.h`), and it appears in the Parquet
-schema's leaf paths — renaming it changes how every other tool addresses the column.
+**The child field's name must stay `item`, but NOT for the reason it is tempting to give.** That
+is what Arrow's own `FixedSizeListType(DataType)` constructor supplies (`arrow/type.h`), and what
+it governs is `arrow::DataType::Equals` — which compares the child field's **name and nullability**
+as well as its type, so a field built with a different child name will not match the array
+`FixedSizeListBuilder` produced, and `align_array_to_field` is what has to reconcile them.
+
+**It does NOT reach the written file, and an earlier version of this note said it did.** Measured
+directly on Arrow 25.0.0: four files written with the child named `item` and `zzz`, fixed-size and
+variable-length, all carry the Parquet leaf path `<col>.list.element`, and the Arrow type read back
+always names the child `element`. Arrow normalises it, because `element` is what the Parquet LIST
+logical type's own schema shape specifies. So a rename changes nothing about how another tool
+addresses the column — the rule stands, its stated consequence did not.
 
 **And the general lesson, which is not about Arrow at all: when a parameter STOPS being ignored,
 every call site that omitted it becomes a suspect.** `build_field`'s `nullable` argument was
@@ -3377,6 +3390,41 @@ nagfor needs `FPM_CC`/`FPM_CXX` set explicitly and a shim to get OpenMP onto the
 warning output needs its own triage, and both are covered in
 [NAG's "explicitly imported but not used" warnings](#nags-explicitly-imported-but-not-used-warnings-most-are-false-positives).
 
+- **An INTERMEDIATE submodule must not reference a name it reaches by HOST ASSOCIATION from the
+  module above -- nagfor then cannot compile ANY of its descendants.** `src/parquet_write.f90` is
+  `submodule (parquet_core) parquet_write` and has four children. Giving its own code a reference to
+  `PK_INT32` -- a name `parquet_core` use-associates from `parquet_columns` -- makes nagfor 7.2 fail
+  while compiling a **sibling** that never mentions it:
+
+  ```
+  Fatal Error: ./src/parquet_write_temporal.f90: Bad module file format for PARQUET_WRITE,
+               could not ref PK_INT32 in module PARQUET_COLUMNS
+  ```
+
+  Observed three times with three different names (`PK_NONE`, `PK_INT32`, and
+  `PARQUET_UNIT_MICROS` from `parquet_temporal`), each naming a different module and each fixed by
+  removing the reference from the parent. gfortran, ifx and flang all compile it, so nothing in the
+  ordinary fleet notices.
+
+  **What identifies the trigger is that a DIRECTLY IMPORTED name is fine.** The same file carries
+  its own `use parquet_temporal, only: parquet_date, parquet_time, parquet_timestamp` and declares
+  `type(parquet_date) :: empty_date(0)` with no trouble at all. So the discriminator is host
+  association, not the name, the module it comes from, or the kind of entity.
+
+  **Two fixes, and prefer the second**: give the intermediate submodule its own `use ..., only:` for
+  the name; or move the code that needs it into a LEAF submodule, declaring an interface in
+  `parquet_core.f90` when a sibling has to call it -- the "cross-subtree private-helper interfaces"
+  mechanism that file's own header describes. `resolve_temporal_write_unit` is the worked example:
+  it is needed by `parquet_write_temporal` and by `parquet_write_list`, its body reads two
+  `parquet_unit_*` constants, and it lives in the temporal leaf with its interface in
+  `parquet_core.f90` for exactly this reason.
+
+  **This QUALIFIES the placement rule** under
+  [Nested submodule tree](#nested-submodule-tree), which says type-generic code "belongs in the
+  parent ... as an ordinary contained procedure". That is still right for a helper referencing only
+  the parent's OWN imports; one that needs a host-associated name has to go in a leaf instead.
+  The failure is loud and at build time, so it cannot ship silently -- but it is visible only to
+  someone running a nagfor build.
 - **nagfor UNMASKS the IEEE traps by default (`-ieee=stop`), for the WHOLE process — so anything
   this library links may not RAISE a flag, however harmlessly.** Two confirmed instances, both fatal
   on data containing nothing exceptional. **`arrow::compute::MinMax` raises `FE_INVALID` on every

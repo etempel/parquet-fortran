@@ -1356,6 +1356,9 @@ contains
         type(parquet_date) :: empty_date(0)
         type(parquet_time) :: empty_time(0)
         type(parquet_timestamp) :: empty_ts(0)
+        character(len=:), allocatable :: elem_base !! parquet_parse_list_type scratch.
+        integer :: elem_unit
+        logical :: elem_utc, is_list, list_ok
 
         if (.not. writer%is_schema_enforced) return
         if (writer%write_started) return
@@ -1385,6 +1388,26 @@ contains
             ! arguments of one call, since the callee defines `writer` (F2018 15.5.2.13).
             cname = trim(writer%enabled_columns(i)%name)
             dtype = trim(writer%enabled_columns(i)%data_type)
+            ! A list column is handled before the select case: its token carries an element type
+            ! (list[int32], list[timestamp[ms]]) so it cannot be matched by a fixed case list, and
+            ! the zero-row column has to be %init'd to that element kind before it can be written.
+            call parquet_parse_list_type(dtype, elem_base, elem_unit, elem_utc, is_list, list_ok)
+            if (is_list) then
+                if (.not. list_ok) then
+                    ! Unreachable: parquet_validate_maml rejects a malformed list token before a
+                    ! schema can reach a writer. GCOVR_EXCL_LINE
+                    error stop "parquet_close_writer: cannot write an empty column of data_type '" // &
+                        dtype // "' for column " // cname // ctx ! GCOVR_EXCL_LINE
+                end if
+                ! Delegated to parquet_write_list rather than built here, and that is NOT a filing
+                ! preference: this file is an intermediate submodule, and nagfor 7.2 cannot compile
+                ! ANY of its sibling descendants once its own code references a PK_* constant
+                ! use-associated into parquet_core from parquet_columns ("Bad module file format
+                ! for PARQUET_WRITE, could not ref PK_INT32"). Keeping every PK_* reference in the
+                ! leaf that needs it is what the read side already does.
+                call parquet_write_empty_list_column(writer, cname, elem_base)
+                cycle
+            end if
             select case (dtype)
             case ("int32")
                 call parquet_write_int32_column(writer, cname, empty_i32)

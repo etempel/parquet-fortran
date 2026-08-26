@@ -24,4 +24,4 @@ variable-length list container.
 - [Variable-length list columns with `parquet_list_column`](list-columns.html) — rows that hold
   different numbers of values, the offsets-plus-payload layout, the difference between a null row
   and a null element, the `parquet_list_row` handle, and how a list column is adopted into a
-  `parquet_column`. In-memory only for now: no file I/O yet.
+  `parquet_column`, and how one is read from and written to a Parquet file.

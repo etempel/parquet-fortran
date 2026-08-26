@@ -115,6 +115,17 @@ Notes on the `fields:` entries:
   unit/timezone token syntax.
 - `col_size` (default `1`) makes the column a fixed-length vector column, read/written as a 2D array
   of shape `(col_size, nrows)`.
+- `list[<elemtype>]` declares a **variable-length** list column, whose rows may hold different
+  numbers of values — read and written through a
+  [`parquet_list_column`](../types/list-columns.html). `<elemtype>` is one of the nine payload
+  kinds (`int32`, `int64`, `float32`, `float64`, `boolean`, `string`, `date`, `time[unit]`,
+  `timestamp[unit,utc]`) and is **required**: a bare `list` is rejected, because a declared column
+  that is never written has to be written with zero rows at close and that cannot invent an element
+  type. `col_size:` does not apply to such a column and is rejected — a list row's length comes from
+  the data — and neither does `array_size:`, which is not consulted for a `list[string]`.
+  > That makes the naming trap below three-way rather than two-way: `col_size` is how many elements
+  > a **vector** row holds, `array_size` is how many characters a **string** value holds, and a
+  > **list** column has neither, because its rows are not all the same length.
 - `array_size` sets the maximum string length for `string` columns; it is ignored for other types.
   Writing a longer value through an ordinary `character` array is an error. A
   [`parquet_string_column`](../types/string-columns.html) write is the one exception: it stores each

@@ -42,8 +42,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Parquet file straight into one, whole or one row group at a time, with per-row lengths, null rows
   and null elements intact and with the payload kind taken from the file rather than declared;
   filtering, sampling and sorting compose with it. A list leaf nested inside a `STRUCT` is now
-  addressable by its dotted path. **Read-only for now**: a list column cannot yet be written to a
-  Parquet file, held by a `parquet_table`, or nested inside another container.
+  addressable by its dotted path. `parquet_write_column`/`parquet_write_column_chunk` write one back
+  out as a genuine variable-length `LIST` column, declared in a schema as `list[<elemtype>]`; the
+  value type decides the file's physical shape, so a 2-D array still writes a fixed-width vector
+  column and a `parquet_list_column` always writes a `LIST`. **Not yet**: a list column cannot be
+  held by a `parquet_table`, or nested inside another container.
 
 ### Changed
 

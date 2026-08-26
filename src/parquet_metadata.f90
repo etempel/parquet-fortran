@@ -329,6 +329,28 @@ contains
             end if
         end select
 
+        ! A list column's own three rules, all refusals, and all for the same reason: a
+        ! `list[<elemtype>]` column's per-row length comes from the DATA, so there is nothing for
+        ! col_size to declare and nothing for it to be resolved from. qc: min:/max: is refused on
+        ! the same terms as a temporal column's above -- qc stays scalar-leaf-only by design (see
+        ! feature_map_list_struct.md), and refusing is what keeps the read and write sides
+        ! agreeing, since with no such declaration possible a reader can never be handed one.
+        ! qc: miss: IS supported and applies to ROW nullness (a null list), which is the same
+        ! concept at the same granularity.
+        if (parquet_is_list_data_type(col%data_type)) then
+            if (col%col_size == parquet_size_auto) then
+                errors = errors // "field '" // cur_name // "' declares col_size: auto, which does not " // &
+                    "apply to a list column (a list row's length comes from the data); "
+            else if (col%col_size > 1) then
+                errors = errors // "field '" // cur_name // "' declares col_size > 1, which does not " // &
+                    "apply to a list column (a list row's length comes from the data); "
+            end if
+            if (col%has_qc_min .or. col%has_qc_max) then
+                errors = errors // "field '" // cur_name // "' declares qc: min:/max:, which is not " // &
+                    "supported for a list column (qc: miss: is); "
+            end if
+        end if
+
         ! qc: min: must use a lower-bound operator (>= or >) and qc: max: an upper-bound
         ! operator (<= or <); the opposite direction (e.g. min: '< 5') is a nonsensical bound.
         ! This is a purely syntactic check, applied to every enforced type (numeric and string
@@ -1026,10 +1048,74 @@ contains
         end select
     end procedure parquet_parse_temporal_type
 
+    !> Whether `token` is a list data_type token at all -- a cheap test for the callers that only
+    !! need to know that much, so they do not have to declare five out-arguments they discard.
+    logical function parquet_is_list_data_type(token) result(res)
+        character(len=*), intent(in) :: token !! a field's declared data_type.
+        character(len=:), allocatable :: base
+        integer :: unit_sel
+        logical :: is_utc, valid
+        call parquet_parse_list_type(token, base, unit_sel, is_utc, res, valid)
+    end function parquet_is_list_data_type
+    !
+    module procedure parquet_parse_list_type
+        character(len=:), allocatable :: lo, inner, tbase
+        integer :: lb, rb, j
+        logical :: t_is_temporal, t_valid
+        logical :: t_utc
+
+        is_list = .false.
+        valid = .false.
+        is_utc = .false.
+        unit_sel = 0
+        elem_base = ""
+        call parquet_to_lower(trim(adjustl(token)), lo)
+
+        ! A list token is exactly `list[...]`. The closing bracket is matched from the END so that
+        ! a temporal element carrying its own suffix -- list[timestamp[ms,utc]] -- splits correctly;
+        ! that is the same rule parquet_parse_temporal_type uses one level down, which is what lets
+        ! the two compose instead of needing a bracket-nesting parser.
+        lb = index(lo, "[")
+        if (lb /= 5) return
+        if (lo(1:4) /= "list") return
+        is_list = .true.
+        rb = index(lo, "]", back=.true.)
+        if (rb /= len(lo) .or. rb <= lb + 1) return
+        inner = trim(adjustl(lo(lb+1:rb-1)))
+        if (len(inner) == 0) return
+
+        ! A non-temporal element is an exact match against the same base tokens a scalar column
+        ! accepts, so the two vocabularies cannot drift.
+        do j = 1, size(valid_maml_data_types)
+            if (inner == trim(valid_maml_data_types(j))) then
+                elem_base = inner
+                valid = .true.
+                return
+            end if
+        end do
+
+        call parquet_parse_temporal_type(inner, tbase, unit_sel, t_utc, t_is_temporal, t_valid)
+        if (t_is_temporal .and. t_valid) then
+            elem_base = tbase
+            is_utc = t_utc
+            valid = .true.
+            return
+        end if
+        unit_sel = 0
+    end procedure parquet_parse_list_type
+
     module procedure parquet_data_type_token_valid
         character(len=:), allocatable :: base, lo
         integer :: unit_sel, j
-        logical :: is_utc, is_temporal, valid
+        logical :: is_utc, is_temporal, valid, is_list
+
+        ! A list token first: `list[int32]` is not temporal and is not in valid_maml_data_types
+        ! either, so without this it would fall through to the exact-match loop and be rejected.
+        call parquet_parse_list_type(token, base, unit_sel, is_utc, is_list, valid)
+        if (is_list) then
+            parquet_data_type_token_valid = valid
+            return
+        end if
 
         call parquet_parse_temporal_type(token, base, unit_sel, is_utc, is_temporal, valid)
         if (is_temporal) then
@@ -1442,6 +1528,7 @@ contains
         character(len=:), allocatable :: dt_base !! temporal base type scratch (parquet_parse_temporal_type).
         integer :: dt_unit !! temporal unit selector scratch.
         logical :: dt_utc, dt_is_temporal, dt_valid !! temporal utc/is-temporal/well-formed scratch.
+        logical :: dt_is_list !! whether the data_type token names a list column (parquet_parse_list_type).
 
         ! See g_maml_mutex in parquet_wrapper.cpp: this function's repeated
         ! "grow tmp(:), whole-array-assign the old contents in, move_alloc"
@@ -1797,16 +1884,32 @@ contains
                 if (index(cvalue, "string") == 1) then
                     tmp(n)%data_type = "string"
                 else
-                    ! Split a temporal token (timestamp[us,utc], time[ms], date) into its base
-                    ! type plus unit/utc; a malformed temporal token is stored verbatim so
-                    ! parquet_validate_maml rejects it (parquet_data_type_token_valid).
-                    call parquet_parse_temporal_type(cvalue, dt_base, dt_unit, dt_utc, dt_is_temporal, dt_valid)
-                    if (dt_is_temporal .and. dt_valid) then
-                        tmp(n)%data_type = dt_base
-                        tmp(n)%time_unit = dt_unit
-                        tmp(n)%is_utc = dt_utc
+                    ! A list token first: `list[<elemtype>]` is stored in its canonical BASE form
+                    ! (list[timestamp]) with a temporal element's unit/utc in the same fields a
+                    ! scalar temporal column uses -- so nothing downstream needs a second place to
+                    ! look for a unit. A malformed one is stored verbatim, exactly as a malformed
+                    ! temporal token is, so parquet_validate_maml rejects it.
+                    call parquet_parse_list_type(cvalue, dt_base, dt_unit, dt_utc, dt_is_list, dt_valid)
+                    if (dt_is_list) then
+                        if (dt_valid) then
+                            tmp(n)%data_type = "list[" // dt_base // "]"
+                            tmp(n)%time_unit = dt_unit
+                            tmp(n)%is_utc = dt_utc
+                        else
+                            tmp(n)%data_type = cvalue
+                        end if
                     else
-                        tmp(n)%data_type = cvalue
+                        ! Split a temporal token (timestamp[us,utc], time[ms], date) into its base
+                        ! type plus unit/utc; a malformed temporal token is stored verbatim so
+                        ! parquet_validate_maml rejects it (parquet_data_type_token_valid).
+                        call parquet_parse_temporal_type(cvalue, dt_base, dt_unit, dt_utc, dt_is_temporal, dt_valid)
+                        if (dt_is_temporal .and. dt_valid) then
+                            tmp(n)%data_type = dt_base
+                            tmp(n)%time_unit = dt_unit
+                            tmp(n)%is_utc = dt_utc
+                        else
+                            tmp(n)%data_type = cvalue
+                        end if
                     end if
                 end if
             case ("array_size")

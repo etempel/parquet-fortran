@@ -46,19 +46,26 @@ contains
     !> the schema-declared unit/utc when the column comes from a MAML/schema (idx > 0 and its
     !> time_unit is set), else the fixed default (microseconds, timezone-naive) for a
     !> schema-less writer or a schema column with no explicit unit.
-    subroutine resolve_temporal_write_unit(writer, idx, unit, is_utc)
-        type(parquet_writer), intent(in) :: writer !! open writer.
-        integer, intent(in) :: idx !! schema column index, or 0 for schema-less.
-        integer, intent(out) :: unit !! resolved unit selector.
-        integer(c_int32_t), intent(out) :: is_utc !! 1 if UTC-adjusted, else 0.
-
+    !>
+    !> A SEPARATE MODULE PROCEDURE (interface in parquet_core.f90) rather than a plain contained
+    !> one, so that parquet_write_list can call it for a temporal PAYLOAD without a second copy of
+    !> the rule. The obvious home -- the shared parquet_write parent -- is unavailable: nagfor 7.2
+    !> cannot compile ANY descendant of an intermediate submodule whose own code references a name
+    !> use-associated into parquet_core ("Bad module file format for PARQUET_WRITE, could not ref
+    !> PARQUET_UNIT_MICROS in module PARQUET_TEMPORAL"), and this body references two.
+    !>
+    !> It must stay ABOVE its four call sites in this file: nagfor binds a separate module
+    !> procedure's name to an implicit external at the first call, so a later implementation of it
+    !> is rejected. See CLAUDE.md, "A separate module procedure must be IMPLEMENTED before it is
+    !> CALLED in the same submodule".
+    module procedure resolve_temporal_write_unit
         unit = parquet_unit_micros
         is_utc = 0_c_int32_t
         if (idx > 0) then
             if (writer%all_columns(idx)%time_unit /= 0) unit = writer%all_columns(idx)%time_unit
             if (writer%all_columns(idx)%is_utc) is_utc = 1_c_int32_t
         end if
-    end subroutine resolve_temporal_write_unit
+    end procedure resolve_temporal_write_unit
     !> Builds the write-side validity pointer for a temporal column: a null-free column is
     !> written non-nullable (c_null_ptr); otherwise a 1=valid/0=null buffer is built from the
     !> per-element null mask, and (for a schema-enforced writer) parquet_check_protected enforces

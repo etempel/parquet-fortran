@@ -175,6 +175,7 @@ parquet_strings.f90
 parquet_temporal.f90
 parquet_wrapper.cpp
 parquet_write.f90
+parquet_write_list.f90
 parquet_write_numeric.f90
 parquet_write_string.f90
 parquet_write_temporal.f90
@@ -242,6 +243,7 @@ parquet_tables_write.f90
 parquet_temporal.f90
 parquet_wrapper.cpp
 parquet_write.f90
+parquet_write_list.f90
 parquet_write_numeric.f90
 parquet_write_string.f90
 parquet_write_temporal.f90
@@ -318,6 +320,7 @@ parquet_temporal.f90
 parquet_version.f90
 parquet_wrapper.cpp
 parquet_write.f90
+parquet_write_list.f90
 parquet_write_numeric.f90
 parquet_write_string.f90
 parquet_write_temporal.f90

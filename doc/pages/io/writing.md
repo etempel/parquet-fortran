@@ -249,6 +249,26 @@ columns](../types/string-columns.html#reading-and-writing-compact-string-columns
 and a full example; this is purely an alternative to the `character(len=...)` form above, not a
 different file format.
 
+## Writing a variable-length list column with parquet_list_column
+
+A column whose rows hold **different numbers of values** is written from a
+`type(parquet_list_column)` (`call parquet_write_column(writer, "flux", lc)`), which produces a
+genuine Parquet `LIST` column rather than the fixed-width `FIXED_SIZE_LIST` a 2-D array produces.
+No `is_valid` mask is needed or accepted: the column tracks both its null rows and its null
+elements itself. See [Writing a list column to a
+file](../types/list-columns.html#writing-a-list-column-to-a-file) for the details, the
+`list[<elemtype>]` schema declaration and a full example.
+
+Two notes that belong here rather than there. **The type you pass decides the file's physical
+shape** — a `parquet_list_column` always writes a `LIST`, a 2-D array always writes a
+`FIXED_SIZE_LIST`, and neither is substituted for the other even when the data would allow it.
+And **one row group may hold at most 2,147,483,647 list elements**, a hard limit of Parquet's own
+level generation; the automatic row-group sizing below already accounts for it, so only an
+explicitly chosen `chunk_size` (or `parquet_new_row_group` row count) that conflicts with it
+aborts rather than being silently resized. That is the variable-length counterpart of the
+`col_size` ceiling described under [Important
+behavior](../../index.html#important-behavior).
+
 ## Streaming/chunked writes
 
 `parquet_write_column` needs the whole column as one complete array — fine for most data, but not

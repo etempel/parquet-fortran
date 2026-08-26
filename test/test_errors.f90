@@ -1520,7 +1520,30 @@ contains
                 test_list_adopt_rows_offset_mismatch_aborts), &
             new_unittest("adopt_rows rejects non-monotonic offsets", test_list_adopt_rows_not_monotonic_aborts), &
             new_unittest("adopt_rows rejects a vector-kind payload", test_list_adopt_rows_bad_payload_kind_aborts), &
-            new_unittest("adopt_rows rejects a short row_valid mask", test_list_adopt_rows_mask_length_aborts) &
+            new_unittest("adopt_rows rejects a short row_valid mask", test_list_adopt_rows_mask_length_aborts), &
+            new_unittest("writing a list column into a differently-typed declaration aborts", &
+                test_list_write_type_mismatch_aborts), &
+            new_unittest("writing an uninitialized list column aborts", test_list_write_uninitialized_aborts), &
+            new_unittest("col_size on a list column is rejected", test_list_write_col_size_rejected_aborts), &
+            new_unittest("qc: min:/max: on a list column is rejected", test_list_write_qc_rejected_aborts), &
+            new_unittest("a list token with no element type is rejected", test_list_write_bad_token_aborts), &
+            new_unittest("a list token with an unknown element type is rejected", &
+                test_list_write_unknown_element_aborts), &
+            new_unittest("a protected list column with a null row aborts", &
+                test_list_write_protected_row_null_aborts), &
+            new_unittest("a protected list column with a null element aborts", &
+                test_list_write_protected_element_null_aborts), &
+            new_unittest("a protected null-free list column writes normally", test_list_write_protected_ok), &
+            new_unittest("one over-long list row aborts", test_list_write_row_too_long_aborts), &
+            new_unittest("a streamed row group over the element ceiling aborts", &
+                test_list_write_chunk_too_many_elements_aborts), &
+            new_unittest("an explicit chunk_size over the element ceiling aborts", &
+                test_list_write_explicit_chunk_size_too_big_aborts), &
+            new_unittest("a chunk_size within the element ceiling writes normally", &
+                test_list_write_ceiling_ok), &
+            new_unittest("the large_list write path round-trips", test_list_write_large_list_roundtrip), &
+            new_unittest("a streamed column that crosses the offset threshold keeps one width", &
+                test_list_write_large_list_chunked) &
             ]
         testsuite = [p1, p2, p3, p4, p5, p6, p7]
     end subroutine collect_tests_parquet_errors
@@ -1635,6 +1658,142 @@ contains
             failure_message="adopt_rows with a short row_valid mask was expected to abort", &
             required_stderr="row_valid has a different length from the row count")
     end subroutine test_list_adopt_rows_mask_length_aborts
+
+    !
+    ! ---- Variable-length LIST write abort paths ----
+    !
+    !> A list column written into a schema column declared with a different element type. There is
+    !! deliberately no widening between list element kinds, so the message has to name both.
+    subroutine test_list_write_type_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_write_type_mismatch", expect_abort=.true., &
+            failure_message="writing a list[int32] column into a list[int64] declaration was expected to abort", &
+            required_stderr="expected list[int32], got list[int64]")
+    end subroutine test_list_write_type_mismatch_aborts
+
+    !> A never-%init'd list column has no payload kind, so there is no element type to declare and
+    !! nothing to write -- reported as such rather than as a type mismatch against no token.
+    subroutine test_list_write_uninitialized_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_write_uninitialized", expect_abort=.true., &
+            failure_message="writing an uninitialized list column was expected to abort", &
+            required_stderr="has not been initialized")
+    end subroutine test_list_write_uninitialized_aborts
+
+    !> col_size: declares a fixed per-row width, which a list column does not have.
+    subroutine test_list_write_col_size_rejected_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_write_col_size_rejected", expect_abort=.true., &
+            failure_message="col_size on a list column was expected to be rejected", &
+            required_stderr="does not apply to a list column")
+    end subroutine test_list_write_col_size_rejected_aborts
+
+    !> qc: min:/max: stays scalar-leaf-only by design; the message says qc: miss: still applies.
+    subroutine test_list_write_qc_rejected_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_write_qc_rejected", expect_abort=.true., &
+            failure_message="qc: min: on a list column was expected to be rejected", &
+            required_stderr="not supported for a list column (qc: miss: is)")
+    end subroutine test_list_write_qc_rejected_aborts
+
+    !> `list[]` names no element type, and the element type is required.
+    subroutine test_list_write_bad_token_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_write_bad_token", expect_abort=.true., &
+            failure_message="a list token with no element type was expected to be rejected", &
+            required_stderr="invalid data_type 'list[]'")
+    end subroutine test_list_write_bad_token_aborts
+
+    !> A well-formed list token whose element type nothing recognises -- the other malformed shape.
+    subroutine test_list_write_unknown_element_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_write_unknown_element", expect_abort=.true., &
+            failure_message="a list token with an unknown element type was expected to be rejected", &
+            required_stderr="invalid data_type 'list[complex64]'")
+    end subroutine test_list_write_unknown_element_aborts
+
+    !> protected_cols: means no Null at either level, and a null ROW is one.
+    subroutine test_list_write_protected_row_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_write_protected_row_null", expect_abort=.true., &
+            failure_message="a protected list column with a null row was expected to abort", &
+            required_stderr="is protected (extra: protected_cols:) and cannot contain Null values")
+    end subroutine test_list_write_protected_row_null_aborts
+
+    !> The other level, with its own message so a caller is not sent looking at rows. At the
+    !! Parquet level a null ELEMENT is a Null in the same leaf column, so the weaker reading of
+    !! protected_cols: would declare a non-nullable element field for a column that can hold one.
+    subroutine test_list_write_protected_element_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_write_protected_element_null", expect_abort=.true., &
+            failure_message="a protected list column with a null element was expected to abort", &
+            required_stderr="one of its list ELEMENTS is Null")
+    end subroutine test_list_write_protected_element_null_aborts
+
+    !> The NEGATIVE CONTROL for the two above: without it, a guard firing unconditionally would
+    !! pass both while making every protected list column unwritable.
+    subroutine test_list_write_protected_ok(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status(error, "list_write_protected_ok", expect_abort=.false., &
+            failure_message="a protected list column with no Null anywhere was expected to write cleanly")
+    end subroutine test_list_write_protected_ok
+
+    !> One row over the per-row-group element ceiling: no row-group size can rescue it, because a
+    !! row is never split across row groups.
+    subroutine test_list_write_row_too_long_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_write_row_too_long", expect_abort=.true., &
+            failure_message="a list row over the element ceiling was expected to abort", &
+            required_stderr="no row-group size can accommodate this")
+    end subroutine test_list_write_row_too_long_aborts
+
+    !> A streamed row group over that ceiling: validated rather than silently overridden, because
+    !! the caller chose this row group's size through parquet_new_row_group.
+    subroutine test_list_write_chunk_too_many_elements_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_write_chunk_too_many_elements", &
+            expect_abort=.true., &
+            failure_message="a streamed row group over the element ceiling was expected to abort", &
+            required_stderr="pass a smaller nrows to parquet_new_row_group")
+    end subroutine test_list_write_chunk_too_many_elements_aborts
+
+    !> An explicit chunk_size that would put too many elements in one row group, checked at close
+    !! by walking the column's own offsets at chunk_size stride.
+    subroutine test_list_write_explicit_chunk_size_too_big_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_write_explicit_chunk_size_too_big", &
+            expect_abort=.true., &
+            failure_message="an explicit chunk_size over the element ceiling was expected to abort", &
+            required_stderr="list elements in one row group")
+    end subroutine test_list_write_explicit_chunk_size_too_big_aborts
+
+    !> The NEGATIVE CONTROL for the three ceiling scenarios: the same shrunk limit with a
+    !! chunk_size that fits must write every row and every element.
+    subroutine test_list_write_ceiling_ok(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status(error, "list_write_ceiling_ok", expect_abort=.false., &
+            failure_message="a chunk_size within the element ceiling was expected to write cleanly")
+    end subroutine test_list_write_ceiling_ok
+
+    !> The arrow::large_list() write path, forced with a tiny fixture by shrinking the int32
+    !! offsets threshold. Asserts the VALUES come back, not merely that nothing crashed: a
+    !! large_list and a list are indistinguishable in the Parquet file itself.
+    subroutine test_list_write_large_list_roundtrip(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status(error, "list_write_large_list_roundtrip", expect_abort=.false., &
+            failure_message="the large_list write path was expected to round-trip cleanly")
+    end subroutine test_list_write_large_list_roundtrip
+
+    !> Two row groups either side of the int32 offsets threshold. The streamed path assembles every
+    !! chunk with the type its FIELD already carries, fixed by the first row group; recomputing the
+    !! width per chunk instead would have align_array_to_field restamp the second chunk's int64
+    !! offsets as int32, so every value in it comes back garbage while the file still validates.
+    !! A mutation doing exactly that survived the whole suite until this scenario existed.
+    subroutine test_list_write_large_list_chunked(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status(error, "list_write_large_list_chunked", expect_abort=.false., &
+            failure_message="a streamed list column crossing the offset threshold was expected to round-trip")
+    end subroutine test_list_write_large_list_chunked
 
     !
     ! ---- parquet_columns foundation abort paths ----

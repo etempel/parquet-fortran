@@ -371,6 +371,7 @@ module parquet_strings
     public :: parquet_string_column_gather
     public :: parquet_string_column_append_nulls
     public :: parquet_string_column_move_from
+    public :: parquet_string_column_raw_buffers
     !
     !> Typed form of `%reserve`, generic over an int32 or int64 index/count argument.
     interface parquet_string_column_reserve
@@ -3742,8 +3743,9 @@ contains
     !! Parquet writer to consume without materializing strings. The returned pointers are valid
     !! only until the next mutation of the column. `validity_ptr` is C_NULL_PTR when the column has
     !! no nulls; `data_ptr` is C_NULL_PTR when the payload is empty.
-    subroutine raw_buffers(self, offsets_ptr, data_ptr, validity_ptr, nrows, nchars, has_validity)
-        class(parquet_string_column), intent(in), target :: self !! the column (must be a target).
+    subroutine parquet_string_column_raw_buffers(self, offsets_ptr, data_ptr, validity_ptr, nrows, nchars, &
+        has_validity)
+        type(parquet_string_column), intent(in), target :: self  !! the column (must be a target).
         type(c_ptr), intent(out) :: offsets_ptr                  !! -> int64 offsets(0:nrows).
         type(c_ptr), intent(out) :: data_ptr                     !! -> nchars payload bytes.
         type(c_ptr), intent(out) :: validity_ptr                 !! -> validity bitmap, or C_NULL_PTR.
@@ -3766,6 +3768,20 @@ contains
         if (self%has_nulls .and. allocated(self%validity)) then
             if (size(self%validity, kind=int64) >= 1) validity_ptr = c_loc(self%validity)
         end if
+    end subroutine parquet_string_column_raw_buffers
+    !
+    !> Binding form of `parquet_string_column_raw_buffers`; forwards to it, keeping the
+    !! implementation at the `type` end (feature_ifx.md).
+    subroutine raw_buffers(self, offsets_ptr, data_ptr, validity_ptr, nrows, nchars, has_validity)
+        class(parquet_string_column), intent(in), target :: self !! the column (must be a target).
+        type(c_ptr), intent(out) :: offsets_ptr                  !! -> int64 offsets(0:nrows).
+        type(c_ptr), intent(out) :: data_ptr                     !! -> nchars payload bytes.
+        type(c_ptr), intent(out) :: validity_ptr                 !! -> validity bitmap, or C_NULL_PTR.
+        integer(int64), intent(out) :: nrows                     !! number of elements.
+        integer(int64), intent(out) :: nchars                    !! total characters.
+        logical, intent(out) :: has_validity                     !! whether a validity bitmap exists.
+        call parquet_string_column_raw_buffers(self, offsets_ptr, data_ptr, validity_ptr, nrows, nchars, &
+            has_validity)
     end subroutine raw_buffers
     !
     !> Bulk-appends one row group straight from C buffers: `nrows_in` elements with a packed

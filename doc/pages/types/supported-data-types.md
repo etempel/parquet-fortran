@@ -135,7 +135,8 @@ one of the following:
 
 `int8`/`int16`/`uint8`/`uint16`/`uint32`/`uint64`/`half_float`/`decimal` here are physical
 Parquet/Arrow storage types this library's own writer never produces (writing stays limited to the
-six types in the table at the top of this page, plus `date`/`time`/`timestamp`) — they only ever
+six types in the table at the top of this page, plus `date`/`time`/`timestamp`, in scalar, vector
+and variable-length-`LIST` form) — they only ever
 arise from a file written by some other tool. There is nothing to declare for them in a MAML schema
 or anywhere else: the conversion is purely internal to the read path, triggered automatically by
 whatever physical type the column already has on disk.

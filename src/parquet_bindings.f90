@@ -35,6 +35,11 @@ module parquet_bindings
     public :: parquet_append_bool8_column
     public :: parquet_append_string_column, parquet_append_string_array_column
     public :: parquet_append_string_column_buffers
+    public :: parquet_append_list_int32_column, parquet_append_list_int64_column
+    public :: parquet_append_list_float32_column, parquet_append_list_float64_column
+    public :: parquet_append_list_bool8_column, parquet_append_list_date_column
+    public :: parquet_append_list_time_column, parquet_append_list_timestamp_column
+    public :: parquet_append_list_string_column
     ! Local (Fortran-side) names deliberately differ from their bind(C, name="...") C++ symbol,
     ! same reason parquet_append_int32_column (this binding) differs from parquet_write_column
     ! (the public generic parquet_core.f90 exposes for it): parquet_write.f90 is a submodule of
@@ -46,6 +51,11 @@ module parquet_bindings
     public :: parquet_append_bool8_column_chunk
     public :: parquet_append_string_column_chunk, parquet_append_string_array_column_chunk
     public :: parquet_write_string_column_chunk_buffers
+    public :: parquet_append_list_int32_column_chunk, parquet_append_list_int64_column_chunk
+    public :: parquet_append_list_float32_column_chunk, parquet_append_list_float64_column_chunk
+    public :: parquet_append_list_bool8_column_chunk, parquet_append_list_date_column_chunk
+    public :: parquet_append_list_time_column_chunk, parquet_append_list_timestamp_column_chunk
+    public :: parquet_append_list_string_column_chunk
     public :: parquet_reader_get_nrows, parquet_reader_get_total_nrows, parquet_reader_get_column_col_size
     public :: parquet_reader_column_width_is_deferred, parquet_reader_column_has_nulls
     public :: parquet_reader_list_width_candidate, parquet_reader_list_width_verified
@@ -433,6 +443,303 @@ module parquet_bindings
             type(c_ptr), value :: offsets
             type(c_ptr), value :: data
             type(c_ptr), value :: validity
+        end subroutine
+
+
+        ! ---- Variable-length LIST column writes ----
+        !
+        ! The mirror image of the LIST read block further below: ONE crossing per column, in the
+        ! read fill's own argument order and vocabulary, with everything Fortran-owned and alive
+        ! for the duration of the call. A write needs no shape call -- Fortran already knows the
+        ! counts, the payload kind and the temporal unit -- so where a read crosses twice, a write
+        ! crosses once.
+        !
+        !   nrows       rows in this column (or in this row group)
+        !   nelems      elements those rows hold between them
+        !   offsets     nrows+1 int64 entries, 0-based, offsets(1) == 0
+        !   row_valid   per-ROW validity (1 = present, 0 = a NULL list), c_null_ptr if none is null
+        !   values      the flattened elements, in row order
+        !   elem_valid  per-ELEMENT validity, c_null_ptr if no element is null
+        !
+        ! row_valid and elem_valid are POINTERS rather than the read side's plain buffers because
+        ! on the write side ABSENCE is meaningful: a null row_valid is what declares the outer
+        ! field non-nullable, exactly as valid_in does for every other append interface above.
+        ! A streamed column is a separate matter -- see resolve_chunk_nullability in the wrapper.
+
+        !> As parquet_append_list_int32_column, for an int32 payload.
+        subroutine parquet_append_list_int32_column(writer, name, nrows, nelems, offsets, row_valid, values, &
+                elem_valid) bind(C, name="parquet_append_list_int32_column")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nelems
+            integer(c_int64_t) :: offsets(*)
+            type(c_ptr), value :: row_valid
+            integer(c_int32_t) :: values(*)
+            type(c_ptr), value :: elem_valid
+        end subroutine
+
+        !> As parquet_append_list_int32_column, for an int64 payload.
+        subroutine parquet_append_list_int64_column(writer, name, nrows, nelems, offsets, row_valid, values, &
+                elem_valid) bind(C, name="parquet_append_list_int64_column")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nelems
+            integer(c_int64_t) :: offsets(*)
+            type(c_ptr), value :: row_valid
+            integer(c_int64_t) :: values(*)
+            type(c_ptr), value :: elem_valid
+        end subroutine
+
+        !> As parquet_append_list_int32_column, for a float32 payload.
+        subroutine parquet_append_list_float32_column(writer, name, nrows, nelems, offsets, row_valid, values, &
+                elem_valid) bind(C, name="parquet_append_list_float32_column")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nelems
+            integer(c_int64_t) :: offsets(*)
+            type(c_ptr), value :: row_valid
+            real(c_float) :: values(*)
+            type(c_ptr), value :: elem_valid
+        end subroutine
+
+        !> As parquet_append_list_int32_column, for a float64 payload.
+        subroutine parquet_append_list_float64_column(writer, name, nrows, nelems, offsets, row_valid, values, &
+                elem_valid) bind(C, name="parquet_append_list_float64_column")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nelems
+            integer(c_int64_t) :: offsets(*)
+            type(c_ptr), value :: row_valid
+            real(c_double) :: values(*)
+            type(c_ptr), value :: elem_valid
+        end subroutine
+
+        !> As parquet_append_list_int32_column, for a boolean payload (one int8 per element).
+        subroutine parquet_append_list_bool8_column(writer, name, nrows, nelems, offsets, row_valid, values, &
+                elem_valid) bind(C, name="parquet_append_list_bool8_column")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nelems
+            integer(c_int64_t) :: offsets(*)
+            type(c_ptr), value :: row_valid
+            integer(c_int8_t) :: values(*)
+            type(c_ptr), value :: elem_valid
+        end subroutine
+
+        !> As parquet_append_list_int32_column, for a date payload (int32 days since the epoch).
+        subroutine parquet_append_list_date_column(writer, name, nrows, nelems, offsets, row_valid, values, &
+                elem_valid) bind(C, name="parquet_append_list_date_column")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nelems
+            integer(c_int64_t) :: offsets(*)
+            type(c_ptr), value :: row_valid
+            integer(c_int32_t) :: values(*)
+            type(c_ptr), value :: elem_valid
+        end subroutine
+
+        !> As parquet_append_list_int32_column, for a time payload (canonical int64
+        !> ns-of-day, scaled to `unit` on the C++ side).
+        subroutine parquet_append_list_time_column(writer, name, nrows, nelems, offsets, row_valid, values, &
+                elem_valid, unit) bind(C, name="parquet_append_list_time_column")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nelems
+            integer(c_int64_t) :: offsets(*)
+            type(c_ptr), value :: row_valid
+            integer(c_int64_t) :: values(*)
+            type(c_ptr), value :: elem_valid
+            integer(c_int32_t), value :: unit
+        end subroutine
+
+        !> As parquet_append_list_int32_column, for a timestamp payload (int64 already in `unit`'s own unit).
+        subroutine parquet_append_list_timestamp_column(writer, name, nrows, nelems, offsets, row_valid, values, &
+                elem_valid, unit, is_utc) bind(C, name="parquet_append_list_timestamp_column")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nelems
+            integer(c_int64_t) :: offsets(*)
+            type(c_ptr), value :: row_valid
+            integer(c_int64_t) :: values(*)
+            type(c_ptr), value :: elem_valid
+            integer(c_int32_t), value :: unit
+            integer(c_int32_t), value :: is_utc
+        end subroutine
+
+        !> As parquet_append_list_int32_column, for a string payload. The elements arrive in the
+        !> same packed layout a parquet_string_column stores natively: `str_offsets` is nelems+1
+        !> int64 entries over `data`'s `nchars` bytes.
+        subroutine parquet_append_list_string_column(writer, name, nrows, nelems, nchars, offsets, &
+                row_valid, str_offsets, data, elem_valid) &
+                bind(C, name="parquet_append_list_string_column")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nelems
+            integer(c_long_long), value :: nchars
+            integer(c_int64_t) :: offsets(*)
+            type(c_ptr), value :: row_valid
+            integer(c_int64_t) :: str_offsets(*)
+            character(kind=c_char) :: data(*)
+            type(c_ptr), value :: elem_valid
+        end subroutine
+
+
+        ! ---- Variable-length LIST column writes, streamed ----
+        !
+        ! Row-group-scoped counterparts of the parquet_append_list_*_column interfaces above,
+        ! taking exactly the same arguments; each call covers one row group's rows.
+
+        !> As parquet_append_list_int32_column_chunk, for an int32 payload.
+        subroutine parquet_append_list_int32_column_chunk(writer, name, nrows, nelems, offsets, row_valid, values, &
+                elem_valid) bind(C, name="parquet_append_list_int32_column_chunk")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nelems
+            integer(c_int64_t) :: offsets(*)
+            type(c_ptr), value :: row_valid
+            integer(c_int32_t) :: values(*)
+            type(c_ptr), value :: elem_valid
+        end subroutine
+
+        !> As parquet_append_list_int32_column_chunk, for an int64 payload.
+        subroutine parquet_append_list_int64_column_chunk(writer, name, nrows, nelems, offsets, row_valid, values, &
+                elem_valid) bind(C, name="parquet_append_list_int64_column_chunk")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nelems
+            integer(c_int64_t) :: offsets(*)
+            type(c_ptr), value :: row_valid
+            integer(c_int64_t) :: values(*)
+            type(c_ptr), value :: elem_valid
+        end subroutine
+
+        !> As parquet_append_list_int32_column_chunk, for a float32 payload.
+        subroutine parquet_append_list_float32_column_chunk(writer, name, nrows, nelems, offsets, row_valid, values, &
+                elem_valid) bind(C, name="parquet_append_list_float32_column_chunk")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nelems
+            integer(c_int64_t) :: offsets(*)
+            type(c_ptr), value :: row_valid
+            real(c_float) :: values(*)
+            type(c_ptr), value :: elem_valid
+        end subroutine
+
+        !> As parquet_append_list_int32_column_chunk, for a float64 payload.
+        subroutine parquet_append_list_float64_column_chunk(writer, name, nrows, nelems, offsets, row_valid, values, &
+                elem_valid) bind(C, name="parquet_append_list_float64_column_chunk")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nelems
+            integer(c_int64_t) :: offsets(*)
+            type(c_ptr), value :: row_valid
+            real(c_double) :: values(*)
+            type(c_ptr), value :: elem_valid
+        end subroutine
+
+        !> As parquet_append_list_int32_column_chunk, for a boolean payload (one int8 per element).
+        subroutine parquet_append_list_bool8_column_chunk(writer, name, nrows, nelems, offsets, row_valid, values, &
+                elem_valid) bind(C, name="parquet_append_list_bool8_column_chunk")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nelems
+            integer(c_int64_t) :: offsets(*)
+            type(c_ptr), value :: row_valid
+            integer(c_int8_t) :: values(*)
+            type(c_ptr), value :: elem_valid
+        end subroutine
+
+        !> As parquet_append_list_int32_column_chunk, for a date payload (int32 days since the epoch).
+        subroutine parquet_append_list_date_column_chunk(writer, name, nrows, nelems, offsets, row_valid, values, &
+                elem_valid) bind(C, name="parquet_append_list_date_column_chunk")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nelems
+            integer(c_int64_t) :: offsets(*)
+            type(c_ptr), value :: row_valid
+            integer(c_int32_t) :: values(*)
+            type(c_ptr), value :: elem_valid
+        end subroutine
+
+        !> As parquet_append_list_int32_column_chunk, for a time payload (canonical int64
+        !> ns-of-day, scaled to `unit` on the C++ side).
+        subroutine parquet_append_list_time_column_chunk(writer, name, nrows, nelems, offsets, row_valid, values, &
+                elem_valid, unit) bind(C, name="parquet_append_list_time_column_chunk")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nelems
+            integer(c_int64_t) :: offsets(*)
+            type(c_ptr), value :: row_valid
+            integer(c_int64_t) :: values(*)
+            type(c_ptr), value :: elem_valid
+            integer(c_int32_t), value :: unit
+        end subroutine
+
+        !> As parquet_append_list_int32_column_chunk, for a timestamp payload (int64 already in `unit`'s own unit).
+        subroutine parquet_append_list_timestamp_column_chunk(writer, name, nrows, nelems, offsets, row_valid, values, &
+                elem_valid, unit, is_utc) bind(C, name="parquet_append_list_timestamp_column_chunk")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nelems
+            integer(c_int64_t) :: offsets(*)
+            type(c_ptr), value :: row_valid
+            integer(c_int64_t) :: values(*)
+            type(c_ptr), value :: elem_valid
+            integer(c_int32_t), value :: unit
+            integer(c_int32_t), value :: is_utc
+        end subroutine
+
+        !> As parquet_append_list_int32_column_chunk, for a string payload. The elements arrive in the
+        !> same packed layout a parquet_string_column stores natively: `str_offsets` is nelems+1
+        !> int64 entries over `data`'s `nchars` bytes.
+        subroutine parquet_append_list_string_column_chunk(writer, name, nrows, nelems, nchars, offsets, &
+                row_valid, str_offsets, data, elem_valid) &
+                bind(C, name="parquet_append_list_string_column_chunk")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nelems
+            integer(c_long_long), value :: nchars
+            integer(c_int64_t) :: offsets(*)
+            type(c_ptr), value :: row_valid
+            integer(c_int64_t) :: str_offsets(*)
+            character(kind=c_char) :: data(*)
+            type(c_ptr), value :: elem_valid
         end subroutine
 
         !> Starts a new row group of `nrows` rows on `writer` -- every column already known must

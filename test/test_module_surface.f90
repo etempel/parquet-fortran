@@ -539,6 +539,72 @@ contains
 
 end module test_module_surface_list
 
+!> `parquet_struct` alone: build a struct column, read a field back, and adopt it into a
+!> `parquet_column` -- all through one import.
+!!
+!! **One library import, and it must stay that way.** A second `use` here would silently stop this
+!! testing anything (CLAUDE.md, "Nested submodule tree"): the point is that everything a struct
+!! column needs -- the type, the handle, the `PK_*` kinds, the abstract container face, the
+!! temporal element types and the two settings knobs governing its one warning -- is reachable
+!! from `use parquet_struct` and nothing else.
+module test_module_surface_struct
+    use parquet_struct                 ! THE ONLY library import.
+    use iso_fortran_env, only : int32, int64
+    implicit none
+    private
+    public :: check_struct_surface
+
+contains
+
+    !> Builds, fills, nulls, reads and adopts a struct column through `use parquet_struct` alone.
+    subroutine check_struct_surface(what)
+        character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
+        type(parquet_struct_column), target :: sc          ! `target`: %view stores a pointer to it.
+        type(parquet_struct_row) :: row
+        type(parquet_column) :: col
+        class(parquet_container_column), allocatable :: cc
+        integer(int32) :: v
+        character(len=:), allocatable :: txt
+        logical :: ok
+
+        what = ""
+        call sc%init(["id ", "nm "], [PK_INT32, PK_STRING])
+        if (sc%field_count() /= 2) what = "%field_count after init"
+        call sc%append_row()
+        call sc%set_field(1, "id", 7_int32)
+        call sc%append_null_row()
+        if (what == "" .and. sc%size() /= 2_int64) what = "%size after two appends"
+        if (what == "" .and. .not. sc%is_null(2_int64)) what = "%append_null_row/%is_null"
+        if (what == "" .and. sc%is_null(1_int64)) what = "a filled row reads as null"
+
+        row = sc%view(1_int64)
+        call row%get_field("id", v, is_valid=ok)
+        if (what == "" .and. .not. ok) what = "%get_field validity"
+        if (what == "" .and. v /= 7_int32) what = "%get_field value"
+
+        ! The settings knobs this module re-exports because its %field(warn=) path can emit --
+        ! naming one here is what keeps the re-export from being dropped.
+        call parquet_get_verbosity(txt)
+        call parquet_set_verbosity(txt)
+
+        ! kind_text is the abstract face's own describe-yourself binding; naming it here is what
+        ! keeps `parquet_container_column` re-exported, since nothing else in this module can
+        ! reach it. A SUBROUTINE with an allocatable-character result argument, per CLAUDE.md.
+        call sc%kind_text(txt)
+        if (what == "" .and. txt /= "struct<id:int32,nm:string>") what = "%kind_text"
+
+        ! The whole point of the abstract face: a struct column goes into a parquet_column without
+        ! either side naming the other's type. Reachable from this one import or not at all.
+        call sc%clone_into(cc)
+        call col%adopt_container(cc)
+        if (what == "" .and. col%kindof() /= PK_STRUCT) what = "%adopt_container kind"
+        if (what == "" .and. col%length() /= 2_int64) what = "%adopt_container row count"
+        call col%clear()
+        call sc%clear()
+    end subroutine check_struct_surface
+
+end module test_module_surface_struct
+
 !> `parquet_random` alone: a draw, and the deliberate ABSENCE of any settings re-export.
 !!
 !! **One library import, and it must stay that way.** The generator is a three-file leaf and had no
@@ -660,6 +726,7 @@ module test_module_surface
     use test_module_surface_spatial, only : check_spatial_surface
     use test_module_surface_columns, only : check_columns_surface
     use test_module_surface_list, only : check_list_surface
+    use test_module_surface_struct, only : check_struct_surface
     use test_module_surface_random, only : check_random_surface
     use test_module_surface_tables, only : check_tables_surface
     use parquet_settings_base          ! THE ONLY library import -- see the note above.
@@ -772,7 +839,9 @@ contains
             new_unittest("parquet_tables alone round-trips a table through a file", &
                 test_tables_surface), &
             new_unittest("parquet_list alone builds, reads and adopts a list column", &
-                test_list_surface) ]
+                test_list_surface), &
+            new_unittest("parquet_struct alone builds, reads and adopts a struct column", &
+                test_struct_surface) ]
     end subroutine collect_tests_module_surface
 
     !> The test-drive wrapper over check_columns_surface.
@@ -792,6 +861,15 @@ contains
         call check_list_surface(what)
         call check(error, what == "", "the list column was not usable through `use parquet_list` alone: " // what)
     end subroutine test_list_surface
+
+    !> The test-drive wrapper over check_struct_surface.
+    subroutine test_struct_surface(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: what
+
+        call check_struct_surface(what)
+        call check(error, what == "", "the struct column was not usable through `use parquet_struct` alone: " // what)
+    end subroutine test_struct_surface
 
     !> The test-drive wrapper over check_random_surface.
     subroutine test_random_surface(error)

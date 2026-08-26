@@ -32,6 +32,8 @@ module parquet_core
     ! what keeps it (and every tier below it) clear of parquet_bindings and hence of Arrow.
     use parquet_list, only: parquet_list_column, parquet_list_column_offsets, parquet_list_column_payload, &
         parquet_list_column_row_validity
+    use parquet_struct, only: parquet_struct_column, parquet_struct_column_field, parquet_struct_column_names, &
+        parquet_struct_column_row_validity, parquet_struct_column_build
     use parquet_columns, only: parquet_column, parquet_column_set_null, parquet_column_string_column, &
         parquet_column_data_ptr, parquet_column_is_null, parquet_kind_name, &
         PK_INT32, PK_INT64, PK_FLOAT32, PK_FLOAT64, PK_LOGICAL, PK_STRING, PK_DATE, PK_TIME, PK_TIMESTAMP
@@ -715,6 +717,7 @@ module parquet_core
         module procedure parquet_write_string_matrix_column
         module procedure parquet_write_string_column_compact
         module procedure parquet_write_list_column
+        module procedure parquet_write_struct_column
         module procedure parquet_write_date_column
         module procedure parquet_write_date_matrix_column
         module procedure parquet_write_time_column
@@ -769,6 +772,7 @@ module parquet_core
         module procedure parquet_write_string_matrix_column_chunk
         module procedure parquet_write_string_column_chunk_compact
         module procedure parquet_write_list_column_chunk
+        module procedure parquet_write_struct_column_chunk
         module procedure parquet_write_date_column_chunk
         module procedure parquet_write_date_matrix_column_chunk
         module procedure parquet_write_time_column_chunk
@@ -955,6 +959,7 @@ module parquet_core
         module procedure parquet_read_timestamp_column_1d
         module procedure parquet_read_timestamp_array_full
         module procedure parquet_read_list_column
+        module procedure parquet_read_struct_column
     end interface parquet_read_column
 
     !> Reads one row of a vector (array) column named `name` from an open
@@ -1089,6 +1094,8 @@ module parquet_core
         module procedure parquet_read_timestamp_array_column_chunk_rg32
         module procedure parquet_read_timestamp_array_column_chunk_rg64
         module procedure parquet_read_list_column_chunk_rg32
+        module procedure parquet_read_struct_column_chunk_rg32
+        module procedure parquet_read_struct_column_chunk_rg64
         module procedure parquet_read_list_column_chunk_rg64
     end interface parquet_read_column_chunk
 
@@ -2373,6 +2380,19 @@ module parquet_core
             type(parquet_list_column), intent(in), target :: values !! one list (or null list) per row;
             !! target so the write path can alias its offsets and payload rather than copying them.
         end subroutine parquet_write_list_column
+        !> Struct (parquet_struct_column) specific of parquet_write_column.
+        !>
+        !> Writes a `STRUCT` column as ONE object: the file's field set, names and order come from
+        !> `values` itself, not from the schema, which declares only the bare `struct` token. The
+        !> struct's own per-row nullness and each field's own nullness are written independently,
+        !> so a row whose every field is null is not written as a null row.
+        !>
+        !> A protected column (`extra: protected_cols:`) may contain no Null at EITHER level.
+        module subroutine parquet_write_struct_column(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_struct_column), intent(in), target :: values !! the struct column to write.
+        end subroutine parquet_write_struct_column
         !> Scalar date specific of parquet_write_column. Null elements (see parquet_date%is_null)
         !> are written as genuine Parquet Nulls; there is no is_valid argument -- validity lives
         !> in the elements themselves.
@@ -2556,6 +2576,14 @@ module parquet_core
             type(parquet_list_column), intent(in), target :: values !! this row group's rows; target for
             !! the same reason as parquet_write_list_column's own values argument.
         end subroutine parquet_write_list_column_chunk
+        !> Struct (parquet_struct_column) specific of parquet_write_column_chunk; writes one row
+        !> group's rows. A streamed struct column is in the ALWAYS-NULLABLE class -- see
+        !> parquet_write_struct_column, and src/parquet_wrapper.cpp's own section banner.
+        module subroutine parquet_write_struct_column_chunk(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_struct_column), intent(in), target :: values !! this row group's rows.
+        end subroutine parquet_write_struct_column_chunk
         !> Writes a declared-but-never-written `list[<elemtype>]` column with ZERO rows, at close.
         !>
         !> Takes the element BASE token (`"int32"`, `"timestamp"`, ...) rather than a `PK_*` kind,
@@ -3326,6 +3354,22 @@ module parquet_core
             character(len=*), intent(in) :: name !! list column name (dotted struct-leaf path allowed).
             type(parquet_list_column), intent(inout) :: values !! cleared, then filled with the whole column.
         end subroutine parquet_read_list_column
+        !> Struct (parquet_struct_column) specific of parquet_read_column.
+        !>
+        !> Reads a `STRUCT` column as ONE object: `values` comes back with the file's declared
+        !> field set, each field's values and its own nullness, and the struct's own per-row
+        !> nullness -- which is a separate question from any field's, and the reason a row whose
+        !> every field is null is not a null row. A field whose own type is a nested struct, list
+        !> or map is refused, naming the field.
+        !>
+        !> Complementary to, and not a replacement for, addressing a struct's leaves by their
+        !> dotted paths (`parquet_read_column(reader, "person.age", ...)`), which is unchanged and
+        !> reads any depth of nesting as flat columns.
+        module subroutine parquet_read_struct_column(reader, name, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! struct column name.
+            type(parquet_struct_column), intent(inout) :: values !! cleared, then filled with the whole column.
+        end subroutine parquet_read_struct_column
         !> Scalar date specific of parquet_read_column. A Parquet Null in the column becomes a
         !> null `values` element (parquet_date%is_null); there is no null_value/is_valid argument
         !> -- validity lives in the elements themselves, so a null-containing date column reads
@@ -3794,6 +3838,23 @@ module parquet_core
             integer(int32), intent(in) :: row_group !! 1-based row group to read.
             type(parquet_list_column), intent(inout) :: values !! cleared, then filled with this row group's rows.
         end subroutine parquet_read_list_column_chunk_rg32
+        !> Struct (parquet_struct_column), int32 row_group specific of parquet_read_column_chunk;
+        !> see parquet_read_struct_column for what a struct read yields. Reads exactly row group
+        !> `row_group`.
+        module subroutine parquet_read_struct_column_chunk_rg32(reader, name, row_group, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! struct column name.
+            integer(int32), intent(in) :: row_group !! 1-based row group to read.
+            type(parquet_struct_column), intent(inout) :: values !! cleared, then filled with this row group's rows.
+        end subroutine parquet_read_struct_column_chunk_rg32
+        !> Struct (parquet_struct_column), int64 row_group specific of parquet_read_column_chunk; see
+        !> parquet_read_struct_column_chunk_rg32.
+        module subroutine parquet_read_struct_column_chunk_rg64(reader, name, row_group, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! struct column name.
+            integer(int64), intent(in) :: row_group !! 1-based row group to read.
+            type(parquet_struct_column), intent(inout) :: values !! cleared, then filled with this row group's rows.
+        end subroutine parquet_read_struct_column_chunk_rg64
         !> Variable-length list, int64 row_group specific of parquet_read_column_chunk; see
         !> parquet_read_list_column_chunk_rg32.
         module subroutine parquet_read_list_column_chunk_rg64(reader, name, row_group, values)

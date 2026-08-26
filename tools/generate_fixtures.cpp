@@ -45,6 +45,10 @@
 //     one eight of the nine element-type arms of the `LIST` read path would never be entered.
 //   * `extended_types.parquet` -- columns of the extended read-only source types
 //     (`int8`/`int16`/unsigned integers/`half_float`/`decimal`).
+//   * `struct_payloads.parquet` -- one flat top-level `STRUCT` column per payload family, plus
+//     one carrying all nine at once, with the four null shapes that separate a struct's own
+//     row nullness from its fields'. Two row groups. See its own banner for why no existing
+//     fixture could serve.
 //   * `nested_struct.parquet` -- a `STRUCT` column, nested 3 levels deep, with a `FIXED_SIZE_LIST`
 //     vector-column leaf in a sibling `STRUCT` column, and rows covering every independent null-
 //     combination source (see Reading a nested struct field (doc/pages/types/supported-data-
@@ -844,6 +848,183 @@ static bool generate_extended_types_fixture()
     return status.ok();
 }
 
+// ---------------------------------------------------------------------------------------------
+// test/fixtures/struct_payloads.parquet: one flat top-level STRUCT column per payload family,
+// plus one carrying all nine at once, with the four null shapes that separate a struct's two
+// independent null levels.
+//
+// **A new fixture was needed rather than reusing an existing one**, and the reason is worth
+// recording: NO fixture in this repository held a flat top-level struct of scalars.
+// nested_struct.parquet's `main` is struct<id, inner: struct<...>> -- one scalar field and one
+// NESTED struct, i.e. a Phase 7 shape; map_list_types.parquet's three struct columns each contain
+// a list, a map or another struct. The only flat structs anywhere (struct<x: int32, y: string>)
+// are the ELEMENTS of list_of_struct and the VALUES of map_of_struct, neither of which is a
+// top-level column and neither of which a struct read can address.
+//
+// Every column carries the same four rows, deliberately, so that a test can predict one column's
+// null pattern from another's:
+//
+//   row 0  every field present, nothing null           -- the ordinary case
+//   row 1  the STRUCT INSTANCE is null                 -- row-level nullness
+//   row 2  the struct is present, field `v` is null    -- field-level nullness, one field
+//   row 3  the struct is present and EVERY field null  -- NOT a null row, and the case a naive
+//                                                         implementation gets wrong: it gives the
+//                                                         same combined mask as row 1 for every
+//                                                         field, and only the struct's own
+//                                                         validity separates the two
+//
+// Two row groups (kRowGroup = 2), so the chunked read path is exercised against a foreign file
+// rather than only against one this library wrote -- and the row-1/row-3 pair straddles the
+// boundary, so a row-group-scoped read has to get the struct's own validity right in both halves.
+//
+// store_schema() is deliberately NOT used: measured, a struct round-trips through Parquet's own
+// nested-group encoding with its field names, order and types intact without it (unlike
+// large_list, which list_payloads.parquet needs it for). Leaving it off keeps this a check of the
+// plain Parquet path.
+static bool generate_struct_payloads_fixture()
+{
+    constexpr int kRows = 4;
+    constexpr int kRowGroup = 2;
+
+    // Which rows are what. `null_row(1)` is the absent struct instance; `null_v(2)` nulls the
+    // value field alone; row 3 nulls every field while the struct itself stays present.
+    auto null_row = [](int r) { return r == 1; };
+    auto null_v = [](int r) { return r == 2 || r == 3; };
+    auto null_tag = [](int r) { return r == 3; };
+
+    arrow::Status st;
+
+    // Builds struct<v: T, tag: string> with the null pattern above, calling `append(vb, row)` for
+    // each present value.
+    auto build = [&](std::shared_ptr<arrow::ArrayBuilder> vb, const std::function<void(int)> &append) {
+        auto tagb = std::make_shared<arrow::StringBuilder>();
+        auto type = arrow::struct_({arrow::field("v", vb->type()), arrow::field("tag", arrow::utf8())});
+        arrow::StructBuilder builder(type, arrow::default_memory_pool(),
+            {vb, std::static_pointer_cast<arrow::ArrayBuilder>(tagb)});
+        arrow::Status inner;
+        for (int row = 0; row < kRows; ++row)
+        {
+            if (null_row(row))
+            {
+                // StructBuilder::AppendNull cascades a null into every child, which is what
+                // Parquet would have stored anyway -- its definition levels cannot encode "the
+                // struct is absent but its field is present".
+                inner = builder.AppendNull();
+                continue;
+            }
+            inner = builder.Append();
+            if (null_v(row)) { inner = vb->AppendNull(); } else { append(row); }
+            if (null_tag(row)) { inner = tagb->AppendNull(); }
+            else { inner = tagb->Append("r" + std::to_string(row)); }
+        }
+        std::shared_ptr<arrow::Array> out;
+        inner = builder.Finish(&out);
+        if (!inner.ok()) return std::shared_ptr<arrow::Array>();
+        return out;
+    };
+
+    auto i32b = std::make_shared<arrow::Int32Builder>();
+    auto s_int32 = build(i32b, [&](int r) { st = i32b->Append(r * 10); });
+    auto i64b = std::make_shared<arrow::Int64Builder>();
+    auto s_int64 = build(i64b, [&](int r) { st = i64b->Append(static_cast<int64_t>(r) * 1000000000LL); });
+    auto f32b = std::make_shared<arrow::FloatBuilder>();
+    auto s_float32 = build(f32b, [&](int r) { st = f32b->Append(static_cast<float>(r) + 0.5f); });
+    auto f64b = std::make_shared<arrow::DoubleBuilder>();
+    auto s_float64 = build(f64b, [&](int r) { st = f64b->Append(static_cast<double>(r) + 0.25); });
+    auto bb = std::make_shared<arrow::BooleanBuilder>();
+    auto s_bool = build(bb, [&](int r) { st = bb->Append(r % 2 == 0); });
+    auto sb = std::make_shared<arrow::StringBuilder>();
+    auto s_string = build(sb, [&](int r) { st = sb->Append(std::string(static_cast<size_t>(r) + 1, 'x')); });
+    auto db = std::make_shared<arrow::Date32Builder>();
+    auto s_date = build(db, [&](int r) { st = db->Append(19000 + r); });
+    auto tb = std::make_shared<arrow::Time64Builder>(arrow::time64(arrow::TimeUnit::MICRO),
+        arrow::default_memory_pool());
+    auto s_time = build(tb, [&](int r) { st = tb->Append(3600000000LL * (r + 1)); });
+    auto tsb = std::make_shared<arrow::TimestampBuilder>(arrow::timestamp(arrow::TimeUnit::MICRO),
+        arrow::default_memory_pool());
+    auto s_timestamp = build(tsb, [&](int r) { st = tsb->Append(1700000000000000LL + r * 1000000LL); });
+
+    // s_mixed: all nine kinds as nine fields of ONE struct -- the case a per-family column cannot
+    // reach, and the one most likely to expose a field-ordering defect. Same four rows: row 1 is
+    // the absent instance, row 3 present with every field null.
+    auto m_i32 = std::make_shared<arrow::Int32Builder>();
+    auto m_i64 = std::make_shared<arrow::Int64Builder>();
+    auto m_f32 = std::make_shared<arrow::FloatBuilder>();
+    auto m_f64 = std::make_shared<arrow::DoubleBuilder>();
+    auto m_b = std::make_shared<arrow::BooleanBuilder>();
+    auto m_s = std::make_shared<arrow::StringBuilder>();
+    auto m_d = std::make_shared<arrow::Date32Builder>();
+    auto m_t = std::make_shared<arrow::Time64Builder>(arrow::time64(arrow::TimeUnit::MICRO),
+        arrow::default_memory_pool());
+    auto m_ts = std::make_shared<arrow::TimestampBuilder>(arrow::timestamp(arrow::TimeUnit::MICRO),
+        arrow::default_memory_pool());
+    auto mixed_type = arrow::struct_({
+        arrow::field("a_i32", arrow::int32()),
+        arrow::field("b_i64", arrow::int64()),
+        arrow::field("c_f32", arrow::float32()),
+        arrow::field("d_f64", arrow::float64()),
+        arrow::field("e_bool", arrow::boolean()),
+        arrow::field("f_str", arrow::utf8()),
+        arrow::field("g_date", arrow::date32()),
+        arrow::field("h_time", arrow::time64(arrow::TimeUnit::MICRO)),
+        arrow::field("i_ts", arrow::timestamp(arrow::TimeUnit::MICRO)),
+    });
+    arrow::StructBuilder mixed_builder(mixed_type, arrow::default_memory_pool(),
+        {m_i32, m_i64, m_f32, m_f64, m_b, m_s, m_d, m_t, m_ts});
+    for (int row = 0; row < kRows; ++row)
+    {
+        if (null_row(row)) { st = mixed_builder.AppendNull(); continue; }
+        st = mixed_builder.Append();
+        if (null_tag(row))
+        {
+            st = m_i32->AppendNull(); st = m_i64->AppendNull(); st = m_f32->AppendNull();
+            st = m_f64->AppendNull(); st = m_b->AppendNull();   st = m_s->AppendNull();
+            st = m_d->AppendNull();   st = m_t->AppendNull();   st = m_ts->AppendNull();
+            continue;
+        }
+        st = m_i32->Append(row * 10);
+        st = m_i64->Append(static_cast<int64_t>(row) * 1000000000LL);
+        st = m_f32->Append(static_cast<float>(row) + 0.5f);
+        st = m_f64->Append(static_cast<double>(row) + 0.25);
+        st = m_b->Append(row % 2 == 0);
+        if (null_v(row)) { st = m_s->AppendNull(); } else { st = m_s->Append("m" + std::to_string(row)); }
+        st = m_d->Append(19000 + row);
+        st = m_t->Append(3600000000LL * (row + 1));
+        st = m_ts->Append(1700000000000000LL + row * 1000000LL);
+    }
+    std::shared_ptr<arrow::Array> s_mixed;
+    st = mixed_builder.Finish(&s_mixed);
+
+    // rowid: a plain scalar column beside the structs, so a test can tell which rows it is
+    // looking at without depending on any struct read having worked.
+    arrow::Int32Builder ridb;
+    for (int row = 0; row < kRows; ++row) st = ridb.Append(row);
+    std::shared_ptr<arrow::Array> rowid_arr;
+    st = ridb.Finish(&rowid_arr);
+
+    auto schema = arrow::schema({
+        arrow::field("rowid", arrow::int32()),
+        arrow::field("s_int32", s_int32->type()),
+        arrow::field("s_int64", s_int64->type()),
+        arrow::field("s_float32", s_float32->type()),
+        arrow::field("s_float64", s_float64->type()),
+        arrow::field("s_bool", s_bool->type()),
+        arrow::field("s_string", s_string->type()),
+        arrow::field("s_date", s_date->type()),
+        arrow::field("s_time", s_time->type()),
+        arrow::field("s_timestamp", s_timestamp->type()),
+        arrow::field("s_mixed", mixed_type),
+    });
+    auto table = arrow::Table::Make(schema, {rowid_arr, s_int32, s_int64, s_float32, s_float64,
+        s_bool, s_string, s_date, s_time, s_timestamp, s_mixed});
+
+    auto maybe_outfile = arrow::io::FileOutputStream::Open("test/fixtures/struct_payloads.parquet");
+    if (!maybe_outfile.ok()) return false;
+    auto outfile = *maybe_outfile;
+    auto status = parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), outfile, kRowGroup);
+    return status.ok();
+}
+
 // test/fixtures/nested_struct.parquet: exercises the arbitrary-depth nested-STRUCT-field read
 // support (dotted-path column names, e.g. "main.inner.age") -- this library's own writer cannot
 // produce STRUCT columns at all, so this fixture is hand-built directly against the Arrow API,
@@ -1525,6 +1706,7 @@ int main()
         {"test/fixtures/no_stats.parquet", generate_no_stats_fixture},
         {"test/fixtures/extended_types.parquet", generate_extended_types_fixture},
         {"test/fixtures/nested_struct.parquet", generate_nested_struct_fixture},
+        {"test/fixtures/struct_payloads.parquet", generate_struct_payloads_fixture},
         {"test/fixtures/map_list_types.parquet", generate_map_list_types_fixture},
         {"test/fixtures/element_nulls.parquet", generate_element_nulls_fixture},
         {"test/fixtures/screen_declined_nulls.parquet", generate_screen_declined_nulls_fixture},

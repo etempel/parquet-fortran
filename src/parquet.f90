@@ -46,6 +46,7 @@ module parquet
     use parquet_tables
     use parquet_columns
     use parquet_list
+    use parquet_struct
     use parquet_strings
     use parquet_temporal
     use parquet_sorting
@@ -137,6 +138,12 @@ module parquet
     ! questions one row at a time, which is what a user calls).
     private :: parquet_list_column_offsets, parquet_list_column_payload
     private :: parquet_list_column_row_validity
+    ! parquet_struct's own four internal accessors, hidden for the same reason once more: they are
+    ! how the STRUCT read and write paths reach a struct column's fields, names and row validity
+    ! without a per-cell binding call, and they duplicate no user-facing capability
+    ! (%field_count/%field_name/%view/%get_field already answer all of it one row at a time).
+    private :: parquet_struct_column_field, parquet_struct_column_names
+    private :: parquet_struct_column_row_validity, parquet_struct_column_build
     !
     ! ---- The sorting tiers' internals need NO `private ::` here, and that is worth stating ----
     !

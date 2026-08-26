@@ -220,6 +220,8 @@ something a reader is expected to have.
 | [Risk-152](#risk-152--two-tables-over-one-file-disagree-about-a-plain-list-columns-kind-and-both-answer-quietly) | Two tables over one file disagree about a plain `LIST` column's KIND, and both answer quietly | 1 — new |
 | [Risk-153](#risk-153--a-container-columns-row-nullness-has-two-possible-homes-and-writing-to-the-wrong-one-is-silent) | A container column's row nullness has TWO possible homes, and writing to the wrong one is silent | 1 — new |
 | [Risk-154](#risk-154--a-sliced-list-array-carries-three-independent-offsets-and-dropping-any-one-is-a-plausible-wrong-answer) | A sliced list array carries THREE independent offsets, and dropping any one is a plausible wrong answer | 1 — new |
+| [Risk-155](#risk-155--a-structs-field-mask-is-taken-at-face-value-and-the-arithmetic-that-looks-necessary-is-not) | A struct's field mask is taken at face value, and the arithmetic that looks necessary is not | 1 — new |
+| [Risk-156](#risk-156--a-struct-write-loses-a-field-because-a-push-was-forgotten) | A struct write loses a field because a push was forgotten | 3 — not testable |
 
 ---
 
@@ -332,6 +334,42 @@ whether those should mean "the row" or abort is open until a table can hold a co
 (`test/test_list.f90`), which assert through `parquet_column` rather than through
 `parquet_list_column` — that is the point, since asking the container directly cannot see the
 disagreement. The element forms are untested because nothing can reach them yet.
+
+### Risk-155 — A struct's field mask is taken at face value, and the arithmetic that looks necessary is not
+
+**What breaks.** `unwrap_struct_path` (`src/parquet_wrapper.cpp`) returns a struct leaf's
+**combined** mask — `struct_valid AND field_valid` — and `src/parquet_read_struct.f90` stores it as
+the field's own validity, unchanged. That is correct, and it looks wrong: the obvious reading is
+that the struct's contribution has to be divided back out
+(`own_null = combined_null .and. .not. struct_null`), and a future reader who "fixes" it that way
+introduces a silent wrong answer — every field of every null struct row would come back reporting
+`is_valid = .true.` over an undefined value.
+
+**Why it is quiet.** Both spellings agree on every row of every struct whose rows are all present,
+which is most fixtures and every casual check. They differ only on a **null struct row**, where the
+"corrected" version reports a value the file does not contain. Nothing aborts; the column validates;
+`%is_null(i)` still answers correctly, so the row-level story looks right while the field-level one
+is wrong.
+
+**Why the face-value reading is the correct one.** Parquet's definition levels cannot encode "the
+struct is absent but its field is present", so **Parquet forces every child null under a null struct
+row on write**. Measured against Arrow 25.0.0: a struct array built in memory with row 4 null and
+its `id` child VALID at row 4 reads back with that child INVALID. So for a file, `combined` IS the
+field's own stored validity at every row — the identity for a present row, and the file's own answer
+for an absent one.
+
+**What must NOT be inferred from this.** The struct's OWN row validity is genuinely not derivable
+and must keep coming from `parquet_read_struct_row_validity`: a present struct whose every field is
+null gives the same combined mask, for every field, as an absent one. That is what
+`test_two_null_levels` (`test/test_struct_read.f90`) pins, using the fixture's row 4, which exists
+for exactly this.
+
+**Test.** Proposed. `test_two_null_levels` covers the row-level half and would catch a reader that
+lost the separate row-validity call. The FIELD-level half — a reader that *adds* the division —
+is not covered: every current assertion holds under both spellings except on a null struct row's
+fields, which `test_two_null_levels` asserts are null. So the coverage is real but incidental, and
+a dedicated assertion that a null row's field reports `is_valid = .false.` **and** yields the type's
+default would pin it deliberately.
 
 ### Risk-154 — A sliced list array carries THREE independent offsets, and dropping any one is a plausible wrong answer
 
@@ -514,6 +552,32 @@ path.
 Each of these says how to check or avoid the risk instead. Most are not gaps at all — they are a
 cost, a caveat about the input, a property of a process that has already aborted, or a pre-state no
 test can arrange — and writing a test for them would freeze the wrong thing as a contract.
+
+### Risk-156 — A struct write loses a field because a push was forgotten
+
+**What breaks.** A struct write is STAGED across several `bind(C)` calls — `parquet_struct_begin`,
+one `parquet_struct_field_<kind>` per field, then a finisher. A path that pushes fewer fields than
+it declared, or pushes them in a different order from the names it declared, produces a
+`StructArray` whose children do not correspond to the field list.
+
+**Why it would be quiet without the guard.** Arrow does not object at push time. It objects at
+`parquet_close_writer`, through `arrow::Table::Validate()`, with a message naming a **field index**
+in a schema the caller never wrote — arriving after every other column has been written, and
+pointing at nothing the caller can act on.
+
+**Test.** Covered. `check_struct_staging` (`src/parquet_wrapper.cpp`) refuses a finisher whose
+staged field count differs from the declared one, whose column name differs, or whose row count
+differs, and `push_struct_child` refuses a push beyond the declared count — each naming the column.
+`test_rewrite_fixture` (`test/test_struct_write.f90`) exercises the ten-column, nine-field case that
+would expose an ordering defect, and `test_mixed_order` (`test/test_struct_read.f90`) asserts the
+nine-field order explicitly.
+
+**What this entry still forbids.** The staging state is per WRITER, and its safety rests on the
+Fortran side holding the writer's concurrency guard (`writer_lock`, `src/parquet_core.f90`) across
+the **whole** begin/push/finish sequence. That is the first place in this library where the guard
+protects state spanning several C++ calls. A future path that opens staging without the lock — or
+that returns between `begin` and the finisher — leaves the writer with half a struct staged, and
+the next write to any column on that writer inherits it.
 
 ### Risk-90 — The narrow-integer bias is safe in exactly ONE direction, and its guard cannot be tested
 

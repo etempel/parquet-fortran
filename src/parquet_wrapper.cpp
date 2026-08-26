@@ -440,6 +440,22 @@ extern "C"
 		// rather than in a mask (temporal, and a parquet_string_column) and which are otherwise
 		// unconditionally nullable.
 		std::unordered_set<std::string> protected_columns;
+
+		// --- STRUCT column staging (see the "STRUCT column writes" section) ---
+		//
+		// A struct with M fields of arbitrary kinds cannot cross a fixed bind(C) signature in one
+		// call, so a struct write is staged: parquet_struct_begin opens it, one
+		// parquet_struct_field_<kind> call per field pushes that field's child array, and
+		// parquet_append_struct_column[_chunk] assembles and stores the result. These three
+		// members are that staging, and they are per WRITER -- which is what the writer's own
+		// concurrency guard (writer_lock, src/parquet_core.f90) makes safe: the Fortran side
+		// holds it across the whole begin/push/finish sequence, so two threads writing two struct
+		// columns to one writer cannot interleave their pushes.
+		std::string struct_staging_name;   // "" when nothing is staged.
+		int64_t struct_staging_nrows = 0;  // rows the finisher will be checked against.
+		int32_t struct_staging_nfields = 0; // fields the finisher will be checked against.
+		std::vector<std::string> struct_staging_field_names;
+		std::vector<std::shared_ptr<arrow::Array>> struct_staging_children;
 	};
 
 	// One column's read-time QC declaration, parsed on the Fortran side
@@ -11681,6 +11697,143 @@ extern "C"
 		mark_list_read(reader_handle, name, row_group, kElemFamilyString, child);
 	}
 
+
+	// ==== STRUCT column reads ====
+	//
+	// A struct column needs FAR less new plumbing than a list column did, and the reason is worth
+	// stating because it is the whole shape of this section. Every field of a struct is already an
+	// ordinary column at an ordinary DOTTED PATH -- `person.age` -- which resolve_struct_path has
+	// resolved and every per-kind reader has read since long before container columns existed,
+	// whole-column and per row group alike. So the field VALUES need no new entry point at all:
+	// src/parquet_read_struct.f90 composes `<col>.<field>` and calls the existing
+	// parquet_read_column / parquet_read_column_chunk machinery once per field.
+	//
+	// What it cannot get that way is exactly two things, and they are the two functions below:
+	// the struct's FIELD SET (names, element families, temporal units), and the struct's OWN
+	// per-row validity.
+	//
+	// THE SECOND IS NOT DERIVABLE and that is the subtle half. unwrap_struct_path hands a field
+	// read its COMBINED mask -- `struct_valid AND field_valid` -- so a row where every field is
+	// null is indistinguishable from a row where the struct instance itself is absent, and those
+	// are different rows. Only the struct array's own validity bitmap separates them.
+	//
+	// THE FIELD'S OWN NULLNESS, ON THE OTHER HAND, *IS* THE COMBINED MASK, with no arithmetic --
+	// which is the opposite of what the obvious derivation suggests, so it is stated here to stop
+	// someone adding the derivation back. For a PRESENT struct row the combination is the
+	// identity. For a NULL struct row Parquet has already forced every child null on write: its
+	// definition levels cannot encode "the struct is absent but its field is present". Measured
+	// against Arrow 25.0.0 -- a struct array built in memory with row 4 null and its `id` child
+	// VALID at row 4 reads back with that child INVALID (feature_container_phase4.md's F5). So
+	// `combined` is exactly what the file stores for the field, at every row.
+
+	// The FIRST of the two crossings for the field set: reports the counts Fortran needs in order
+	// to allocate, and writes no data.
+	//
+	//   nrows_out        rows in this column (or in this row group)
+	//   nfields_out      declared fields of the struct
+	//   name_width_out   longest field name, so Fortran can allocate character(len=W) :: names(nf)
+	//
+	// Everything but nrows comes from the SCHEMA, so a zero-row column still reports its full
+	// field set -- which is what lets a reader %init a struct column that has no rows.
+	void parquet_read_struct_column_shape(void *handle, const char *name, int64_t row_group,
+		int64_t *nrows_out, int32_t *nfields_out, int32_t *name_width_out)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		const char *context = row_group > 0 ? "parquet_read_column_chunk" : "parquet_read_column";
+		auto resolved = resolve_struct_path(reader_handle->schema, name);
+		if (resolved.leaf_field->type()->id() != arrow::Type::STRUCT)
+		{
+			report_fatal_error(context, std::string("type mismatch for column: ") + name +
+				" (expected a struct column, got " + resolved.leaf_field->type()->ToString() + ")"); // GCOVR_EXCL_LINE
+		}
+		auto struct_type = std::static_pointer_cast<arrow::StructType>(resolved.leaf_field->type());
+		*nfields_out = struct_type->num_fields();
+		int32_t width = 1;
+		for (int i = 0; i < struct_type->num_fields(); ++i)
+		{
+			auto len = static_cast<int32_t>(struct_type->field(i)->name().size());
+			if (len > width) width = len;
+		}
+		*name_width_out = width;
+		// The field set above is schema-only; the ROW COUNT is not, and must not be, because a
+		// filtered, sampled or sorted reader answers about the rows that survived rather than
+		// about the file. Taking it from the array is what makes this agree with what
+		// parquet_read_struct_row_validity and every per-field read will go on to see. Same rule
+		// -- and the same helper -- as parquet_read_list_column_shape. row_group <= 0 means the
+		// whole column.
+		auto array = get_list_source_array(reader_handle, name, row_group, context);
+		*nrows_out = array->length();
+	}
+
+	// The SECOND crossing for the field set: the declared field names, blank-padded into one
+	// `nfields * name_width` block, plus each field's element family and temporal unit/utc flag.
+	//
+	// A field whose own type is STRUCT, LIST or MAP reports kElemFamilyNone rather than aborting
+	// here, so that src/parquet_read_struct.f90 can name the offending FIELD in its message
+	// instead of this function naming only the column. Nesting is Phase 7; refusing it cleanly,
+	// with the field named, is Phase 4's whole obligation towards it.
+	void parquet_read_struct_column_fields(void *handle, const char *name, int32_t nfields,
+		int32_t name_width, char *names_out, int32_t *families_out, int32_t *units_out, int8_t *utc_out)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto resolved = resolve_struct_path(reader_handle->schema, name);
+		auto struct_type = std::static_pointer_cast<arrow::StructType>(resolved.leaf_field->type());
+		if (struct_type->num_fields() != nfields)
+		{ // GCOVR_EXCL_START -- Fortran passes back what the shape call just reported.
+			report_fatal_error("parquet_read_column", std::string("field count changed between calls for column: ") + name);
+		}
+		// GCOVR_EXCL_STOP
+		for (int i = 0; i < nfields; ++i)
+		{
+			auto field = struct_type->field(i);
+			copy_string_with_padding(names_out + static_cast<int64_t>(i) * name_width, name_width, field->name());
+			families_out[i] = arrow_leaf_family(field->type());
+			units_out[i] = 0;
+			utc_out[i] = 0;
+			if (families_out[i] == kElemFamilyTimestamp)
+			{
+				auto ts = std::static_pointer_cast<arrow::TimestampType>(field->type());
+				units_out[i] = arrow_unit_to_temporal_selector(ts->unit());
+				utc_out[i] = ts->timezone().empty() ? 0 : 1;
+			}
+			else if (families_out[i] == kElemFamilyTime)
+			{
+				units_out[i] = field->type()->id() == arrow::Type::TIME32
+					? arrow_unit_to_temporal_selector(std::static_pointer_cast<arrow::Time32Type>(field->type())->unit())
+					: arrow_unit_to_temporal_selector(std::static_pointer_cast<arrow::Time64Type>(field->type())->unit());
+			}
+		}
+	}
+
+	// The struct's OWN per-row validity: 1 where the struct instance is present, 0 where it is
+	// absent. See this section's banner for why nothing else can answer this.
+	//
+	// Reads the STRUCT array rather than any field, so it goes through the same source-array
+	// helper the list reads use and inherits filtering, sampling and sorting unchanged: a row
+	// transform only ever removes or reorders rows, and this walks whatever rows survived.
+	void parquet_read_struct_row_validity(void *handle, const char *name, int64_t row_group,
+		int64_t nrows, int8_t *row_valid)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		const char *context = row_group > 0 ? "parquet_read_column_chunk" : "parquet_read_column";
+		auto array = get_list_source_array(reader_handle, name, row_group, context);
+		if (array->type_id() != arrow::Type::STRUCT)
+		{
+			report_fatal_error(context, std::string("type mismatch for column: ") + name +
+				" (expected a struct column, got " + array->type()->ToString() + ")"); // GCOVR_EXCL_LINE
+		}
+		if (array->length() != nrows)
+		{
+			report_fatal_error(context, std::string("row count mismatch for column: ") + name + // GCOVR_EXCL_LINE
+				" (file has " + std::to_string(array->length()) + " rows, caller expects " + // GCOVR_EXCL_LINE
+				std::to_string(nrows) + ")"); // GCOVR_EXCL_LINE
+		}
+		for (int64_t i = 0; i < nrows; ++i)
+		{
+			row_valid[i] = array->IsValid(i) ? 1 : 0;
+		}
+	}
+
 	// Reads row group `row_group`'s full vector int32 column `name` into `data`.
 	void parquet_read_int32_array_column_chunk(void *handle, const char *name, int64_t row_group, int32_t *data, int64_t nrows, int64_t col_size, int8_t *valid_out)
 	{
@@ -12355,6 +12508,342 @@ static void append_list_column_chunk_common(void *handle, const char *name, int6
 		child, name, context);
 	writer_handle->pending_chunk_arrays[static_cast<int>(idx)] =
 		align_array_to_field(writer_handle->fields[idx], array);
+}
+
+// ==== STRUCT column writes (staged: begin, push one field at a time, finish) ====
+//
+// A struct column with M fields of arbitrary kinds cannot cross a fixed bind(C) signature in one
+// call, so a struct write is STAGED on the writer handle: parquet_struct_begin opens the staging,
+// one parquet_struct_field_<kind> call per field builds that field's child array and pushes it,
+// and parquet_append_struct_column (or its _chunk twin) assembles the StructArray, builds the
+// field and stores it. Eleven entry points, of which the nine pushes are shared between the
+// whole-column and the streamed path -- which is why this is eleven where the list write needed
+// eighteen.
+//
+// EVERY ONE OF THE NINE PUSHES REUSES THE LIST WRITE'S OWN CHILD BUILDERS. A struct field's child
+// array is exactly a list column's child array -- the same flat Fortran buffer plus the same int8
+// validity buffer -- so build_list_child_array / build_list_string_child / build_time_array /
+// build_timestamp_array serve both, and a second copy of any of them would be a second place for
+// a null convention to drift.
+//
+// NULLABILITY HAS 1 + M LEVELS: the struct row's own, plus one per field. build_field decides one
+// flag and build_list_field two, so a struct gets its own build_struct_field for the same reason
+// the list write did. The rule per path is the list write's rule exactly:
+//
+//   * a WHOLE-COLUMN write decides every flag FROM THE VALUES, having seen all of them;
+//   * a STREAMED write is in the ALWAYS-NULLABLE class -- a parquet_struct_column carries its
+//     null state inside itself, so there is no caller-supplied mask whose presence could stand in
+//     for "might this column contain a Null?", and the first row group locks the schema long
+//     before the later ones exist;
+//   * a PROTECTED column is non-nullable at EVERY level, which is the only way to declare a
+//     streamed struct column null-free. src/parquet_write_struct.f90 enforces that before calling
+//     in, at both levels, so a protected struct column may hold neither a null row nor a null
+//     field value.
+//
+// THERE IS NO REPETITION-LEVEL CEILING HERE, and that was measured rather than assumed: a written
+// struct<id:int32, nm:string> has leaf paths `s.id`/`s.nm` with max_repetition_level 0 and
+// max_definition_level 2, so apache/arrow#33188 -- which cost the list write three guards and a
+// debug hook -- cannot bite for a non-nested struct. **Phase 7 reopens this**: the moment a struct
+// field is a list or a map, maxrep becomes 1 and the list write's guard is back in play, reached
+// THROUGH the struct. See feature_container_phase4.md's F7 and D9.
+
+// The field a struct column is written with. Deliberately NOT build_field: see this section's
+// banner for why a struct needs 1 + M independent nullability flags where every other column here
+// needs one.
+//
+// The child fields take their types from the already-built child arrays, so the type this stamps
+// and the type the StructArray carries agree by construction and align_array_to_field is the
+// no-op it is designed to be -- which matters more here than for a list, because
+// arrow::DataType::Equals compares every child's name and nullability as well as its type, and a
+// struct has M chances to disagree rather than one.
+static std::shared_ptr<arrow::Field> build_struct_field(const std::string &name,
+	const std::vector<std::string> &field_names,
+	const std::vector<std::shared_ptr<arrow::Array>> &children,
+	bool row_nullable, const std::vector<bool> &field_nullable)
+{
+	std::vector<std::shared_ptr<arrow::Field>> fields;
+	fields.reserve(children.size());
+	for (size_t i = 0; i < children.size(); ++i)
+	{
+		fields.push_back(arrow::field(field_names[i], children[i]->type(), field_nullable[i]));
+	}
+	return arrow::field(name, arrow::struct_(fields), row_nullable);
+}
+
+// Assembles the struct array itself from the staged children and Fortran's per-ROW validity.
+//
+// `struct_type` is the field's own type, so the child fields' declared nullability follows the
+// FIELD rather than being recomputed -- which is what keeps a STREAMED column's later row groups
+// consistent with the field its first row group locked in, exactly as assemble_list_array does
+// with the offsets buffer's width.
+//
+// A null ROW whose fields still hold values is left exactly as Fortran handed it over.
+// parquet_struct_column's %set_null leaves a nulled row's field values physically present and
+// unreachable, and rebuilding to clear them here would be an O(nrows * nfields) pass to buy back
+// nothing: Parquet emits a definition level for the null row and never visits its values, which
+// is also why such values do not survive a round trip.
+static std::shared_ptr<arrow::Array> assemble_struct_array(const std::shared_ptr<arrow::DataType> &struct_type,
+	int64_t nrows, const int8_t *row_valid,
+	const std::vector<std::shared_ptr<arrow::Array>> &children, const std::string &name, const char *context)
+{
+	for (size_t i = 0; i < children.size(); ++i)
+	{
+		if (children[i]->length() != nrows)
+		{
+			report_fatal_error(context, "column '" + name + "': field " + std::to_string(i + 1) + // GCOVR_EXCL_LINE
+				" holds " + std::to_string(children[i]->length()) + " values but the struct has " + // GCOVR_EXCL_LINE
+				std::to_string(nrows) + " rows"); // GCOVR_EXCL_LINE
+		}
+	}
+	std::shared_ptr<arrow::Buffer> null_bitmap;
+	int64_t null_count = 0;
+	if (row_valid != nullptr)
+	{
+		for (int64_t i = 0; i < nrows; ++i)
+		{
+			if (row_valid[i] == 0) ++null_count;
+		}
+	}
+	if (null_count > 0)
+	{
+		auto alloc = arrow::AllocateEmptyBitmap(nrows);
+		if (!alloc.ok())
+		{ // GCOVR_EXCL_START -- real allocation-failure backstop, not fixture-triggerable
+			report_fatal_error(context, "column '" + name + "': failed to allocate a struct row validity bitmap");
+		}
+		// GCOVR_EXCL_STOP
+		null_bitmap = alloc.ValueOrDie();
+		for (int64_t i = 0; i < nrows; ++i)
+		{
+			arrow::bit_util::SetBitTo(null_bitmap->mutable_data(), i, row_valid[i] != 0);
+		}
+	}
+	std::vector<std::shared_ptr<arrow::ArrayData>> child_data;
+	child_data.reserve(children.size());
+	for (const auto &c : children) child_data.push_back(c->data());
+	auto data = arrow::ArrayData::Make(struct_type, nrows, {null_bitmap}, child_data, null_count);
+	return arrow::MakeArray(data);
+}
+
+// The guard every finisher shares: staging is open, it is for THIS column, and it received
+// exactly the fields it was promised.
+//
+// The field-count check is what turns a forgotten push into a message naming the column, instead
+// of an Arrow schema mismatch at close time naming a field index -- and a MISSING push is the
+// failure mode a staged protocol makes easy, so it is checked rather than trusted.
+//
+// **EVERY CHECK HERE IS DEFENSIVE AND UNREACHABLE FROM FORTRAN, and that was established rather
+// than assumed.** src/parquet_write_struct.f90 is the only caller: it opens staging, loops over
+// every declared field, and finishes, with no path that returns in between -- the two error stops
+// inside that loop abort the process rather than leaving staging open. A test cannot drive the
+// boundary directly either, because `parquet_writer%handle` is a PRIVATE component, so there is
+// no way to obtain the writer handle these functions take. A mutation removing the field-count
+// check therefore survives the whole suite; that is a fact about what is reachable, not a
+// coverage gap to be closed with a contrived hook. See feature_risks.md Risk-156 and CLAUDE.md,
+// "If a mutation cannot be caught by any fixture this repository can build, the branch is
+// defensive".
+static void check_struct_staging(ParquetWriterHandle *writer_handle, const char *name, int64_t nrows,
+	const char *context)
+{
+	if (writer_handle->struct_staging_name.empty())
+	{
+		report_fatal_error(context, std::string("column '") + name + // GCOVR_EXCL_LINE
+			"': no struct column staging is open -- parquet_struct_begin must be called first"); // GCOVR_EXCL_LINE
+	}
+	if (writer_handle->struct_staging_name != name)
+	{
+		report_fatal_error(context, std::string("column '") + name + // GCOVR_EXCL_LINE
+			"': struct staging is open for a different column ('" + // GCOVR_EXCL_LINE
+			writer_handle->struct_staging_name + "')"); // GCOVR_EXCL_LINE
+	}
+	if (static_cast<int32_t>(writer_handle->struct_staging_children.size()) != writer_handle->struct_staging_nfields)
+	{
+		report_fatal_error(context, std::string("column '") + name + "': " + // GCOVR_EXCL_LINE
+			std::to_string(writer_handle->struct_staging_children.size()) + " field(s) were pushed but " + // GCOVR_EXCL_LINE
+			std::to_string(writer_handle->struct_staging_nfields) + " were declared"); // GCOVR_EXCL_LINE
+	}
+	if (writer_handle->struct_staging_nrows != nrows)
+	{
+		report_fatal_error(context, std::string("column '") + name + "': the finisher was given " + // GCOVR_EXCL_LINE
+			std::to_string(nrows) + " rows but staging was opened for " + // GCOVR_EXCL_LINE
+			std::to_string(writer_handle->struct_staging_nrows)); // GCOVR_EXCL_LINE
+	}
+}
+
+// Pushes one already-built child array into the open staging, checking that staging is open at
+// all and that this push does not exceed the declared field count.
+static void push_struct_child(void *handle, const char *field_name, const std::shared_ptr<arrow::Array> &child)
+{
+	auto writer_handle = as_handle(handle);
+	if (writer_handle->struct_staging_name.empty())
+	{
+		report_fatal_error("parquet_write_column", std::string("field '") + field_name + // GCOVR_EXCL_LINE
+			"': no struct column staging is open -- parquet_struct_begin must be called first"); // GCOVR_EXCL_LINE
+	}
+	if (static_cast<int32_t>(writer_handle->struct_staging_children.size()) >= writer_handle->struct_staging_nfields)
+	{
+		report_fatal_error("parquet_write_column", std::string("column '") + // GCOVR_EXCL_LINE
+			writer_handle->struct_staging_name + "': more fields pushed than the " + // GCOVR_EXCL_LINE
+			std::to_string(writer_handle->struct_staging_nfields) + " declared"); // GCOVR_EXCL_LINE
+	}
+	writer_handle->struct_staging_field_names.push_back(std::string(field_name));
+	writer_handle->struct_staging_children.push_back(child);
+}
+
+// Drops whatever is staged, so that a finished (or refused) write cannot leak into the next one.
+static void clear_struct_staging(ParquetWriterHandle *writer_handle)
+{
+	writer_handle->struct_staging_name.clear();
+	writer_handle->struct_staging_nrows = 0;
+	writer_handle->struct_staging_nfields = 0;
+	writer_handle->struct_staging_field_names.clear();
+	writer_handle->struct_staging_children.clear();
+}
+
+extern "C"
+{
+
+	// Opens struct-column staging for `name`, discarding nothing: a second begin without an
+	// intervening finish is a caller bug (an abandoned write) and is refused, because leaving the
+	// previous fields staged would silently write a mixture of two columns.
+	void parquet_struct_begin(void *handle, const char *name, int64_t nrows, int32_t nfields)
+	{
+		auto writer_handle = as_handle(handle);
+		if (!writer_handle->struct_staging_name.empty())
+		{
+			report_fatal_error("parquet_write_column", std::string("column '") + name + // GCOVR_EXCL_LINE
+				"': struct staging is already open for column '" + // GCOVR_EXCL_LINE
+				writer_handle->struct_staging_name + "' -- the previous write did not finish"); // GCOVR_EXCL_LINE
+		}
+		if (nfields < 1)
+		{
+			report_fatal_error("parquet_write_column", std::string("column '") + name + // GCOVR_EXCL_LINE
+				"': a struct column must declare at least one field"); // GCOVR_EXCL_LINE
+		}
+		clear_struct_staging(writer_handle);
+		writer_handle->struct_staging_name = name;
+		writer_handle->struct_staging_nrows = nrows;
+		writer_handle->struct_staging_nfields = nfields;
+	}
+
+	// The nine field pushes. Each builds one field's child array from Fortran's flat value buffer
+	// and its per-row validity, exactly as the matching list child builder does, and stages it.
+	void parquet_struct_field_int32(void *handle, const char *field_name, const int32_t *values, int64_t nrows,
+		const int8_t *valid)
+	{
+		push_struct_child(handle, field_name, build_list_child_array<arrow::Int32Builder>(values, nrows, valid));
+	}
+
+	void parquet_struct_field_int64(void *handle, const char *field_name, const int64_t *values, int64_t nrows,
+		const int8_t *valid)
+	{
+		push_struct_child(handle, field_name, build_list_child_array<arrow::Int64Builder>(values, nrows, valid));
+	}
+
+	void parquet_struct_field_float32(void *handle, const char *field_name, const float *values, int64_t nrows,
+		const int8_t *valid)
+	{
+		push_struct_child(handle, field_name, build_list_child_array<arrow::FloatBuilder>(values, nrows, valid));
+	}
+
+	void parquet_struct_field_float64(void *handle, const char *field_name, const double *values, int64_t nrows,
+		const int8_t *valid)
+	{
+		push_struct_child(handle, field_name, build_list_child_array<arrow::DoubleBuilder>(values, nrows, valid));
+	}
+
+	void parquet_struct_field_bool8(void *handle, const char *field_name, const int8_t *values, int64_t nrows,
+		const int8_t *valid)
+	{
+		push_struct_child(handle, field_name,
+			build_list_child_array<arrow::BooleanBuilder>(reinterpret_cast<const uint8_t *>(values), nrows, valid));
+	}
+
+	void parquet_struct_field_date(void *handle, const char *field_name, const int32_t *values, int64_t nrows,
+		const int8_t *valid)
+	{
+		push_struct_child(handle, field_name, build_list_child_array<arrow::Date32Builder>(values, nrows, valid));
+	}
+
+	void parquet_struct_field_time(void *handle, const char *field_name, const int64_t *values, int64_t nrows,
+		const int8_t *valid, int32_t unit)
+	{
+		push_struct_child(handle, field_name,
+			build_time_array(values, nrows, 1, unit, valid, field_name, "parquet_write_column"));
+	}
+
+	void parquet_struct_field_timestamp(void *handle, const char *field_name, const int64_t *values, int64_t nrows,
+		const int8_t *valid, int32_t unit, int32_t is_utc)
+	{
+		push_struct_child(handle, field_name,
+			build_timestamp_array(values, nrows, 1, unit, is_utc, valid, field_name, "parquet_write_column"));
+	}
+
+	void parquet_struct_field_string(void *handle, const char *field_name, const int64_t *offsets, const char *data,
+		int64_t nrows, int64_t nchars, const int8_t *valid)
+	{
+		push_struct_child(handle, field_name, build_list_string_child(offsets, data, nrows, nchars, valid));
+	}
+
+	// Finishes a WHOLE-COLUMN struct write: decides every nullability flag from the values,
+	// assembles the array and stores it. Staging is cleared whether or not this succeeds.
+	void parquet_append_struct_column(void *handle, const char *name, int64_t nrows, const int8_t *row_valid)
+	{
+		auto writer_handle = as_handle(handle);
+		check_struct_staging(writer_handle, name, nrows, "parquet_write_column");
+		bool row_nullable = has_any_null(row_valid, nrows);
+		std::vector<bool> field_nullable(writer_handle->struct_staging_children.size());
+		for (size_t i = 0; i < writer_handle->struct_staging_children.size(); ++i)
+		{
+			field_nullable[i] = writer_handle->struct_staging_children[i]->null_count() > 0;
+		}
+		if (writer_handle->protected_columns.count(name) != 0)
+		{
+			// A protected column is non-nullable at EVERY level. Fortran has already refused a
+			// null row or a null field value for such a column, so this cannot produce a field
+			// that receives nulls -- the invariant build_field's own comment states.
+			row_nullable = false;
+			for (size_t i = 0; i < field_nullable.size(); ++i) field_nullable[i] = false;
+		}
+		auto field = build_struct_field(name, writer_handle->struct_staging_field_names,
+			writer_handle->struct_staging_children, row_nullable, field_nullable);
+		auto array = assemble_struct_array(field->type(), nrows, row_valid,
+			writer_handle->struct_staging_children, name, "parquet_write_column");
+		clear_struct_staging(writer_handle);
+		append_column(writer_handle, name, field, array);
+	}
+
+	// Streaming counterpart: same array, stashed into pending_chunk_arrays instead of arrays,
+	// with the field built once on the column's first chunk.
+	//
+	// Every flag comes from ONE resolve_chunk_nullability call with always_nullable set, because
+	// for a struct column the 1 + M answers are one answer: nullable at every level unless the
+	// column is protected, in which case no level may hold a Null and every one is non-nullable.
+	// There is no first-chunk consistency rule to enforce, because the answer does not depend on
+	// the chunk -- which is exactly what always_nullable means.
+	void parquet_append_struct_column_chunk(void *handle, const char *name, int64_t nrows, const int8_t *row_valid)
+	{
+		auto writer_handle = as_handle(handle);
+		check_struct_staging(writer_handle, name, nrows, "parquet_write_column_chunk");
+		bool first_chunk_ever;
+		size_t idx = check_column_chunk_write_preconditions(writer_handle, name, first_chunk_ever);
+		bool nullable = resolve_chunk_nullability(writer_handle, name, idx, first_chunk_ever,
+			/*mask_present=*/true, /*always_nullable=*/true);
+		if (first_chunk_ever)
+		{
+			if (writer_handle->fields.size() <= idx) writer_handle->fields.resize(idx + 1);
+			std::vector<bool> field_nullable(writer_handle->struct_staging_children.size(), nullable);
+			writer_handle->fields[idx] = build_struct_field(name, writer_handle->struct_staging_field_names,
+				writer_handle->struct_staging_children, nullable, field_nullable);
+		}
+		if (writer_handle->arrays.size() <= idx) writer_handle->arrays.resize(idx + 1);
+		auto array = assemble_struct_array(writer_handle->fields[idx]->type(), nrows, row_valid,
+			writer_handle->struct_staging_children, name, "parquet_write_column_chunk");
+		clear_struct_staging(writer_handle);
+		writer_handle->pending_chunk_arrays[static_cast<int>(idx)] =
+			align_array_to_field(writer_handle->fields[idx], array);
+	}
+
 }
 
 extern "C"

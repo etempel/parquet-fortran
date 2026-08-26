@@ -351,6 +351,25 @@ contains
             end if
         end if
 
+        ! A struct column's own three rules, all refusals, and all for the same reasons the list
+        ! column's are: a struct row is ONE struct instance, so there is no width for col_size or
+        ! array_size to declare, and qc: min:/max: stays scalar-leaf-only by design (see
+        ! feature_map_list_struct.md). qc: miss: IS supported and applies to ROW nullness (an
+        ! absent struct instance), which is the same concept at the same granularity.
+        if (trim(col%data_type) == "struct") then
+            if (col%col_size == parquet_size_auto) then
+                errors = errors // "field '" // cur_name // "' declares col_size: auto, which does not " // &
+                    "apply to a struct column (a struct row is one instance and has no width); "
+            else if (col%col_size > 1) then
+                errors = errors // "field '" // cur_name // "' declares col_size > 1, which does not " // &
+                    "apply to a struct column (a struct row is one instance and has no width); "
+            end if
+            if (col%has_qc_min .or. col%has_qc_max) then
+                errors = errors // "field '" // cur_name // "' declares qc: min:/max:, which is not " // &
+                    "supported for a struct column (qc: miss: is); "
+            end if
+        end if
+
         ! qc: min: must use a lower-bound operator (>= or >) and qc: max: an upper-bound
         ! operator (<= or <); the opposite direction (e.g. min: '< 5') is a nonsensical bound.
         ! This is a purely syntactic check, applied to every enforced type (numeric and string
@@ -1122,6 +1141,16 @@ contains
             parquet_data_type_token_valid = valid
             return
         end if
+        ! The bare `struct` token. Deliberately NOT an entry in valid_maml_data_types: that array
+        ! is also what parquet_parse_list_type validates a LIST's element token against, so adding
+        ! "struct" there would silently make `list[struct]` a valid declaration -- which is Phase
+        ! 7's nesting and not this. A struct declares no field layout in MAML at all; its fields
+        ! come entirely from the parquet_struct_column the caller passes at write time.
+        call parquet_to_lower(trim(adjustl(token)), lo)
+        if (trim(lo) == "struct") then
+            parquet_data_type_token_valid = .true.
+            return
+        end if
         ! Non-temporal: an exact match against the numeric/string/boolean base tokens (same
         ! rule the original add_field used, so behavior for those is unchanged).
         call parquet_to_lower(trim(adjustl(token)), lo)
@@ -1890,7 +1919,12 @@ contains
                     ! look for a unit. A malformed one is stored verbatim, exactly as a malformed
                     ! temporal token is, so parquet_validate_maml rejects it.
                     call parquet_parse_list_type(cvalue, dt_base, dt_unit, dt_utc, dt_is_list, dt_valid)
-                    if (dt_is_list) then
+                    if (trim(adjustl(cvalue)) == "struct") then
+                        ! The bare struct token, stored canonically. No unit, no element type and
+                        ! no field layout: a struct's fields come from the column object at write
+                        ! time, never from the schema.
+                        tmp(n)%data_type = "struct"
+                    else if (dt_is_list) then
                         if (dt_valid) then
                             tmp(n)%data_type = "list[" // dt_base // "]"
                             tmp(n)%time_unit = dt_unit

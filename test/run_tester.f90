@@ -26,6 +26,9 @@ program tester
     use test_list, only : collect_tests_parquet_list
     use test_list_read, only : collect_tests_parquet_list_read
     use test_list_write, only : collect_tests_parquet_list_write
+    use test_struct, only : collect_tests_parquet_struct
+    use test_struct_read, only : collect_tests_parquet_struct_read
+    use test_struct_write, only : collect_tests_parquet_struct_write
     use test_filter, only : collect_tests_filter
     use test_filter_screen, only : collect_tests_filter_screen
     use test_sort, only : collect_tests_sort
@@ -89,6 +92,9 @@ program tester
         new_testsuite("list", collect_tests_parquet_list), &
         new_testsuite("list_read", collect_tests_parquet_list_read), &
         new_testsuite("list_write", collect_tests_parquet_list_write), &
+        new_testsuite("struct", collect_tests_parquet_struct), &
+        new_testsuite("struct_read", collect_tests_parquet_struct_read), &
+        new_testsuite("struct_write", collect_tests_parquet_struct_write), &
         new_testsuite("filter", collect_tests_filter), &
         new_testsuite("filter_screen", collect_tests_filter_screen), &
         new_testsuite("sort", collect_tests_sort), &

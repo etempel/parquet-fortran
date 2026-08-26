@@ -102,6 +102,13 @@ module parquet_bindings
     public :: parquet_read_list_float32_fill, parquet_read_list_float64_fill
     public :: parquet_read_list_bool8_fill, parquet_read_list_string_fill
     public :: parquet_read_list_date_fill, parquet_read_list_time_fill, parquet_read_list_timestamp_fill
+    public :: parquet_read_struct_column_shape, parquet_read_struct_column_fields
+    public :: parquet_read_struct_row_validity
+    public :: parquet_struct_begin, parquet_append_struct_column, parquet_append_struct_column_chunk
+    public :: parquet_struct_field_int32, parquet_struct_field_int64
+    public :: parquet_struct_field_float32, parquet_struct_field_float64
+    public :: parquet_struct_field_bool8, parquet_struct_field_string
+    public :: parquet_struct_field_date, parquet_struct_field_time, parquet_struct_field_timestamp
     public :: parquet_read_int32_array_row, parquet_read_int64_array_row
     public :: parquet_read_float32_array_row, parquet_read_float64_array_row
     public :: parquet_read_bool8_array_row, parquet_read_string_array_row
@@ -1923,6 +1930,205 @@ module parquet_bindings
             integer(c_long_long), intent(out) :: nchars
             integer(c_int32_t), intent(out) :: elem_family
             integer(c_int32_t), intent(out) :: unit_out
+        end subroutine
+
+        ! ---- STRUCT column writes (staged: begin, push one field at a time, finish) ----
+        !
+        ! A struct with M fields of arbitrary kinds cannot cross a fixed bind(C) signature in one
+        ! call, so a struct write is staged on the writer handle. The NINE field pushes are shared
+        ! between the whole-column and the streamed path, which is why this is eleven entry points
+        ! where the list write needed eighteen.
+        !
+        ! The Fortran side holds the writer's concurrency guard (writer_lock, parquet_core.f90)
+        ! across the whole begin/push/finish sequence -- this is the first time that guard
+        ! protects state spanning several C++ calls, and it is what makes staging on a shared
+        ! writer safe.
+
+        !> Opens struct-column staging for `name`. Aborts if staging is already open.
+        subroutine parquet_struct_begin(writer, name, nrows, nfields) &
+                bind(C, name="parquet_struct_begin")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: nrows
+            integer(c_int32_t), value :: nfields
+        end subroutine
+
+        !> Stages one int32 field's values and per-row validity.
+        subroutine parquet_struct_field_int32(writer, field_name, values, nrows, valid) &
+                bind(C, name="parquet_struct_field_int32")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: field_name(*)
+            integer(c_int32_t) :: values(*)
+            integer(c_long_long), value :: nrows
+            type(c_ptr), value :: valid
+        end subroutine
+
+        !> Stages one int64 field's values and per-row validity.
+        subroutine parquet_struct_field_int64(writer, field_name, values, nrows, valid) &
+                bind(C, name="parquet_struct_field_int64")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: field_name(*)
+            integer(c_int64_t) :: values(*)
+            integer(c_long_long), value :: nrows
+            type(c_ptr), value :: valid
+        end subroutine
+
+        !> Stages one float32 field's values and per-row validity.
+        subroutine parquet_struct_field_float32(writer, field_name, values, nrows, valid) &
+                bind(C, name="parquet_struct_field_float32")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: field_name(*)
+            real(c_float) :: values(*)
+            integer(c_long_long), value :: nrows
+            type(c_ptr), value :: valid
+        end subroutine
+
+        !> Stages one float64 field's values and per-row validity.
+        subroutine parquet_struct_field_float64(writer, field_name, values, nrows, valid) &
+                bind(C, name="parquet_struct_field_float64")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: field_name(*)
+            real(c_double) :: values(*)
+            integer(c_long_long), value :: nrows
+            type(c_ptr), value :: valid
+        end subroutine
+
+        !> Stages one boolean field's values (as int8) and per-row validity.
+        subroutine parquet_struct_field_bool8(writer, field_name, values, nrows, valid) &
+                bind(C, name="parquet_struct_field_bool8")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: field_name(*)
+            integer(c_int8_t) :: values(*)
+            integer(c_long_long), value :: nrows
+            type(c_ptr), value :: valid
+        end subroutine
+
+        !> Stages one date field's day counts and per-row validity.
+        subroutine parquet_struct_field_date(writer, field_name, values, nrows, valid) &
+                bind(C, name="parquet_struct_field_date")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: field_name(*)
+            integer(c_int32_t) :: values(*)
+            integer(c_long_long), value :: nrows
+            type(c_ptr), value :: valid
+        end subroutine
+
+        !> Stages one time field's nanosecond values, per-row validity and unit selector.
+        subroutine parquet_struct_field_time(writer, field_name, values, nrows, valid, unit) &
+                bind(C, name="parquet_struct_field_time")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: field_name(*)
+            integer(c_int64_t) :: values(*)
+            integer(c_long_long), value :: nrows
+            type(c_ptr), value :: valid
+            integer(c_int32_t), value :: unit
+        end subroutine
+
+        !> Stages one timestamp field's values, per-row validity, unit selector and UTC flag.
+        subroutine parquet_struct_field_timestamp(writer, field_name, values, nrows, valid, unit, is_utc) &
+                bind(C, name="parquet_struct_field_timestamp")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: field_name(*)
+            integer(c_int64_t) :: values(*)
+            integer(c_long_long), value :: nrows
+            type(c_ptr), value :: valid
+            integer(c_int32_t), value :: unit
+            integer(c_int32_t), value :: is_utc
+        end subroutine
+
+        !> Stages one string field from the packed offsets+bytes layout a parquet_string_column
+        !> stores natively, plus per-row validity.
+        subroutine parquet_struct_field_string(writer, field_name, offsets, data, nrows, nchars, valid) &
+                bind(C, name="parquet_struct_field_string")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: field_name(*)
+            integer(c_int64_t) :: offsets(*)
+            character(kind=c_char) :: data(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nchars
+            type(c_ptr), value :: valid
+        end subroutine
+
+        !> Finishes a WHOLE-COLUMN struct write: assembles the staged fields and stores them.
+        subroutine parquet_append_struct_column(writer, name, nrows, row_valid) &
+                bind(C, name="parquet_append_struct_column")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: nrows
+            type(c_ptr), value :: row_valid
+        end subroutine
+
+        !> Finishes ONE ROW GROUP of a streamed struct write.
+        subroutine parquet_append_struct_column_chunk(writer, name, nrows, row_valid) &
+                bind(C, name="parquet_append_struct_column_chunk")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: nrows
+            type(c_ptr), value :: row_valid
+        end subroutine
+
+        ! ---- STRUCT column reads ----
+        !
+        ! Only THREE entry points, where a list column needed ten, and the reason is the read
+        ! path's whole design: every field of a struct is already an ordinary column at a dotted
+        ! path (`person.age`), which the existing per-kind readers have read since long before
+        ! container columns existed. So the field VALUES cross the boundary through those, and
+        ! only the field SET and the struct's OWN row validity need anything new. See the C++
+        ! side's section banner for why the second of those cannot be derived from a field read.
+
+        !> Reports struct column `name`'s row count, declared field count and longest field-name
+        !> length, so the caller can allocate before asking for the field set itself.
+        !> `row_group` <= 0 means the whole column.
+        subroutine parquet_read_struct_column_shape(reader, name, row_group, nrows, nfields, &
+                name_width) bind(C, name="parquet_read_struct_column_shape")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_long_long), intent(out) :: nrows
+            integer(c_int32_t), intent(out) :: nfields
+            integer(c_int32_t), intent(out) :: name_width
+        end subroutine
+
+        !> Fills struct column `name`'s declared field names (blank-padded, `name_width` bytes
+        !> each), each field's element family (a PF_ELEM_* value; PF_ELEM_NONE for a field this
+        !> library cannot read, including a nested container) and, for a time/timestamp field,
+        !> its unit selector and UTC flag.
+        subroutine parquet_read_struct_column_fields(reader, name, nfields, name_width, names, &
+                families, units, utc) bind(C, name="parquet_read_struct_column_fields")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_int32_t), value :: nfields
+            integer(c_int32_t), value :: name_width
+            character(kind=c_char) :: names(*)
+            integer(c_int32_t), intent(out) :: families(*)
+            integer(c_int32_t), intent(out) :: units(*)
+            integer(c_int8_t), intent(out) :: utc(*)
+        end subroutine
+
+        !> Fills struct column `name`'s own per-ROW validity (1 = the struct instance is present).
+        !> Distinct from any field's validity, which is combined with this one; see the C++ side.
+        subroutine parquet_read_struct_row_validity(reader, name, row_group, nrows, row_valid) &
+                bind(C, name="parquet_read_struct_row_validity")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_long_long), value :: nrows
+            integer(c_int8_t), intent(out) :: row_valid(*)
         end subroutine
 
         !> Fills an int32-payload list column's offsets, row validity, values and element validity.

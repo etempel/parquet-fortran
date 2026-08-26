@@ -365,6 +365,14 @@ should be visible in the program's output. See
 
 ## Reading a nested struct field
 
+**There are two ways to reach a `STRUCT` column, and this section is about the first of them.**
+Addressing a struct's *leaves* by their dot-separated paths, described below, reaches any depth of
+nesting and hands back ordinary flat columns. Reading the struct as **one object** — with its field
+set, each field's own nullness and the struct instance's own nullness kept separate — is
+`parquet_struct_column`, on [its own page](struct-columns.html); that is also the only one of the
+two that can be **written**. The two are complementary and neither replaces the other: pick the
+dotted path when you want a column, and `parquet_struct_column` when you want a struct.
+
 A Parquet `STRUCT` column's individual fields — at any nesting depth — can be read directly by
 passing a dot-separated path as the `name` argument to `parquet_read_column`,
 `parquet_read_array_row_mode`/`parquet_read_array_element_mode`, `parquet_read_column_chunk`,
@@ -420,7 +428,11 @@ and `output_type` shows whichever leaf under that struct was most recently read.
 accepted limitation, not a bug: reading two different leaves under one struct is still reported as a
 single touched column.
 
-This library's own writer cannot produce `STRUCT` columns — like the extended read-only source types
-in [Reading a column into a different numeric kind](#reading-a-column-into-a-different-numeric-kind)
-above, struct support is read-only, for files produced by some other tool.
+**The dotted-path mechanism described in this section is read-only**: it reaches a leaf of a struct
+another tool produced, and there is no dotted-path *write*. Writing a struct column goes through
+`parquet_struct_column` instead — see [Struct columns with `parquet_struct_column`](struct-columns.html)
+— which builds the whole struct as one object and writes it with `parquet_write_column`. What that
+path supports is narrower in one respect and wider in another: a field must be one of the nine
+scalar kinds, so it cannot produce the arbitrarily deep nesting the dotted-path reader can consume,
+and it is the only way to produce a `STRUCT` column at all.
 

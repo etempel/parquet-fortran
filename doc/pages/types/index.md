@@ -4,11 +4,12 @@ ordered_subpage: supported-data-types.md
 ordered_subpage: date-time.md
 ordered_subpage: string-columns.md
 ordered_subpage: list-columns.md
+ordered_subpage: struct-columns.md
 ---
 
 What a column can hold: the supported Parquet/Arrow types and their Fortran counterparts, the
-three temporal element types, the compact variable-length string container, and the
-variable-length list container.
+three temporal element types, the compact variable-length string container, and the two
+container columns.
 
 - [Supported data types](supported-data-types.html) — the Fortran-kind-to-MAML type table, how
   nulls work and how a column is declared null-free, reading a column into a different numeric
@@ -25,3 +26,7 @@ variable-length list container.
   different numbers of values, the offsets-plus-payload layout, the difference between a null row
   and a null element, the `parquet_list_row` handle, and how a list column is adopted into a
   `parquet_column`, and how one is read from and written to a Parquet file.
+- [Struct columns with `parquet_struct_column`](struct-columns.html) — one value per declared
+  field per row, the field set fixed at `%init`, the difference between an absent struct instance
+  and a present one whose fields are null, the `parquet_struct_row` handle and its two read forms,
+  and how a struct column relates to the unchanged dotted-path leaf reader.

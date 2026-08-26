@@ -101,6 +101,46 @@ program error_scenarios
         call scenario_list_adopt_rows_bad_payload_kind()
     case ("list_adopt_rows_mask_length")
         call scenario_list_adopt_rows_mask_length()
+    case ("struct_init_no_fields")
+        call scenario_struct_init_no_fields()
+    case ("struct_init_duplicate_name")
+        call scenario_struct_init_duplicate_name()
+    case ("struct_init_dotted_name")
+        call scenario_struct_init_dotted_name()
+    case ("struct_init_bad_kind")
+        call scenario_struct_init_bad_kind()
+    case ("struct_get_wrong_kind")
+        call scenario_struct_get_wrong_kind()
+    case ("struct_get_not_narrowed")
+        call scenario_struct_get_not_narrowed()
+    case ("struct_field_unknown")
+        call scenario_struct_field_unknown()
+    case ("struct_field_unknown_warn_ok")
+        call scenario_struct_field_unknown_warn_ok()
+    case ("struct_write_uninitialized")
+        call scenario_struct_write_uninitialized()
+    case ("struct_write_type_mismatch")
+        call scenario_struct_write_type_mismatch()
+    case ("struct_col_size_rejected")
+        call scenario_struct_col_size_rejected()
+    case ("struct_qc_rejected")
+        call scenario_struct_qc_rejected()
+    case ("struct_protected_row_null")
+        call scenario_struct_protected_row_null()
+    case ("struct_protected_field_null")
+        call scenario_struct_protected_field_null()
+    case ("struct_protected_ok")
+        call scenario_struct_protected_ok()
+    case ("struct_read_nested_field")
+        call scenario_struct_read_nested_field()
+    case ("struct_read_not_a_struct")
+        call scenario_struct_read_not_a_struct()
+    case ("struct_view_out_of_range")
+        call scenario_struct_view_out_of_range()
+    case ("struct_set_field_unknown")
+        call scenario_struct_set_field_unknown()
+    case ("struct_set_field_wrong_kind")
+        call scenario_struct_set_field_wrong_kind()
     case ("list_write_type_mismatch")
         call scenario_list_write_type_mismatch()
     case ("list_write_uninitialized")
@@ -17296,6 +17336,238 @@ contains
     !> deliberately no widening between list element kinds the way there is between scalar numeric
     !> kinds (parquet_is_type_compatible), so this is a clean refusal naming both tokens rather
     !> than a silent conversion of the payload.
+    !> ---- STRUCT column scenarios ----
+    !>
+    !> `%init` with no fields at all. Arrow cannot construct a zero-field struct and a struct
+    !> column carrying no data is a mistake in every case a caller could reach it, so one clean
+    !> abort here beats an obscure Arrow failure at close time.
+    subroutine scenario_struct_init_no_fields()
+        type(parquet_struct_column) :: sc
+        character(len=4) :: names(0)
+        integer :: kinds(0)
+        call sc%init(names, kinds)
+    end subroutine scenario_struct_init_no_fields
+
+    !> `%init` with two field names the same. A duplicate would make `%field_index` answer about
+    !> one of them arbitrarily and `%set_field(name)` write to that one for good.
+    subroutine scenario_struct_init_duplicate_name()
+        type(parquet_struct_column) :: sc
+        call sc%init(["v", "v"], [PK_INT32, PK_INT32])
+    end subroutine scenario_struct_init_duplicate_name
+
+    !> `%init` with a field name containing a dot. A dot would make this column's own leaf path
+    !> ambiguous against the dotted-path struct reader, which addresses exactly `col.field`.
+    subroutine scenario_struct_init_dotted_name()
+        type(parquet_struct_column) :: sc
+        call sc%init(["a.b"], [PK_INT32])
+    end subroutine scenario_struct_init_dotted_name
+
+    !> `%init` with a field kind this type cannot hold. `PK_INT32_VEC` is a fixed-width vector,
+    !> which inside a struct is `struct<fixed_size_list<...>>` -- Phase 7's nesting, not a width.
+    subroutine scenario_struct_init_bad_kind()
+        type(parquet_struct_column) :: sc
+        call sc%init(["v"], [PK_INT32_VEC])
+    end subroutine scenario_struct_init_bad_kind
+
+    !> Reading a field through the wrong `%get` specific. A type mismatch, never a lookup failure,
+    !> so it aborts with no soft-fail option -- the campaign's error-handling convention.
+    subroutine scenario_struct_get_wrong_kind()
+        type(parquet_struct_column), target :: sc
+        type(parquet_struct_row) :: h
+        integer(int32) :: v
+        call sc%init(["nm"], [PK_STRING])
+        call sc%append_row()
+        h = sc%view(1)
+        call h%get_field("nm", v)
+    end subroutine scenario_struct_get_wrong_kind
+
+    !> `%get` on a handle that has not been narrowed. A whole-row handle has no one value to
+    !> materialize, so this is a wrong-kind access rather than a lookup that could soft-fail.
+    subroutine scenario_struct_get_not_narrowed()
+        type(parquet_struct_column), target :: sc
+        type(parquet_struct_row) :: h
+        integer(int32) :: v
+        call sc%init(["v"], [PK_INT32])
+        call sc%append_row()
+        h = sc%view(1)
+        call h%get(v)
+    end subroutine scenario_struct_get_not_narrowed
+
+    !> `%field` on a name the column does not declare, with no `warn=`. The message lists every
+    !> declared name, because a misspelled or reordered field is the overwhelmingly common cause.
+    subroutine scenario_struct_field_unknown()
+        type(parquet_struct_column), target :: sc
+        type(parquet_struct_row) :: h, slot
+        call sc%init(["v"], [PK_INT32])
+        call sc%append_row()
+        h = sc%view(1)
+        slot = h%field("nope")
+    end subroutine scenario_struct_field_unknown
+
+    !> The NEGATIVE CONTROL for the guard above: the same call with `warn=.true.` must NOT abort,
+    !> and must hand back an invalid handle. Without this, a guard that fired unconditionally
+    !> would pass every abort scenario written for it.
+    subroutine scenario_struct_field_unknown_warn_ok()
+        type(parquet_struct_column), target :: sc
+        type(parquet_struct_row) :: h, slot
+        call sc%init(["v"], [PK_INT32])
+        call sc%append_row()
+        h = sc%view(1)
+        slot = h%field("nope", warn=.true.)
+        if (slot%is_valid()) error stop "scenario_struct_field_unknown_warn_ok: expected an invalid handle"
+        slot = h%field("v", warn=.true.)
+        if (.not. slot%is_valid()) error stop "scenario_struct_field_unknown_warn_ok: expected a valid handle"
+    end subroutine scenario_struct_field_unknown_warn_ok
+
+    !> Writing an uninitialized struct column. Nothing declares its field set, so there is no
+    !> Arrow field to build.
+    subroutine scenario_struct_write_uninitialized()
+        type(parquet_writer) :: writer
+        type(parquet_struct_column) :: sc
+        call parquet_open_writer(writer, "test_run/error_scenario_struct_uninit.parquet")
+        call parquet_write_column(writer, "s", sc)
+        call parquet_close_writer(writer)
+    end subroutine scenario_struct_write_uninitialized
+
+    !> Writing a struct column into a schema slot declared as something else.
+    subroutine scenario_struct_write_type_mismatch()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_struct_column) :: sc
+        call schema%init(table="struct_mismatch")
+        call schema%add_field("s", "int32")
+        call parquet_parse_maml(schema)
+        call sc%init(["v"], [PK_INT32])
+        call sc%append_row()
+        call parquet_open_writer(writer, "test_run/error_scenario_struct_mismatch.parquet", schema)
+        call parquet_write_column(writer, "s", sc)
+        call parquet_close_writer(writer)
+    end subroutine scenario_struct_write_type_mismatch
+
+    !> `col_size:` on a struct column. A struct row is ONE instance, so there is no width for the
+    !> key to declare. Rejected at schema-validation time, before a writer can ever see it.
+    subroutine scenario_struct_col_size_rejected()
+        type(parquet_schema) :: schema
+        call schema%init(table="struct_colsize")
+        call schema%add_field("s", "struct", col_size=3)
+        call parquet_parse_maml(schema)
+    end subroutine scenario_struct_col_size_rejected
+
+    !> `qc: min:`/`max:` on a struct column. qc stays scalar-leaf-only by design; refusing the
+    !> declaration is what keeps the read and write sides agreeing, since with no such declaration
+    !> possible a reader can never be handed one. `qc: miss:` IS supported and applies to ROW
+    !> nullness, which is the same concept at the same granularity.
+    subroutine scenario_struct_qc_rejected()
+        type(parquet_schema) :: schema
+        call schema%init(table="struct_qc")
+        call schema%add_field("s", "struct", qc_min="0")
+        call parquet_parse_maml(schema)
+    end subroutine scenario_struct_qc_rejected
+
+    !> A protected struct column holding a null ROW. A protected column may contain no Null at any
+    !> level, and the row level is parquet_check_protected's ordinary job.
+    subroutine scenario_struct_protected_row_null()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_struct_column) :: sc
+        call schema%init(table="struct_prot_row")
+        call schema%add_field("s", "struct")
+        call parquet_parse_maml(schema)
+        call schema%set_protected("s")
+        call sc%init(["v"], [PK_INT32])
+        call sc%append_row()
+        call sc%set_field(1, "v", 1_int32)
+        call sc%append_null_row()
+        call parquet_open_writer(writer, "test_run/error_scenario_struct_prot_row.parquet", schema)
+        call parquet_write_column(writer, "s", sc)
+        call parquet_close_writer(writer)
+    end subroutine scenario_struct_protected_row_null
+
+    !> A protected struct column holding a null FIELD of a PRESENT row. The row level is clean, so
+    !> only the field-level half of the protected check can catch this -- and its message names
+    !> which field failed.
+    subroutine scenario_struct_protected_field_null()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_struct_column) :: sc
+        call schema%init(table="struct_prot_fld")
+        call schema%add_field("s", "struct")
+        call parquet_parse_maml(schema)
+        call schema%set_protected("s")
+        call sc%init(["v", "w"], [PK_INT32, PK_INT32])
+        call sc%append_row()
+        call sc%set_field(1, "v", 1_int32)   ! `w` left null: the row is present, the field is not
+        call parquet_open_writer(writer, "test_run/error_scenario_struct_prot_fld.parquet", schema)
+        call parquet_write_column(writer, "s", sc)
+        call parquet_close_writer(writer)
+    end subroutine scenario_struct_protected_field_null
+
+    !> The NEGATIVE CONTROL for both protected guards: a protected struct column with no Null at
+    !> EITHER level must write cleanly. Without it, a guard that fired unconditionally would pass
+    !> the two scenarios above while breaking every legitimate protected write.
+    subroutine scenario_struct_protected_ok()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_struct_column) :: sc
+        call schema%init(table="struct_prot_ok")
+        call schema%add_field("s", "struct")
+        call parquet_parse_maml(schema)
+        call schema%set_protected("s")
+        call sc%init(["v", "w"], [PK_INT32, PK_INT32])
+        call sc%append_row()
+        call sc%set_field(1, "v", 1_int32)
+        call sc%set_field(1, "w", 2_int32)
+        call parquet_open_writer(writer, "test_run/error_scenario_struct_prot_ok.parquet", schema)
+        call parquet_write_column(writer, "s", sc)
+        call parquet_close_writer(writer)
+    end subroutine scenario_struct_protected_ok
+
+    !> Reading a struct column whose field is itself a nested container. Phase 4 does not support
+    !> nesting; refusing it cleanly, NAMING THE FIELD rather than only the column, is its whole
+    !> obligation towards Phase 7.
+    subroutine scenario_struct_read_nested_field()
+        type(parquet_reader) :: reader
+        type(parquet_struct_column) :: sc
+        call parquet_open_reader(reader, "test/fixtures/map_list_types.parquet")
+        call parquet_read_column(reader, "struct_of_list", sc)
+        call parquet_close_reader(reader)
+    end subroutine scenario_struct_read_nested_field
+
+    !> Reading a column that is not a struct at all into a parquet_struct_column.
+    subroutine scenario_struct_read_not_a_struct()
+        type(parquet_reader) :: reader
+        type(parquet_struct_column) :: sc
+        call parquet_open_reader(reader, "test/fixtures/struct_payloads.parquet")
+        call parquet_read_column(reader, "rowid", sc)
+        call parquet_close_reader(reader)
+    end subroutine scenario_struct_read_not_a_struct
+
+    !> `%view` on a row index the column does not have.
+    subroutine scenario_struct_view_out_of_range()
+        type(parquet_struct_column), target :: sc
+        type(parquet_struct_row) :: h
+        call sc%init(["v"], [PK_INT32])
+        call sc%append_row()
+        h = sc%view(5)
+    end subroutine scenario_struct_view_out_of_range
+
+    !> `%set_field` naming a field the column does not declare. A WRITE has no sensible soft
+    !> outcome -- unlike a read, which %field(name, warn=) can decline -- so it always aborts.
+    subroutine scenario_struct_set_field_unknown()
+        type(parquet_struct_column) :: sc
+        call sc%init(["v"], [PK_INT32])
+        call sc%append_row()
+        call sc%set_field(1, "nope", 1_int32)
+    end subroutine scenario_struct_set_field_unknown
+
+    !> `%set_field` writing the wrong type into a declared field.
+    subroutine scenario_struct_set_field_wrong_kind()
+        type(parquet_struct_column) :: sc
+        call sc%init(["v"], [PK_INT32])
+        call sc%append_row()
+        call sc%set_field(1, "v", 1.5_real64)
+    end subroutine scenario_struct_set_field_wrong_kind
+
     subroutine scenario_list_write_type_mismatch()
         type(parquet_schema) :: schema
         type(parquet_writer) :: writer

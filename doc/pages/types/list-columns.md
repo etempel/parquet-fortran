@@ -8,10 +8,11 @@ empty. That is what the Parquet `LIST` logical type describes, and it is the one
 library's other column types cannot represent: a `*_VEC` column has a fixed `col_size` and every
 row is exactly that wide.
 
-A list column can be **read from a Parquet file** with `parquet_read_column`, whole or one row
-group at a time — see [Reading a list column from a file](#reading-a-list-column-from-a-file)
-below. **Writing** one is not available yet; that arrives in a later release. Everything else on
-this page is about building, filling, querying, copying and mutating a list column in memory, and
+A list column can be **read from a Parquet file** with `parquet_read_column` and **written back**
+with `parquet_write_column`, whole or one row group at a time — see
+[Reading a list column from a file](#reading-a-list-column-from-a-file) and
+[Writing a list column to a file](#writing-a-list-column-to-a-file) below. Everything else on this
+page is about building, filling, querying, copying and mutating a list column in memory, and
 handing it to a `parquet_column`.
 
 The module itself is **independent**: a program whose only import is `use parquet_list` compiles
@@ -371,7 +372,9 @@ than the limit aborts too, since no row-group size can help: a row is never spli
 
 ## What this module does not do yet
 
-- **No nesting.** A list of lists, a list of structs, and the `MAP`/`STRUCT` containers themselves
-  are not available; the payload must be one of the nine scalar kinds.
+- **No nesting.** A list of lists, a list of structs and a list of maps are not available; the
+  payload must be one of the nine scalar kinds. `STRUCT` columns have their own type — see
+  [Struct columns with `parquet_struct_column`](struct-columns.html) — but a struct cannot be a
+  list's payload and a list cannot be a struct's field. `MAP` is not available at all yet.
 - **No `parquet_table` integration.** A table cannot yet hold a list column.
 - **No `%append` between container columns**, and no `%paste` at all — see above.

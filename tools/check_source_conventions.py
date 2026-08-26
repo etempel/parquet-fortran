@@ -1494,6 +1494,25 @@ def check_parquet_list_stays_arrow_free():
         "A list column is in-memory storage and is advertised as an Arrow-free import.")
 
 
+def check_parquet_struct_stays_arrow_free():
+    """`use parquet_struct` must not reach parquet_bindings.
+
+    A struct column is pure in-memory storage: one `parquet_column` per declared field, a packed
+    name list and a row bitmap. Nothing in it needs Arrow, and a program that builds struct-shaped
+    data without ever touching a file should pay for none. Pinned in its own right rather than
+    through `parquet_columns` (which it imports and which is itself checked) for the reason
+    recorded on that check: coverage inherited from a neighbour's import evaporates the day that
+    import moves, and does so silently.
+
+    The one dependency beyond `parquet_columns` is `parquet_settings_base`, a leaf, for the single
+    warning `%field(name, warn=.true.)` can emit -- so the Arrow-free property is unaffected, and
+    the re-export rule that forces the import is what lets a narrow consumer silence that warning.
+    """
+    return _check_stays_arrow_free(
+        "parquet_struct",
+        "A struct column is in-memory storage and is advertised as an Arrow-free import.")
+
+
 def check_parquet_temporal_stays_arrow_free():
     """`use parquet_temporal` must not reach parquet_bindings.
 
@@ -3431,6 +3450,7 @@ CHECKS = (
     ("parquet_sampling stays Arrow-free", check_parquet_sampling_stays_arrow_free),
     ("parquet_columns stays Arrow-free", check_parquet_columns_stays_arrow_free),
     ("parquet_list stays Arrow-free", check_parquet_list_stays_arrow_free),
+    ("parquet_struct stays Arrow-free", check_parquet_struct_stays_arrow_free),
     ("parquet_temporal stays Arrow-free", check_parquet_temporal_stays_arrow_free),
     ("parquet_version stays Arrow-free", check_parquet_version_stays_arrow_free),
     ("parquet_spatial stays Arrow-free", check_parquet_spatial_stays_arrow_free),

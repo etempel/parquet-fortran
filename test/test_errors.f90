@@ -1533,6 +1533,31 @@ contains
                 test_list_write_protected_row_null_aborts), &
             new_unittest("a protected list column with a null element aborts", &
                 test_list_write_protected_element_null_aborts), &
+            new_unittest("a struct column with no fields aborts", test_struct_init_no_fields_aborts), &
+            new_unittest("a struct column with duplicate field names aborts", &
+                test_struct_init_duplicate_name_aborts), &
+            new_unittest("a struct field name containing a dot aborts", test_struct_init_dotted_name_aborts), &
+            new_unittest("a struct field of an unsupported kind aborts", test_struct_init_bad_kind_aborts), &
+            new_unittest("reading a struct field through the wrong specific aborts", &
+                test_struct_get_wrong_kind_aborts), &
+            new_unittest("%get on an un-narrowed struct handle aborts", test_struct_get_not_narrowed_aborts), &
+            new_unittest("%field on an unknown struct field name aborts", test_struct_field_unknown_aborts), &
+            new_unittest("%field with warn= returns an invalid handle instead", test_struct_field_unknown_warn_ok), &
+            new_unittest("writing an uninitialized struct column aborts", test_struct_write_uninitialized_aborts), &
+            new_unittest("writing a struct column into a non-struct slot aborts", &
+                test_struct_write_type_mismatch_aborts), &
+            new_unittest("col_size on a struct column is rejected", test_struct_col_size_rejected), &
+            new_unittest("qc min/max on a struct column is rejected", test_struct_qc_rejected), &
+            new_unittest("a protected struct column with a null row aborts", &
+                test_struct_protected_row_null_aborts), &
+            new_unittest("a protected struct column with a null field aborts", &
+                test_struct_protected_field_null_aborts), &
+            new_unittest("a protected null-free struct column writes normally", test_struct_protected_ok), &
+            new_unittest("reading a struct with a nested container field aborts", &
+                test_struct_read_nested_field_aborts), &
+            new_unittest("%view past the last struct row aborts", test_struct_view_out_of_range_aborts), &
+            new_unittest("%set_field naming an undeclared field aborts", test_struct_set_field_unknown_aborts), &
+            new_unittest("%set_field writing the wrong type aborts", test_struct_set_field_wrong_kind_aborts), &
             new_unittest("a protected null-free list column writes normally", test_list_write_protected_ok), &
             new_unittest("one over-long list row aborts", test_list_write_row_too_long_aborts), &
             new_unittest("a streamed row group over the element ceiling aborts", &
@@ -1723,6 +1748,156 @@ contains
     !> The other level, with its own message so a caller is not sent looking at rows. At the
     !! Parquet level a null ELEMENT is a Null in the same leaf column, so the weaker reading of
     !! protected_cols: would declare a non-nullable element field for a column that can hold one.
+
+    !> ---- STRUCT column scenarios ----
+    !>
+    !> Every one asserts the LIBRARY's own message, not just the abort. That matters most for the
+    !> two protected guards: with the field-level check removed, Arrow catches the resulting
+    !> non-nullable-field-containing-nulls array at close time and the process still dies (exit
+    !> 134) -- so an exit-status-only assertion cannot tell the guard from its absence. Measured,
+    !> by removing the check and running the scenario. The message is what distinguishes them.
+    subroutine test_struct_init_no_fields_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_init_no_fields", expect_abort=.true., &
+            failure_message="a struct column declaring no fields was expected to abort", &
+            required_stderr="must declare at least one field")
+    end subroutine test_struct_init_no_fields_aborts
+
+    subroutine test_struct_init_duplicate_name_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_init_duplicate_name", expect_abort=.true., &
+            failure_message="a struct column with two identically named fields was expected to abort", &
+            required_stderr="duplicate field name")
+    end subroutine test_struct_init_duplicate_name_aborts
+
+    subroutine test_struct_init_dotted_name_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_init_dotted_name", expect_abort=.true., &
+            failure_message="a struct field name containing '.' was expected to abort", &
+            required_stderr="would collide with the dotted path")
+    end subroutine test_struct_init_dotted_name_aborts
+
+    subroutine test_struct_init_bad_kind_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_init_bad_kind", expect_abort=.true., &
+            failure_message="a struct field of an unsupported kind was expected to abort", &
+            required_stderr="not a supported struct field kind")
+    end subroutine test_struct_init_bad_kind_aborts
+
+    subroutine test_struct_get_wrong_kind_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_get_wrong_kind", expect_abort=.true., &
+            failure_message="reading a struct field through the wrong specific was expected to abort", &
+            required_stderr="it cannot be read into a")
+    end subroutine test_struct_get_wrong_kind_aborts
+
+    subroutine test_struct_get_not_narrowed_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_get_not_narrowed", expect_abort=.true., &
+            failure_message="%get on an un-narrowed struct handle was expected to abort", &
+            required_stderr="narrow it to a field")
+    end subroutine test_struct_get_not_narrowed_aborts
+
+    !> The message lists every declared name -- a misspelled or reordered field is the
+    !! overwhelmingly common cause, so the list is the useful half of the message.
+    subroutine test_struct_field_unknown_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_field_unknown", expect_abort=.true., &
+            failure_message="%field on an unknown struct field name was expected to abort", &
+            required_stderr="declared fields: v")
+    end subroutine test_struct_field_unknown_aborts
+
+    !> The NEGATIVE CONTROL for the guard above: `warn=` must NOT abort, and must hand back an
+    !! invalid handle. Without it, a guard firing unconditionally would pass the abort test.
+    subroutine test_struct_field_unknown_warn_ok(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status(error, "struct_field_unknown_warn_ok", expect_abort=.false., &
+            failure_message="%field(warn=.true.) on an unknown name was expected to warn, not abort")
+    end subroutine test_struct_field_unknown_warn_ok
+
+    subroutine test_struct_write_uninitialized_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_write_uninitialized", expect_abort=.true., &
+            failure_message="writing an uninitialized struct column was expected to abort", &
+            required_stderr="has not been initialized")
+    end subroutine test_struct_write_uninitialized_aborts
+
+    subroutine test_struct_write_type_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_write_type_mismatch", expect_abort=.true., &
+            failure_message="writing a struct column into an int32 schema slot was expected to abort", &
+            required_stderr="expected struct, got int32")
+    end subroutine test_struct_write_type_mismatch_aborts
+
+    subroutine test_struct_col_size_rejected(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_col_size_rejected", expect_abort=.true., &
+            failure_message="col_size: on a struct column was expected to be rejected", &
+            required_stderr="a struct row is one instance and has no width")
+    end subroutine test_struct_col_size_rejected
+
+    subroutine test_struct_qc_rejected(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_qc_rejected", expect_abort=.true., &
+            failure_message="qc: min:/max: on a struct column was expected to be rejected", &
+            required_stderr="not supported for a struct column")
+    end subroutine test_struct_qc_rejected
+
+    subroutine test_struct_protected_row_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_protected_row_null", expect_abort=.true., &
+            failure_message="a protected struct column with a null row was expected to abort", &
+            required_stderr="cannot contain Null values")
+    end subroutine test_struct_protected_row_null_aborts
+
+    !> **The stderr assertion here is load-bearing, not decoration.** With the field-level
+    !! protected check removed, Arrow rejects the resulting array at close time and the process
+    !! still aborts -- so only the message separates the library's own guard from Arrow's
+    !! after-the-fact catch. Naming the FIELD is what the guard buys.
+    subroutine test_struct_protected_field_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_protected_field_null", expect_abort=.true., &
+            failure_message="a protected struct column with a null field was expected to abort", &
+            required_stderr="field 'w' holds a Null")
+    end subroutine test_struct_protected_field_null_aborts
+
+    !> The NEGATIVE CONTROL for the two above.
+    subroutine test_struct_protected_ok(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status(error, "struct_protected_ok", expect_abort=.false., &
+            failure_message="a protected struct column with no Null anywhere was expected to write cleanly")
+    end subroutine test_struct_protected_ok
+
+    !> Nesting is Phase 7. Refusing it cleanly, NAMING THE FIELD rather than only the column, is
+    !! this phase's whole obligation towards it -- so the field name is what is asserted.
+    subroutine test_struct_read_nested_field_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_read_nested_field", expect_abort=.true., &
+            failure_message="reading a struct with a nested container field was expected to abort", &
+            required_stderr="field 'values' of struct column 'struct_of_list'")
+    end subroutine test_struct_read_nested_field_aborts
+
+    subroutine test_struct_view_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_view_out_of_range", expect_abort=.true., &
+            failure_message="%view past the last struct row was expected to abort", &
+            required_stderr="row index is out of range")
+    end subroutine test_struct_view_out_of_range_aborts
+
+    subroutine test_struct_set_field_unknown_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_set_field_unknown", expect_abort=.true., &
+            failure_message="%set_field naming an undeclared field was expected to abort", &
+            required_stderr="no field named 'nope'")
+    end subroutine test_struct_set_field_unknown_aborts
+
+    subroutine test_struct_set_field_wrong_kind_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_set_field_wrong_kind", expect_abort=.true., &
+            failure_message="%set_field writing the wrong type was expected to abort", &
+            required_stderr="value cannot be written into it")
+    end subroutine test_struct_set_field_wrong_kind_aborts
+
     subroutine test_list_write_protected_element_null_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "list_write_protected_element_null", expect_abort=.true., &

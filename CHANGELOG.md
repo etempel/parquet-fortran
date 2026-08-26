@@ -47,6 +47,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value type decides the file's physical shape, so a 2-D array still writes a fixed-width vector
   column and a `parquet_list_column` always writes a `LIST`. **Not yet**: a list column cannot be
   held by a `parquet_table`, or nested inside another container.
+- **`parquet_struct`: `parquet_struct_column`, a `STRUCT` column, plus `parquet_struct_row`, a
+  lightweight handle to one of its rows.** Every row holds one value per declared field and the
+  fields may have different types; the field set is fixed by `%init(names, kinds)` and covers the
+  nine scalar kinds. A row may be a null (absent) struct instance, distinct from a present one
+  whose fields are null, and the two are tracked separately. `%get_field(name, value)` reads a
+  field in one call and `%field(name)` narrows a handle for step-by-step navigation; an unknown
+  field name can warn instead of aborting. Deep copy, move, and a `%gather_rows` rebuild that
+  serves reordering, filtering and duplication. A `parquet_column` can take ownership of one
+  through `%adopt_container`. A new Arrow-free entry module (`use parquet_struct` compiles eleven
+  Fortran files). `parquet_read_column`/`parquet_read_column_chunk` read a `STRUCT` column from a
+  Parquet file straight into one, whole or one row group at a time, taking the field set from the
+  file; `parquet_write_column`/`parquet_write_column_chunk` write one back out, declared in a
+  schema as `struct` — the field layout comes from the column object, never from MAML. Addressing
+  a struct's leaves by their dotted paths (`"person.age"`) is unchanged and still reaches any
+  depth of nesting. **Not yet**: a struct column cannot be held by a `parquet_table`, and a field
+  cannot itself be a struct, list or map.
 
 ### Changed
 

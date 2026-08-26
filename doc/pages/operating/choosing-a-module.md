@@ -3,7 +3,7 @@ title: Choosing a module: what each entry module costs to import
 ---
 
 `use parquet` brings the whole library into scope and is the right answer for most programs. It is
-also the largest: a project that imports it compiles **74** of this library's Fortran files.
+also the largest: a project that imports it compiles **77** of this library's Fortran files.
 
 Every layer underneath is importable on its own, and several of them cost a great deal less. This
 page says what each entry module gives you, what it costs, and — the part that is easy to get wrong
@@ -49,11 +49,12 @@ in every one of them.
 | `parquet_spatial` | 9 | no | `pf_spatial_index`: neighbour and k-nearest search on a uniform grid, including on the sky |
 | `parquet_columns` | 10 | no | `parquet_column`: a typed, null-aware column container |
 | `parquet_list` | 11 | no | `parquet_list_column` / `parquet_list_row`: variable-length list storage |
+| `parquet_struct` | 11 | no | `parquet_struct_column` / `parquet_struct_row`: one value per declared field per row |
 | `parquet_sorting` | 21 | no | the whole sorting API, every element type, including `pf_sort_keys` |
 | `parquet_settings` | 3 | **yes** | the process-global knobs, and `parquet_get_arrow_version` |
-| `parquet_io` | 47 | **yes** | reading and writing Parquet files, and nothing else |
-| `parquet_tables` | 65 | **yes** | the `parquet_table` container |
-| `parquet` | 74 | **yes** | everything above, through one `use` |
+| `parquet_io` | 50 | **yes** | reading and writing Parquet files, and nothing else |
+| `parquet_tables` | 68 | **yes** | the `parquet_table` container |
+| `parquet` | 77 | **yes** | everything above, through one `use` |
 
 Four rows deserve a note.
 
@@ -120,6 +121,7 @@ anything else.
 | `parquet_random` | none — it reads none; the thread rule lives in `parquet_sampling` |
 | `parquet_columns` | none — it reads none |
 | `parquet_list` | none — it reads none |
+| `parquet_struct` | `verbosity` and `message_stream` |
 | `parquet_strings` | `string_threads`, plus `verbosity` and `message_stream` |
 | `parquet_sampling` | `random_threads`, `random_parallel_min_elements` |
 | `parquet_spatial` | `spatial_threads`, `spatial_rebuild_warning`, the four sorting knobs, plus `verbosity` and `message_stream` |

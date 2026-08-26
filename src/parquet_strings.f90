@@ -3583,7 +3583,7 @@ contains
         integer, intent(in), optional :: unit            !! output unit (default output_unit).
         integer(int64), intent(in), optional :: max_rows  !! max elements to print (default 20).
         integer :: u
-        integer(int64) :: i, lim, a, b
+        integer(int64) :: i, lim, a, b, j
         if (parquet_output_is_suppressed()) return
         u = output_unit
         if (present(unit)) u = unit
@@ -3600,9 +3600,16 @@ contains
                 ! the module free of the shape entirely, so `feature_risks.md` Risk-60's rule
                 ! reads as absolute rather than "except where it does not matter", and a static
                 ! check over this file needs no exemption.
+                ! The payload goes out through an implied-do rather than as the section
+                ! `self%data(a:b)`. Identical output list, identical output -- but ifx builds an
+                ! array temporary for a SECTION of an allocatable component used as an I/O list
+                ! item (its descriptor is not known contiguous at the write), and reports one
+                ! `forrtl: warning (406)` per line printed under the debug profile's
+                ! `-check arg_temp_created`. An implied-do passes each byte as a scalar and is
+                ! silent. Measured both ways with ifx 2026.1.1.
                 call elem_bounds(self, i, a, b)
                 if (b >= a) then
-                    write(u, '(2x,i0,a,a,a)') i, ': "', self%data(a:b), '"'
+                    write(u, '(2x,i0,a,a,a)') i, ': "', (self%data(j), j = a, b), '"'
                 else
                     ! A column whose elements are ALL zero-length never allocates `data` at all
                     ! (`ensure_data_cap` skips a zero request), so the slice above would reference

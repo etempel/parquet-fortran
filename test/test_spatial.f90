@@ -38,6 +38,16 @@ module test_spatial
     !> Seed for every fixture here. Fixed so a failure is reproducible.
     integer(int64), parameter :: fixture_seed = 20260825_int64
 
+    !> The `wrap=` a NON-periodic brute-force scan takes: no wrapping on any axis.
+    !>
+    !> A named constant rather than an inline `[0.0_real64, 0.0_real64, 0.0_real64]` at each call
+    !> site: `brute_within` takes `wrap(3)` explicit-shape, and an array CONSTRUCTOR is
+    !> argument-associated to such a dummy through a compiler-created temporary -- which ifx
+    !> reports as `forrtl: warning (406)`, with a traceback, on every call under the debug
+    !> profile's `-check arg_temp_created`. A named array constant has an address and is passed
+    !> directly. The same reasoning applies to any oracle argument added here later.
+    real(real64), parameter :: NO_WRAP(3) = 0.0_real64
+
 contains
 
     !> Registers every test in this suite.
@@ -496,7 +506,7 @@ contains
                 p(2) = pf_random_at(fixture_seed + 7_int64, q, 2_int64)
                 p(3) = pf_random_at(fixture_seed + 7_int64, q, 3_int64)
                 mg = sx%within(p, r, got)
-                call brute_within(x, y, z, p, r, [0.0_real64, 0.0_real64, 0.0_real64], want, mw)
+                call brute_within(x, y, z, p, r, NO_WRAP, want, mw)
                 call check(error, same_rows(got, mg, want, mw), &
                     "ball search must return exactly the rows a brute-force scan finds")
                 if (allocated(error)) return
@@ -672,7 +682,7 @@ contains
             p(2) = pf_random_at(fixture_seed + 3_int64, q, 2_int64)
             p3 = [p(1), p(2), 0.0_real64]
             mg = sx%within(p, 0.12_real64, got)
-            call brute_within(x, y, z, p3, 0.12_real64, [0.0_real64, 0.0_real64, 0.0_real64], want, mw)
+            call brute_within(x, y, z, p3, 0.12_real64, NO_WRAP, want, mw)
             call check(error, same_rows(got, mg, want, mw), &
                 "a 2D index must return exactly the rows a 2D brute-force scan finds")
             if (allocated(error)) return
@@ -1125,6 +1135,7 @@ contains
         integer(int64), allocatable :: got(:), want(:), long(:)
         type(pf_spatial_index) :: sx
         integer(int64) :: n, m, mw, ml
+        real(real64) :: far1(3), far2(3) !! the overlong axis's endpoints; named, see `NO_WRAP`.
 
         n = 3000_int64
         call make_cloud(n, 1.0_real64, .false., x, y, z)
@@ -1138,10 +1149,14 @@ contains
         ! Spanning the cloud, then the same line extended far past it in both directions.
         m = sx%within_cylinder([0.0_real64, 0.5_real64, 0.5_real64], &
                                [1.0_real64, 0.5_real64, 0.5_real64], 0.1_real64, got)
-        ml = sx%within_cylinder([-50.0_real64, 0.5_real64, 0.5_real64], &
-                                [51.0_real64, 0.5_real64, 0.5_real64], 0.1_real64, long)
-        call brute_axis(x, y, z, [-50.0_real64, 0.5_real64, 0.5_real64], &
-                        [51.0_real64, 0.5_real64, 0.5_real64], 0.1_real64, 0.1_real64, .false., want, mw)
+        ! Named locals, not inline constructors: `brute_axis` takes its endpoints
+        ! explicit-shape, so a constructor there costs an argument temporary and an ifx warning
+        ! (406) per call -- see `NO_WRAP`. They also tie the index call and the oracle to one
+        ! pair of endpoints, which is what the comparison below assumes.
+        far1 = [-50.0_real64, 0.5_real64, 0.5_real64]
+        far2 = [51.0_real64, 0.5_real64, 0.5_real64]
+        ml = sx%within_cylinder(far1, far2, 0.1_real64, long)
+        call brute_axis(x, y, z, far1, far2, 0.1_real64, 0.1_real64, .false., want, mw)
         call check(error, m > 0_int64, "the spanning cylinder must find some points")
         if (allocated(error)) return
         call check(error, same_rows(long, ml, want, mw), &
@@ -1158,6 +1173,7 @@ contains
         integer(int64), allocatable :: got(:), want(:)
         type(pf_spatial_index) :: sx
         integer(int64) :: n, m, mw
+        real(real64) :: a1(3), a2(3) !! the oracle's axis endpoints; named, see `NO_WRAP`.
 
         n = 2000_int64
         call make_cloud(n, 1.0_real64, .true., x, y, z)
@@ -1165,8 +1181,10 @@ contains
         allocate (got(n))
         m = sx%within_segment([0.1_real64, 0.2_real64], [0.9_real64, 0.8_real64], 0.12_real64, got)
         ! `z` is all zeros from `make_cloud`, so the 3D oracle answers the 2D question unchanged.
-        call brute_axis(x, y, z, [0.1_real64, 0.2_real64, 0.0_real64], &
-                        [0.9_real64, 0.8_real64, 0.0_real64], 0.12_real64, 0.12_real64, .true., want, mw)
+        ! Named locals rather than inline constructors, see `NO_WRAP`.
+        a1 = [0.1_real64, 0.2_real64, 0.0_real64]
+        a2 = [0.9_real64, 0.8_real64, 0.0_real64]
+        call brute_axis(x, y, z, a1, a2, 0.12_real64, 0.12_real64, .true., want, mw)
         call check(error, mw > 0_int64, "the 2D axis fixture must find some points")
         if (allocated(error)) return
         call check(error, same_rows(got, m, want, mw), &
@@ -2697,7 +2715,7 @@ contains
                 p(2) = pf_random_at(fixture_seed + 29_int64, q, 2_int64)
                 p(3) = pf_random_at(fixture_seed + 29_int64, q, 3_int64)
                 mg = sx%within(p, r, got)
-                call brute_within(x, y, z, p, r, [0.0_real64, 0.0_real64, 0.0_real64], want, mw)
+                call brute_within(x, y, z, p, r, NO_WRAP, want, mw)
                 call check(error, same_rows(got, mg, want, mw), &
                     "the rows a query returns must not depend on the cell size the index was built with")
                 if (allocated(error)) return
@@ -2806,7 +2824,7 @@ contains
         allocate (got(n))
         p = 0.5_real64
         mg = sx%within(p, 0.15_real64, got)
-        call brute_within(x, y, z, p, 0.15_real64, [0.0_real64, 0.0_real64, 0.0_real64], want, mw)
+        call brute_within(x, y, z, p, 0.15_real64, NO_WRAP, want, mw)
         call check(error, same_rows(got, mg, want, mw), &
             "after a rebuild the index must answer about the NEW coordinates")
     end subroutine test_rebuild_detects_change
@@ -2834,7 +2852,7 @@ contains
         allocate (got(n))
         p = 0.5_real64
         mg = sx%within(p, 0.4_real64, got)
-        call brute_within(x, y, z, p, 0.4_real64, [0.0_real64, 0.0_real64, 0.0_real64], want, mw)
+        call brute_within(x, y, z, p, 0.4_real64, NO_WRAP, want, mw)
         call check(error, same_rows(got, mg, want, mw), &
             "a re-tuned index must still answer exactly what a brute-force scan finds")
     end subroutine test_rebuild_for_retunes

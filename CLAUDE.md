@@ -3299,6 +3299,49 @@ Compiler-independent rules. Anything specific to one compiler is in its own sect
   constructor with an explicit field-by-field reset of the type's own components, leaving the
   private-dependent one untouched (handled separately, e.g. by `%clear()`). `table_drop_column`
   (`parquet_tables_mutate.f90`) is the worked example.
+- **Never pass a FUNCTION RESULT or an ARRAY CONSTRUCTOR to an EXPLICIT-SHAPE array dummy — assign
+  it to a named local and pass that.** Both are values with no address of their own, so ifx
+  argument-associates them through a copy and, under `fpm test --profile debug`
+  (`-check arg_temp_created`), prints `forrtl: warning (406): ... an array temporary was created
+  for argument #N` **plus an eleven-line traceback, on every call**. The two forms cost the same;
+  only the named local is silent. This is a noise defect rather than a correctness one, and that is
+  exactly what makes it worth a rule: it scales with how often the procedure is *called*, so a
+  handful of source lines can bury the run. Measured here at **3929 warnings in one `fpm test`**,
+  3917 of them from fourteen call sites — the `pf_spatial_index` binders passing
+  `query_point(self, p, ...)` and `sky_vector(ra, dec)` straight into scan procedures that take the
+  point as `p(3)`, and two test helpers taking `[0.0_real64, 0.0_real64, 0.0_real64]` inline.
+
+  **The dummy's shape is what decides it, and the contrast is sharp.** Measured with ifx 2026.1.1
+  on three-line programs, since guessing here is unreliable:
+
+  | actual | explicit-shape dummy `g(4)` | assumed-shape dummy `g(:)` |
+  |---|---|---|
+  | array constructor `[a, b, c, d]` | **warns** | silent |
+  | function result | **warns** | silent |
+  | named `parameter` array | silent | silent |
+  | named local / dummy | silent | silent |
+
+  So a `parameter` is a complete fix where the value is constant (`NO_WRAP` in
+  `test/test_spatial.f90`), and widening the dummy to assumed-shape is *also* a fix — but a worse
+  one where the explicit shape is documenting a contract, which is why `sweep_search_ok`
+  (`test/test_sorting.f90`) kept `g32(4)` and had its callers build the array instead.
+
+  **Two things this rule does NOT cover.** A genuinely non-contiguous actual — a derived-type
+  component section such as `data(:)%id` — really does need the copy, and the library's public
+  dummies are `contiguous` precisely so that it happens safely; those warnings are the contract
+  working and must not be "fixed" by packing at the call site (see `write_test_data`,
+  `test/test_writing.f90`, which is the only place the suite exercises that path). And an **I/O
+  list item** is a third case with its own answer: a section of an ALLOCATABLE COMPONENT
+  (`self%data(a:b)`) warns because its descriptor is not known contiguous at the write, while the
+  same bytes emitted through an **implied-do** (`(self%data(j), j = a, b)`) are silent — see
+  `col_print` (`src/parquet_strings.f90`).
+
+  **gfortran, flang and nagfor report none of this**, so a violation is invisible outside an ifx
+  debug build and nothing in CI will catch it. The one-command check is
+  `fpm test --profile debug 2>&1 | grep -c 'warning (406)'` under ifx, and its traceback names the
+  calling line directly — the fastest triage is
+  `awk '/warning \(406\)/{w=$0; getline; getline; getline; print w, $0}'`, which pairs each
+  warning with the frame that raised it.
 
 #### flang-specific gotchas
 

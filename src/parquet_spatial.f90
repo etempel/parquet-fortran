@@ -982,9 +982,10 @@ contains
         real(real64), intent(out), optional :: dist(:) !! distance to each reported point.
         real(real64), intent(in), optional :: r_inner !! an inner radius; makes the ball an annulus.
         logical, intent(in), optional :: sorted !! .true. orders the result by increasing distance.
+        real(real64) :: q(3) !! `p` widened to three coordinates; a named local, see `query_point`.
 
-        call spatial_scan(self, query_point(self, p, "within"), r, m, out32=out, dist=dist, &
-            r_inner=r_inner, sorted=sorted)
+        q = query_point(self, p, "within")
+        call spatial_scan(self, q, r, m, out32=out, dist=dist, r_inner=r_inner, sorted=sorted)
     end function bind_within_i32
 
     !> `%within` into an `int64` buffer. See `bind_within_i32` for `r_inner=` and `sorted=`.
@@ -996,9 +997,10 @@ contains
         real(real64), intent(out), optional :: dist(:) !! distance to each reported point.
         real(real64), intent(in), optional :: r_inner !! an inner radius; makes the ball an annulus.
         logical, intent(in), optional :: sorted !! .true. orders the result by increasing distance.
+        real(real64) :: q(3) !! `p` widened to three coordinates; a named local, see `query_point`.
 
-        call spatial_scan(self, query_point(self, p, "within"), r, m, out64=out, dist=dist, &
-            r_inner=r_inner, sorted=sorted)
+        q = query_point(self, p, "within")
+        call spatial_scan(self, q, r, m, out64=out, dist=dist, r_inner=r_inner, sorted=sorted)
     end function bind_within_i64
 
     !> How many points lie within `r` of `p`, without materialising them.
@@ -1009,8 +1011,10 @@ contains
         real(real64), intent(in) :: p(:) !! the query point; 2 or 3 coordinates.
         real(real64), intent(in) :: r !! the search radius.
         real(real64), intent(in), optional :: r_inner !! an inner radius; counts an annulus.
+        real(real64) :: q(3) !! `p` widened to three coordinates; a named local, see `query_point`.
 
-        call spatial_scan(self, query_point(self, p, "count_within"), r, m, r_inner=r_inner)
+        q = query_point(self, p, "count_within")
+        call spatial_scan(self, q, r, m, r_inner=r_inner)
     end function bind_count_within
 
     !> `%within_sky` into an `int32` buffer.
@@ -1133,9 +1137,12 @@ contains
         real(real64), intent(out), optional :: axis_point(:,:) !! `(ndim, m)`: where `dist` was measured from.
         real(real64), intent(out), optional :: axis_t(:) !! where that point sits along the axis, in [0, 1].
         logical, intent(in), optional :: sorted !! .true. orders the result by increasing distance.
+        real(real64) :: q1(3), q2(3) !! the two ends widened to three coordinates; named locals,
+            !! see `query_point`.
 
-        call spatial_scan_axis(self, query_point(self, p1, "within_segment"), &
-            query_point(self, p2, "within_segment"), r, r, .true., "within_segment", m, &
+        q1 = query_point(self, p1, "within_segment")
+        q2 = query_point(self, p2, "within_segment")
+        call spatial_scan_axis(self, q1, q2, r, r, .true., "within_segment", m, &
             out32=out, dist=dist, axis_point=axis_point, axis_t=axis_t, sorted=sorted)
     end function bind_seg_i32
 
@@ -1150,9 +1157,12 @@ contains
         real(real64), intent(out), optional :: axis_point(:,:) !! `(ndim, m)`: where `dist` was measured from.
         real(real64), intent(out), optional :: axis_t(:) !! where that point sits along the axis, in [0, 1].
         logical, intent(in), optional :: sorted !! .true. orders the result by increasing distance.
+        real(real64) :: q1(3), q2(3) !! the two ends widened to three coordinates; named locals,
+            !! see `query_point`.
 
-        call spatial_scan_axis(self, query_point(self, p1, "within_segment"), &
-            query_point(self, p2, "within_segment"), r, r, .true., "within_segment", m, &
+        q1 = query_point(self, p1, "within_segment")
+        q2 = query_point(self, p2, "within_segment")
+        call spatial_scan_axis(self, q1, q2, r, r, .true., "within_segment", m, &
             out64=out, dist=dist, axis_point=axis_point, axis_t=axis_t, sorted=sorted)
     end function bind_seg_i64
 
@@ -1176,9 +1186,12 @@ contains
         real(real64), intent(out), optional :: axis_point(:,:) !! `(ndim, m)`: the foot of that distance.
         real(real64), intent(out), optional :: axis_t(:) !! where that foot sits along the axis, in [0, 1].
         logical, intent(in), optional :: sorted !! .true. orders the result by increasing distance.
+        real(real64) :: q1(3), q2(3) !! the two ends widened to three coordinates; named locals,
+            !! see `query_point`.
 
-        call spatial_scan_axis(self, query_point(self, p1, "within_cylinder"), &
-            query_point(self, p2, "within_cylinder"), r, r, .false., "within_cylinder", m, &
+        q1 = query_point(self, p1, "within_cylinder")
+        q2 = query_point(self, p2, "within_cylinder")
+        call spatial_scan_axis(self, q1, q2, r, r, .false., "within_cylinder", m, &
             out32=out, dist=dist, axis_point=axis_point, axis_t=axis_t, sorted=sorted)
     end function bind_cyl_i32
 
@@ -1193,9 +1206,12 @@ contains
         real(real64), intent(out), optional :: axis_point(:,:) !! `(ndim, m)`: the foot of that distance.
         real(real64), intent(out), optional :: axis_t(:) !! where that foot sits along the axis, in [0, 1].
         logical, intent(in), optional :: sorted !! .true. orders the result by increasing distance.
+        real(real64) :: q1(3), q2(3) !! the two ends widened to three coordinates; named locals,
+            !! see `query_point`.
 
-        call spatial_scan_axis(self, query_point(self, p1, "within_cylinder"), &
-            query_point(self, p2, "within_cylinder"), r, r, .false., "within_cylinder", m, &
+        q1 = query_point(self, p1, "within_cylinder")
+        q2 = query_point(self, p2, "within_cylinder")
+        call spatial_scan_axis(self, q1, q2, r, r, .false., "within_cylinder", m, &
             out64=out, dist=dist, axis_point=axis_point, axis_t=axis_t, sorted=sorted)
     end function bind_cyl_i64
 
@@ -1224,9 +1240,12 @@ contains
         real(real64), intent(out), optional :: axis_point(:,:) !! `(ndim, m)`: the foot of that distance.
         real(real64), intent(out), optional :: axis_t(:) !! where that foot sits along the axis, in [0, 1].
         logical, intent(in), optional :: sorted !! .true. orders the result by increasing distance.
+        real(real64) :: q1(3), q2(3) !! the two ends widened to three coordinates; named locals,
+            !! see `query_point`.
 
-        call spatial_scan_axis(self, query_point(self, p1, "within_cone"), &
-            query_point(self, p2, "within_cone"), r1, r2, .false., "within_cone", m, &
+        q1 = query_point(self, p1, "within_cone")
+        q2 = query_point(self, p2, "within_cone")
+        call spatial_scan_axis(self, q1, q2, r1, r2, .false., "within_cone", m, &
             out32=out, dist=dist, axis_point=axis_point, axis_t=axis_t, sorted=sorted)
     end function bind_cone_i32
 
@@ -1242,9 +1261,12 @@ contains
         real(real64), intent(out), optional :: axis_point(:,:) !! `(ndim, m)`: the foot of that distance.
         real(real64), intent(out), optional :: axis_t(:) !! where that foot sits along the axis, in [0, 1].
         logical, intent(in), optional :: sorted !! .true. orders the result by increasing distance.
+        real(real64) :: q1(3), q2(3) !! the two ends widened to three coordinates; named locals,
+            !! see `query_point`.
 
-        call spatial_scan_axis(self, query_point(self, p1, "within_cone"), &
-            query_point(self, p2, "within_cone"), r1, r2, .false., "within_cone", m, &
+        q1 = query_point(self, p1, "within_cone")
+        q2 = query_point(self, p2, "within_cone")
+        call spatial_scan_axis(self, q1, q2, r1, r2, .false., "within_cone", m, &
             out64=out, dist=dist, axis_point=axis_point, axis_t=axis_t, sorted=sorted)
     end function bind_cone_i64
 
@@ -1529,9 +1551,10 @@ contains
         integer(int32), intent(in) :: k !! how many neighbours to report; must be >= 1.
         integer(int32), intent(out) :: out(:) !! caller's row indices, nearest first.
         real(real64), intent(out), optional :: dist(:) !! distance to each reported point.
+        real(real64) :: q(3) !! `p` widened to three coordinates; a named local, see `query_point`.
 
-        call near_scan(self, query_point(self, p, "nearest"), int(k, kind=int64), m, &
-            out32=out, dist=dist)
+        q = query_point(self, p, "nearest")
+        call near_scan(self, q, int(k, kind=int64), m, out32=out, dist=dist)
     end function bind_near_k32_i32
 
     !> `%nearest` with an `int32` k into an `int64` buffer. See `bind_near_k32_i32`.
@@ -1541,9 +1564,10 @@ contains
         integer(int32), intent(in) :: k !! how many neighbours to report; must be >= 1.
         integer(int64), intent(out) :: out(:) !! caller's row indices, nearest first.
         real(real64), intent(out), optional :: dist(:) !! distance to each reported point.
+        real(real64) :: q(3) !! `p` widened to three coordinates; a named local, see `query_point`.
 
-        call near_scan(self, query_point(self, p, "nearest"), int(k, kind=int64), m, &
-            out64=out, dist=dist)
+        q = query_point(self, p, "nearest")
+        call near_scan(self, q, int(k, kind=int64), m, out64=out, dist=dist)
     end function bind_near_k32_i64
 
     !> `%nearest` with an `int64` k into an `int32` buffer. See `bind_near_k32_i32`.
@@ -1553,8 +1577,10 @@ contains
         integer(int64), intent(in) :: k !! how many neighbours to report; must be >= 1.
         integer(int32), intent(out) :: out(:) !! caller's row indices, nearest first.
         real(real64), intent(out), optional :: dist(:) !! distance to each reported point.
+        real(real64) :: q(3) !! `p` widened to three coordinates; a named local, see `query_point`.
 
-        call near_scan(self, query_point(self, p, "nearest"), k, m, out32=out, dist=dist)
+        q = query_point(self, p, "nearest")
+        call near_scan(self, q, k, m, out32=out, dist=dist)
     end function bind_near_k64_i32
 
     !> `%nearest` with an `int64` k into an `int64` buffer. See `bind_near_k32_i32`.
@@ -1564,8 +1590,10 @@ contains
         integer(int64), intent(in) :: k !! how many neighbours to report; must be >= 1.
         integer(int64), intent(out) :: out(:) !! caller's row indices, nearest first.
         real(real64), intent(out), optional :: dist(:) !! distance to each reported point.
+        real(real64) :: q(3) !! `p` widened to three coordinates; a named local, see `query_point`.
 
-        call near_scan(self, query_point(self, p, "nearest"), k, m, out64=out, dist=dist)
+        q = query_point(self, p, "nearest")
+        call near_scan(self, q, k, m, out64=out, dist=dist)
     end function bind_near_k64_i64
 
     !> The shared body of every `%nearest` form: guard, expanding ball, copy out.
@@ -1668,13 +1696,15 @@ contains
         real(real64), intent(out), optional :: dist_deg(:) !! angular separation, in degrees.
         integer(int64) :: t, nfill
         real(real64) :: half
+        real(real64) :: v(3) !! the query direction as a unit vector; a named local, see `query_point`.
 
         m = 0_int64
         if (.not. self%built_ok) error stop &
             "pf_spatial_index%nearest_sky: this index has not been built; call %build_sky first"
         if (self%metric_id /= PF_METRIC_SKY) error stop &
             "pf_spatial_index%nearest_sky: this index was built with %build, not %build_sky; use %nearest"
-        call near_scan(self, sky_vector(ra, dec), k, m, out32=out32, out64=out64, dist=dist_deg)
+        v = sky_vector(ra, dec)
+        call near_scan(self, v, k, m, out32=out32, out64=out64, dist=dist_deg)
         if (.not. present(dist_deg)) return
         ! The same rule as `sky_scan`: only the entries `near_scan` filled, which is the true count
         ! capped by the shortest buffer of the three, `out` included.
@@ -1813,6 +1843,15 @@ contains
 
     !> Widens a caller's 2- or 3-element query point to the internal 3-vector, checking it against
     !> the rank the index was built with.
+    !>
+    !> **Every caller assigns the result to a named local and passes THAT** -- never
+    !> `call spatial_scan(self, query_point(self, p, ...), ...)` inline. The scan procedures take
+    !> the point as an explicit-shape `p(3)`, so an inline function result is argument-associated
+    !> through a compiler-created array temporary. The two forms cost the same, but only the named
+    !> local is silent: under ifx's debug profile (`-check arg_temp_created`) the inline form emits
+    !> `forrtl: warning (406)` with a full traceback on EVERY call, which at one warning per query
+    !> buries the test output it is printed into. `sky_vector`'s result is passed the same way, for
+    !> the same reason.
     function query_point(self, p, what) result(q)
         class(pf_spatial_index), intent(in) :: self !! the index being queried.
         real(real64), intent(in) :: p(:) !! the caller's query point.

@@ -4645,6 +4645,14 @@ contains
 
         call parquet_open_writer(writer, filename, schema, write_maml=write_maml)
 
+        ! The `data(:)%<component>` arguments below are DELIBERATE and must not be packed into
+        ! contiguous locals to quieten a compiler: a derived-type component section is the natural
+        ! way to write a column out of an array of structures, so this is the one place the suite
+        ! exercises a strided actual argument reaching the writer at all. The library's public
+        ! dummies are `contiguous`, so each such call is argument-associated through a copy -- which
+        ! ifx reports as `forrtl: warning (406)` under the debug profile's `-check arg_temp_created`.
+        ! Those six warnings are the copy the contract promises, not a defect; every other 406 in
+        ! this suite was avoidable and has been removed.
         call parquet_write_column(writer, schema%cinfo%col(8)%name, arr_col)
         call parquet_write_column(writer, "id0", data(:)%id)
         call parquet_write_column(writer, schema%cinfo%col(12)%name, data(:)%flag)

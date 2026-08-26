@@ -3164,21 +3164,27 @@ contains
         integer, parameter :: WANT(4) = [2, 4, 2, 3]
         !> The same four for the logical fixture, searching for `.true.`.
         integer, parameter :: WANTB(4) = [4, 7, 4, 6]
-        integer(int32) :: lo32, up32, fi32, la32
-        integer(int64) :: lo64, up64, fi64, la64
+        !> Lower bound, upper bound, and the two ends of the equal range -- held as one array of
+        !> four rather than four scalars so the call below needs no `[lo32, up32, ...]`
+        !> constructor. `sweep_search_ok` takes them explicit-shape, and an array CONSTRUCTOR
+        !> passed to such a dummy is argument-associated through a compiler-created temporary,
+        !> which ifx reports as `forrtl: warning (406)` -- with a traceback, on every one of these
+        !> twenty calls -- under the debug profile's `-check arg_temp_created`.
+        integer(int32) :: g32(4)
+        integer(int64) :: g64(4)
         integer :: k
 
         block
             integer(int32) :: v(SWN), t
             v = 10_int32 * int(SWSRT, int32)
             t = 20_int32
-            call pf_lower_bound(v, t, lo32)
-            call pf_lower_bound(v, t, lo64)
-            call pf_upper_bound(v, t, up32)
-            call pf_upper_bound(v, t, up64)
-            call pf_equal_range(v, t, fi32, la32)
-            call pf_equal_range(v, t, fi64, la64)
-            call check(error, sweep_search_ok([lo32, up32, fi32, la32], [lo64, up64, fi64, la64], WANT), &
+            call pf_lower_bound(v, t, g32(1))
+            call pf_lower_bound(v, t, g64(1))
+            call pf_upper_bound(v, t, g32(2))
+            call pf_upper_bound(v, t, g64(2))
+            call pf_equal_range(v, t, g32(3), g32(4))
+            call pf_equal_range(v, t, g64(3), g64(4))
+            call check(error, sweep_search_ok(g32, g64, WANT), &
                 "int32 searches must bracket the duplicated class in both index kinds")
         end block
         if (allocated(error)) return
@@ -3186,13 +3192,13 @@ contains
             integer(int64) :: v(SWN), t
             v = 100_int64 * int(SWSRT, int64)
             t = 200_int64
-            call pf_lower_bound(v, t, lo32)
-            call pf_lower_bound(v, t, lo64)
-            call pf_upper_bound(v, t, up32)
-            call pf_upper_bound(v, t, up64)
-            call pf_equal_range(v, t, fi32, la32)
-            call pf_equal_range(v, t, fi64, la64)
-            call check(error, sweep_search_ok([lo32, up32, fi32, la32], [lo64, up64, fi64, la64], WANT), &
+            call pf_lower_bound(v, t, g32(1))
+            call pf_lower_bound(v, t, g64(1))
+            call pf_upper_bound(v, t, g32(2))
+            call pf_upper_bound(v, t, g64(2))
+            call pf_equal_range(v, t, g32(3), g32(4))
+            call pf_equal_range(v, t, g64(3), g64(4))
+            call check(error, sweep_search_ok(g32, g64, WANT), &
                 "int64 searches must bracket the duplicated class in both index kinds")
         end block
         if (allocated(error)) return
@@ -3200,13 +3206,13 @@ contains
             real(real32) :: v(SWN), t
             v = real(SWSRT, real32) + 0.5_real32
             t = 2.5_real32
-            call pf_lower_bound(v, t, lo32)
-            call pf_lower_bound(v, t, lo64)
-            call pf_upper_bound(v, t, up32)
-            call pf_upper_bound(v, t, up64)
-            call pf_equal_range(v, t, fi32, la32)
-            call pf_equal_range(v, t, fi64, la64)
-            call check(error, sweep_search_ok([lo32, up32, fi32, la32], [lo64, up64, fi64, la64], WANT), &
+            call pf_lower_bound(v, t, g32(1))
+            call pf_lower_bound(v, t, g64(1))
+            call pf_upper_bound(v, t, g32(2))
+            call pf_upper_bound(v, t, g64(2))
+            call pf_equal_range(v, t, g32(3), g32(4))
+            call pf_equal_range(v, t, g64(3), g64(4))
+            call check(error, sweep_search_ok(g32, g64, WANT), &
                 "real32 searches must bracket the duplicated class in both index kinds")
         end block
         if (allocated(error)) return
@@ -3215,32 +3221,32 @@ contains
             logical :: mask(SWN)
             v = real(SWSRT, real64) + 0.25_real64
             t = 2.25_real64
-            call pf_lower_bound(v, t, lo32)
-            call pf_lower_bound(v, t, lo64)
-            call pf_upper_bound(v, t, up32)
-            call pf_upper_bound(v, t, up64)
-            call pf_equal_range(v, t, fi32, la32)
-            call pf_equal_range(v, t, fi64, la64)
-            call check(error, sweep_search_ok([lo32, up32, fi32, la32], [lo64, up64, fi64, la64], WANT), &
+            call pf_lower_bound(v, t, g32(1))
+            call pf_lower_bound(v, t, g64(1))
+            call pf_upper_bound(v, t, g32(2))
+            call pf_upper_bound(v, t, g64(2))
+            call pf_equal_range(v, t, g32(3), g32(4))
+            call pf_equal_range(v, t, g64(3), g64(4))
+            call check(error, sweep_search_ok(g32, g64, WANT), &
                 "real64 searches must bracket the duplicated class in both index kinds")
             if (allocated(error)) return
             ! A null sorts last, so it is outside the searched region entirely: marking the final
             ! element null must not move any of the four answers.
             mask = .true.
             mask(SWN) = .false.
-            call pf_equal_range(v, t, fi32, la32, is_valid=mask, assume_sorted=.true.)
-            call check(error, fi32 == 2_int32 .and. la32 == 3_int32, &
+            call pf_equal_range(v, t, g32(3), g32(4), is_valid=mask, assume_sorted=.true.)
+            call check(error, g32(3) == 2_int32 .and. g32(4) == 3_int32, &
                 "a trailing null must leave a range that ends before it untouched")
         end block
         if (allocated(error)) return
         block
-            call pf_lower_bound(SWSRTB, .true., lo32)
-            call pf_lower_bound(SWSRTB, .true., lo64)
-            call pf_upper_bound(SWSRTB, .true., up32)
-            call pf_upper_bound(SWSRTB, .true., up64)
-            call pf_equal_range(SWSRTB, .true., fi32, la32)
-            call pf_equal_range(SWSRTB, .true., fi64, la64)
-            call check(error, sweep_search_ok([lo32, up32, fi32, la32], [lo64, up64, fi64, la64], WANTB), &
+            call pf_lower_bound(SWSRTB, .true., g32(1))
+            call pf_lower_bound(SWSRTB, .true., g64(1))
+            call pf_upper_bound(SWSRTB, .true., g32(2))
+            call pf_upper_bound(SWSRTB, .true., g64(2))
+            call pf_equal_range(SWSRTB, .true., g32(3), g32(4))
+            call pf_equal_range(SWSRTB, .true., g64(3), g64(4))
+            call check(error, sweep_search_ok(g32, g64, WANTB), &
                 "logical searches must bracket the .true. run in both index kinds")
         end block
         if (allocated(error)) return
@@ -3249,13 +3255,13 @@ contains
             do k = 1, SWN
                 v(k) = swchr(SWSRT(k))
             end do
-            call pf_lower_bound(v, swchr(2), lo32)
-            call pf_lower_bound(v, swchr(2), lo64)
-            call pf_upper_bound(v, swchr(2), up32)
-            call pf_upper_bound(v, swchr(2), up64)
-            call pf_equal_range(v, swchr(2), fi32, la32)
-            call pf_equal_range(v, swchr(2), fi64, la64)
-            call check(error, sweep_search_ok([lo32, up32, fi32, la32], [lo64, up64, fi64, la64], WANT), &
+            call pf_lower_bound(v, swchr(2), g32(1))
+            call pf_lower_bound(v, swchr(2), g64(1))
+            call pf_upper_bound(v, swchr(2), g32(2))
+            call pf_upper_bound(v, swchr(2), g64(2))
+            call pf_equal_range(v, swchr(2), g32(3), g32(4))
+            call pf_equal_range(v, swchr(2), g64(3), g64(4))
+            call check(error, sweep_search_ok(g32, g64, WANT), &
                 "character searches must bracket the duplicated class in both index kinds")
         end block
         if (allocated(error)) return
@@ -3263,13 +3269,13 @@ contains
             type(parquet_date) :: v(SWN), t
             call v%set_raw(1000_int32 + int(SWSRT, int32))
             call t%set_raw(1002_int32)
-            call pf_lower_bound(v, t, lo32)
-            call pf_lower_bound(v, t, lo64)
-            call pf_upper_bound(v, t, up32)
-            call pf_upper_bound(v, t, up64)
-            call pf_equal_range(v, t, fi32, la32)
-            call pf_equal_range(v, t, fi64, la64)
-            call check(error, sweep_search_ok([lo32, up32, fi32, la32], [lo64, up64, fi64, la64], WANT), &
+            call pf_lower_bound(v, t, g32(1))
+            call pf_lower_bound(v, t, g64(1))
+            call pf_upper_bound(v, t, g32(2))
+            call pf_upper_bound(v, t, g64(2))
+            call pf_equal_range(v, t, g32(3), g32(4))
+            call pf_equal_range(v, t, g64(3), g64(4))
+            call check(error, sweep_search_ok(g32, g64, WANT), &
                 "parquet_date searches must bracket the duplicated class in both index kinds")
         end block
         if (allocated(error)) return
@@ -3277,13 +3283,13 @@ contains
             type(parquet_time) :: v(SWN), t
             call v%set_raw(2000_int64 + int(SWSRT, int64))
             call t%set_raw(2002_int64)
-            call pf_lower_bound(v, t, lo32)
-            call pf_lower_bound(v, t, lo64)
-            call pf_upper_bound(v, t, up32)
-            call pf_upper_bound(v, t, up64)
-            call pf_equal_range(v, t, fi32, la32)
-            call pf_equal_range(v, t, fi64, la64)
-            call check(error, sweep_search_ok([lo32, up32, fi32, la32], [lo64, up64, fi64, la64], WANT), &
+            call pf_lower_bound(v, t, g32(1))
+            call pf_lower_bound(v, t, g64(1))
+            call pf_upper_bound(v, t, g32(2))
+            call pf_upper_bound(v, t, g64(2))
+            call pf_equal_range(v, t, g32(3), g32(4))
+            call pf_equal_range(v, t, g64(3), g64(4))
+            call check(error, sweep_search_ok(g32, g64, WANT), &
                 "parquet_time searches must bracket the duplicated class in both index kinds")
         end block
         if (allocated(error)) return
@@ -3291,13 +3297,13 @@ contains
             type(parquet_timestamp) :: v(SWN), t
             call v%set_raw(3000_int64 + int(SWSRT, int64), 7_int32)
             call t%set_raw(3002_int64, 7_int32)
-            call pf_lower_bound(v, t, lo32)
-            call pf_lower_bound(v, t, lo64)
-            call pf_upper_bound(v, t, up32)
-            call pf_upper_bound(v, t, up64)
-            call pf_equal_range(v, t, fi32, la32)
-            call pf_equal_range(v, t, fi64, la64)
-            call check(error, sweep_search_ok([lo32, up32, fi32, la32], [lo64, up64, fi64, la64], WANT), &
+            call pf_lower_bound(v, t, g32(1))
+            call pf_lower_bound(v, t, g64(1))
+            call pf_upper_bound(v, t, g32(2))
+            call pf_upper_bound(v, t, g64(2))
+            call pf_equal_range(v, t, g32(3), g32(4))
+            call pf_equal_range(v, t, g64(3), g64(4))
+            call check(error, sweep_search_ok(g32, g64, WANT), &
                 "parquet_timestamp searches must bracket the duplicated class in both index kinds")
         end block
         if (allocated(error)) return
@@ -3306,13 +3312,13 @@ contains
             do k = 1, SWN
                 call sc%append_string(swchr(SWSRT(k)))
             end do
-            call pf_lower_bound(sc, swchr(2), lo32)
-            call pf_lower_bound(sc, swchr(2), lo64)
-            call pf_upper_bound(sc, swchr(2), up32)
-            call pf_upper_bound(sc, swchr(2), up64)
-            call pf_equal_range(sc, swchr(2), fi32, la32)
-            call pf_equal_range(sc, swchr(2), fi64, la64)
-            call check(error, sweep_search_ok([lo32, up32, fi32, la32], [lo64, up64, fi64, la64], WANT), &
+            call pf_lower_bound(sc, swchr(2), g32(1))
+            call pf_lower_bound(sc, swchr(2), g64(1))
+            call pf_upper_bound(sc, swchr(2), g32(2))
+            call pf_upper_bound(sc, swchr(2), g64(2))
+            call pf_equal_range(sc, swchr(2), g32(3), g32(4))
+            call pf_equal_range(sc, swchr(2), g64(3), g64(4))
+            call check(error, sweep_search_ok(g32, g64, WANT), &
                 "parquet_string_column searches must bracket the duplicated class in both index kinds")
             if (allocated(error)) return
             block
@@ -3322,11 +3328,11 @@ contains
                 do k = SWN, 1, -1
                     call rev%append_string(swchr(SWSRT(k)))
                 end do
-                call pf_lower_bound(rev, swchr(2), lo32, descending=.true.)
-                call pf_upper_bound(rev, swchr(2), up32, descending=.true.)
-                call pf_equal_range(rev, swchr(2), fi32, la32, descending=.true.)
-                call check(error, lo32 == 4_int32 .and. up32 == 6_int32 .and. fi32 == 4_int32 .and. &
-                    la32 == 5_int32, &
+                call pf_lower_bound(rev, swchr(2), g32(1), descending=.true.)
+                call pf_upper_bound(rev, swchr(2), g32(2), descending=.true.)
+                call pf_equal_range(rev, swchr(2), g32(3), g32(4), descending=.true.)
+                call check(error, g32(1) == 4_int32 .and. g32(2) == 6_int32 .and. g32(3) == 4_int32 .and. &
+                    g32(4) == 5_int32, &
                     "a descending parquet_string_column search must bracket the reversed run")
             end block
         end block

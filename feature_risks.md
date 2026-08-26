@@ -219,6 +219,7 @@ something a reader is expected to have.
 | [Risk-151](#risk-151--axis_point-taken-as-the-infinite-line-projection-disagrees-with-dist-and-both-look-right) | `axis_point` taken as the infinite-line projection disagrees with `dist`, and both look right | 4 — covered |
 | [Risk-152](#risk-152--two-tables-over-one-file-disagree-about-a-plain-list-columns-kind-and-both-answer-quietly) | Two tables over one file disagree about a plain `LIST` column's KIND, and both answer quietly | 1 — new |
 | [Risk-153](#risk-153--a-container-columns-row-nullness-has-two-possible-homes-and-writing-to-the-wrong-one-is-silent) | A container column's row nullness has TWO possible homes, and writing to the wrong one is silent | 1 — new |
+| [Risk-154](#risk-154--a-sliced-list-array-carries-three-independent-offsets-and-dropping-any-one-is-a-plausible-wrong-answer) | A sliced list array carries THREE independent offsets, and dropping any one is a plausible wrong answer | 1 — new |
 
 ---
 
@@ -264,6 +265,15 @@ column and the thing callers dispatch on.
 *directly*, without going through `table_touch`, so a caller can provoke the wrong answer without
 ever reading a value. And the measurement is memoised on the descriptor (`width_pending` is cleared),
 so the first range a column is asked about wins for that table's lifetime.
+
+**Its scope widened when a `LIST` leaf became addressable through a dotted struct path.** Such a
+column was previously classified `unsupported` and never reached the width machinery at all; it is
+now classified exactly like a top-level one, so a ragged `struct.field` inherits this entry
+unchanged. That is the right outcome — a dotted-path-specific rule here would have been a second
+place for the two to disagree — but it means the fix (T5's `list_columns=`) has to cover dotted
+names too. `test_struct_nested_ragged_matches_top_level` (`test/test_list_read.f90`) pins the
+equivalence, asserting that a ragged struct-nested list resolves to the same kind and width a ragged
+top-level one does.
 
 **What must NOT be the fix.** Making `table_resolve_width` abort on a ragged range would break files
 that read correctly today — a table over a *uniform* file is unaffected, and a slice over a
@@ -322,6 +332,63 @@ whether those should mean "the row" or abort is open until a table can hold a co
 (`test/test_list.f90`), which assert through `parquet_column` rather than through
 `parquet_list_column` — that is the point, since asking the container directly cannot see the
 disagreement. The element forms are untested because nothing can reach them yet.
+
+### Risk-154 — A sliced list array carries THREE independent offsets, and dropping any one is a plausible wrong answer
+
+Reading a `LIST` column hands `describe_list_array` (`src/parquet_wrapper.cpp`) an Arrow array that
+may be a **slice** of a larger one, and a list array carries three offsets that a slice moves
+independently. Arrow rebases none of them:
+
+| offset | what it aligns | consequence of ignoring it |
+|---|---|---|
+| the list array's own `data()->offset` | the **row** validity bitmap | the wrong rows read as null |
+| `raw_value_offsets()[0]` | where this slice's elements start in the child | every row's values shifted by a constant |
+| the **child** array's `data()->offset` | the **element** validity bitmap | the wrong elements read as null |
+
+**Every one of the three failures is a plausible wrong answer, not a crash.** The row count is
+right, every row's length is right, the values are in range, the offsets stay monotonic, and
+`%validate()` passes. Nothing raises.
+
+**Only ONE of the three is handled explicitly, and that is the design rather than an omission.**
+`base = value_offset(0)` is written out; the other two are absorbed by Arrow's own accessors, since
+`array->IsValid(i)` accounts for the parent's offset and slicing the child gives it an offset that
+`child->IsValid(k)` accounts for in turn. So an edit to `describe_list_array` cannot drop the row or
+element alignment at all — **only replacing an accessor with a raw buffer walk can**, which is
+therefore the change to refuse. The string read path is the cautionary case: it hands Arrow's own
+buffers across the `bind(C)` boundary and had to grow a `validity_offset` argument for exactly this,
+which is one more thing a future caller can drop.
+
+**The explicit rebase is DEFENSIVE on today's read paths, measured rather than assumed.** A probe
+against Arrow 25 found that `arrow::compute::Filter` and `Take` — what a filtered, sampled or sorted
+read goes through — return **compact** arrays with all three offsets 0, *not* slices; and nothing on
+the read side calls `Slice()` on a column array (the only such call in `src/parquet_wrapper.cpp` is
+on the writer side). The single route by which a sliced list array could arrive is
+`unwrap_struct_path`'s `StructArray::field()` on an already-sliced struct, which
+`extract_string_buffers`' own comment records as never observed in any fixture.
+
+**Consequence, and it is the reason this entry exists: a mutation setting `base` to 0 SURVIVES the
+whole suite.** That was run and confirmed. It is a fact about what is reachable, not a coverage gap
+to close with an unbuildable fixture — so do not read a green suite as evidence that this
+arithmetic is right.
+
+**How it was verified instead.** Out of process, by replicating `describe_list_array`'s logic
+exactly against a genuinely sliced array (`Slice(4, 4)` of an 8-row ragged list carrying a null row
+and a null element): `base` came out 10, and all four rows' lengths, values, row nullness and
+element nullness were correct. **Re-run a check of that shape rather than the suite** if this
+arithmetic is ever changed.
+
+A fourth offset is not currently possible but would be if a payload ever became a container
+(`list<list<...>>`, Phase 7): the inner list's own two offsets would join these three.
+
+**Test.** What the suite *does* cover is everything downstream of the rebase, and those mutations
+are all caught: shifting the offsets by one, having the chunked form ignore its row group, and
+collapsing either null level were each run and each failed the `list_read` suite (1, 1, 3 and 3
+tests respectively). `test_filtered_read`, `test_sorted_read` and `test_sampled_read`
+(`test/test_list_read.f90`) assert per-row lengths *and* per-element values against an untransformed
+control, which is what makes a constant shift visible; `test_sampled_read` additionally checks that
+every element of a row shares that row's own value prefix, catching a row assembled from two source
+rows' elements.
+
 
 ## 2. Risks with a proposed testing scenario
 

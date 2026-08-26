@@ -1606,6 +1606,19 @@ contains
         call check_column_exists(reader, name, "parquet_get_column_type")
         call resolve_column_type(reader, name, type_name, recognized)
     end procedure parquet_get_column_type
+    module procedure parquet_get_column_shape
+        character(len=16) :: buf
+
+        call check_reader_open(reader, "parquet_get_column_shape")
+        ! Same contract as parquet_get_column_type: a name that does not exist is a caller mistake
+        ! and aborts, but a SHAPE this library cannot read is an ANSWER ("map", "struct",
+        ! "unknown") rather than an error, so there is nothing for this call to report but the
+        ! token itself.
+        call check_column_exists(reader, name, "parquet_get_column_shape")
+        call parquet_reader_get_column_shape_name(reader%handle, trim(name)//char(0), buf, &
+            int(len(buf), kind=c_long_long))
+        shape = trim(buf)
+    end procedure parquet_get_column_shape
     module procedure parquet_get_column_nullable
         call check_reader_open(reader, "parquet_get_column_nullable")
         ! Same rule as parquet_get_column_type: a missing name is a caller mistake and aborts,

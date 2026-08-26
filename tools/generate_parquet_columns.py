@@ -471,6 +471,7 @@ module parquet_columns
         parquet_string_column_character_capacity, parquet_string_column_character_size, &
         parquet_string_column_copy_to, parquet_string_column_delete_by_mask, parquet_string_column_gather, &
         parquet_string_column_get, parquet_string_column_has_validity, parquet_string_column_is_null, &
+        parquet_string_column_move_from, &
         parquet_string_column_null_count, parquet_string_column_reindex, parquet_string_column_reindex_trusted, &
         parquet_string_column_reserve, parquet_string_column_reserve_validity, parquet_string_column_set, &
         parquet_string_column_set_null, parquet_string_column_shrink_to_fit, parquet_string_column_size
@@ -717,6 +718,7 @@ module parquet_columns
         procedure :: deep_copy                         !! Independent copy of values, validity and unit.
         procedure :: move_from                         !! Take over another column's storage, leaving it empty.
         procedure :: adopt_container                   !! Take ownership of a container column (PK_LIST/MAP/STRUCT).
+        procedure :: adopt_string_column                !! Take ownership of a parquet_string_column (PK_STRING).
         ! --- queries ---
         procedure :: kindof                            !! The active PK_* discriminator.
         procedure :: length                            !! Number of rows stored.
@@ -869,6 +871,24 @@ module parquet_columns
             class(parquet_column), intent(inout) :: self                     !! the column.
             class(parquet_container_column), allocatable, intent(inout) :: container !! moved in; left empty.
         end subroutine adopt_container
+        !> Takes ownership of a `parquet_string_column`, making this a `PK_STRING` column. The
+        !! eighteenth sibling of the sixteen array `adopt_*` specifics and of `adopt_container`,
+        !! and the only one a string kind has.
+        !!
+        !! It exists because a `PK_STRING` column's storage is a packed variable-length store
+        !! rather than an array, so there is no array for the `adopt` generic to take -- and
+        !! without this, a caller who has built such a store (from a file's own buffers, say) had
+        !! no way to hand it over that also settled the column's row count. Reaching the store
+        !! through `parquet_column_string_column` and appending to it directly does NOT: the
+        !! column keeps its own `nrows`, which then silently disagrees with what the store holds.
+        !!
+        !! MOVES rather than copies: `values` is left empty and must not be used again. Kind
+        !! (`PK_STRING`), width (1) and row count are settled here from `values` itself, so this
+        !! replaces `init` rather than following it.
+        module subroutine adopt_string_column(self, values)
+            class(parquet_column), intent(inout) :: self                !! the column.
+            type(parquet_string_column), intent(inout) :: values        !! moved in; left empty.
+        end subroutine adopt_string_column
         !> Copies the unit string out ("" when no unit is set).
         module subroutine unit_string(self, u)
             class(parquet_column), intent(in) :: self          !! the column.

@@ -370,6 +370,7 @@ module parquet_strings
     public :: parquet_string_column_reindex_trusted
     public :: parquet_string_column_gather
     public :: parquet_string_column_append_nulls
+    public :: parquet_string_column_move_from
     !
     !> Typed form of `%reserve`, generic over an int32 or int64 index/count argument.
     interface parquet_string_column_reserve
@@ -3556,13 +3557,21 @@ contains
     !
     !> Transfers all buffers from `other` into self, leaving `other` a valid empty column. Self's
     !! previous contents are released. Self-move (move_from with the same object) is a no-op.
-    subroutine move_from(self, other)
-        class(parquet_string_column), intent(inout) :: self !! the destination column.
+    subroutine parquet_string_column_move_from(self, other)
+        type(parquet_string_column), intent(inout) :: self  !! the destination column.
         type(parquet_string_column), intent(inout) :: other !! the source column (left empty).
         type(parquet_string_column) :: tmp
         call swap_impl(other, tmp)   ! other -> tmp, other emptied
         call swap_impl(self, tmp)    ! self <-> tmp: self gets other's data, tmp gets self's old
-        ! tmp (self's former data) is finalized on return
+        ! tmp (self's former data) is discarded on return
+    end subroutine parquet_string_column_move_from
+    !
+    !> Binding form of `parquet_string_column_move_from`; forwards to it, keeping the
+    !! implementation at the `type` end (feature_ifx.md).
+    subroutine move_from(self, other)
+        class(parquet_string_column), intent(inout) :: self !! the destination column.
+        type(parquet_string_column), intent(inout) :: other !! the source column (left empty).
+        call parquet_string_column_move_from(self, other)
     end subroutine move_from
     !
     !> Exchanges the contents of self and `other` in O(1). Symmetric: a%swap(b) == b%swap(a).

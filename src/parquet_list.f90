@@ -121,6 +121,7 @@ module parquet_list
         procedure :: clear                               !! Release everything and reset to an uninitialized column.
         procedure :: deep_copy                           !! Independent copy of offsets, validity and payload.
         procedure :: move_from                           !! Take over another column's storage, leaving it empty.
+        procedure :: adopt_rows                          !! Build from moved-in offsets and a moved-in payload column.
         ! --- queries ---
         procedure :: size => lc_nrows_public             !! Rows stored (alias of %nrows()).
         procedure :: is_init                             !! Whether %init has fixed a payload kind.
@@ -483,6 +484,80 @@ contains
         end if
         call self%payload%deep_copy(out%payload)
     end subroutine deep_copy
+    !
+    !> Takes ownership of a whole column at once: `offsets` and `payload` are MOVED in (both come
+    !! back deallocated/empty), `row_valid` marks which rows are present, and everything else --
+    !! the payload kind, the row count -- is derived from what it was given rather than declared.
+    !!
+    !! The bulk counterpart of `%append_row`, and what the file reader is built on: a read knows
+    !! its final row and element counts before it has a single value, so appending row by row
+    !! would mean re-deriving what it already knows, once per row. Deriving the kind from the
+    !! payload rather than taking it as an argument is the same design `parquet_column`'s own
+    !! `%adopt_container` uses, and for the same reason -- a discriminator passed alongside an
+    !! object that already carries it is a second copy that can disagree.
+    !!
+    !! Replaces whatever this column held (it `%clear()`s first), so it is a build, not an append.
+    !!
+    !! Preconditions, all checked and all fatal, because every one of them would otherwise show up
+    !! later as a wrong answer rather than as an error here:
+    !!
+    !! * `payload` must have a kind this type accepts as a payload, and width 1.
+    !! * `offsets` must be allocated with at least one entry; `size(offsets) - 1` is the row
+    !!   count, so a single entry builds a legitimate empty column.
+    !! * `offsets(1)` must be 0 and the sequence must be non-decreasing.
+    !! * `offsets(nrows+1)` must equal the payload's row count -- i.e. the rows must account for
+    !!   exactly the elements handed over, with none left over and none missing.
+    !! * `row_valid`, if present, must have exactly `nrows` entries.
+    !!
+    !! Per-ELEMENT nullness travels inside `payload` (a `parquet_column` carries its own validity),
+    !! so it needs no argument here; `row_valid` is the separate ROW level. A row marked absent
+    !! keeps whatever payload range its offsets describe -- exactly as `%set_null` leaves it --
+    !! so the two null levels stay independent and a later `%clear_null` restores the row intact.
+    subroutine adopt_rows(self, offsets, payload, row_valid)
+        class(parquet_list_column), intent(inout) :: self         !! the column being built.
+        integer(int64), allocatable, intent(inout) :: offsets(:)  !! nrows+1 offsets, moved in.
+        type(parquet_column), intent(inout) :: payload            !! the flattened elements, moved in.
+        logical, intent(in), optional :: row_valid(:)             !! per-ROW validity; absent = all present.
+        integer(int64) :: n, i
+        character(len=:), allocatable :: kname
+        if (.not. allocated(offsets)) error stop EP//"adopt_rows: offsets is not allocated"
+        n = size(offsets, kind=int64) - 1_int64
+        if (n < 0_int64) error stop EP//"adopt_rows: offsets must hold at least one entry"
+        if (.not. is_supported_payload(payload%kindof())) then
+            call parquet_kind_name(payload%kindof(), kname)
+            error stop EP//"adopt_rows: "//kname//" is not a supported list payload kind"
+        end if
+        if (payload%colwidth() /= 1_int32) then
+            error stop EP//"adopt_rows: the payload must be a scalar (width 1) column"
+        end if
+        if (offsets(1) /= 0_int64) error stop EP//"adopt_rows: offsets(1) must be 0"
+        do i = 1_int64, n
+            if (offsets(i + 1_int64) < offsets(i)) error stop EP//"adopt_rows: offsets are not monotonic"
+        end do
+        if (offsets(n + 1_int64) /= payload%length()) then
+            error stop EP//"adopt_rows: the final offset does not match the payload element count"
+        end if
+        if (present(row_valid)) then
+            if (size(row_valid, kind=int64) /= n) then
+                error stop EP//"adopt_rows: row_valid has a different length from the row count"
+            end if
+        end if
+        call self%clear()
+        self%elem_kind = payload%kindof()
+        self%nrows_ = n
+        call move_alloc(offsets, self%offsets)
+        call self%payload%move_from(payload)
+        if (.not. present(row_valid)) return
+        ! The bitmap stays LAZY: a column with no null row allocates nothing, exactly as one built
+        ! by %append_row does. That is what keeps %has_validity_storage meaningful for a column
+        ! that arrived this way.
+        if (.not. any(.not. row_valid)) return
+        call ensure_validity_cap(self, n)
+        self%has_nulls_ = .true.
+        do i = 1_int64, n
+            if (.not. row_valid(i)) call bit_set(self%validity, i)
+        end do
+    end subroutine adopt_rows
     !
     !> Takes over `src`'s storage without copying it, leaving `src` empty and uninitialized.
     subroutine move_from(self, src)

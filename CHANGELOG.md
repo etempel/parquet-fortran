@@ -26,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   followed by one more call. A new Arrow-free entry module (`use parquet_spatial` compiles nine
   Fortran files), with `spatial_threads` and `spatial_rebuild_warning` joining the process-global
   settings.
+- **`parquet_get_column_shape(reader, name, shape)`** reports whether a column is a `"scalar"`,
+  `"vector"`, `"list"`, `"map"` or `"struct"`, from the file schema alone. Orthogonal to
+  `parquet_get_column_type`, which reports the element type and is unchanged.
 - **`parquet_list`: `parquet_list_column`, a variable-length list column, plus `parquet_list_row`,
   a lightweight handle to one of its rows.** Rows may hold different numbers of values, including
   none, and a row may be a null (absent) list distinct from a present but empty one; element nulls
@@ -34,8 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `%gather_rows` rebuild that serves reordering, filtering and duplication. A `parquet_column` can
   take ownership of one through the new `%adopt_container`, which is how the container reaches the
   rest of the library. A new Arrow-free entry module (`use parquet_list` compiles eleven Fortran
-  files) that reads no settings. **In-memory only for now**: a list column cannot yet be read from
-  or written to a Parquet file, held by a `parquet_table`, or nested inside another container.
+  files) that reads no settings.
+  `parquet_read_column`/`parquet_read_column_chunk` read a `LIST`/`LARGE_LIST` column from a
+  Parquet file straight into one, whole or one row group at a time, with per-row lengths, null rows
+  and null elements intact and with the payload kind taken from the file rather than declared;
+  filtering, sampling and sorting compose with it. A list leaf nested inside a `STRUCT` is now
+  addressable by its dotted path. **Read-only for now**: a list column cannot yet be written to a
+  Parquet file, held by a `parquet_table`, or nested inside another container.
 
 ### Changed
 

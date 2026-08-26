@@ -392,10 +392,39 @@ because that column's target kind is `int32`. The two ask different questions: *
 float at all?* against *is `float64` the right declaration?* Both are useful, so neither was made to
 imply the other.
 
-A vector (`FIXED_SIZE_LIST`) column reports its element type (an `int32` vector column reports
-`"int32"` — see `parquet_get_col_size` for its element count). `parquet_get_column_type` fails with
+A container column reports its **element** type: an `int32` vector (`FIXED_SIZE_LIST`) column and a
+variable-length `list<int32>` column both report `"int32"`. `parquet_get_column_type` fails with
 `error stop` only if `name` doesn't exist — that is a caller mistake, and `parquet_column_exists` is
 the query for it. A type it cannot read is an answer (`"unknown"`), not an error.
+
+### Which kind of container a column is: `parquet_get_column_shape`
+
+`parquet_get_column_shape(reader, name, shape)` answers the orthogonal question — *is this a plain
+value, a fixed-width vector, or a variable-length list?* — as one of six tokens:
+
+```fortran
+character(len=:), allocatable :: shape
+call parquet_get_column_shape(reader, "flux", shape)   ! e.g. "list"
+```
+
+| token | what the column is |
+|---|---|
+| `"scalar"` | one value per row |
+| `"vector"` | a fixed-size list: every row holds the same declared number of elements |
+| `"list"` | a variable-length `LIST`/`LARGE_LIST` |
+| `"map"` | a `MAP` — not readable |
+| `"struct"` | a `STRUCT` reached as a whole — not readable; address its leaves by dotted path |
+| `"unknown"` | anything else |
+
+It is schema-only: no column data is read, whatever the answer. Together with
+`parquet_get_column_type` it gives a complete description of a column — `("float64", "list")` — and
+neither half is redundant, which is why the shape was not folded into the existing query.
+
+**A uniform `LIST` still answers `"list"`.** A variable-length column whose rows all happen to hold
+three elements reads perfectly well into a 2-D array, and this query still calls it a `"list"` —
+because whether the rows are uniform is a property of the *data*, and answering it would mean
+reading the column. Ask `parquet_get_col_size` if that is the question; it does look (one row group
+at a time, never the whole column). `"vector"` means the *schema* declares a width.
 
 ## Prefetching multiple columns at once with `parquet_prefetch_columns`
 

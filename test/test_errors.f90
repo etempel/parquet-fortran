@@ -1506,10 +1506,135 @@ contains
             new_unittest("min_size = 0 aborts", test_spatial_components_min_size_aborts), &
             new_unittest("a negative vertex count aborts", test_spatial_components_nvert_aborts), &
             new_unittest("the automatic-rebuild warning is said, and can be silenced", &
-                test_spatial_rebuild_warning) &
+                test_spatial_rebuild_warning), &
+            new_unittest("reading a non-list column into a list column aborts", test_list_read_not_a_list_aborts), &
+            new_unittest("a nested list payload aborts", test_list_read_nested_payload_aborts), &
+            new_unittest("a struct list payload aborts", test_list_read_struct_payload_aborts), &
+            new_unittest("a chunked list read refuses an active sort", test_list_chunk_refuses_sort_aborts), &
+            new_unittest("a chunked list read checks its row group", test_list_chunk_row_group_out_of_range_aborts), &
+            new_unittest("a partially chunk-read list column fails the completeness check", &
+                test_list_chunk_incomplete_aborts), &
+            new_unittest("a fully chunk-read list column passes it", test_list_chunk_complete_ok), &
+            new_unittest("a whole-column list read marks the column read", test_list_read_marks_read), &
+            new_unittest("adopt_rows rejects a final offset short of the payload", &
+                test_list_adopt_rows_offset_mismatch_aborts), &
+            new_unittest("adopt_rows rejects non-monotonic offsets", test_list_adopt_rows_not_monotonic_aborts), &
+            new_unittest("adopt_rows rejects a vector-kind payload", test_list_adopt_rows_bad_payload_kind_aborts), &
+            new_unittest("adopt_rows rejects a short row_valid mask", test_list_adopt_rows_mask_length_aborts) &
             ]
         testsuite = [p1, p2, p3, p4, p5, p6, p7]
     end subroutine collect_tests_parquet_errors
+
+
+    !
+    ! ---- Variable-length LIST read abort paths ----
+    !
+    !> Reading a non-list column into a parquet_list_column: the shape query refuses before
+    !! anything is allocated, and names the type it actually found.
+    subroutine test_list_read_not_a_list_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_read_not_a_list", expect_abort=.true., &
+            failure_message="reading a scalar column into a list column was expected to abort", &
+            required_stderr="expected a list column, got int32")
+    end subroutine test_list_read_not_a_list_aborts
+
+    !> A list whose elements are themselves a list. Nested payloads are a later phase's subject;
+    !! until then the refusal is clean and names the element type.
+    subroutine test_list_read_nested_payload_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_read_nested_payload", expect_abort=.true., &
+            failure_message="reading a list<list<...>> column was expected to abort", &
+            required_stderr="unsupported list element type for column: list_of_list")
+    end subroutine test_list_read_nested_payload_aborts
+
+    !> The same refusal reached through a different unsupported element type, so the guard is not
+    !! keyed on one Arrow type id.
+    subroutine test_list_read_struct_payload_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_read_struct_payload", expect_abort=.true., &
+            failure_message="reading a list<struct<...>> column was expected to abort", &
+            required_stderr="unsupported list element type for column: list_of_struct")
+    end subroutine test_list_read_struct_payload_aborts
+
+    !> The chunked list specific inherits the sort refusal every row-group-scoped operation makes,
+    !! and must not weaken it: a sort permutation destroys row-group locality.
+    subroutine test_list_chunk_refuses_sort_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_chunk_refuses_sort", expect_abort=.true., &
+            failure_message="a chunked list read under an active sort was expected to abort", &
+            required_stderr="not supported on a reader with an active sort")
+    end subroutine test_list_chunk_refuses_sort_aborts
+
+    !> And the row-group bounds check.
+    subroutine test_list_chunk_row_group_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_chunk_row_group_out_of_range", &
+            expect_abort=.true., &
+            failure_message="a chunked list read of a nonexistent row group was expected to abort", &
+            required_stderr="row_group 99 out of range")
+    end subroutine test_list_chunk_row_group_out_of_range_aborts
+
+    !> The chunked list path must register the row groups it reads, or the completeness check
+    !! silently stops covering it. This is the only observation of that bookkeeping.
+    subroutine test_list_chunk_incomplete_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_chunk_incomplete_aborts", expect_abort=.true., &
+            failure_message="a partially chunk-read list column was expected to fail the completeness check", &
+            required_stderr="missing row group(s): 3, 4")
+    end subroutine test_list_chunk_incomplete_aborts
+
+    !> Its negative control: reading every row group closes cleanly. Without this, the abort above
+    !! would hold just as well against a check that fired unconditionally.
+    subroutine test_list_chunk_complete_ok(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_streams(error, "list_chunk_complete_ok", &
+            "a fully chunk-read LIST column passes the completeness check", expect_on="stdout", &
+            failure_message="reading every row group of a list column should pass the completeness check")
+    end subroutine test_list_chunk_complete_ok
+
+    !> A whole-column list read must MARK the column read, so %print_stat reports it. print_stat
+    !! writes to stdout, so this is the out-of-process half of that assertion.
+    subroutine test_list_read_marks_read(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_streams(error, "list_read_marks_read", "list<int32>", expect_on="stdout", &
+            failure_message="print_stat should report the list column's parquet type after a list read")
+    end subroutine test_list_read_marks_read
+
+    !
+    ! ---- parquet_list_column%adopt_rows precondition aborts ----
+    !
+    !> Offsets whose final entry does not account for the payload handed over.
+    subroutine test_list_adopt_rows_offset_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_adopt_rows_offset_mismatch", expect_abort=.true., &
+            failure_message="adopt_rows with a final offset short of the payload was expected to abort", &
+            required_stderr="the final offset does not match the payload element count")
+    end subroutine test_list_adopt_rows_offset_mismatch_aborts
+
+    !> Non-monotonic offsets, which would give some row a negative length.
+    subroutine test_list_adopt_rows_not_monotonic_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_adopt_rows_not_monotonic", expect_abort=.true., &
+            failure_message="adopt_rows with non-monotonic offsets was expected to abort", &
+            required_stderr="adopt_rows: offsets are not monotonic")
+    end subroutine test_list_adopt_rows_not_monotonic_aborts
+
+    !> A payload kind a list row cannot hold -- here a VECTOR kind, whose width is exactly the
+    !! thing a list row expresses instead.
+    subroutine test_list_adopt_rows_bad_payload_kind_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_adopt_rows_bad_payload_kind", expect_abort=.true., &
+            failure_message="adopt_rows with a vector-kind payload was expected to abort", &
+            required_stderr="is not a supported list payload kind")
+    end subroutine test_list_adopt_rows_bad_payload_kind_aborts
+
+    !> A row_valid mask of the wrong length, which would leave some row's nullness undecided.
+    subroutine test_list_adopt_rows_mask_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_adopt_rows_mask_length", expect_abort=.true., &
+            failure_message="adopt_rows with a short row_valid mask was expected to abort", &
+            required_stderr="row_valid has a different length from the row count")
+    end subroutine test_list_adopt_rows_mask_length_aborts
 
     !
     ! ---- parquet_columns foundation abort paths ----

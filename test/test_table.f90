@@ -993,17 +993,26 @@ contains
             "a LIST column whose null row keeps the mean integral must still report width 1")
         if (allocated(error)) return
         !
-        ! A plain LIST leaf underneath a STRUCT is a different matter: struct_path_exists
-        ! (parquet_wrapper.cpp) deliberately refuses to address a LIST/LARGE_LIST/MAP leaf through a
-        ! dotted path, so such a column is visible but not readable and deferral never applies to
-        ! it. Pinned here so the boundary is explicit rather than discovered -- a FIXED_SIZE_LIST
-        ! leaf under a struct IS addressable (see test/fixtures/nested_struct.parquet); only the
-        ! variable-length form is not.
+        ! A plain LIST leaf underneath a STRUCT is treated exactly like a top-level one, and
+        ! that is the point: struct_path_exists (parquet_wrapper.cpp) accepts a LIST/LARGE_LIST
+        ! leaf through a dotted path, so the deferred-width machinery above applies to it
+        ! unchanged -- no dotted-path special case anywhere. nested.vals is uniform width 3, so it
+        ! resolves to a vector column and reads; a RAGGED one resolves to width 1 exactly as
+        ! `ragged` above does (test_deferred_list_width_nested_ragged pins that half).
+        !
+        ! MAP is the boundary that did NOT move: a MAP leaf under a struct is still not
+        ! addressable at all, which is what keeps this a widening rather than a removal (see
+        ! test_list_read.f90's "a MAP column and a map under a struct stay unreadable").
         call check(error, t%has_column("nested.vals"), &
-            "a struct-nested LIST leaf should still be listed as a column")
+            "a struct-nested LIST leaf should be listed as a column")
         if (allocated(error)) return
-        call check(error, .not. t%is_supported("nested.vals"), &
-            "but it should be reported unsupported, not silently classified")
+        call check(error, t%is_supported("nested.vals"), &
+            "and should be classified, exactly as the same column at the top level would be")
+        if (allocated(error)) return
+        call check(error, t%kind("nested.vals") == PK_INT32_VEC, &
+            "a uniform struct-nested LIST resolves to the vector kind")
+        if (allocated(error)) return
+        call check(error, t%width("nested.vals") == 3, "with the width its data actually has")
         if (allocated(error)) return
         !
         ! The control: a scalar column is classified from the schema at open and never deferred.

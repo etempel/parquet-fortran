@@ -146,6 +146,7 @@ parquet_columns_validity.f90
 parquet_core.f90
 parquet_expkey.f90
 parquet_io.f90
+parquet_list.f90
 parquet_maml_base.f90
 parquet_maml_base_add_col_qc.f90
 parquet_metadata.f90
@@ -155,6 +156,7 @@ parquet_metadata_maml.f90
 parquet_random.f90
 parquet_read.f90
 parquet_read_filter.f90
+parquet_read_list.f90
 parquet_read_numeric.f90
 parquet_read_sort.f90
 parquet_read_string.f90
@@ -192,6 +194,7 @@ parquet_columns_util.f90
 parquet_columns_validity.f90
 parquet_core.f90
 parquet_expkey.f90
+parquet_list.f90
 parquet_maml_base.f90
 parquet_maml_base_add_col_qc.f90
 parquet_metadata.f90
@@ -201,6 +204,7 @@ parquet_metadata_maml.f90
 parquet_random.f90
 parquet_read.f90
 parquet_read_filter.f90
+parquet_read_list.f90
 parquet_read_numeric.f90
 parquet_read_sort.f90
 parquet_read_string.f90
@@ -269,6 +273,7 @@ parquet_metadata_maml.f90
 parquet_random.f90
 parquet_read.f90
 parquet_read_filter.f90
+parquet_read_list.f90
 parquet_read_numeric.f90
 parquet_read_sort.f90
 parquet_read_string.f90

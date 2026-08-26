@@ -1132,11 +1132,11 @@ extern "C"
 	// Resolves `name` against `schema`, walking a dotted path through nested STRUCT fields if it
 	// isn't itself a literal top-level field name (exact match always wins, so an existing column
 	// literally named with a "." in it is unaffected). Every non-terminal path segment must be a
-	// STRUCT field; the terminal segment must resolve to something other than STRUCT/LIST/
-	// LARGE_LIST/MAP -- a FIXED_SIZE_LIST or scalar leaf is fine. Struct-of-struct nesting to any
-	// depth is supported, but a path stopping at an intermediate struct, or passing through/
-	// landing on a MAP or (variable-length) LIST, is not (see CLAUDE.md's nested-struct-field
-	// design notes). Throws std::runtime_error, same as get_column_index, on any failure --
+	// STRUCT field; the terminal segment must resolve to something other than STRUCT/MAP -- a
+	// scalar, FIXED_SIZE_LIST or (variable-length) LIST/LARGE_LIST leaf is fine. Struct-of-struct
+	// nesting to any depth is supported, but a path stopping at an intermediate struct, or
+	// passing through/landing on a MAP, is not (see CLAUDE.md's nested-struct-field design
+	// notes). Throws std::runtime_error, same as get_column_index, on any failure --
 	// callers that need a non-throwing probe should use struct_path_exists instead.
 	static StructPathInfo resolve_struct_path(const std::shared_ptr<arrow::Schema> &schema, const std::string &name)
 	{
@@ -1195,12 +1195,11 @@ extern "C"
 		}
 
 		auto leaf_id = field->type()->id();
-		if (leaf_id == arrow::Type::STRUCT || leaf_id == arrow::Type::LIST ||
-			leaf_id == arrow::Type::LARGE_LIST || leaf_id == arrow::Type::MAP)
+		if (leaf_id == arrow::Type::STRUCT || leaf_id == arrow::Type::MAP)
 		{ // GCOVR_EXCL_START -- dead, see comment above.
 			throw std::runtime_error(std::string("Column not found: ") + name +
 				" (resolves to a " + field->type()->ToString() +
-				" column; struct paths must resolve to a leaf scalar/vector column, and MAP/LIST are not supported)");
+				" column; struct paths must resolve to a leaf scalar/vector/list column, and MAP is not supported)");
 		}
 		// GCOVR_EXCL_STOP
 
@@ -1247,8 +1246,19 @@ extern "C"
 		}
 
 		auto leaf_id = field->type()->id();
-		return leaf_id != arrow::Type::STRUCT && leaf_id != arrow::Type::LIST &&
-			leaf_id != arrow::Type::LARGE_LIST && leaf_id != arrow::Type::MAP;
+		// LIST/LARGE_LIST are ACCEPTED as a leaf: a variable-length list column is readable (into
+		// a parquet_list_column, and into a 2-D array when its data happens to be uniform),
+		// whether it sits at the top level or under a struct, so refusing it here would have made
+		// this probe -- and every query built on it -- disagree with parquet_get_column_names,
+		// which lists such a leaf under its dotted path. That disagreement was three separate
+		// wrong answers about the same name: listed, `parquet_column_exists` .false., and
+		// `parquet_get_column_type` ABORTING with "column not found" about a path the same reader
+		// had just listed -- the last of those a defect against that query's own contract, which
+		// is that an unreadable type is an ANSWER ("unknown") and not an error.
+		//
+		// MAP stays refused: nothing can read one yet, so answering .true. would move the failure
+		// from a truthful "not found" to an abort further down the read.
+		return leaf_id != arrow::Type::STRUCT && leaf_id != arrow::Type::MAP;
 	}
 
 	// Appends `field`'s addressable column name(s) to `out`, as the dotted leaf paths
@@ -1257,14 +1267,15 @@ extern "C"
 	// name is not readable; every other field -- scalar, FIXED_SIZE_LIST (vector), and also
 	// LIST/LARGE_LIST/MAP -- contributes exactly one entry under its own name.
 	//
-	// LIST/MAP are deliberately INCLUDED even though nothing can read them today: this powers
+	// LIST/LARGE_LIST is a readable leaf (into a parquet_list_column, or into a 2-D array when its
+	// data happens to be uniform) whether it is top-level or nested inside a struct, so it is
+	// listed and every lookup on it answers about a name that really does resolve.
+	//
+	// MAP is deliberately INCLUDED too, even though nothing can read one: this powers
 	// parquet_get_column_names, whose job is to report what the file actually contains, and a
 	// caller that goes on to ask parquet_column_exists/parquet_get_column_type about such a name
-	// gets a truthful "not a supported type" answer. Silently omitting them would instead make a
-	// column simply vanish from a file listing, which is a much harder thing to diagnose. A
-	// LIST/MAP nested *inside* a struct is the one case with no addressable name at all (a dotted
-	// path may not land on one -- see resolve_struct_path), so it is emitted under its dotted
-	// path for the same reporting reason, and every lookup on it truthfully answers "not found".
+	// gets a truthful "not a supported type" answer. Silently omitting it would instead make a
+	// column simply vanish from a file listing, which is a much harder thing to diagnose.
 	static void collect_column_leaf_paths(
 		const std::shared_ptr<arrow::Field> &field, const std::string &prefix, std::vector<std::string> &out)
 	{
@@ -8048,6 +8059,97 @@ extern "C"
 		return struct_path_exists(reader_handle->schema, name) ? 1 : 0;
 	}
 
+	// ==== Element families ====
+	//
+	// The one place a physical Arrow leaf type is mapped onto the Fortran kind this library reads
+	// it into. Two callers want that mapping and used to be at risk of disagreeing about it: the
+	// type-name query below, which answers a caller's "what do I declare?", and the LIST read
+	// path (parquet_read_list_column_shape), which must tell Fortran which payload kind to %init
+	// a parquet_list_column to before filling it.
+	//
+	// A family is an integer rather than a token string because it crosses the bind(C) boundary:
+	// see the PF_ELEM_* parameters in parquet_bindings.f90, which MUST match these values. The
+	// C++ side deliberately knows nothing about Fortran's own PK_* discriminators -- those are a
+	// Fortran-side vocabulary and the mapping from a family to one lives there.
+	static constexpr int32_t kElemFamilyNone = 0; // not readable by this library at all
+	static constexpr int32_t kElemFamilyInt32 = 1;
+	static constexpr int32_t kElemFamilyInt64 = 2;
+	static constexpr int32_t kElemFamilyFloat32 = 3;
+	static constexpr int32_t kElemFamilyFloat64 = 4;
+	static constexpr int32_t kElemFamilyBool = 5;
+	static constexpr int32_t kElemFamilyString = 6;
+	static constexpr int32_t kElemFamilyDate = 7;
+	static constexpr int32_t kElemFamilyTime = 8;
+	static constexpr int32_t kElemFamilyTimestamp = 9;
+
+	// The element family `type` reads into, or kElemFamilyNone if this library cannot read it.
+	// `type` is a LEAF type -- a list/vector wrapper must already have been unwrapped by the
+	// caller, since whether to unwrap is the caller's question, not this one's.
+	static int32_t arrow_leaf_family(const std::shared_ptr<arrow::DataType> &type)
+	{
+		switch (type->id())
+		{
+		// Every integer physical type narrower than int64 is exactly representable in int32 or
+		// int64, so the narrowest LOSSLESS Fortran kind is what it maps to. Note UINT32 needs
+		// int64, not int32: its top half does not fit a signed 32-bit integer.
+		case arrow::Type::INT8: return kElemFamilyInt32;
+		case arrow::Type::INT16: return kElemFamilyInt32;
+		case arrow::Type::INT32: return kElemFamilyInt32;
+		case arrow::Type::UINT8: return kElemFamilyInt32;
+		case arrow::Type::UINT16: return kElemFamilyInt32;
+		case arrow::Type::INT64: return kElemFamilyInt64;
+		case arrow::Type::UINT32: return kElemFamilyInt64;
+		// UINT64 and the decimals have no lossless Fortran kind at all, and answer with the
+		// CONVENTIONAL LOSSY target rather than "unknown": a caller asking "what do I declare?" is
+		// better served by the kind this library will actually read the column into than by being
+		// told a readable column is unreadable. A uint64 value above huge(int64) aborts on read,
+		// and a decimal is read through double.
+		case arrow::Type::UINT64: return kElemFamilyInt64;
+		// Mapped on the type ID alone -- deliberately no precision/scale awareness, so
+		// decimal(9,0) answers float64 like every other decimal rather than int32.
+		case arrow::Type::DECIMAL32: return kElemFamilyFloat64;
+		case arrow::Type::DECIMAL64: return kElemFamilyFloat64;
+		case arrow::Type::DECIMAL128: return kElemFamilyFloat64;
+		case arrow::Type::DECIMAL256: return kElemFamilyFloat64;
+		case arrow::Type::HALF_FLOAT: return kElemFamilyFloat32;
+		case arrow::Type::FLOAT: return kElemFamilyFloat32;
+		case arrow::Type::DOUBLE: return kElemFamilyFloat64;
+		case arrow::Type::BOOL: return kElemFamilyBool;
+		case arrow::Type::STRING: return kElemFamilyString;
+		case arrow::Type::LARGE_STRING: return kElemFamilyString;
+		// STRING_VIEW is deliberately absent, matching what parquet_get_column_type has always
+		// answered for one ("unknown"): the compact string read coerces such a column to an
+		// offset string before reading it (recache_coerced_string_view), but the TYPE query never
+		// claimed it, and this helper exists to be that query's single source of truth rather
+		// than to change what it says.
+		case arrow::Type::DATE32: return kElemFamilyDate;
+		case arrow::Type::DATE64: return kElemFamilyDate; // GCOVR_EXCL_LINE -- DATE64 never actually produced (see CLAUDE.md's temporal notes).
+		case arrow::Type::TIME32: return kElemFamilyTime;
+		case arrow::Type::TIME64: return kElemFamilyTime;
+		case arrow::Type::TIMESTAMP: return kElemFamilyTimestamp;
+		default:
+			return kElemFamilyNone;
+		}
+	}
+
+	// The canonical data-type token for a family, as parquet_get_column_type reports it.
+	static const char *elem_family_token(int32_t family)
+	{
+		switch (family)
+		{
+		case kElemFamilyInt32: return "int32";
+		case kElemFamilyInt64: return "int64";
+		case kElemFamilyFloat32: return "float32";
+		case kElemFamilyFloat64: return "float64";
+		case kElemFamilyBool: return "boolean";
+		case kElemFamilyString: return "string";
+		case kElemFamilyDate: return "date";
+		case kElemFamilyTime: return "time";
+		case kElemFamilyTimestamp: return "timestamp";
+		default: return "unknown";
+		}
+	}
+
 	// Writes `name`'s canonical data-type token ("int32"/"int64"/"float32"/"float64"/"boolean"/
 	// "string"/"date"/"time"/"timestamp") into `buf` (space-padded to buf_len) and returns 1, if
 	// its physical Arrow type maps onto one of those nine tokens -- a FIXED_SIZE_LIST/LIST/
@@ -8069,43 +8171,9 @@ extern "C"
 		{
 			type = type->field(0)->type();
 		}
-		std::string token;
-		switch (type->id())
+		int32_t family = arrow_leaf_family(type);
+		if (family == kElemFamilyNone)
 		{
-		// Every integer physical type narrower than int64 is exactly representable in int32 or
-		// int64, so the narrowest LOSSLESS Fortran kind is what it maps to. Note UINT32 needs
-		// int64, not int32: its top half does not fit a signed 32-bit integer.
-		case arrow::Type::INT8: token = "int32"; break;
-		case arrow::Type::INT16: token = "int32"; break;
-		case arrow::Type::INT32: token = "int32"; break;
-		case arrow::Type::UINT8: token = "int32"; break;
-		case arrow::Type::UINT16: token = "int32"; break;
-		case arrow::Type::INT64: token = "int64"; break;
-		case arrow::Type::UINT32: token = "int64"; break;
-		// UINT64 and the decimals have no lossless Fortran kind at all, and answer with the
-		// CONVENTIONAL LOSSY target rather than "unknown": a caller asking "what do I declare?" is
-		// better served by the kind this library will actually read the column into than by being
-		// told a readable column is unreadable. A uint64 value above huge(int64) aborts on read,
-		// and a decimal is read through double.
-		case arrow::Type::UINT64: token = "int64"; break;
-		// Mapped on the type ID alone -- deliberately no precision/scale awareness, so
-		// decimal(9,0) answers float64 like every other decimal rather than int32.
-		case arrow::Type::DECIMAL32: token = "float64"; break;
-		case arrow::Type::DECIMAL64: token = "float64"; break;
-		case arrow::Type::DECIMAL128: token = "float64"; break;
-		case arrow::Type::DECIMAL256: token = "float64"; break;
-		case arrow::Type::HALF_FLOAT: token = "float32"; break;
-		case arrow::Type::FLOAT: token = "float32"; break;
-		case arrow::Type::DOUBLE: token = "float64"; break;
-		case arrow::Type::BOOL: token = "boolean"; break;
-		case arrow::Type::STRING: token = "string"; break;
-		case arrow::Type::LARGE_STRING: token = "string"; break;
-		case arrow::Type::DATE32: token = "date"; break;
-		case arrow::Type::DATE64: token = "date"; break; // GCOVR_EXCL_LINE -- DATE64 never actually produced (see CLAUDE.md's temporal notes).
-		case arrow::Type::TIME32: token = "time"; break;
-		case arrow::Type::TIME64: token = "time"; break;
-		case arrow::Type::TIMESTAMP: token = "timestamp"; break;
-		default:
 			// Not readable by this library at all (a MAP, a nested STRUCT reached as a whole, an
 			// unsupported binary type, ...). Answering "unknown" rather than the raw Arrow type
 			// name is what lets parquet_get_column_type report it instead of aborting: the query
@@ -8114,8 +8182,56 @@ extern "C"
 			copy_string_with_padding(buf, buf_len, std::string("unknown"));
 			return 0;
 		}
-		copy_string_with_padding(buf, buf_len, token);
+		copy_string_with_padding(buf, buf_len, std::string(elem_family_token(family)));
 		return 1;
+	}
+
+	// Writes `name`'s CONTAINER SHAPE token ("scalar"/"vector"/"list"/"map"/"struct"/"unknown")
+	// into `buf`, space-padded to buf_len. Schema-only: reads no column data at all, which is the
+	// property that makes it usable from parquet_open_table's classification pass.
+	//
+	// Deliberately returns nothing, unlike parquet_reader_get_column_type_name beside it: EVERY
+	// shape has a token, including the ones nothing can read, so there is no "not recognised" for
+	// a return value to report. One that was always 1 would only have forced a dead local on the
+	// Fortran side.
+	//
+	// Orthogonal to parquet_reader_get_column_type_name, which reports the ELEMENT type and
+	// deliberately unwraps a list to it, so a list<double> answers "float64" there and "list"
+	// here. Neither half is redundant: ("float64", "list") is a complete description of a column
+	// and a caller needs both to decide what to declare.
+	//
+	// "vector" means a FIXED_SIZE_LIST -- and ONLY that. A plain LIST answers "list" even when its
+	// data happens to be uniform and would read perfectly well into a 2-D array, because whether
+	// it is uniform is a property of the DATA (see needs_data_to_measure_col_size) and answering
+	// it would mean reading the column. That is the honest schema-level answer: the file declares
+	// a variable-length list and says nothing about the lengths. A caller who wants to know
+	// whether a 2-D read will work asks parquet_get_col_size, which does look.
+	void parquet_reader_get_column_shape_name(void *handle, const char *name, char *buf, int64_t buf_len)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto resolved = resolve_struct_path(reader_handle->schema, name);
+		auto type = resolved.leaf_field->type();
+		const char *token = "unknown";
+		switch (type->id())
+		{
+		case arrow::Type::FIXED_SIZE_LIST: token = "vector"; break;
+		case arrow::Type::LIST: token = "list"; break;
+		case arrow::Type::LARGE_LIST: token = "list"; break;
+		case arrow::Type::MAP: token = "map"; break;
+		// A bare STRUCT is not addressable at all -- resolve_struct_path refuses a path landing on
+		// one, so this arm is only reachable for a TOP-LEVEL struct field, whose name
+		// parquet_get_column_names does not emit either. Answering "struct" rather than aborting
+		// keeps this query's contract identical to parquet_get_column_type's: a shape this
+		// library cannot read is an ANSWER.
+		case arrow::Type::STRUCT: token = "struct"; break; // GCOVR_EXCL_LINE
+		default:
+			// Every leaf this library can read one value at a time -- and equally every leaf it
+			// cannot -- is a "scalar" in the only sense this query is about: it is not a
+			// container. An unreadable ELEMENT type is the other query's business, not this one's.
+			token = "scalar";
+			break;
+		}
+		copy_string_with_padding(buf, buf_len, std::string(token));
 	}
 
 	// Returns 1 if `name`'s stored Arrow field is declared nullable, 0 if not -- the schema flag
@@ -10878,6 +10994,237 @@ extern "C"
 		return array;
 	}
 
+
+	// ==== Variable-length LIST column reads ====
+	//
+	// The path a genuinely ragged LIST column takes into a Fortran parquet_list_column, and the
+	// only read path in this file whose result is not a flat rectangle. It sits BESIDE
+	// get_uniform_list_values rather than replacing it: a list column whose rows all have the
+	// same length still reads into a 2-D array through that one, and the caller's chosen output
+	// type is what picks the interpretation.
+	//
+	// TWO CROSSINGS, AND NOTHING ARROW-OWNED CROSSES EITHER OF THEM. Fortran first asks for the
+	// shape (row count, element count, payload byte count, element family, temporal unit), which
+	// is what lets it allocate its buffers and %init the payload column to the right kind; it
+	// then asks for the fill, which COPIES into those Fortran-owned buffers.
+	//
+	// The alternative -- handing back Arrow's own buffers, as parquet_read_string_column_buffers
+	// does -- was considered and rejected. It does not generalise: a payload may need CONVERTING
+	// (a list<int8>, a list<uint16> and a list<int32> all read into an int32 payload, because
+	// this library reports the narrowest LOSSLESS Fortran kind), so for most families there is no
+	// pointer to hand over at all. Copying uniformly is what removes the whole use-after-free
+	// class that the string path had to grow last_whole_column_buffers_array to close, and there
+	// is nothing here to pin. The extra cost is one int64 offsets array of nrows+1 entries, which
+	// is noise beside the values.
+	//
+	// The two entry points are NOT a matched pair sharing hidden state (contrast sort_key_info /
+	// sort_key_fetch). Each is independently correct: the fill re-derives the shape and ABORTS if
+	// it disagrees with the arguments it was given, so a caller passing a stale count is told,
+	// rather than writing past the end of a buffer.
+
+	// One row group, or the whole column, as a list array -- the single place the LIST read path
+	// decides which. `row_group <= 0` means the whole column (get_single_chunk_array, so the row
+	// transform applies and filtering/sampling/sorting compose for free); otherwise exactly that
+	// one row group (get_row_group_chunk_array, whose own mask segment is already applied).
+	static std::shared_ptr<arrow::Array> get_list_source_array(ParquetReaderHandle *reader_handle,
+		const char *name, int64_t row_group, const char *context)
+	{
+		if (row_group <= 0) return get_single_chunk_array(reader_handle, name);
+		return get_row_group_chunk_array(reader_handle, name, row_group, context);
+	}
+
+	// A list array's three shape facts, resolved in one place: how many rows, how many elements
+	// those rows hold between them, and where the elements start in the child array.
+	//
+	// SLICING IS WHY THE REBASE EXISTS, and it is worth being precise about which offsets are
+	// really in play, because the obvious guess is wrong. A list array has three:
+	//
+	//   * the list array's own data()->offset  -- aligns the ROW validity bitmap
+	//   * raw_value_offsets()[0]               -- where this slice's elements start in the child
+	//   * the CHILD array's data()->offset     -- aligns the ELEMENT validity bitmap
+	//
+	// Only the SECOND is handled explicitly here (`base`). The other two are handled by Arrow's
+	// own accessors: array->IsValid(i) already accounts for the parent's offset, and slicing the
+	// child gives it an offset that child->IsValid(k) accounts for in turn. So the code below
+	// reads one offset, not three, and the other two cannot be dropped by an edit to this
+	// function at all -- only by replacing an accessor with a raw buffer walk, which is the thing
+	// not to do.
+	//
+	// THE REBASE IS DEFENSIVE ON TODAY'S READ PATHS, and that was measured rather than assumed.
+	// arrow::compute::Filter and Take -- what a filtered, sampled or sorted read goes through
+	// (apply_row_transform) -- return COMPACT arrays with all three offsets 0, not slices; and
+	// nothing on the read side calls Slice() on a column array (the only such call in this file is
+	// on the WRITER side). The one route by which a sliced list array could arrive is
+	// unwrap_struct_path's StructArray::field() on an already-sliced struct, which
+	// extract_string_buffers' own comment records as never yet observed. So no Fortran-side test
+	// can reach a nonzero `base`, and a mutation setting it to 0 survives the whole suite --
+	// which is a fact about what is reachable, not a coverage gap to be closed with an
+	// unbuildable fixture (CLAUDE.md, "Coverage tooling never drives design").
+	//
+	// It was instead verified OUT OF PROCESS, against a genuinely sliced array carrying a null row
+	// and a null element, by replicating this logic exactly: base=10, and all four rows' lengths,
+	// values, row nullness and element nullness came back correct. Re-run that check rather than
+	// trusting a green suite if this arithmetic is ever changed. See feature_risks.md Risk-154.
+	//
+	// `child_out` comes back already Sliced to exactly the elements these rows use, so every
+	// consumer downstream (the convert_values_to_* family, the string byte copy, the element
+	// validity walk) sees an ordinary array and needs no offset awareness of its own.
+	struct ListShape
+	{
+		int64_t nrows = 0;
+		int64_t nelems = 0;
+		std::shared_ptr<arrow::Array> child; // sliced to exactly [0, nelems)
+		std::vector<int64_t> offsets;        // nrows+1 entries, 0-based, offsets[0] == 0
+	};
+
+	// Fills a ListShape from `array`, which must be a LIST/LARGE_LIST/FIXED_SIZE_LIST array.
+	// FIXED_SIZE_LIST is accepted deliberately: a vector column IS a list whose rows all happen to
+	// have the same length, and refusing it would be a third rule about which representation is
+	// allowed when -- the very thing the caller's-output-type-decides design exists to avoid.
+	static ListShape describe_list_array(const std::shared_ptr<arrow::Array> &array,
+		const std::string &name, const char *context)
+	{
+		ListShape shape;
+		shape.nrows = array->length();
+		shape.offsets.resize(static_cast<size_t>(shape.nrows) + 1, 0);
+		if (array->type_id() == arrow::Type::LIST)
+		{
+			auto list_arr = std::static_pointer_cast<arrow::ListArray>(array);
+			int64_t base = shape.nrows > 0 ? list_arr->value_offset(0) : 0;
+			for (int64_t i = 0; i < shape.nrows; ++i)
+			{
+				shape.offsets[static_cast<size_t>(i) + 1] = list_arr->value_offset(i + 1) - base;
+			}
+			shape.nelems = shape.offsets[static_cast<size_t>(shape.nrows)];
+			shape.child = list_arr->values()->Slice(base, shape.nelems);
+			return shape;
+		}
+		if (array->type_id() == arrow::Type::LARGE_LIST)
+		{
+			auto list_arr = std::static_pointer_cast<arrow::LargeListArray>(array);
+			int64_t base = shape.nrows > 0 ? list_arr->value_offset(0) : 0;
+			for (int64_t i = 0; i < shape.nrows; ++i)
+			{
+				shape.offsets[static_cast<size_t>(i) + 1] = list_arr->value_offset(i + 1) - base;
+			}
+			shape.nelems = shape.offsets[static_cast<size_t>(shape.nrows)];
+			shape.child = list_arr->values()->Slice(base, shape.nelems);
+			return shape;
+		}
+		if (array->type_id() == arrow::Type::FIXED_SIZE_LIST)
+		{
+			auto list_arr = std::static_pointer_cast<arrow::FixedSizeListArray>(array);
+			int64_t width = list_arr->value_length();
+			for (int64_t i = 0; i < shape.nrows; ++i)
+			{
+				shape.offsets[static_cast<size_t>(i) + 1] = (i + 1) * width;
+			}
+			shape.nelems = shape.nrows * width;
+			shape.child = list_arr->values()->Slice(list_arr->value_offset(0), shape.nelems);
+			return shape;
+		}
+		report_fatal_error(context, std::string("type mismatch for column: ") + name +
+			" (expected list/large_list/fixed_size_list, got " + array->type()->ToString() + ")"); // GCOVR_EXCL_LINE
+	}
+
+	// The value type a list column's elements read into -- its child field's type, taken from the
+	// SCHEMA rather than from any decoded array, so a shape query never has to read data it does
+	// not need. Returns nullptr when `field` is not a list-typed field at all.
+	static std::shared_ptr<arrow::DataType> list_element_type(const std::shared_ptr<arrow::Field> &field)
+	{
+		auto id = field->type()->id();
+		if (id != arrow::Type::LIST && id != arrow::Type::LARGE_LIST && id != arrow::Type::FIXED_SIZE_LIST)
+		{
+			return nullptr;
+		}
+		return field->type()->field(0)->type();
+	}
+
+	// Writes `array`'s per-ROW validity into `valid_out` (1 = present, 0 = a NULL list). A null
+	// ROW and a present-but-EMPTY row are different things and both survive: an empty row is
+	// valid here and simply has offsets[i] == offsets[i+1].
+	static void write_list_row_validity(const std::shared_ptr<arrow::Array> &array, int64_t nrows, int8_t *valid_out)
+	{
+		if (!valid_out) return; // GCOVR_EXCL_LINE -- every caller passes a buffer; kept as a guard.
+		for (int64_t i = 0; i < nrows; ++i)
+		{
+			valid_out[i] = array->IsValid(i) ? 1 : 0;
+		}
+	}
+
+	// Writes the per-ELEMENT validity of an already-sliced child array into `valid_out`. This is
+	// the SECOND null level -- an element that is Null inside a row that is itself present -- and
+	// is stored separately from row nullness on the Fortran side too, so a read that collapsed
+	// the two would still pass every assertion made about either one alone.
+	static void write_list_element_validity(const std::shared_ptr<arrow::Array> &child, int64_t nelems, int8_t *valid_out)
+	{
+		if (!valid_out) return; // GCOVR_EXCL_LINE -- every caller passes a buffer; kept as a guard.
+		for (int64_t i = 0; i < nelems; ++i)
+		{
+			valid_out[i] = child->IsValid(i) ? 1 : 0;
+		}
+	}
+
+	// The shared body of every parquet_read_list_*_fill entry point: fetch the array, describe it,
+	// check the caller's counts against what is really there, and write out the offsets and both
+	// validity levels. Returns the child array the caller then converts into its typed buffer.
+	//
+	// The count check is the reason the two entry points do not have to be a matched pair: a
+	// caller that allocated from a stale shape is told so here, before anything writes past the
+	// end of its buffers.
+	static std::shared_ptr<arrow::Array> fill_list_common(ParquetReaderHandle *reader_handle,
+		const char *name, int64_t row_group, int64_t nrows, int64_t nelems,
+		int64_t *offsets_out, int8_t *row_valid_out, int8_t *elem_valid_out, const char *context)
+	{
+		auto array = get_list_source_array(reader_handle, name, row_group, context);
+		auto shape = describe_list_array(array, name, context);
+		if (shape.nrows != nrows)
+		{
+			report_fatal_error(context, std::string("nrows mismatch for column: ") + name);
+		}
+		if (shape.nelems != nelems)
+		{
+			report_fatal_error(context, std::string("element count mismatch for column: ") + name +
+				" (the column changed between the shape and fill calls)"); // GCOVR_EXCL_LINE
+		}
+		for (int64_t i = 0; i <= nrows; ++i)
+		{
+			offsets_out[i] = shape.offsets[static_cast<size_t>(i)];
+		}
+		write_list_row_validity(array, nrows, row_valid_out);
+		write_list_element_validity(shape.child, nelems, elem_valid_out);
+		return shape.child;
+	}
+
+	// The payload byte total of an already-sliced string child array. STRING/LARGE_STRING only:
+	// both report it in O(1) from their own offsets, and STRING_VIEW -- which would need a scan --
+	// never reaches here, because arrow_leaf_family deliberately does not claim it (see there).
+	static int64_t string_child_total_bytes(const std::shared_ptr<arrow::Array> &child,
+		const std::string &name, const char *context)
+	{
+		if (child->type_id() == arrow::Type::LARGE_STRING)
+		{
+			return std::static_pointer_cast<arrow::LargeStringArray>(child)->total_values_length();
+		}
+		if (child->type_id() == arrow::Type::STRING)
+		{
+			return std::static_pointer_cast<arrow::StringArray>(child)->total_values_length();
+		}
+		report_fatal_error(context, std::string("type mismatch for list values in column: ") + name +
+			" (expected string, got " + child->type()->ToString() + ")"); // GCOVR_EXCL_LINE
+	}
+
+	// Records a completed whole-column list read against the reader's own bookkeeping, so
+	// parquet_reader_check_complete and %print_stat both see the column as read. A chunked read
+	// deliberately does not, matching every other _chunk entry point in this file.
+	static void mark_list_read(ParquetReaderHandle *reader_handle, const char *name, int64_t row_group,
+		int32_t family, const std::shared_ptr<arrow::Array> &array)
+	{
+		if (row_group > 0) return;
+		mark_read(reader_handle, name, elem_family_token(family), array);
+	}
+
+
 extern "C"
 {
 
@@ -11031,6 +11378,223 @@ extern "C"
 		reader_handle->last_chunk_buffers_array = array;
 		extract_string_buffers(array, nrows_out, nchars_out, offsets_out, data_out, validity_out, offsets_int32_out,
 			validity_offset_out);
+	}
+
+
+	// ==== Variable-length LIST column reads (see the section banner above) ====
+	//
+	// The FIRST of the two crossings: reports everything Fortran needs in order to allocate its
+	// buffers and %init a parquet_list_column to the right payload kind, and writes no data.
+	//
+	//   nrows_out         rows in this column (or in this row group)
+	//   nelems_out        elements those rows hold between them
+	//   nchars_out        payload bytes, for a string element family only; 0 otherwise
+	//   elem_family_out   the element family (see arrow_leaf_family / the PF_ELEM_* parameters)
+	//   unit_out          the temporal unit selector, for a timestamp element family only
+	//
+	// The family and the unit are resolved from the SCHEMA, so a zero-row column still reports
+	// the kind its payload would have had; the two counts need the array. `row_group <= 0` means
+	// the whole column. Aborts if `name` is not a list column at all, or if its element type is
+	// one this library cannot read -- the second of those is a clean refusal in place of a
+	// half-built column, since there is no "unknown" payload kind for a list to hold.
+	void parquet_read_list_column_shape(void *handle, const char *name, int64_t row_group,
+		int64_t *nrows_out, int64_t *nelems_out, int64_t *nchars_out,
+		int32_t *elem_family_out, int32_t *unit_out)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		const char *context = row_group > 0 ? "parquet_read_column_chunk" : "parquet_read_column";
+		auto resolved = resolve_struct_path(reader_handle->schema, name);
+		auto elem_type = list_element_type(resolved.leaf_field);
+		if (!elem_type)
+		{
+			report_fatal_error(context, std::string("type mismatch for column: ") + name +
+				" (expected a list column, got " + resolved.leaf_field->type()->ToString() + ")"); // GCOVR_EXCL_LINE
+		}
+		int32_t family = arrow_leaf_family(elem_type);
+		if (family == kElemFamilyNone)
+		{
+			report_fatal_error(context, std::string("unsupported list element type for column: ") + name +
+				" (" + elem_type->ToString() + ")"); // GCOVR_EXCL_LINE
+		}
+		*elem_family_out = family;
+		*unit_out = 0;
+		if (family == kElemFamilyTimestamp)
+		{
+			*unit_out = arrow_unit_to_temporal_selector(
+				std::static_pointer_cast<arrow::TimestampType>(elem_type)->unit());
+		}
+		auto array = get_list_source_array(reader_handle, name, row_group, context);
+		auto shape = describe_list_array(array, name, context);
+		*nrows_out = shape.nrows;
+		*nelems_out = shape.nelems;
+		*nchars_out = 0;
+		if (family == kElemFamilyString)
+		{
+			*nchars_out = string_child_total_bytes(shape.child, name, context);
+		}
+	}
+
+	// The SECOND crossing, one entry point per element family. Each copies this column's (or this
+	// row group's) offsets, both null levels and its values into the caller's own buffers -- see
+	// fill_list_common for the shape check that makes each independently safe rather than
+	// dependent on a matching shape call having just happened.
+	void parquet_read_list_int32_fill(void *handle, const char *name, int64_t row_group,
+		int64_t nrows, int64_t nelems, int64_t *offsets, int8_t *row_valid,
+		int32_t *values, int8_t *elem_valid)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		const char *context = row_group > 0 ? "parquet_read_column_chunk" : "parquet_read_column";
+		auto child = fill_list_common(reader_handle, name, row_group, nrows, nelems, offsets,
+			row_valid, elem_valid, context);
+		convert_values_to_int32(child, values, nelems, name, context);
+		fill_null_default(values, elem_valid, nelems);
+		mark_list_read(reader_handle, name, row_group, kElemFamilyInt32, child);
+	}
+
+	// Same as parquet_read_list_int32_fill, but for an int64 payload.
+	void parquet_read_list_int64_fill(void *handle, const char *name, int64_t row_group,
+		int64_t nrows, int64_t nelems, int64_t *offsets, int8_t *row_valid,
+		int64_t *values, int8_t *elem_valid)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		const char *context = row_group > 0 ? "parquet_read_column_chunk" : "parquet_read_column";
+		auto child = fill_list_common(reader_handle, name, row_group, nrows, nelems, offsets,
+			row_valid, elem_valid, context);
+		convert_values_to_int64(child, values, nelems, name, context);
+		fill_null_default(values, elem_valid, nelems);
+		mark_list_read(reader_handle, name, row_group, kElemFamilyInt64, child);
+	}
+
+	// Same as parquet_read_list_int32_fill, but for a float32 payload.
+	void parquet_read_list_float32_fill(void *handle, const char *name, int64_t row_group,
+		int64_t nrows, int64_t nelems, int64_t *offsets, int8_t *row_valid,
+		float *values, int8_t *elem_valid)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		const char *context = row_group > 0 ? "parquet_read_column_chunk" : "parquet_read_column";
+		auto child = fill_list_common(reader_handle, name, row_group, nrows, nelems, offsets,
+			row_valid, elem_valid, context);
+		convert_values_to_float32(child, values, nelems, name, context);
+		fill_null_default(values, elem_valid, nelems);
+		mark_list_read(reader_handle, name, row_group, kElemFamilyFloat32, child);
+	}
+
+	// Same as parquet_read_list_int32_fill, but for a float64 payload.
+	void parquet_read_list_float64_fill(void *handle, const char *name, int64_t row_group,
+		int64_t nrows, int64_t nelems, int64_t *offsets, int8_t *row_valid,
+		double *values, int8_t *elem_valid)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		const char *context = row_group > 0 ? "parquet_read_column_chunk" : "parquet_read_column";
+		auto child = fill_list_common(reader_handle, name, row_group, nrows, nelems, offsets,
+			row_valid, elem_valid, context);
+		convert_values_to_float64(child, values, nelems, name, context);
+		fill_null_default(values, elem_valid, nelems);
+		mark_list_read(reader_handle, name, row_group, kElemFamilyFloat64, child);
+	}
+
+	// Same as parquet_read_list_int32_fill, but for a boolean payload (one int8 per element).
+	void parquet_read_list_bool8_fill(void *handle, const char *name, int64_t row_group,
+		int64_t nrows, int64_t nelems, int64_t *offsets, int8_t *row_valid,
+		int8_t *values, int8_t *elem_valid)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		const char *context = row_group > 0 ? "parquet_read_column_chunk" : "parquet_read_column";
+		auto child = fill_list_common(reader_handle, name, row_group, nrows, nelems, offsets,
+			row_valid, elem_valid, context);
+		if (child->type_id() != arrow::Type::BOOL)
+		{
+			report_fatal_error(context, std::string("type mismatch for list values in column: ") + name +
+				" (expected bool, got " + child->type()->ToString() + ")"); // GCOVR_EXCL_LINE
+		}
+		auto arr = std::static_pointer_cast<arrow::BooleanArray>(child);
+		for (int64_t i = 0; i < nelems; ++i)
+		{
+			values[i] = arr->Value(i) ? 1 : 0;
+		}
+		fill_null_default(values, elem_valid, nelems);
+		mark_list_read(reader_handle, name, row_group, kElemFamilyBool, child);
+	}
+
+	// Same as parquet_read_list_int32_fill, but for a date payload (int32 days since the epoch).
+	void parquet_read_list_date_fill(void *handle, const char *name, int64_t row_group,
+		int64_t nrows, int64_t nelems, int64_t *offsets, int8_t *row_valid,
+		int32_t *values, int8_t *elem_valid)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		const char *context = row_group > 0 ? "parquet_read_column_chunk" : "parquet_read_column";
+		auto child = fill_list_common(reader_handle, name, row_group, nrows, nelems, offsets,
+			row_valid, elem_valid, context);
+		convert_date_values(child, values, nelems, name, context);
+		fill_null_default(values, elem_valid, nelems);
+		mark_list_read(reader_handle, name, row_group, kElemFamilyDate, child);
+	}
+
+	// Same as parquet_read_list_int32_fill, but for a time payload (canonical int64 ns-of-day).
+	void parquet_read_list_time_fill(void *handle, const char *name, int64_t row_group,
+		int64_t nrows, int64_t nelems, int64_t *offsets, int8_t *row_valid,
+		int64_t *values, int8_t *elem_valid)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		const char *context = row_group > 0 ? "parquet_read_column_chunk" : "parquet_read_column";
+		auto child = fill_list_common(reader_handle, name, row_group, nrows, nelems, offsets,
+			row_valid, elem_valid, context);
+		convert_time_values(child, values, nelems, name, context);
+		fill_null_default(values, elem_valid, nelems);
+		mark_list_read(reader_handle, name, row_group, kElemFamilyTime, child);
+	}
+
+	// Same as parquet_read_list_int32_fill, but for a timestamp payload (int64 in the column's own
+	// unit -- the unit itself comes from parquet_read_list_column_shape's unit_out).
+	void parquet_read_list_timestamp_fill(void *handle, const char *name, int64_t row_group,
+		int64_t nrows, int64_t nelems, int64_t *offsets, int8_t *row_valid,
+		int64_t *values, int8_t *elem_valid)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		const char *context = row_group > 0 ? "parquet_read_column_chunk" : "parquet_read_column";
+		auto child = fill_list_common(reader_handle, name, row_group, nrows, nelems, offsets,
+			row_valid, elem_valid, context);
+		convert_timestamp_values(child, values, nelems, name, context);
+		fill_null_default(values, elem_valid, nelems);
+		mark_list_read(reader_handle, name, row_group, kElemFamilyTimestamp, child);
+	}
+
+	// Same as parquet_read_list_int32_fill, but for a string payload, which needs its own
+	// offsets-and-bytes pair rather than one value per element: `str_offsets` gets nelems+1
+	// entries starting at 0, and `str_data` gets nchars payload bytes.
+	//
+	// This one COPIES rather than handing back Arrow's own buffers, unlike
+	// parquet_read_string_column_buffers -- deliberately, so that this whole path keeps the one
+	// property that makes it safe: nothing Arrow-owned crosses the boundary, so there is nothing
+	// to pin and no lifetime to reason about. The extra pass over the payload bytes is the price,
+	// and it is one memcpy next to the copy the destination parquet_string_column does anyway.
+	void parquet_read_list_string_fill(void *handle, const char *name, int64_t row_group,
+		int64_t nrows, int64_t nelems, int64_t nchars, int64_t *offsets, int8_t *row_valid,
+		int64_t *str_offsets, char *str_data, int8_t *elem_valid)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		const char *context = row_group > 0 ? "parquet_read_column_chunk" : "parquet_read_column";
+		auto child = fill_list_common(reader_handle, name, row_group, nrows, nelems, offsets,
+			row_valid, elem_valid, context);
+		if (string_child_total_bytes(child, name, context) != nchars)
+		{
+			report_fatal_error(context, std::string("payload byte count mismatch for column: ") + name +
+				" (the column changed between the shape and fill calls)"); // GCOVR_EXCL_LINE
+		}
+		auto acc = make_string_like_accessor(child);
+		int64_t at = 0;
+		str_offsets[0] = 0;
+		for (int64_t i = 0; i < nelems; ++i)
+		{
+			auto view = acc.get_view(i);
+			if (!view.empty())
+			{
+				std::memcpy(str_data + at, view.data(), view.size());
+			}
+			at += static_cast<int64_t>(view.size());
+			str_offsets[i + 1] = at;
+		}
+		mark_list_read(reader_handle, name, row_group, kElemFamilyString, child);
 	}
 
 	// Reads row group `row_group`'s full vector int32 column `name` into `data`.

@@ -8,13 +8,17 @@ empty. That is what the Parquet `LIST` logical type describes, and it is the one
 library's other column types cannot represent: a `*_VEC` column has a fixed `col_size` and every
 row is exactly that wide.
 
-**This page describes in-memory storage only.** Nothing here reads a list column from a Parquet
-file or writes one to a file yet; that arrives in a later release. What you can do today is build,
-fill, query, copy and mutate a list column in memory, and hand it to a `parquet_column`.
+A list column can be **read from a Parquet file** with `parquet_read_column`, whole or one row
+group at a time — see [Reading a list column from a file](#reading-a-list-column-from-a-file)
+below. **Writing** one is not available yet; that arrives in a later release. Everything else on
+this page is about building, filling, querying, copying and mutating a list column in memory, and
+handing it to a `parquet_column`.
 
-It is an **independent module**: a program whose only import is `use parquet_list` compiles eleven
-Fortran files and never reaches this library's C++ bindings (the *package* still links Arrow; see
-[Choosing a module](../operating/choosing-a-module.html)). It reads no settings and prints nothing.
+The module itself is **independent**: a program whose only import is `use parquet_list` compiles
+eleven Fortran files and never reaches this library's C++ bindings (the *package* still links
+Arrow; see [Choosing a module](../operating/choosing-a-module.html)). It reads no settings and
+prints nothing. Reading from a file naturally does reach them, and goes through `use parquet` (or
+`use parquet_io`) like every other read.
 
 ## A first example
 
@@ -156,6 +160,12 @@ answers `.false.` and every other accessor on it aborts rather than returning a 
 - **`%append_row` grows geometrically** (1.5x, like every other container here), so building a
   column one row at a time is amortised O(1) per row. `%reserve(n)` presizes without adding rows;
   `%shrink_to_fit()` gives back the slack.
+- **`%adopt_rows(offsets, payload, [row_valid])`** is the bulk counterpart: it takes over a whole
+  column at once, moving in an offsets array and a filled `parquet_column` of elements and deriving
+  the payload kind and the row count from them. Reach for it when the final row and element counts
+  are known before the values are — a file read is the worked example — and for a string payload,
+  where `%append_row`'s `character(len=*)` array form would trim trailing blanks. Every
+  precondition is checked and fatal.
 - **`%deep_copy(out)`** produces a fully independent copy — offsets, row nullness, and the payload
   with its own per-element nullness. **`%move_from(src)`** hands the storage over without copying
   and leaves `src` empty.
@@ -210,9 +220,80 @@ so the *first* null written from inside a parallel region races with that alloca
 call lc%ensure_validity()     ! now no allocation happens inside the region
 ```
 
+## Reading a list column from a file
+
+`parquet_read_column` reads a whole `LIST` column into a `parquet_list_column`, and
+`parquet_read_column_chunk` reads one row group of it:
+
+```fortran
+use parquet
+type(parquet_reader) :: r
+type(parquet_list_column), target :: lc
+type(parquet_list_row) :: row
+integer(int32), allocatable :: v(:)
+
+call parquet_open_reader(r, "spectra.parquet")
+call parquet_read_column(r, "flux", lc)          ! one call; nothing declared about the column
+call parquet_close_reader(r)
+
+row = lc%view(3_int64)
+call row%get(v)                                   ! v is sized to row 3, whatever its length
+```
+
+**You do not declare the payload kind — the file does.** `lc` is cleared and rebuilt on every
+read, and its `%element_kind()` comes from the column's own element type, mapped to the narrowest
+Fortran kind that holds it losslessly: a `list<int8>`, a `list<int16>` and a `list<int32>` all read
+into a `PK_INT32` payload, while a `list<uint32>` reads into `PK_INT64` because uint32's upper half
+does not fit a signed 32-bit integer. This is the same mapping
+[`parquet_get_column_type`](../io/reading.html) reports, and reading a column into a `lc` that
+already held something else simply replaces it.
+
+Both null levels survive the read, and they stay distinct:
+
+| in the file | after the read |
+|---|---|
+| a **null** list row | `lc%is_null(i)` is `.true.`, `lc%length(i)` is 0 |
+| a present but **empty** row | `lc%is_null(i)` is `.false.`, `lc%length(i)` is 0 |
+| a **null element** in a present row | the row is not null; `row%get(v, is_valid=ok)` has `ok(e)` `.false.` |
+
+There is no `null_value=`/`is_valid=` argument on this specific — the destination carries its own
+validity, exactly as it does for
+[`parquet_string_column`](string-columns.html).
+
+**Filtering, sampling and sorting compose with it** exactly as with any other read: open the reader
+with `filter=`, `sample_fraction=` or `sort_by=` and the list column receives the surviving rows,
+in the requested order, each with its own length.
+
+**The chunked form is row-group-scoped**, so `parquet_read_column_chunk(r, name, rg, lc)` fills
+`lc` with just that row group's rows. Like every other row-group-scoped operation it **refuses
+while a read-time sort is installed**, because a sort permutation destroys row-group locality —
+read the column whole in that case. A filter is fine, since a filter only ever removes rows.
+
+### Which columns can be read this way
+
+Any Parquet `LIST` or `LARGE_LIST` column whose elements are one of the nine payload kinds, plus a
+`FIXED_SIZE_LIST` (this library's own vector-column layout), whose rows then all happen to have the
+same length. A list under a `STRUCT` is addressable by its dotted path (`"nested.vals"`) like any
+other leaf.
+
+A column whose elements are themselves a container — a `list<list<...>>`, a `list<struct<...>>`, a
+`list<map<...>>` — is refused with a message naming the element type. Nesting arrives in a later
+release.
+
+**A list column and a vector column are two readings of the same file column, and the caller's
+chosen output type picks which.** A `LIST` column whose rows happen to be uniformly 3 long reads
+into a `parquet_list_column` *and* into a 2-D `integer(int32) :: v(3, nrows)` array, and neither
+path knows about the other. The asymmetry is deliberate: a genuinely **ragged** column can only be
+read as a list column, because no 2-D array can hold rows of differing lengths — but a **uniform**
+one is never refused as a list column, because uniformity is a property of the data rather than of
+the request, and the same column may be ragged in next month's file.
+
+[`parquet_get_column_shape`](../io/reading.html) answers which kind of container a column is
+(`"scalar"`, `"vector"`, `"list"`, `"map"`, `"struct"`), from the schema alone.
+
 ## What this module does not do yet
 
-- **No file I/O.** A list column cannot yet be read from or written to a Parquet file.
+- **No writing.** A list column can be read from a Parquet file but not yet written to one.
 - **No nesting.** A list of lists, a list of structs, and the `MAP`/`STRUCT` containers themselves
   are not available; the payload must be one of the nine scalar kinds.
 - **No `parquet_table` integration.** A table cannot yet hold a list column.

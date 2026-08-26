@@ -24,6 +24,15 @@ module parquet_core
         parquet_max_sort_keys, parquet_max_sort_key_len
     use parquet_maml_base, only: parquet_maml_file
     use parquet_strings, only: parquet_string_column, parquet_string
+    ! parquet_list for the container type the LIST read specifics fill; parquet_columns for the
+    ! payload column they build inside it, and the PK_* kinds they map a file's element family
+    ! onto. Both are default-private here, so neither is re-exported from parquet_core -- a user
+    ! reaches them through the `parquet` facade's own `use parquet_list`/`use parquet_columns`.
+    ! The dependency runs THIS WAY ONLY: parquet_list must never import parquet_core, which is
+    ! what keeps it (and every tier below it) clear of parquet_bindings and hence of Arrow.
+    use parquet_list, only: parquet_list_column
+    use parquet_columns, only: parquet_column, parquet_column_set_null, parquet_column_string_column, &
+        PK_INT32, PK_INT64, PK_FLOAT32, PK_FLOAT64, PK_LOGICAL, PK_STRING, PK_DATE, PK_TIME, PK_TIMESTAMP
     use parquet_temporal, only: parquet_date, parquet_time, parquet_timestamp, &
         parquet_unit_seconds, parquet_unit_millis, parquet_unit_micros, parquet_unit_nanos, &
         parquet_ns_per_sec, parquet_ns_per_day, parquet_ns_to_sec, parquet_ns_to_day
@@ -941,6 +950,7 @@ module parquet_core
         module procedure parquet_read_time_array_full
         module procedure parquet_read_timestamp_column_1d
         module procedure parquet_read_timestamp_array_full
+        module procedure parquet_read_list_column
     end interface parquet_read_column
 
     !> Reads one row of a vector (array) column named `name` from an open
@@ -1074,6 +1084,8 @@ module parquet_core
         module procedure parquet_read_timestamp_column_chunk_rg64
         module procedure parquet_read_timestamp_array_column_chunk_rg32
         module procedure parquet_read_timestamp_array_column_chunk_rg64
+        module procedure parquet_read_list_column_chunk_rg32
+        module procedure parquet_read_list_column_chunk_rg64
     end interface parquet_read_column_chunk
 
     !> Returns `reader`'s post-filter row count in `nrows`, dispatched by
@@ -1299,6 +1311,7 @@ module parquet_core
     public :: parquet_get_string_length
     public :: parquet_column_exists
     public :: parquet_get_column_type
+    public :: parquet_get_column_shape
     public :: parquet_get_column_nullable
     public :: parquet_get_column_names
     public :: parquet_release_column
@@ -2930,6 +2943,27 @@ module parquet_core
             character(len=*), intent(in) :: name !! existing column name (dotted struct-leaf path allowed).
             character(len=:), allocatable, intent(out) :: type_name !! resolved canonical type token.
         end subroutine parquet_get_column_type
+        !> Reports existing column `name`'s CONTAINER SHAPE in `shape`, as one of the tokens
+        !> `"scalar"`, `"vector"`, `"list"`, `"map"`, `"struct"` or `"unknown"`. A schema-only
+        !> query: it reads no column data at all.
+        !>
+        !> Orthogonal to parquet_get_column_type, which reports the ELEMENT type and deliberately
+        !> unwraps a list to it -- so a `list<double>` column answers `"float64"` there and
+        !> `"list"` here, and a caller wanting a complete description asks both.
+        !>
+        !> `"vector"` means a fixed-size list, and only that. A variable-length `LIST` column
+        !> answers `"list"` EVEN WHEN ITS ROWS HAPPEN TO BE UNIFORM and it would read perfectly
+        !> well into a 2-D array, because whether they are uniform is a property of the data and
+        !> answering it would mean reading the column. Ask parquet_get_col_size, which does look,
+        !> if that is the question.
+        !>
+        !> error stops only if `name` doesn't exist, same as parquet_get_column_type: a shape this
+        !> library cannot read is an answer, not an error.
+        module subroutine parquet_get_column_shape(reader, name, shape)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! existing column name (dotted struct-leaf path allowed).
+            character(len=:), allocatable, intent(out) :: shape !! resolved container-shape token.
+        end subroutine parquet_get_column_shape
         !> Reports whether existing column `name` is declared NULLABLE in `reader`'s file schema,
         !> in `is_nullable`. A schema-only query -- it reads no column data, and says nothing about
         !> whether the column actually contains any Null (parquet_column_has_nulls answers that,
@@ -3191,6 +3225,29 @@ module parquet_core
             character(len=*), intent(in) :: name !! column name.
             type(parquet_string_column), intent(inout) :: values !! cleared, then filled with the whole column.
         end subroutine parquet_read_string_column_compact
+        !> Variable-length list specific of parquet_read_column: reads a whole `LIST`/`LARGE_LIST`
+        !> column into a `parquet_list_column` (see module parquet_list), rows of differing
+        !> lengths and all. `values` is cleared and rebuilt, so the caller declares nothing about
+        !> the column beforehand -- not even its payload type, which comes from the file.
+        !>
+        !> Both null levels survive: a Null list row reads back as `values%is_null(i)`, a Null
+        !> ELEMENT inside a present row as a null element of the payload, and a present-but-empty
+        !> row as `%length(i) == 0` with `%is_null(i)` .false. There is no null_value/is_valid
+        !> argument, for the same reason parquet_read_string_column_compact has none -- the
+        !> destination carries its own validity.
+        !>
+        !> A FIXED_SIZE_LIST (vector) column is accepted too, and yields rows that all happen to
+        !> have the same length. The reverse also holds: a `LIST` column whose data is uniform
+        !> still reads into a 2-D array through the vector specifics. The caller's chosen output
+        !> type picks the interpretation, and there is no third rule about when each is allowed --
+        !> only a 2-D read of genuinely ragged data is refused, because no 2-D array can hold it.
+        !>
+        !> Filtering, sampling and sorting compose with this read exactly as with any other.
+        module subroutine parquet_read_list_column(reader, name, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! list column name (dotted struct-leaf path allowed).
+            type(parquet_list_column), intent(inout) :: values !! cleared, then filled with the whole column.
+        end subroutine parquet_read_list_column
         !> Scalar date specific of parquet_read_column. A Parquet Null in the column becomes a
         !> null `values` element (parquet_date%is_null); there is no null_value/is_valid argument
         !> -- validity lives in the elements themselves, so a null-containing date column reads
@@ -3649,6 +3706,24 @@ module parquet_core
             integer(int64), intent(in) :: row_group !! 1-based row group to read.
             type(parquet_string_column), intent(inout) :: values !! cleared, then filled with this row group's rows.
         end subroutine parquet_read_string_column_chunk_compact_rg64
+        !> Variable-length list, int32 row_group specific of parquet_read_column_chunk; see
+        !> parquet_read_list_column for what a list read yields. Reads exactly row group
+        !> `row_group`'s rows, and -- like every other row-group-scoped operation -- refuses while
+        !> a sort is installed, since a permutation destroys row-group locality.
+        module subroutine parquet_read_list_column_chunk_rg32(reader, name, row_group, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! list column name.
+            integer(int32), intent(in) :: row_group !! 1-based row group to read.
+            type(parquet_list_column), intent(inout) :: values !! cleared, then filled with this row group's rows.
+        end subroutine parquet_read_list_column_chunk_rg32
+        !> Variable-length list, int64 row_group specific of parquet_read_column_chunk; see
+        !> parquet_read_list_column_chunk_rg32.
+        module subroutine parquet_read_list_column_chunk_rg64(reader, name, row_group, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! list column name.
+            integer(int64), intent(in) :: row_group !! 1-based row group to read.
+            type(parquet_list_column), intent(inout) :: values !! cleared, then filled with this row group's rows.
+        end subroutine parquet_read_list_column_chunk_rg64
         !> int32 value / int32 row_index specific of parquet_read_array_row_mode; see the generic
         !> interface above for the shared "one row of a vector column" behavior. A paired
         !> _row_index_int64 specific (same value type, int64 row_index) also exists for files with

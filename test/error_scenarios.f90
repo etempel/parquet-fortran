@@ -77,6 +77,30 @@ program error_scenarios
         call scenario_plain_list_size_queries_avoid_whole_column_read()
     case ("list_width_never_reads_whole_column")
         call scenario_list_width_never_reads_whole_column()
+    case ("list_read_not_a_list")
+        call scenario_list_read_not_a_list()
+    case ("list_read_nested_payload")
+        call scenario_list_read_nested_payload()
+    case ("list_read_struct_payload")
+        call scenario_list_read_struct_payload()
+    case ("list_chunk_refuses_sort")
+        call scenario_list_chunk_refuses_sort()
+    case ("list_chunk_row_group_out_of_range")
+        call scenario_list_chunk_row_group_out_of_range()
+    case ("list_chunk_incomplete_aborts")
+        call scenario_list_chunk_incomplete_aborts()
+    case ("list_chunk_complete_ok")
+        call scenario_list_chunk_complete_ok()
+    case ("list_read_marks_read")
+        call scenario_list_read_marks_read()
+    case ("list_adopt_rows_offset_mismatch")
+        call scenario_list_adopt_rows_offset_mismatch()
+    case ("list_adopt_rows_not_monotonic")
+        call scenario_list_adopt_rows_not_monotonic()
+    case ("list_adopt_rows_bad_payload_kind")
+        call scenario_list_adopt_rows_bad_payload_kind()
+    case ("list_adopt_rows_mask_length")
+        call scenario_list_adopt_rows_mask_length()
     case ("whole_column_read_forced_error_control")
         call scenario_whole_column_read_forced_error_control()
     case ("read_array_full_bool_type_mismatch")
@@ -17090,5 +17114,152 @@ contains
         call sx%count_all_within(0.5_real64, counts)
         print '(a,i0)', "rebuilds=", parquet_debug_spatial_rebuilds()
     end subroutine scenario_spatial_rebuild_warning
+
+    !> ==== Variable-length LIST reads ====
+    !
+    !> A list read of a column that is not a list at all: the shape query refuses before anything
+    !> is allocated, naming the type it actually found.
+    subroutine scenario_list_read_not_a_list()
+        type(parquet_reader) :: reader
+        type(parquet_list_column) :: lc
+        call parquet_open_reader(reader, "test/fixtures/list_widths.parquet")
+        call parquet_read_column(reader, "scalar", lc)
+        call parquet_close_reader(reader)
+    end subroutine scenario_list_read_not_a_list
+
+    !> A list whose ELEMENTS are themselves a container (`list<list<int32>>`). Nested payloads are
+    !> Phase 7's subject; until then this is a clean refusal naming the element type, rather than a
+    !> half-built column -- there is no "unknown" payload kind for a list to hold.
+    subroutine scenario_list_read_nested_payload()
+        type(parquet_reader) :: reader
+        type(parquet_list_column) :: lc
+        call parquet_open_reader(reader, "test/fixtures/map_list_types.parquet")
+        call parquet_read_column(reader, "list_of_list", lc)
+        call parquet_close_reader(reader)
+    end subroutine scenario_list_read_nested_payload
+
+    !> The same, for a `list<struct<...>>` -- a different unsupported element type reaching the
+    !> same refusal, so the guard is not keyed on one Arrow type id.
+    subroutine scenario_list_read_struct_payload()
+        type(parquet_reader) :: reader
+        type(parquet_list_column) :: lc
+        call parquet_open_reader(reader, "test/fixtures/map_list_types.parquet")
+        call parquet_read_column(reader, "list_of_struct", lc)
+        call parquet_close_reader(reader)
+    end subroutine scenario_list_read_struct_payload
+
+    !> A chunked list read while a read-time sort is installed. Every row-group-scoped operation
+    !> refuses, because a permutation destroys row-group locality -- the list specific inherits
+    !> that and must not weaken it.
+    subroutine scenario_list_chunk_refuses_sort()
+        type(parquet_reader) :: reader
+        type(parquet_sortkey) :: srt
+        type(parquet_list_column) :: lc
+        call srt%add("scalar desc")
+        call parquet_open_reader(reader, "test/fixtures/list_widths.parquet", sort_by=srt)
+        call parquet_read_column_chunk(reader, "ragged", 1_int64, lc)
+        call parquet_close_reader(reader)
+    end subroutine scenario_list_chunk_refuses_sort
+
+    !> A chunked list read of a row group that does not exist.
+    subroutine scenario_list_chunk_row_group_out_of_range()
+        type(parquet_reader) :: reader
+        type(parquet_list_column) :: lc
+        call parquet_open_reader(reader, "test/fixtures/list_widths.parquet")
+        call parquet_read_column_chunk(reader, "ragged", 99_int64, lc)
+        call parquet_close_reader(reader)
+    end subroutine scenario_list_chunk_row_group_out_of_range
+
+    !> A chunked list read that skips a row group, then a close that checks completeness. This is
+    !> the only in-library observation that the chunked list path registers the row groups it read
+    !> -- and so the only thing that would notice if it stopped.
+    subroutine scenario_list_chunk_incomplete_aborts()
+        type(parquet_reader) :: reader
+        type(parquet_list_column) :: lc
+        call parquet_open_reader(reader, "test/fixtures/list_widths.parquet")
+        call parquet_read_column_chunk(reader, "ragged", 1_int64, lc)
+        call parquet_read_column_chunk(reader, "ragged", 2_int64, lc)
+        call parquet_close_reader(reader, check_complete=.true.)
+    end subroutine scenario_list_chunk_incomplete_aborts
+
+    !> The negative control for the scenario above: reading EVERY row group closes cleanly. Without
+    !> it, the abort would hold just as well against a check that fired unconditionally.
+    subroutine scenario_list_chunk_complete_ok()
+        type(parquet_reader) :: reader
+        type(parquet_list_column) :: lc
+        integer(int64) :: rg, ngroups
+        call parquet_open_reader(reader, "test/fixtures/list_widths.parquet")
+        call parquet_get_num_row_groups(reader, ngroups)
+        do rg = 1_int64, ngroups
+            call parquet_read_column_chunk(reader, "ragged", rg, lc)
+        end do
+        call parquet_close_reader(reader, check_complete=.true.)
+        print '(a)', "a fully chunk-read LIST column passes the completeness check, as expected"
+    end subroutine scenario_list_chunk_complete_ok
+
+    !> A whole-column list read must MARK the column read, so parquet_reader_print_stat reports it.
+    !> print_stat writes to stdout, so this has to be an out-of-process scenario; the wrapper
+    !> asserts the column's row says it was read.
+    subroutine scenario_list_read_marks_read()
+        type(parquet_reader) :: reader
+        type(parquet_list_column) :: lc
+        call parquet_open_reader(reader, "test/fixtures/list_payloads.parquet")
+        call parquet_read_column(reader, "i32", lc)
+        call parquet_close_reader(reader, print_stat=.true.)
+    end subroutine scenario_list_read_marks_read
+
+    !> %adopt_rows refuses offsets whose final entry does not account for the payload it was handed.
+    !> The invariant is what every later query depends on, so it is checked once, here, rather than
+    !> discovered as a wrong row length much later.
+    subroutine scenario_list_adopt_rows_offset_mismatch()
+        type(parquet_list_column) :: lc
+        type(parquet_column) :: payload
+        integer(int64), allocatable :: offsets(:)
+        integer(int32), allocatable :: v(:)
+        v = [1_int32, 2_int32, 3_int32]
+        call payload%adopt(v)
+        offsets = [0_int64, 1_int64, 2_int64]   ! claims 2 elements for a 3-element payload
+        call lc%adopt_rows(offsets, payload)
+    end subroutine scenario_list_adopt_rows_offset_mismatch
+
+    !> %adopt_rows refuses non-monotonic offsets: a row whose end precedes its start would yield a
+    !> negative length, which every read of that row would then carry.
+    subroutine scenario_list_adopt_rows_not_monotonic()
+        type(parquet_list_column) :: lc
+        type(parquet_column) :: payload
+        integer(int64), allocatable :: offsets(:)
+        integer(int32), allocatable :: v(:)
+        v = [1_int32, 2_int32, 3_int32]
+        call payload%adopt(v)
+        offsets = [0_int64, 2_int64, 1_int64, 3_int64]
+        call lc%adopt_rows(offsets, payload)
+    end subroutine scenario_list_adopt_rows_not_monotonic
+
+    !> %adopt_rows refuses a payload whose kind cannot be a list element (here a VECTOR kind, whose
+    !> width is exactly what a list row expresses instead).
+    subroutine scenario_list_adopt_rows_bad_payload_kind()
+        type(parquet_list_column) :: lc
+        type(parquet_column) :: payload
+        integer(int64), allocatable :: offsets(:)
+        integer(int32), allocatable :: v(:,:)
+        allocate(v(2, 3))
+        v = 0_int32
+        call payload%adopt(v)
+        offsets = [0_int64, 1_int64, 2_int64, 3_int64]
+        call lc%adopt_rows(offsets, payload)
+    end subroutine scenario_list_adopt_rows_bad_payload_kind
+
+    !> %adopt_rows refuses a row_valid mask of the wrong length -- a mask one short would silently
+    !> leave the last row's nullness to whatever the bitmap happened to hold.
+    subroutine scenario_list_adopt_rows_mask_length()
+        type(parquet_list_column) :: lc
+        type(parquet_column) :: payload
+        integer(int64), allocatable :: offsets(:)
+        integer(int32), allocatable :: v(:)
+        v = [1_int32, 2_int32, 3_int32]
+        call payload%adopt(v)
+        offsets = [0_int64, 1_int64, 2_int64, 3_int64]
+        call lc%adopt_rows(offsets, payload, row_valid=[.true., .true.])
+    end subroutine scenario_list_adopt_rows_mask_length
 
 end program error_scenarios

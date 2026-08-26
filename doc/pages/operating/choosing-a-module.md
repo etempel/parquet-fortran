@@ -51,9 +51,9 @@ in every one of them.
 | `parquet_list` | 11 | no | `parquet_list_column` / `parquet_list_row`: variable-length list storage |
 | `parquet_sorting` | 21 | no | the whole sorting API, every element type, including `pf_sort_keys` |
 | `parquet_settings` | 3 | **yes** | the process-global knobs, and `parquet_get_arrow_version` |
-| `parquet_io` | 44 | **yes** | reading and writing Parquet files, and nothing else |
-| `parquet_tables` | 62 | **yes** | the `parquet_table` container |
-| `parquet` | 72 | **yes** | everything above, through one `use` |
+| `parquet_io` | 46 | **yes** | reading and writing Parquet files, and nothing else |
+| `parquet_tables` | 64 | **yes** | the `parquet_table` container |
+| `parquet` | 73 | **yes** | everything above, through one `use` |
 
 Four rows deserve a note.
 
@@ -66,14 +66,15 @@ Parquet C++ versions are a different question with a different answer: `parquet_
 in `parquet_settings` (and so in `parquet_io`, `parquet_tables` and `parquet`), because reading them
 means calling into the C++ half.
 
-**`parquet_tables` costs all but four files of `parquet`**, so importing it instead of the facade
-buys little beyond a narrower namespace. The table layer sits on the reader, the column container
-and the sorting engine, which between them are almost the whole library; the four it leaves behind
-are the two facades themselves, `parquet_sampling` and `parquet_version`.
+**`parquet_tables` costs all but a handful of `parquet`'s files**, so importing it instead of the
+facade buys little beyond a narrower namespace. The table layer sits on the reader, the column
+container and the sorting engine, which between them are almost the whole library; what it leaves
+behind is the two facades themselves, `parquet_sampling`, `parquet_spatial` and `parquet_version`.
 
-**`parquet_io` is the one real saving on the Arrow side**, at 44 files against 66: it drops the
-entire table layer, the sampling module, `parquet_version` and the outer facade. Reach for it when
-your program opens files, moves columns in and out, and never builds a `parquet_table`.
+**`parquet_io` is the one real saving on the Arrow side** — see the table above for the two
+counts: it drops the entire table layer, the sampling and spatial modules, `parquet_version` and the
+outer facade. Reach for it when your program opens files, moves columns in and out, and never builds
+a `parquet_table`.
 
 It does **not** drop `parquet_random`, and the three files it keeps that belong to none of the
 reader/writer machinery are that generator's: `parquet_open_reader(..., sample_fraction=)` picks its

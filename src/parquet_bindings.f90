@@ -58,6 +58,7 @@ module parquet_bindings
     public :: parquet_reader_get_column_name, parquet_reader_release_column
     public :: parquet_reader_prefetch_columns, parquet_reader_prefetch_all_columns, parquet_reader_has_column
     public :: parquet_reader_get_column_type_name, parquet_reader_get_column_nullable
+    public :: parquet_reader_get_column_shape_name
     public :: parquet_writer_set_protected_column
     public :: c_reader_set_filter, parquet_reader_has_decoded_columns, parquet_reader_has_filter_clauses
     public :: parquet_reader_has_chunk_reads
@@ -84,6 +85,13 @@ module parquet_bindings
     public :: parquet_read_float32_array_column, parquet_read_float64_array_column
     public :: parquet_read_bool8_array_column, parquet_read_string_array_column
     public :: parquet_read_string_column_buffers
+    public :: parquet_read_list_column_shape
+    public :: PF_ELEM_NONE, PF_ELEM_INT32, PF_ELEM_INT64, PF_ELEM_FLOAT32, PF_ELEM_FLOAT64
+    public :: PF_ELEM_BOOL, PF_ELEM_STRING, PF_ELEM_DATE, PF_ELEM_TIME, PF_ELEM_TIMESTAMP
+    public :: parquet_read_list_int32_fill, parquet_read_list_int64_fill
+    public :: parquet_read_list_float32_fill, parquet_read_list_float64_fill
+    public :: parquet_read_list_bool8_fill, parquet_read_list_string_fill
+    public :: parquet_read_list_date_fill, parquet_read_list_time_fill, parquet_read_list_timestamp_fill
     public :: parquet_read_int32_array_row, parquet_read_int64_array_row
     public :: parquet_read_float32_array_row, parquet_read_float64_array_row
     public :: parquet_read_bool8_array_row, parquet_read_string_array_row
@@ -111,6 +119,29 @@ module parquet_bindings
     public :: parquet_read_date_array_element, parquet_read_time_array_element, parquet_read_timestamp_array_element
     public :: parquet_reader_get_column_time_unit
     public :: parquet_reader_get_column_timezone_length, parquet_reader_get_column_timezone
+
+    ! ---- Element families ----
+    !
+    ! What parquet_read_list_column_shape's `elem_family` argument reports: the Fortran kind a
+    ! list column's payload reads into. These values MUST match the kElemFamily* constants in
+    ! src/parquet_wrapper.cpp's "Element families" section -- they are the two halves of one
+    ! contract, and tools/check_bindc_boundary.py cannot see a mismatch, because both sides are
+    ! plain integers.
+    !
+    ! A family is deliberately NOT a PK_* discriminator: PK_* is a parquet_columns vocabulary and
+    ! the C++ side must not be given a reason to know about it. The mapping from a family to a
+    ! PK_* kind lives in src/parquet_read_list.f90, on the Fortran side of the boundary, in one
+    ! place.
+    integer(c_int32_t), parameter :: PF_ELEM_NONE = 0      !! not readable by this library at all.
+    integer(c_int32_t), parameter :: PF_ELEM_INT32 = 1     !! int8/int16/int32/uint8/uint16.
+    integer(c_int32_t), parameter :: PF_ELEM_INT64 = 2     !! int64/uint32/uint64.
+    integer(c_int32_t), parameter :: PF_ELEM_FLOAT32 = 3   !! half_float/float.
+    integer(c_int32_t), parameter :: PF_ELEM_FLOAT64 = 4   !! double/decimal*.
+    integer(c_int32_t), parameter :: PF_ELEM_BOOL = 5      !! bool.
+    integer(c_int32_t), parameter :: PF_ELEM_STRING = 6    !! string/large_string.
+    integer(c_int32_t), parameter :: PF_ELEM_DATE = 7      !! date32/date64.
+    integer(c_int32_t), parameter :: PF_ELEM_TIME = 8      !! time32/time64.
+    integer(c_int32_t), parameter :: PF_ELEM_TIMESTAMP = 9 !! timestamp.
 
     interface
         !> Creates a new parquet writer for `filename` and returns its opaque handle.
@@ -1548,6 +1579,197 @@ module parquet_bindings
             type(c_ptr), intent(out) :: validity
             integer(c_int8_t), intent(out) :: offsets_int32
             integer(c_long_long), intent(out) :: validity_offset
+        end subroutine
+
+
+        ! ---- Variable-length LIST column reads ----
+        !
+        ! The read path a genuinely ragged LIST column takes into a parquet_list_column, in TWO
+        ! crossings, neither of which passes a pointer to anything Arrow owns.
+        !
+        ! `parquet_read_list_column_shape` first reports the counts, the element family and the
+        ! temporal unit; Fortran then allocates its own buffers and %init's the payload column;
+        ! one `parquet_read_list_<family>_fill` then COPIES into those buffers. That is
+        ! deliberately unlike parquet_read_string_column_buffers above, which hands back Arrow's
+        ! own buffers: a list payload frequently needs CONVERTING on the way out (a list<int8>, a
+        ! list<uint16> and a list<int32> all read into an int32 payload), so for most families
+        ! there is no pointer to hand over -- and copying uniformly is what removes the whole
+        ! use-after-free class the string path needed a pin to close.
+        !
+        ! Every fill takes `row_group`: <= 0 means the whole column (the row transform applies,
+        ! so filtering/sampling/sorting compose), > 0 means exactly that one row group. Each fill
+        ! re-derives the shape and aborts if it disagrees with the counts it was given, so the
+        ! pair is not a matched sequence sharing hidden state -- either call is safe alone.
+
+        !> Reports the shape of list column `name` without writing any values: row count, total
+        !> element count, payload byte count (string family only, 0 otherwise), the element family
+        !> (one of the PF_ELEM_* parameters below) and the temporal unit selector (timestamp
+        !> family only, 0 otherwise). `row_group` <= 0 means the whole column.
+        subroutine parquet_read_list_column_shape(reader, name, row_group, nrows, nelems, nchars, &
+                elem_family, unit_out) bind(C, name="parquet_read_list_column_shape")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_long_long), intent(out) :: nrows
+            integer(c_long_long), intent(out) :: nelems
+            integer(c_long_long), intent(out) :: nchars
+            integer(c_int32_t), intent(out) :: elem_family
+            integer(c_int32_t), intent(out) :: unit_out
+        end subroutine
+
+        !> Fills an int32-payload list column's offsets, row validity, values and element validity.
+        subroutine parquet_read_list_int32_fill(reader, name, row_group, nrows, nelems, offsets, &
+                row_valid, values, elem_valid) bind(C, name="parquet_read_list_int32_fill")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nelems
+            integer(c_int64_t) :: offsets(*)
+            integer(c_int8_t) :: row_valid(*)
+            integer(c_int32_t) :: values(*)
+            integer(c_int8_t) :: elem_valid(*)
+        end subroutine
+
+        !> As parquet_read_list_int32_fill, for an int64 payload.
+        subroutine parquet_read_list_int64_fill(reader, name, row_group, nrows, nelems, offsets, &
+                row_valid, values, elem_valid) bind(C, name="parquet_read_list_int64_fill")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nelems
+            integer(c_int64_t) :: offsets(*)
+            integer(c_int8_t) :: row_valid(*)
+            integer(c_int64_t) :: values(*)
+            integer(c_int8_t) :: elem_valid(*)
+        end subroutine
+
+        !> As parquet_read_list_int32_fill, for a float32 payload.
+        subroutine parquet_read_list_float32_fill(reader, name, row_group, nrows, nelems, offsets, &
+                row_valid, values, elem_valid) bind(C, name="parquet_read_list_float32_fill")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nelems
+            integer(c_int64_t) :: offsets(*)
+            integer(c_int8_t) :: row_valid(*)
+            real(c_float) :: values(*)
+            integer(c_int8_t) :: elem_valid(*)
+        end subroutine
+
+        !> As parquet_read_list_int32_fill, for a float64 payload.
+        subroutine parquet_read_list_float64_fill(reader, name, row_group, nrows, nelems, offsets, &
+                row_valid, values, elem_valid) bind(C, name="parquet_read_list_float64_fill")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nelems
+            integer(c_int64_t) :: offsets(*)
+            integer(c_int8_t) :: row_valid(*)
+            real(c_double) :: values(*)
+            integer(c_int8_t) :: elem_valid(*)
+        end subroutine
+
+        !> As parquet_read_list_int32_fill, for a boolean payload (one int8 per element).
+        subroutine parquet_read_list_bool8_fill(reader, name, row_group, nrows, nelems, offsets, &
+                row_valid, values, elem_valid) bind(C, name="parquet_read_list_bool8_fill")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nelems
+            integer(c_int64_t) :: offsets(*)
+            integer(c_int8_t) :: row_valid(*)
+            integer(c_int8_t) :: values(*)
+            integer(c_int8_t) :: elem_valid(*)
+        end subroutine
+
+        !> As parquet_read_list_int32_fill, for a date payload (int32 days since the epoch).
+        subroutine parquet_read_list_date_fill(reader, name, row_group, nrows, nelems, offsets, &
+                row_valid, values, elem_valid) bind(C, name="parquet_read_list_date_fill")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nelems
+            integer(c_int64_t) :: offsets(*)
+            integer(c_int8_t) :: row_valid(*)
+            integer(c_int32_t) :: values(*)
+            integer(c_int8_t) :: elem_valid(*)
+        end subroutine
+
+        !> As parquet_read_list_int32_fill, for a time payload (canonical int64 ns-of-day).
+        subroutine parquet_read_list_time_fill(reader, name, row_group, nrows, nelems, offsets, &
+                row_valid, values, elem_valid) bind(C, name="parquet_read_list_time_fill")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nelems
+            integer(c_int64_t) :: offsets(*)
+            integer(c_int8_t) :: row_valid(*)
+            integer(c_int64_t) :: values(*)
+            integer(c_int8_t) :: elem_valid(*)
+        end subroutine
+
+        !> As parquet_read_list_int32_fill, for a timestamp payload (int64 in the column's own
+        !> unit -- parquet_read_list_column_shape's `unit_out` reports which).
+        subroutine parquet_read_list_timestamp_fill(reader, name, row_group, nrows, nelems, offsets, &
+                row_valid, values, elem_valid) bind(C, name="parquet_read_list_timestamp_fill")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nelems
+            integer(c_int64_t) :: offsets(*)
+            integer(c_int8_t) :: row_valid(*)
+            integer(c_int64_t) :: values(*)
+            integer(c_int8_t) :: elem_valid(*)
+        end subroutine
+
+        !> As parquet_read_list_int32_fill, for a string payload: the values come back as their
+        !> own offsets/bytes pair (`str_offsets` gets nelems+1 entries starting at 0, `str_data`
+        !> gets `nchars` bytes) rather than one fixed-width value per element, so nothing is
+        !> padded and no trailing space is lost.
+        subroutine parquet_read_list_string_fill(reader, name, row_group, nrows, nelems, nchars, &
+                offsets, row_valid, str_offsets, str_data, elem_valid) &
+                bind(C, name="parquet_read_list_string_fill")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nelems
+            integer(c_long_long), value :: nchars
+            integer(c_int64_t) :: offsets(*)
+            integer(c_int8_t) :: row_valid(*)
+            integer(c_int64_t) :: str_offsets(*)
+            character(kind=c_char) :: str_data(*)
+            integer(c_int8_t) :: elem_valid(*)
+        end subroutine
+
+        !> Writes `name`'s container-shape token ("scalar"/"vector"/"list"/"map"/"struct"/
+        !> "unknown") into `buf`, space-padded to buf_len. Schema-only: reads no column data.
+        !> Orthogonal to parquet_reader_get_column_type_name, which reports the ELEMENT type.
+        subroutine parquet_reader_get_column_shape_name(reader, name, buf, buf_len) &
+                bind(C, name="parquet_reader_get_column_shape_name")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            character(kind=c_char) :: buf(*)
+            integer(c_long_long), value :: buf_len
         end subroutine
 
         !> Reads one row (`row_index`) of vector int32 column `name` from `reader` into `data`.

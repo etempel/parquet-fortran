@@ -387,13 +387,18 @@ unaffected. A dotted path may also resolve to a vector (`FIXED_SIZE_LIST`) leaf 
 struct — reading it behaves exactly like any other vector column (`col_size`, row/element modes,
 `(col_size, nrows)` shape, all apply unchanged).
 
+A dotted path may equally resolve to a variable-length `LIST` leaf, which reads into a
+[`parquet_list_column`](list-columns.html#reading-a-list-column-from-a-file) exactly as a top-level
+one does — including into a 2-D array when its rows happen to be uniform. There is no
+dotted-path-specific behaviour in either direction.
+
 A path must resolve all the way down to a leaf column: naming an intermediate struct directly
 (`"main.inner"`, or just `"main"` when `main` is itself a struct) is not readable by any type this
 library supports and fails the same way as any other unknown column
 (`error stop "...: column not found in parquet file: ..."`) — there is no struct/record output type
-to read it into. `MAP` columns, and variable-length `LIST` columns, are not supported anywhere along
-a struct path — neither as an intermediate hop nor as the terminal leaf — and are rejected with the
-same "column not found" class of error rather than a silent wrong answer or a crash.
+to read it into. `MAP` columns are not supported anywhere along a struct path — neither as an
+intermediate hop nor as the terminal leaf — and are rejected with the same "column not found" class
+of error rather than a silent wrong answer or a crash.
 
 **Null handling** combines every level a path passes through: a leaf is reported/treated as Null
 (via `null_value=`/`is_valid=`, [above](#null-values)) if the top-level struct itself is missing for

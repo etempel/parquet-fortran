@@ -24,6 +24,7 @@ program tester
     use test_parquet_string, only : collect_tests_parquet_string
     use test_columns, only : collect_tests_parquet_columns
     use test_list, only : collect_tests_parquet_list
+    use test_list_read, only : collect_tests_parquet_list_read
     use test_filter, only : collect_tests_filter
     use test_filter_screen, only : collect_tests_filter_screen
     use test_sort, only : collect_tests_sort
@@ -85,6 +86,7 @@ program tester
         new_testsuite("temporal", collect_tests_parquet_temporal), &
         new_testsuite("columns", collect_tests_parquet_columns), &
         new_testsuite("list", collect_tests_parquet_list), &
+        new_testsuite("list_read", collect_tests_parquet_list_read), &
         new_testsuite("filter", collect_tests_filter), &
         new_testsuite("filter_screen", collect_tests_filter_screen), &
         new_testsuite("sort", collect_tests_sort), &

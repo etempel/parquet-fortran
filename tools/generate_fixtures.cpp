@@ -38,6 +38,11 @@
 //     and `reading` suites and the `list_width_never_reads_whole_column` error scenario. Written
 //     without `store_schema()` on purpose -- with it, Arrow round-trips a `fixed_size_list` as a
 //     `fixed_size_list` and none of these columns would exercise the plain-`LIST` path.
+//   * `list_payloads.parquet` -- one genuinely ragged variable-length `LIST` column per payload
+//     element type this library can read (plus a `large_list`, an `int8`/`uint32` pair whose
+//     conversion is visible, and columns carrying null elements / a null row / an empty row),
+//     written across 3 row groups. The two other list fixtures are `int32`-only, so without this
+//     one eight of the nine element-type arms of the `LIST` read path would never be entered.
 //   * `extended_types.parquet` -- columns of the extended read-only source types
 //     (`int8`/`int16`/unsigned integers/`half_float`/`decimal`).
 //   * `nested_struct.parquet` -- a `STRUCT` column, nested 3 levels deep, with a `FIXED_SIZE_LIST`
@@ -344,6 +349,239 @@ static bool generate_list_widths_fixture()
     auto maybe_outfile = arrow::io::FileOutputStream::Open("test/fixtures/list_widths.parquet");
     auto outfile = *maybe_outfile;
     auto status = parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), outfile, kRowGroup);
+    return status.ok();
+}
+
+// test/fixtures/list_payloads.parquet: one genuinely ragged variable-length column per payload
+// element type this library can read, so the LIST read path is exercised across all nine of its
+// element-type arms rather than only the int32 one.
+//
+// It exists because the two other list fixtures are int32-only: list_widths.parquet's seven list
+// columns are all `list<int32>` (its subject is the WIDTH machinery, one column per shape), and
+// has_null.parquet's is too. Without this file, eight of the nine arms of the read path's
+// element-type dispatch would be `case default` waiting to happen -- an arm never entered is a
+// passing test.
+//
+// Deliberately a SEPARATE file rather than extra columns on list_widths.parquet: that one is
+// consumed by the `table` and `reading` suites and by the list_width_* error scenarios, and every
+// one of its column shapes is chosen to hit a specific outcome of the width screen. Adding columns
+// to it risks those; a new file risks nothing.
+//
+// 12 rows written with row_group_size 4, so there are 3 row groups and every column's raggedness
+// spans a row-group boundary. Row lengths are `row % 4 + 1` (1,2,3,4 repeating), so no column has
+// a whole-number mean elements-per-row and none of them is mistakable for a vector column.
+//
+// The value in row `r`, element `e` (both 0-based) is `r * 100 + e` in whatever the column's own
+// units are, so a test can predict any cell from its coordinates alone:
+//
+//   i32        list<int32>        the baseline
+//   i64        list<int64>
+//   f32        list<float>        value + 0.5, so a truncating read would be visible
+//   f64        list<double>       value + 0.25
+//   flag       list<bool>         (r + e) even
+//   text       list<string>       "v<value>", plus a deliberate EMPTY string and a deliberate
+//                                 TRAILING SPACE (row 0), which a padded/trimming read would lose
+//   day        list<date32>       value days after the epoch
+//   clock      list<time64[us]>   value * 1000 microseconds past midnight
+//   stamp      list<timestamp[ms]> value * 1000 milliseconds after the epoch
+//   narrow8    list<int8>         value % 100, read as an int32 payload (narrowest LOSSLESS kind)
+//   wide32     list<uint32>       value + 3000000000, read as an int64 payload -- uint32's top
+//                                 half does not fit a signed int32, which is what makes this
+//                                 column prove the conversion rather than merely exercise it
+//   big        large_list<int32>  the int64-offsets variant, which no other fixture anywhere
+//                                 contains and which was previously permanently-dead code
+//   elem_nulls list<int32>        every row present, but element 0 of each row is NULL -- the
+//                                 second null level, distinct from a null row
+//   day_nulls  list<date32>       the same, on a temporal payload: a date carries its null state
+//                                 INSIDE the element, so this is the one combination no other
+//                                 fixture reaches
+//   mixed      list<int32>        all three at once: row 5 is a NULL row, row 6 is an EMPTY
+//                                 (present, length 0) row, and row 7's last element is NULL
+//   rowid      int32              the scalar control, holding the 0-based row index. The only
+//                                 column here a filter rule or a sort key can name -- every other
+//                                 one is a list, and neither can be written against one -- so
+//                                 without it this fixture cannot be read through a row transform
+//
+// store_schema() IS called here, unlike list_widths.parquet -- see the call site for why (short
+// version: Parquet cannot store the LIST/LARGE_LIST distinction, so `big` needs it and nothing
+// else in this file is affected either way).
+static bool generate_list_payloads_fixture()
+{
+    constexpr int kRows = 12;
+    constexpr int kRowGroup = 4;
+
+    // Row `row`'s element count. Kept in one place so every column below is ragged identically
+    // and a test can predict one column's offsets from another's.
+    auto len_of = [](int row) { return row % 4 + 1; };
+    // The canonical value of row `row`, element `e`.
+    auto value_of = [](int row, int e) { return row * 100 + e; };
+
+    arrow::Status st;
+    // Builds one list column, calling `append(values_builder, row, e)` for each element and
+    // `null_elem` deciding which elements are appended as NULL instead. `null_row`/`empty_row`
+    // pick out the rows that are absent / present-but-empty.
+    auto build = [&](auto values_builder, const std::function<void(int, int)> &append,
+                     const std::function<bool(int, int)> &null_elem,
+                     const std::function<bool(int)> &null_row,
+                     const std::function<bool(int)> &empty_row) {
+        arrow::ListBuilder builder(arrow::default_memory_pool(), values_builder);
+        arrow::Status inner;
+        for (int row = 0; row < kRows; ++row)
+        {
+            if (null_row && null_row(row))
+            {
+                inner = builder.AppendNull();
+                continue;
+            }
+            inner = builder.Append();
+            if (empty_row && empty_row(row)) continue;
+            for (int e = 0; e < len_of(row); ++e)
+            {
+                if (null_elem && null_elem(row, e))
+                {
+                    inner = values_builder->AppendNull();
+                    continue;
+                }
+                append(row, e);
+            }
+        }
+        std::shared_ptr<arrow::Array> out;
+        inner = builder.Finish(&out);
+        return out;
+    };
+    auto no_null_elem = std::function<bool(int, int)>();
+    auto no_null_row = std::function<bool(int)>();
+    auto no_empty_row = std::function<bool(int)>();
+
+    auto i32b = std::make_shared<arrow::Int32Builder>();
+    auto i32_arr = build(i32b, [&](int r, int e) { st = i32b->Append(value_of(r, e)); },
+        no_null_elem, no_null_row, no_empty_row);
+
+    auto i64b = std::make_shared<arrow::Int64Builder>();
+    auto i64_arr = build(i64b, [&](int r, int e) { st = i64b->Append(value_of(r, e)); },
+        no_null_elem, no_null_row, no_empty_row);
+
+    auto f32b = std::make_shared<arrow::FloatBuilder>();
+    auto f32_arr = build(f32b, [&](int r, int e) { st = f32b->Append(value_of(r, e) + 0.5f); },
+        no_null_elem, no_null_row, no_empty_row);
+
+    auto f64b = std::make_shared<arrow::DoubleBuilder>();
+    auto f64_arr = build(f64b, [&](int r, int e) { st = f64b->Append(value_of(r, e) + 0.25); },
+        no_null_elem, no_null_row, no_empty_row);
+
+    auto boolb = std::make_shared<arrow::BooleanBuilder>();
+    auto flag_arr = build(boolb, [&](int r, int e) { st = boolb->Append((r + e) % 2 == 0); },
+        no_null_elem, no_null_row, no_empty_row);
+
+    // Row 0 element 0 is "" and row 0 element 1 would not exist (row 0 has length 1), so the
+    // trailing-space value goes on row 1 element 0. Both are what a fixed-width padded read
+    // cannot represent, which is the point of testing a string payload at all.
+    auto strb = std::make_shared<arrow::StringBuilder>();
+    auto text_arr = build(strb, [&](int r, int e) {
+        if (r == 0 && e == 0) { st = strb->Append(""); return; }
+        if (r == 1 && e == 0) { st = strb->Append("pad "); return; }
+        st = strb->Append("v" + std::to_string(value_of(r, e)));
+    }, no_null_elem, no_null_row, no_empty_row);
+
+    auto dayb = std::make_shared<arrow::Date32Builder>();
+    auto day_arr = build(dayb, [&](int r, int e) { st = dayb->Append(value_of(r, e)); },
+        no_null_elem, no_null_row, no_empty_row);
+
+    auto clockb = std::make_shared<arrow::Time64Builder>(arrow::time64(arrow::TimeUnit::MICRO),
+        arrow::default_memory_pool());
+    auto clock_arr = build(clockb, [&](int r, int e) {
+        st = clockb->Append(static_cast<int64_t>(value_of(r, e)) * 1000);
+    }, no_null_elem, no_null_row, no_empty_row);
+
+    auto stampb = std::make_shared<arrow::TimestampBuilder>(arrow::timestamp(arrow::TimeUnit::MILLI),
+        arrow::default_memory_pool());
+    auto stamp_arr = build(stampb, [&](int r, int e) {
+        st = stampb->Append(static_cast<int64_t>(value_of(r, e)) * 1000);
+    }, no_null_elem, no_null_row, no_empty_row);
+
+    auto n8b = std::make_shared<arrow::Int8Builder>();
+    auto narrow8_arr = build(n8b, [&](int r, int e) {
+        st = n8b->Append(static_cast<int8_t>(value_of(r, e) % 100));
+    }, no_null_elem, no_null_row, no_empty_row);
+
+    auto u32b = std::make_shared<arrow::UInt32Builder>();
+    auto wide32_arr = build(u32b, [&](int r, int e) {
+        st = u32b->Append(static_cast<uint32_t>(value_of(r, e)) + 3000000000u);
+    }, no_null_elem, no_null_row, no_empty_row);
+
+    auto enb = std::make_shared<arrow::Int32Builder>();
+    auto elem_nulls_arr = build(enb, [&](int r, int e) { st = enb->Append(value_of(r, e)); },
+        [](int, int e) { return e == 0; }, no_null_row, no_empty_row);
+
+    auto dnb = std::make_shared<arrow::Date32Builder>();
+    auto day_nulls_arr = build(dnb, [&](int r, int e) { st = dnb->Append(value_of(r, e)); },
+        [](int, int e) { return e == 0; }, no_null_row, no_empty_row);
+
+    auto mixb = std::make_shared<arrow::Int32Builder>();
+    auto mixed_arr = build(mixb, [&](int r, int e) { st = mixb->Append(value_of(r, e)); },
+        [&](int r, int e) { return r == 7 && e == len_of(r) - 1; },
+        [](int r) { return r == 5; }, [](int r) { return r == 6; });
+
+    // large_list has no ListBuilder-shaped helper above (arrow::LargeListBuilder is a different
+    // type), so it is built out of line -- the one column whose offsets are int64.
+    auto bigvals = std::make_shared<arrow::Int32Builder>();
+    arrow::LargeListBuilder bigb(arrow::default_memory_pool(), bigvals);
+    for (int row = 0; row < kRows; ++row)
+    {
+        st = bigb.Append();
+        for (int e = 0; e < len_of(row); ++e)
+        {
+            st = bigvals->Append(value_of(row, e));
+        }
+    }
+    std::shared_ptr<arrow::Array> big_arr;
+    st = bigb.Finish(&big_arr);
+
+    // The control, and the only column here a filter or a sort key can name: every other column
+    // is a list, and neither a filter rule nor a sort key can be written against one. Without it
+    // this fixture cannot be read through a row transform at all.
+    arrow::Int32Builder rowid_builder;
+    for (int row = 0; row < kRows; ++row) st = rowid_builder.Append(row);
+    std::shared_ptr<arrow::Array> rowid_arr;
+    st = rowid_builder.Finish(&rowid_arr);
+
+    auto schema = arrow::schema({
+        arrow::field("rowid", arrow::int32()),
+        arrow::field("i32", arrow::list(arrow::int32())),
+        arrow::field("i64", arrow::list(arrow::int64())),
+        arrow::field("f32", arrow::list(arrow::float32())),
+        arrow::field("f64", arrow::list(arrow::float64())),
+        arrow::field("flag", arrow::list(arrow::boolean())),
+        arrow::field("text", arrow::list(arrow::utf8())),
+        arrow::field("day", arrow::list(arrow::date32())),
+        arrow::field("clock", arrow::list(arrow::time64(arrow::TimeUnit::MICRO))),
+        arrow::field("stamp", arrow::list(arrow::timestamp(arrow::TimeUnit::MILLI))),
+        arrow::field("narrow8", arrow::list(arrow::int8())),
+        arrow::field("wide32", arrow::list(arrow::uint32())),
+        arrow::field("big", arrow::large_list(arrow::int32())),
+        arrow::field("elem_nulls", arrow::list(arrow::int32())),
+        arrow::field("day_nulls", arrow::list(arrow::date32())),
+        arrow::field("mixed", arrow::list(arrow::int32())),
+    });
+    auto table = arrow::Table::Make(schema, {rowid_arr, i32_arr, i64_arr, f32_arr, f64_arr, flag_arr, text_arr,
+        day_arr, clock_arr, stamp_arr, narrow8_arr, wide32_arr, big_arr, elem_nulls_arr,
+        day_nulls_arr, mixed_arr});
+
+    auto maybe_outfile = arrow::io::FileOutputStream::Open("test/fixtures/list_payloads.parquet");
+    auto outfile = *maybe_outfile;
+    // store_schema() is REQUIRED here, and only for `big`. Parquet's own format has no
+    // LIST/LARGE_LIST distinction -- both are the same 3-level list encoding -- so without the
+    // stored Arrow schema a large_list column reads back as a plain list and the LARGE_LIST arm
+    // stays the permanently-dead code it has always been. Measured directly: the same column
+    // round-trips as `list<element: int32>` without it and as `large_list<element: int32>` with
+    // it. Every other column in this file is unaffected either way (int8, uint32, time64[us] and
+    // timestamp[ms] all already survive without it), so this costs nothing but the one property
+    // it buys. Contrast list_widths.parquet, which must NOT store its schema: there the point is
+    // to exercise the plain-LIST path, and a stored schema would round-trip a fixed_size_list as
+    // a fixed_size_list.
+    auto arrow_props = parquet::ArrowWriterProperties::Builder().store_schema()->build();
+    auto status = parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), outfile, kRowGroup,
+        parquet::default_writer_properties(), arrow_props);
     return status.ok();
 }
 
@@ -1283,6 +1521,7 @@ int main()
         {"test/fixtures/unsupported_type.parquet", generate_unsupported_type_fixture},
         {"test/fixtures/list_vector.parquet", generate_list_vector_fixture},
         {"test/fixtures/list_widths.parquet", generate_list_widths_fixture},
+        {"test/fixtures/list_payloads.parquet", generate_list_payloads_fixture},
         {"test/fixtures/no_stats.parquet", generate_no_stats_fixture},
         {"test/fixtures/extended_types.parquet", generate_extended_types_fixture},
         {"test/fixtures/nested_struct.parquet", generate_nested_struct_fixture},

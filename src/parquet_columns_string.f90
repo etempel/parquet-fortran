@@ -255,6 +255,18 @@ contains
         call parquet_string_column_append_values(str, values(1:n))
     end subroutine append_flat_strings
     !
+    !> Takes over a `parquet_string_column`, making this a PK_STRING column; see the interface's
+    !! own doc comment in `parquet_columns.f90` for why a string kind needs its own `adopt`.
+    module procedure adopt_string_column
+        call self%clear()
+        self%kind = PK_STRING
+        self%width = 1_int32
+        self%nrows = values%size()
+        self%cap = self%nrows
+        allocate(self%str)
+        call parquet_string_column_move_from(self%str, values)
+    end procedure adopt_string_column
+    !
     !> Appends rows to a PK_STRING column. `values` is an ARRAY, so trailing blanks are trimmed --
     !! the same rule `refill_string_store` states, applied here so that a column filled by
     !! `%append` and one filled by `%set_all` hold the same bytes.

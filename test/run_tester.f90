@@ -23,6 +23,7 @@ program tester
     use test_openmp, only : collect_tests_parquet_openmp_write, collect_tests_parquet_openmp
     use test_parquet_string, only : collect_tests_parquet_string
     use test_columns, only : collect_tests_parquet_columns
+    use test_list, only : collect_tests_parquet_list
     use test_filter, only : collect_tests_filter
     use test_filter_screen, only : collect_tests_filter_screen
     use test_sort, only : collect_tests_sort
@@ -83,6 +84,7 @@ program tester
         new_testsuite("parquet_string", collect_tests_parquet_string), &
         new_testsuite("temporal", collect_tests_parquet_temporal), &
         new_testsuite("columns", collect_tests_parquet_columns), &
+        new_testsuite("list", collect_tests_parquet_list), &
         new_testsuite("filter", collect_tests_filter), &
         new_testsuite("filter_screen", collect_tests_filter_screen), &
         new_testsuite("sort", collect_tests_sort), &

@@ -48,11 +48,12 @@ in every one of them.
 | `parquet_sampling` | 8 | no | permutations, subsets, resampling and weighted draws |
 | `parquet_spatial` | 9 | no | `pf_spatial_index`: neighbour and k-nearest search on a uniform grid, including on the sky |
 | `parquet_columns` | 10 | no | `parquet_column`: a typed, null-aware column container |
+| `parquet_list` | 11 | no | `parquet_list_column` / `parquet_list_row`: variable-length list storage |
 | `parquet_sorting` | 21 | no | the whole sorting API, every element type, including `pf_sort_keys` |
 | `parquet_settings` | 3 | **yes** | the process-global knobs, and `parquet_get_arrow_version` |
 | `parquet_io` | 44 | **yes** | reading and writing Parquet files, and nothing else |
 | `parquet_tables` | 62 | **yes** | the `parquet_table` container |
-| `parquet` | 71 | **yes** | everything above, through one `use` |
+| `parquet` | 72 | **yes** | everything above, through one `use` |
 
 Four rows deserve a note.
 
@@ -117,6 +118,7 @@ anything else.
 | `parquet_temporal` | none — it reads none |
 | `parquet_random` | none — it reads none; the thread rule lives in `parquet_sampling` |
 | `parquet_columns` | none — it reads none |
+| `parquet_list` | none — it reads none |
 | `parquet_strings` | `string_threads`, plus `verbosity` and `message_stream` |
 | `parquet_sampling` | `random_threads`, `random_parallel_min_elements` |
 | `parquet_spatial` | `spatial_threads`, `spatial_rebuild_warning`, the four sorting knobs, plus `verbosity` and `message_stream` |

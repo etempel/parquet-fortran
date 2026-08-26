@@ -17,6 +17,7 @@ program error_scenarios
     ! settings module directly.
     use parquet_settings, only : parquet_emit_info, parquet_emit_warning
     use parquet_columns
+    use parquet_list, only : parquet_list_column, parquet_list_row
     use parquet_table_example, only : parquet_table_test
     use parquet_tables
     use parquet_temporal, only : parquet_date, parquet_time, parquet_timestamp, &
@@ -1060,6 +1061,28 @@ program error_scenarios
         call scenario_columns_string_column_wrong_kind()
     case ("columns_init_container_kind")
         call scenario_columns_init_container_kind()
+    case ("list_init_unsupported_payload")
+        call scenario_list_init_unsupported_payload()
+    case ("list_append_before_init")
+        call scenario_list_append_before_init()
+    case ("list_append_wrong_kind")
+        call scenario_list_append_wrong_kind()
+    case ("list_append_mask_length")
+        call scenario_list_append_mask_length()
+    case ("list_view_out_of_range")
+        call scenario_list_view_out_of_range()
+    case ("list_unassociated_handle")
+        call scenario_list_unassociated_handle()
+    case ("list_get_wrong_kind")
+        call scenario_list_get_wrong_kind()
+    case ("list_gather_out_of_range")
+        call scenario_list_gather_out_of_range()
+    case ("list_adopt_not_allocated")
+        call scenario_list_adopt_not_allocated()
+    case ("list_column_paste_refused")
+        call scenario_list_column_paste_refused()
+    case ("list_column_append_refused")
+        call scenario_list_column_append_refused()
     case ("columns_init_width_on_scalar_kind")
         call scenario_columns_init_width_on_scalar_kind()
     case ("columns_adopt_not_allocated_i32")
@@ -12732,6 +12755,128 @@ contains
         call col%init(PK_LIST, 2_int64)   ! reserved kind -> aborts
         print '(a,i0)', "unexpectedly initialized a reserved container kind, length=", col%length()
     end subroutine scenario_columns_init_container_kind
+
+    !> A list column's payload must be one of the nine SCALAR value kinds. A *_VEC or container
+    !! payload is nesting, which %init has no way to be told the shape of -- so it is refused
+    !! rather than silently accepted and misread later.
+    subroutine scenario_list_init_unsupported_payload()
+        type(parquet_list_column) :: lc
+        call lc%init(PK_INT32_VEC)   ! a vector payload is nesting -> aborts
+        print '(a,i0)', "unexpectedly initialized a list column with payload kind ", lc%element_kind()
+    end subroutine scenario_list_init_unsupported_payload
+
+    !> Every mutating operation needs the payload kind %init fixes; without it there is nothing to
+    !! append the values INTO, and the guard is what turns that into a message rather than a
+    !! failure inside the payload column.
+    subroutine scenario_list_append_before_init()
+        type(parquet_list_column) :: lc
+        call lc%append_row([1_int32, 2_int32])   ! no %init -> aborts
+        print '(a,i0)', "unexpectedly appended to an uninitialized list column, rows=", lc%size()
+    end subroutine scenario_list_append_before_init
+
+    !> The payload kind is fixed at %init and cannot change: appending int64 values to an int32
+    !! list column is a caller mistake, and accepting it would need a second payload column.
+    subroutine scenario_list_append_wrong_kind()
+        type(parquet_list_column) :: lc
+        call lc%init(PK_INT32)
+        call lc%append_row([1_int64, 2_int64])   ! wrong element type -> aborts
+        print '(a,i0)', "unexpectedly appended int64 values to an int32 list column, rows=", lc%size()
+    end subroutine scenario_list_append_wrong_kind
+
+    !> is_valid is per ELEMENT, so a mask of a different length cannot be applied to the row.
+    !! Silently padding or clipping it would mark the wrong elements null.
+    subroutine scenario_list_append_mask_length()
+        type(parquet_list_column) :: lc
+        call lc%init(PK_INT32)
+        call lc%append_row([1_int32, 2_int32, 3_int32], is_valid=[.true., .false.])   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted a short validity mask, rows=", lc%size()
+    end subroutine scenario_list_append_mask_length
+
+    !> A row index out of range is a programming error, exactly as it is for
+    !! parquet_string_column%view -- the sibling type this handle is modelled on.
+    subroutine scenario_list_view_out_of_range()
+        type(parquet_list_column), target :: lc
+        type(parquet_list_row) :: row
+        call lc%init(PK_INT32)
+        call lc%append_row([1_int32])
+        row = lc%view(2_int64)   ! only one row exists -> aborts
+        print '(a,i0)', "unexpectedly viewed a row that does not exist, index=", row%row_index()
+    end subroutine scenario_list_view_out_of_range
+
+    !> A default-constructed handle refers to no column. %is_valid() reports that without
+    !! aborting; every accessor aborts rather than answering plausibly about nothing.
+    subroutine scenario_list_unassociated_handle()
+        type(parquet_list_row) :: row
+        integer(int64) :: n
+        if (row%is_valid()) print '(a)', "an unassigned handle unexpectedly reported itself valid"
+        n = row%length()   ! no column -> aborts
+        print '(a,i0)', "unexpectedly read a length from an unassigned handle: ", n
+    end subroutine scenario_list_unassociated_handle
+
+    !> Reading a float64 list column into an int32 array would silently reinterpret the values,
+    !! so the payload kind is checked before anything is copied.
+    subroutine scenario_list_get_wrong_kind()
+        type(parquet_list_column), target :: lc
+        type(parquet_list_row) :: row
+        integer(int32), allocatable :: v(:)
+        call lc%init(PK_FLOAT64)
+        call lc%append_row([1.5_real64])
+        row = lc%view(1_int64)
+        call row%get(v)   ! int32 array, float64 payload -> aborts
+        print '(a,i0)', "unexpectedly read a float64 list column into int32 values, n=", size(v)
+    end subroutine scenario_list_get_wrong_kind
+
+    !> gather_rows names a source row per destination row; an index outside the column would
+    !! read past the offsets and build a plausible column out of nothing.
+    subroutine scenario_list_gather_out_of_range()
+        type(parquet_list_column) :: lc
+        call lc%init(PK_INT32)
+        call lc%append_row([1_int32])
+        call lc%gather_rows([1_int64, 3_int64])   ! row 3 does not exist -> aborts
+        print '(a,i0)', "unexpectedly gathered a row that does not exist, rows=", lc%size()
+    end subroutine scenario_list_gather_out_of_range
+
+    !> %adopt_container takes over an allocatable object via move_alloc, so an unallocated one has
+    !! nothing to take over -- the same guard every one of the 16 array adopt_* specifics carries.
+    subroutine scenario_list_adopt_not_allocated()
+        type(parquet_column) :: col
+        class(parquet_container_column), allocatable :: cc
+        call col%adopt_container(cc)   ! never allocated -> aborts
+        print '(a,i0)', "unexpectedly adopted an unallocated container, kind=", col%kindof()
+    end subroutine scenario_list_adopt_not_allocated
+
+    !> %paste overwrites a fixed row range in place, which a container column has no way to do:
+    !! row i's element count is data, so replacing it moves every following row's payload.
+    subroutine scenario_list_column_paste_refused()
+        type(parquet_column) :: col, src
+        type(parquet_list_column) :: lc
+        class(parquet_container_column), allocatable :: cc
+        call lc%init(PK_INT32)
+        call lc%append_row([1_int32])
+        call lc%clone_into(cc)
+        call col%adopt_container(cc)
+        call lc%clone_into(cc)
+        call src%adopt_container(cc)
+        call col%paste(src, 1_int64)   ! a container cannot be overwritten in place -> aborts
+        print '(a,i0)', "unexpectedly pasted into a container column, rows=", col%length()
+    end subroutine scenario_list_column_paste_refused
+
+    !> Appending one container column onto another needs the payload concatenated and the offsets
+    !! rebased; it is deferred until the reader is its first caller, and says so rather than
+    !! reporting "column has no active storage", which would not be true.
+    subroutine scenario_list_column_append_refused()
+        type(parquet_column) :: col, src
+        type(parquet_list_column) :: lc
+        class(parquet_container_column), allocatable :: cc
+        call lc%init(PK_INT32)
+        call lc%append_row([1_int32])
+        call lc%clone_into(cc)
+        call col%adopt_container(cc)
+        call lc%clone_into(cc)
+        call src%adopt_container(cc)
+        call col%append(src)   ! not implemented yet -> aborts
+        print '(a,i0)', "unexpectedly appended a container column, rows=", col%length()
+    end subroutine scenario_list_column_append_refused
 
     !> width > 1 only means something for a *_VEC kind; silently ignoring it on a scalar kind
     !! would give the caller a column shaped differently from the one they asked for.

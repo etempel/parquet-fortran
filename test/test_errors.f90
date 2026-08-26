@@ -901,6 +901,28 @@ contains
                 test_columns_string_column_wrong_kind_aborts), &
             new_unittest("parquet_column init of a reserved container kind aborts", &
                 test_columns_init_container_kind_aborts), &
+            new_unittest("parquet_list_column init with a vector payload kind aborts", &
+                test_list_init_unsupported_payload_aborts), &
+            new_unittest("parquet_list_column append_row before init aborts", &
+                test_list_append_before_init_aborts), &
+            new_unittest("parquet_list_column append_row of the wrong element type aborts", &
+                test_list_append_wrong_kind_aborts), &
+            new_unittest("parquet_list_column append_row with a short validity mask aborts", &
+                test_list_append_mask_length_aborts), &
+            new_unittest("parquet_list_column view of a row that does not exist aborts", &
+                test_list_view_out_of_range_aborts), &
+            new_unittest("parquet_list_row accessor on an unassigned handle aborts", &
+                test_list_unassociated_handle_aborts), &
+            new_unittest("parquet_list_row get into the wrong element type aborts", &
+                test_list_get_wrong_kind_aborts), &
+            new_unittest("parquet_list_column gather_rows naming a row that does not exist aborts", &
+                test_list_gather_out_of_range_aborts), &
+            new_unittest("parquet_column adopt_container of an unallocated container aborts", &
+                test_list_adopt_not_allocated_aborts), &
+            new_unittest("parquet_column paste into a container column aborts", &
+                test_list_column_paste_refused_aborts), &
+            new_unittest("parquet_column append of a container column aborts", &
+                test_list_column_append_refused_aborts), &
             new_unittest("parquet_column init with a width on a scalar kind aborts", &
                 test_columns_init_width_on_scalar_kind_aborts), &
             new_unittest("parquet_column adopt of an unallocated array aborts, on every kind", &
@@ -3089,9 +3111,86 @@ contains
     subroutine test_columns_init_container_kind_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "columns_init_container_kind", expect_abort=.true., &
-            failure_message="initializing a reserved container kind was expected to abort", &
-            required_stderr="parquet_columns: init: container kinds are reserved and not implemented yet")
+            failure_message="initializing a container kind through init was expected to abort", &
+            required_stderr="parquet_columns: init: a container column is built with adopt_container, not init")
     end subroutine test_columns_init_container_kind_aborts
+
+    subroutine test_list_init_unsupported_payload_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_init_unsupported_payload", expect_abort=.true., &
+            failure_message="a vector payload kind is nesting and was expected to be refused", &
+            required_stderr="parquet_list: init: PK_INT32_VEC is not a supported list payload kind")
+    end subroutine test_list_init_unsupported_payload_aborts
+
+    subroutine test_list_append_before_init_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_append_before_init", expect_abort=.true., &
+            failure_message="appending to a list column with no payload kind was expected to abort", &
+            required_stderr="parquet_list: append_row: this list column has no payload kind")
+    end subroutine test_list_append_before_init_aborts
+
+    subroutine test_list_append_wrong_kind_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_append_wrong_kind", expect_abort=.true., &
+            failure_message="appending int64 values to an int32 list column was expected to abort", &
+            required_stderr="parquet_list: append_row: this is a int32 list column; int64 values cannot be appended")
+    end subroutine test_list_append_wrong_kind_aborts
+
+    subroutine test_list_append_mask_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_append_mask_length", expect_abort=.true., &
+            failure_message="a validity mask of the wrong length was expected to be refused", &
+            required_stderr="parquet_list: append_row: is_valid has a different length from values")
+    end subroutine test_list_append_mask_length_aborts
+
+    subroutine test_list_view_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_view_out_of_range", expect_abort=.true., &
+            failure_message="viewing a row past the end of the column was expected to abort", &
+            required_stderr="parquet_list: view: row index is out of range")
+    end subroutine test_list_view_out_of_range_aborts
+
+    subroutine test_list_unassociated_handle_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_unassociated_handle", expect_abort=.true., &
+            failure_message="reading through a handle that refers to no column was expected to abort", &
+            required_stderr="parquet_list: length: this row handle is not associated with a column")
+    end subroutine test_list_unassociated_handle_aborts
+
+    subroutine test_list_get_wrong_kind_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_get_wrong_kind", expect_abort=.true., &
+            failure_message="reading a float64 list column into int32 values was expected to abort", &
+            required_stderr="parquet_list: get: this is a float64 list column; it cannot be read into int32 values")
+    end subroutine test_list_get_wrong_kind_aborts
+
+    subroutine test_list_gather_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_gather_out_of_range", expect_abort=.true., &
+            failure_message="gathering a source row past the end of the column was expected to abort", &
+            required_stderr="parquet_list: gather_rows: source row index out of range")
+    end subroutine test_list_gather_out_of_range_aborts
+
+    subroutine test_list_adopt_not_allocated_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_adopt_not_allocated", expect_abort=.true., &
+            failure_message="adopting an unallocated container was expected to abort", &
+            required_stderr="parquet_columns: adopt_container: the container is not allocated")
+    end subroutine test_list_adopt_not_allocated_aborts
+
+    subroutine test_list_column_paste_refused_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_column_paste_refused", expect_abort=.true., &
+            failure_message="pasting into a container column was expected to be refused", &
+            required_stderr="parquet_columns: paste: a container column cannot be overwritten in place")
+    end subroutine test_list_column_paste_refused_aborts
+
+    subroutine test_list_column_append_refused_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_column_append_refused", expect_abort=.true., &
+            failure_message="appending one container column onto another was expected to be refused", &
+            required_stderr="parquet_columns: append_storage: appending a container column is not implemented yet")
+    end subroutine test_list_column_append_refused_aborts
 
     subroutine test_columns_init_width_on_scalar_kind_aborts(error)
         type(error_type), allocatable, intent(out) :: error

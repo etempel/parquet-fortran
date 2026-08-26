@@ -26,6 +26,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   followed by one more call. A new Arrow-free entry module (`use parquet_spatial` compiles nine
   Fortran files), with `spatial_threads` and `spatial_rebuild_warning` joining the process-global
   settings.
+- **`parquet_list`: `parquet_list_column`, a variable-length list column, plus `parquet_list_row`,
+  a lightweight handle to one of its rows.** Rows may hold different numbers of values, including
+  none, and a row may be a null (absent) list distinct from a present but empty one; element nulls
+  inside a row are tracked separately from row nulls. Nine scalar payload kinds, an
+  offsets-plus-payload layout matching Arrow's, geometric growth, deep copy, move, and a
+  `%gather_rows` rebuild that serves reordering, filtering and duplication. A `parquet_column` can
+  take ownership of one through the new `%adopt_container`, which is how the container reaches the
+  rest of the library. A new Arrow-free entry module (`use parquet_list` compiles eleven Fortran
+  files) that reads no settings. **In-memory only for now**: a list column cannot yet be read from
+  or written to a Parquet file, held by a `parquet_table`, or nested inside another container.
 
 ### Changed
 

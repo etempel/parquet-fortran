@@ -480,7 +480,9 @@ module parquet_columns
     private
     !
     public :: parquet_column
-    public :: parquet_kind_name""")
+    public :: parquet_container_column
+    public :: parquet_kind_name
+    public :: parquet_kind_is_container""")
     for name, _, _ in PK_VALUES:
         w(f"    public :: {name}")
     w("""    !
@@ -523,6 +525,161 @@ module parquet_columns
     w("    ! ---- Column kind discriminators ----")
     for name, val, doc in PK_VALUES:
         w(f"    integer, parameter :: {name} = {val} !! {doc}")
+    w(r"""    !
+    !> The abstract face of a CONTAINER column -- `PK_LIST`, `PK_MAP` or `PK_STRUCT`.
+    !!
+    !! A container column's storage is not a Fortran array, so it cannot live in a component of
+    !! `parquet_column` the way the eighteen array/string kinds do. It lives behind this type
+    !! instead: `parquet_column` holds one `class(parquet_container_column), allocatable` slot and
+    !! reaches whatever is in it through the deferred bindings below, never by naming the concrete
+    !! type -- which it could not do anyway, since `parquet_list` and its siblings `use` this
+    !! module rather than the other way round.
+    !!
+    !! **The binding set is deliberately minimal and is the phase's most load-bearing artefact.**
+    !! A binding exists here only because a procedure in `parquet_columns` has to call it on a
+    !! container whose type it cannot name. Everything a *user* does with a list column --
+    !! `%append_row`, `%view`, `%length`, per-element access -- lives on the concrete type's own
+    !! public API and is deliberately absent from this face. Two consequences worth keeping:
+    !!
+    !! * **Every binding here is per-COLUMN, never per-cell.** That is what makes polymorphic
+    !!   dispatch acceptable at all -- CLAUDE.md's typed-accessor rule bans a `class` dummy on a
+    !!   per-cell path (ifx builds a runtime type descriptor in the caller's prologue on every
+    !!   call) and explicitly permits it once per column.
+    !! * **Adding a binding later costs one implementation per concrete container type.** Prefer
+    !!   solving a new need on the concrete type, and widen this face only when a procedure in
+    !!   `parquet_columns` genuinely cannot proceed without it.
+    type, abstract :: parquet_container_column
+    contains
+        procedure(container_kindof_i), deferred :: kindof            !! The PK_* discriminator this container is.
+        procedure(container_nrows_i), deferred :: nrows              !! Rows the container holds.
+        procedure(container_clone_into_i), deferred :: clone_into    !! Allocate `out` as an independent copy.
+        procedure(container_gather_rows_i), deferred :: gather_rows  !! Rebuild so row k becomes old row idx(k).
+        procedure(container_grow_rows_i), deferred :: grow_rows      !! Append n null rows.
+        procedure(container_reserve_rows_i), deferred :: reserve_rows !! Reserve capacity for n rows.
+        procedure(container_ensure_validity_i), deferred :: ensure_validity !! Materialize validity storage.
+        procedure(container_kind_text_i), deferred :: kind_text      !! Human-readable kind, e.g. "list<int32>".
+        procedure(container_is_null_row_i), deferred :: is_null_row  !! Whether row i is a null container.
+        procedure(container_set_null_row_i), deferred :: set_null_row !! Mark row i a null container.
+        procedure(container_clear_null_row_i), deferred :: clear_null_row !! Mark row i present again.
+        !
+        ! THIS TYPE DELIBERATELY HAS NO `final` PROCEDURE, and an extending type must not add one
+        ! either -- see the same note at the end of parquet_string (src/parquet_strings.f90) for
+        ! the three shipped properties that depend on the absence. In short: nagfor 7.2 emits
+        ! invalid C when finalizing an ARRAY whose element type has a finalizable COMPONENT, and a
+        ! container column sits inside a parquet_column, which sits inside a parquet_table_column,
+        ! which lives in an array; gfortran refuses a finalizable type in an OpenMP `private()`
+        ! clause; and intrinsic assignment to or from one runs the finalizer twice per iteration.
+        ! Nothing a container column owns needs freeing that the language does not already free.
+    end type parquet_container_column
+    !
+    ! The deferred bindings' interfaces. Each is named `container_<binding>_i` so that the binding
+    ! name itself stays free -- `kind_text` and `grow_rows` are both also ordinary module-level
+    ! procedure names in this module, on different types and with different argument lists.
+    abstract interface
+        !> The PK_* discriminator this container is (`PK_LIST`, `PK_MAP` or `PK_STRUCT`).
+        !!
+        !! `adopt_container` cannot ask any other way: it takes a `class(parquet_container_column)`
+        !! and this module may not name a concrete container type, so the discriminator has to come
+        !! through the abstract face or `parquet_column%kind` could never be set at all.
+        pure function container_kindof_i(self) result(res)
+            import :: parquet_container_column
+            class(parquet_container_column), intent(in) :: self !! the container column.
+            integer :: res                                      !! the PK_* discriminator.
+        end function container_kindof_i
+        !
+        !> Number of rows the container holds.
+        pure function container_nrows_i(self) result(n)
+            import :: parquet_container_column, int64
+            class(parquet_container_column), intent(in) :: self !! the container column.
+            integer(int64) :: n                                 !! rows stored.
+        end function container_nrows_i
+        !
+        !> Allocates `out` with this container's dynamic type and fills it with an independent copy.
+        !!
+        !! `parquet_column%deep_copy` cannot allocate `out` itself -- only the dynamic type knows
+        !! what to allocate -- so the copy is delegated whole rather than split into
+        !! allocate-then-copy the way the array kinds' `init` + `copy_storage` is.
+        subroutine container_clone_into_i(self, out)
+            import :: parquet_container_column
+            class(parquet_container_column), intent(in) :: self               !! the source container.
+            class(parquet_container_column), allocatable, intent(out) :: out  !! the copy, allocated here.
+        end subroutine container_clone_into_i
+        !
+        !> Rebuilds the container so that row k becomes the row that was at `idx(k)`.
+        !!
+        !! Serves `reindex`, `delete_by_mask`, `%filter_rows` and `%sort_by` alike, exactly as
+        !! `gather_storage` does for the array kinds. `idx` may be any length and may repeat.
+        subroutine container_gather_rows_i(self, idx)
+            import :: parquet_container_column, int64
+            class(parquet_container_column), intent(inout) :: self !! the container column.
+            integer(int64), intent(in) :: idx(:)                   !! source row for each new row.
+        end subroutine container_gather_rows_i
+        !
+        !> Appends `n` null rows.
+        subroutine container_grow_rows_i(self, n)
+            import :: parquet_container_column, int64
+            class(parquet_container_column), intent(inout) :: self !! the container column.
+            integer(int64), intent(in) :: n                        !! rows to append.
+        end subroutine container_grow_rows_i
+        !
+        !> Reserves capacity for at least `n` rows without changing the row count.
+        subroutine container_reserve_rows_i(self, n)
+            import :: parquet_container_column, int64
+            class(parquet_container_column), intent(inout) :: self !! the container column.
+            integer(int64), intent(in) :: n                        !! rows to reserve for.
+        end subroutine container_reserve_rows_i
+        !
+        !> Materializes whatever validity storage the container keeps lazily.
+        !!
+        !! The concurrency escape hatch behind `parquet_column%ensure_validity`, and it must not be
+        !! refused for a container kind: a table filled from several threads calls it before the
+        !! region so that the first null does not race with a lazy allocation.
+        subroutine container_ensure_validity_i(self)
+            import :: parquet_container_column
+            class(parquet_container_column), intent(inout) :: self !! the container column.
+        end subroutine container_ensure_validity_i
+        !
+        !> Writes a human-readable description of the container's kind, e.g. `"list<int32>"`.
+        !!
+        !! A subroutine with an allocatable `intent(out)` argument rather than a
+        !! `character(len=:), allocatable` FUNCTION, per the project-wide rule in CLAUDE.md
+        !! (gfortran PR113797: the hidden length temporary is not reliably thread-local).
+        subroutine container_kind_text_i(self, out)
+            import :: parquet_container_column
+            class(parquet_container_column), intent(in) :: self       !! the container column.
+            character(len=:), allocatable, intent(out) :: out         !! the description.
+        end subroutine container_kind_text_i
+        !
+        !> Whether row `i` is a null container -- an ABSENT list/map/struct, not a present but
+        !! empty one, and not a present one holding a null element.
+        !!
+        !! `parquet_column`'s own bitmap is never allocated for a container kind, so row nullness
+        !! has to be asked of the container or `%is_null(i)` would answer `.false.` for a row that
+        !! is genuinely null. That is a silent wrong answer on an ordinary path, which is why
+        !! these three are deferred at all -- the rest of the face exists for operations
+        !! `parquet_columns` performs, and these exist for a question it must be able to ANSWER.
+        pure function container_is_null_row_i(self, i) result(res)
+            import :: parquet_container_column, int64
+            class(parquet_container_column), intent(in) :: self !! the container column.
+            integer(int64), intent(in) :: i                     !! 1-based row index.
+            logical :: res                                      !! whether the row is null.
+        end function container_is_null_row_i
+        !
+        !> Marks row `i` a null container.
+        subroutine container_set_null_row_i(self, i)
+            import :: parquet_container_column, int64
+            class(parquet_container_column), intent(inout) :: self !! the container column.
+            integer(int64), intent(in) :: i                        !! 1-based row index.
+        end subroutine container_set_null_row_i
+        !
+        !> Marks row `i` present again.
+        subroutine container_clear_null_row_i(self, i)
+            import :: parquet_container_column, int64
+            class(parquet_container_column), intent(inout) :: self !! the container column.
+            integer(int64), intent(in) :: i                        !! 1-based row index.
+        end subroutine container_clear_null_row_i
+    end interface
+    !""")
     w("""    !
     !> One column's values: a kind discriminator, one active storage array, sparse validity,
     !! an optional unit, and the row/width geometry.
@@ -547,13 +704,19 @@ module parquet_columns
         type(parquet_string_column), allocatable :: str !! PK_STRING / PK_STRING_VEC storage (DD1).""")
     for k in ARRAY_KINDS:
         w(storage_decl(k))
-    w("""        class(*), allocatable :: container             !! reserved payload for PK_LIST/PK_MAP/PK_STRUCT.
+    w("""        !> PK_LIST/PK_MAP/PK_STRUCT storage, behind the abstract face declared above.
+        !!
+        !! Allocated only for a container kind, and only ever by `adopt_container` -- `init`
+        !! refuses the container kinds outright, because "a hundred rows of a list column" has no
+        !! meaning until the payload type is known and the caller already owns the object.
+        class(parquet_container_column), allocatable :: container
     contains
         ! --- lifecycle ---
         procedure :: init                              !! Set kind/geometry and allocate empty storage.
         procedure :: clear                             !! Release all storage and reset to PK_NONE.
         procedure :: deep_copy                         !! Independent copy of values, validity and unit.
         procedure :: move_from                         !! Take over another column's storage, leaving it empty.
+        procedure :: adopt_container                   !! Take ownership of a container column (PK_LIST/MAP/STRUCT).
         ! --- queries ---
         procedure :: kindof                            !! The active PK_* discriminator.
         procedure :: length                            !! Number of rows stored.
@@ -687,6 +850,25 @@ module parquet_columns
             class(parquet_column), intent(inout) :: self    !! the column receiving the storage.
             type(parquet_column), intent(inout) :: src      !! the column giving it up; left empty.
         end subroutine move_from
+        !> Takes ownership of a container column, making this a `PK_LIST`/`PK_MAP`/`PK_STRUCT`
+        !! column. The seventeenth sibling of the sixteen `adopt_*` array specifics, and the ONLY
+        !! way a container kind enters a `parquet_column`.
+        !!
+        !! `init` deliberately still refuses the container kinds: it allocates the kind's storage
+        !! from a row count, and `init(PK_LIST, 100)` would have to mean "a hundred rows of what?".
+        !! A container's contents come from an object the caller has already built, so the entry
+        !! point is `adopt`, not `init` -- and, exactly like the array `adopt_*` specifics, it
+        !! MOVES rather than copies: `container` is left deallocated and the caller must not use it
+        !! again.
+        !!
+        !! The column's kind and row count are taken from the container itself (`%kindof()`,
+        !! `%nrows()`), so they cannot disagree with what was adopted. Width is 1: a container row
+        !! holds a variable number of elements, which is precisely what `width` cannot express, and
+        !! reporting anything else would make a `*_VEC` guard elsewhere believe it could stride.
+        module subroutine adopt_container(self, container)
+            class(parquet_column), intent(inout) :: self                     !! the column.
+            class(parquet_container_column), allocatable, intent(inout) :: container !! moved in; left empty.
+        end subroutine adopt_container
         !> Copies the unit string out ("" when no unit is set).
         module subroutine unit_string(self, u)
             class(parquet_column), intent(in) :: self          !! the column.
@@ -1493,6 +1675,19 @@ contains
         name = trim(kind_text(kind))
     end subroutine parquet_kind_name
     !
+    !> Whether a PK_* discriminator names a CONTAINER kind, i.e. one whose storage is a
+    !! `parquet_container_column` rather than a Fortran array.
+    !!
+    !! Published so that no call site anywhere in the library has to spell out the three-way test.
+    !! There is deliberately one predicate rather than three: a fourth container kind would
+    !! otherwise have to be found by grepping for whichever of `PK_LIST`/`PK_MAP`/`PK_STRUCT`
+    !! someone happened to write first.
+    pure function parquet_kind_is_container(kind) result(res)
+        integer, intent(in) :: kind !! a PK_* discriminator.
+        logical :: res              !! .true. for PK_LIST, PK_MAP and PK_STRUCT.
+        res = (kind == PK_LIST .or. kind == PK_MAP .or. kind == PK_STRUCT)
+    end function parquet_kind_is_container
+    !
     !
 end module parquet_columns ! GCOVR_EXCL_LINE""")
     return "\n".join(o) + "\n"
@@ -1825,6 +2020,11 @@ contains""")
     w("""        case (PK_STRING, PK_STRING_VEC)
             ! the string store is reordered by its own reindex/delete_by_mask (DD1)
             continue ! GCOVR_EXCL_LINE -- gcov attribution artifact: a bare `continue` no-op
+        case (PK_LIST, PK_MAP, PK_STRUCT)
+            ! The container rebuilds itself: only it knows how a row is laid out. `cap` below is
+            ! then meaningless for this kind (the container carries its own), but setting it keeps
+            ! the cap >= nrows invariant that %capacity and ensure_capacity both read.
+            call self%container%gather_rows(idx)
         case default
             error stop EP//"gather_storage: column has no active storage"
         end select
@@ -1863,6 +2063,10 @@ contains""")
             ! the string store carries its own capacity (parquet_strings' ensure_*_cap), so `cap`
             ! is meaningless here and %capacity/%reserve/%shrink_to_fit forward to it instead
             continue ! GCOVR_EXCL_LINE -- gcov attribution artifact: a bare `continue` no-op
+        case (PK_LIST, PK_MAP, PK_STRUCT)
+            ! Same shape as the string kinds: the container owns its own capacity policy, so this
+            ! is a request forwarded on rather than an allocation performed here.
+            call self%container%reserve_rows(newcap)
         case default
             error stop EP//"ensure_capacity: column has no active storage"
         end select
@@ -1902,6 +2106,17 @@ contains""")
     module procedure grow_storage
         if (n < 0_int64) error stop EP//"grow_storage: negative row count"
         if (n == 0_int64) return
+        ! The container kinds fork HERE rather than gaining an arm inside ensure_capacity, because
+        ! the two operations are genuinely different and only share a caller: ensure_capacity
+        ! RESERVES room for rows that do not exist yet, while this has to APPEND n null rows.
+        ! Routing a container through ensure_capacity would reserve and then advance `nrows` past
+        ! rows the container had never created.
+        if (parquet_kind_is_container(self%kind)) then
+            call self%container%grow_rows(n)
+            self%nrows = self%nrows + n
+            self%cap = max(self%cap, self%nrows)
+            return
+        end if
         ! Two lines on top of ensure_capacity, which is the only place capacity grows. The string
         ! kinds reach here too and ensure_capacity is a no-op for them -- their storage grows
         ! through parquet_string_column's own append path (DD1) -- but nrows must still advance.
@@ -1924,6 +2139,14 @@ contains""")
             end if
         case (PK_NONE)
             continue ! GCOVR_EXCL_LINE -- gcov attribution artifact: a bare `continue` no-op
+        case (PK_LIST, PK_MAP, PK_STRUCT)
+            ! DELIBERATELY an abort rather than an arm. copy_storage fills a destination that
+            ! `deep_copy` has already sized with `out%init(...)` -- which refuses a container kind,
+            ! so `deep_copy` forks to `clone_into` well before reaching here. Anything that DOES
+            ! reach here is a caller that has not been taught about containers, and a silent wrong
+            ! copy cannot be taken back where a loud abort can. Add an arm if a real caller turns
+            ! up; do not add one speculatively.
+            error stop EP//"copy_storage: a container column is copied by clone_into, not here"
         case default
             error stop EP//"copy_storage: column has no active storage"
         end select
@@ -1950,6 +2173,12 @@ contains""")
     w("""        case (PK_STRING, PK_STRING_VEC)
             call parquet_string_column_append_column(self%str, other%str)
             self%nrows = old + n
+        case (PK_LIST, PK_MAP, PK_STRUCT)
+            ! Deferred, not forgotten: appending one container column onto another needs the
+            ! payload columns concatenated and the offsets rebased, which is the concrete type's
+            ! business and has no caller until the reader lands. Named explicitly so the failure
+            ! says what is missing rather than "column has no active storage", which is false.
+            error stop EP//"append_storage: appending a container column is not implemented yet"
         case default
             error stop EP//"append_storage: column has no active storage"
         end select
@@ -1982,6 +2211,10 @@ contains""")
             end do
             self%nrows = self%nrows + 1_int64
             return
+        case (PK_LIST, PK_MAP, PK_STRUCT)
+            ! Deferred for the same reason as append_storage above, and with the same reasoning
+            ! for saying so explicitly rather than falling through to a message that is not true.
+            error stop EP//"append_row_of: appending a container row is not implemented yet"
         case default
             error stop EP//"append_row_of: column has no active storage"
         end select
@@ -2017,6 +2250,10 @@ contains""")
             ! Unreachable through paste, which rejects the string kinds before it gets here --
             ! kept so this select is exhaustive over every storable kind, like its siblings above.
             error stop EP//"paste_storage: the string kinds cannot be overwritten in place" ! GCOVR_EXCL_LINE
+        case (PK_LIST, PK_MAP, PK_STRUCT)
+            ! Unreachable through paste, which rejects the container kinds before it gets here --
+            ! kept so this select stays exhaustive over every kind, like its siblings above.
+            error stop EP//"paste_storage: a container column cannot be overwritten in place" ! GCOVR_EXCL_LINE
         case default
             error stop EP//"paste_storage: column has no active storage"
         end select

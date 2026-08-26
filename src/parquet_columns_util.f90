@@ -298,6 +298,13 @@ contains
         else if (is_string_kind(self%kind)) then
             res = .false.
             if (allocated(self%str)) res = parquet_string_column_has_validity(self%str)
+        else if (parquet_kind_is_container(self%kind)) then
+            ! A FOURTH dispatch class: row nullness lives inside the container. This column's own
+            ! bitmap is never allocated for a container kind, so answering from `self%validity`
+            ! would say "nulling would still have to allocate" forever, whatever the container has
+            ! already done.
+            res = .false.
+            if (allocated(self%container)) res = .true.
         else
             res = allocated(self%validity)
         end if
@@ -305,6 +312,14 @@ contains
     !
     module procedure ensure_validity
         if (is_temporal_kind(self%kind)) return
+        ! The concurrency escape hatch must reach a container too, and must NOT be refused for one:
+        ! a table filled from several threads calls this before the region precisely so that the
+        ! first null does not race with a lazy allocation, and a container allocates lazily for the
+        ! same reasons everything else here does.
+        if (parquet_kind_is_container(self%kind)) then
+            if (allocated(self%container)) call self%container%ensure_validity()
+            return
+        end if
         if (is_string_kind(self%kind)) then
             if (allocated(self%str)) call parquet_string_column_reserve_validity(self%str)
             return

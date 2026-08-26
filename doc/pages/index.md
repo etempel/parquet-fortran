@@ -17,9 +17,10 @@ type/function/subroutine under `use parquet`), see the [modules](../lists/module
 `parquet_table` container, the `parquet_column` foundation and its `PK_*` kind constants, compact
 string columns, the date/time/timestamp types, sorting, random numbers and sampling, spatial
 neighbour search, and the process-global settings. Every page below assumes that single import. The
-individual modules (`parquet_io`, `parquet_tables`, `parquet_columns`, `parquet_strings`,
-`parquet_temporal`, `parquet_sorting`, `parquet_argsort`, `parquet_sampling`, `parquet_spatial`,
-`parquet_random`, `parquet_settings`, `parquet_version`, `parquet_maml_base`) are still there and
+individual modules (`parquet_io`, `parquet_tables`, `parquet_columns`, `parquet_list`,
+`parquet_strings`, `parquet_temporal`, `parquet_sorting`, `parquet_argsort`, `parquet_sampling`,
+`parquet_spatial`, `parquet_random`, `parquet_settings`, `parquet_version`, `parquet_maml_base`)
+are still there and
 can be named directly when you want a narrower import — see [Choosing a module](operating/choosing-a-module.html) for what each one costs
 to compile against and which of them are covered by the library's API stability promise.
 `parquet_core` is the exception in the other direction: it is internal and is covered by no promise.
@@ -56,7 +57,7 @@ point in the library.
 
 ### Every page at a glance
 
-All 25 pages, in reading order. (This list, each group's own page list and the
+All 26 pages, in reading order. (This list, each group's own page list and the
 `ordered_subpage:` frontmatter are kept consistent by
 `tools/check_source_conventions.py`, which fails the CI lint stage when they drift.)
 
@@ -71,6 +72,7 @@ All 25 pages, in reading order. (This list, each group's own page list and the
 - [Supported data types](types/supported-data-types.html)
 - [Date, time and timestamp columns](types/date-time.html)
 - [Compact string columns with `parquet_string_column`](types/string-columns.html)
+- [Variable-length list columns with `parquet_list_column`](types/list-columns.html)
 
 **Schemas, metadata and quality control**
 

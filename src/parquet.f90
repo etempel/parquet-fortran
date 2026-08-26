@@ -45,6 +45,7 @@ module parquet
     use parquet_io
     use parquet_tables
     use parquet_columns
+    use parquet_list
     use parquet_strings
     use parquet_temporal
     use parquet_sorting

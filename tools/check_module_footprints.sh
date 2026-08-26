@@ -102,8 +102,8 @@ expect_file="$repo/tools/module_footprints.txt"
 # CLAUDE.md and CONTRIBUTING.md all use for it, and the number the page printed for it (64, where
 # the truth is 62) had never been measured by anything at all.
 ENTRY_MODULES="parquet_version parquet_temporal parquet_strings parquet_random parquet_argsort \
-parquet_sampling parquet_spatial parquet_columns parquet_sorting parquet_settings parquet_io \
-parquet_tables parquet"
+parquet_sampling parquet_spatial parquet_columns parquet_list parquet_sorting parquet_settings \
+parquet_io parquet_tables parquet"
 
 mode="check"
 only=""

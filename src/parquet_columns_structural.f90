@@ -30,21 +30,18 @@ contains
         integer(int32) :: w
         call self%clear()
         if (kind == PK_NONE) error stop EP//"init: PK_NONE is not a storable kind"
-        ! THE SINGLE GATE for the three reserved container kinds, and the reason no other storage
-        ! operation carries a container arm of its own. `self%kind` has exactly four writers: this
-        ! one, `clear` (writes PK_NONE), `move_from` (copies from a column that cannot itself hold
-        ! a container kind), and the sixteen `adopt_*` specifics (each hard-codes one non-container
-        ! kind). So while this refusal stands, a container kind cannot enter a parquet_column at
-        ! all, and every `case default` further down the storage layer -- gather_storage,
-        ! ensure_capacity, copy_storage, append_storage, append_row_of, paste_storage -- is
-        ! unreachable defence rather than a live guard. `grow_storage` does not dispatch on kind
-        ! and would abort through ensure_capacity's arm; `shrink_storage`'s default is a
-        ! deliberate no-op. Those messages all read "column has no active storage", which is not
-        ! what a container column's problem would be -- they are left as they are because opening
-        ! this gate (feature_map_list_struct.md, Phase 1) replaces every one of them with
-        ! delegation to the container object rather than improving the wording.
-        if (kind == PK_LIST .or. kind == PK_MAP .or. kind == PK_STRUCT) then
-            error stop EP//"init: container kinds are reserved and not implemented yet"
+        ! `init` STILL REFUSES the container kinds, and this refusal is permanent rather than a
+        ! placeholder -- it allocates a kind's storage from a row count, and `init(PK_LIST, 100)`
+        ! would have to mean "a hundred rows of what?", which has no answer. A container column's
+        ! contents come from an object the caller has already built, so the entry point is
+        ! `adopt_container` (feature_map_list_struct.md, Phase 1).
+        !
+        ! `self%kind` therefore has exactly FIVE writers: this one (never a container kind),
+        ! `clear` (writes PK_NONE), `move_from` (copies whatever the source held), the sixteen
+        ! `adopt_*` array specifics (each hard-codes one non-container kind), and
+        ! `adopt_container` -- the only one that can write PK_LIST/PK_MAP/PK_STRUCT.
+        if (parquet_kind_is_container(kind)) then
+            error stop EP//"init: a container column is built with adopt_container, not init"
         end if
         if (nrows < 0_int64) error stop EP//"init: negative row count"
         w = 1_int32
@@ -149,9 +146,48 @@ contains
         call src%clear()
     end procedure move_from
     !
+    !> Takes ownership of a container column, making this a PK_LIST/PK_MAP/PK_STRUCT column.
+    !!
+    !! The seventeenth `adopt_*` sibling and, while `init` keeps refusing the container kinds, the
+    !! ONLY writer of a container kind into `self%kind` besides `move_from` (which can only copy a
+    !! kind some earlier adopt already wrote). See `init`'s own comment for the full list.
+    module procedure adopt_container
+        if (.not. allocated(container)) error stop EP//"adopt_container: the container is not allocated"
+        if (.not. parquet_kind_is_container(container%kindof())) then
+            error stop EP//"adopt_container: the container reports a kind that is not a container kind"
+        end if
+        call self%clear()
+        ! Taken from the container itself rather than from an argument, so the column cannot end up
+        ! claiming a kind or a row count the thing it holds disagrees with.
+        self%kind = container%kindof()
+        self%nrows = container%nrows()
+        ! A container row holds a variable number of elements, which is exactly what `width` cannot
+        ! express -- so it stays 1 and no *_VEC guard anywhere can be fooled into striding.
+        self%width = 1_int32
+        ! The adopted object IS the capacity, as for the array kinds: leaving `cap` at 0 would
+        ! break the cap >= nrows invariant that %capacity and ensure_capacity both read.
+        self%cap = self%nrows
+        ! Row nullness lives INSIDE the container, exactly as it lives inside the element for the
+        ! temporal kinds -- so this column's own bitmap stays unallocated and `has_nulls` .false.
+        ! Materializing one here would create a second, silently divergent answer to "is row i
+        ! null?".
+        call move_alloc(container, self%container)
+    end procedure adopt_container
+    !
     module procedure deep_copy
+        class(parquet_container_column), allocatable :: cc
         call out%clear()
         if (self%kind == PK_NONE) return
+        ! The container kinds fork BEFORE `init`, not inside it: `init` refuses them (and must keep
+        ! doing so -- see its own comment), so routing a container through the ordinary
+        ! init + copy_storage path would abort on the DESTINATION. The container copies itself
+        ! whole instead, because only its dynamic type knows what to allocate.
+        if (parquet_kind_is_container(self%kind)) then
+            call self%container%clone_into(cc)
+            call out%adopt_container(cc)
+            if (allocated(self%unit)) out%unit = self%unit
+            return
+        end if
         if (allocated(self%unit)) then
             call out%init(self%kind, self%nrows, self%width, self%unit)
         else
@@ -284,6 +320,10 @@ contains
         old = self%nrows
         call grow_rows(self, n)
         if (is_string_kind(self%kind)) return
+        ! Row nullness lives inside the container, which `grow_rows` has just appended null rows
+        ! to. Falling through would set bits in THIS column's bitmap as well, giving two answers to
+        ! "is row i null?" with nothing to keep them in step.
+        if (parquet_kind_is_container(self%kind)) return
         if (is_temporal_kind(self%kind)) then
             self%nulls_dirty = .true.
             return
@@ -313,6 +353,14 @@ contains
         if (self%width /= src%width) error stop EP//"paste: column widths differ"
         if (is_string_kind(self%kind)) then
             error stop EP//"paste: the string kinds cannot be overwritten in place; use append"
+        end if
+        ! Refused HERE rather than in paste_storage, so the message names the operation the caller
+        ! actually asked for. A container column has no fixed-width row slots to overwrite: row i's
+        ! element count is data, so replacing it moves every following row's payload. Presizing
+        ! plus %paste is therefore unavailable for containers and `reserve` + append is the shape
+        ! to use -- which is why `reserve_rows` is a deferred binding at all.
+        if (parquet_kind_is_container(self%kind)) then
+            error stop EP//"paste: a container column cannot be overwritten in place; use append"
         end if
         f = 1_int64
         if (present(from)) f = from

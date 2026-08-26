@@ -122,6 +122,11 @@ contains
                     return
                 end if
             end do
+        case (PK_LIST, PK_MAP, PK_STRUCT)
+            ! Asked of the container: this column's own bitmap is never allocated for a container
+            ! kind, so falling through to the default arm below would answer .false. for a row
+            ! that really is null -- a silent wrong answer rather than a missing feature.
+            res = col%container%is_null_row(i)
         case (PK_NONE)
             ! Unreachable through the public API: check_index above rejects every index on a
             ! kindless column (its row count is 0), so this arm is defensive only.
@@ -574,6 +579,11 @@ contains
                 call col%tsv(e, i)%set_null()
             end do
             col%nulls_dirty = .true.
+        case (PK_LIST, PK_MAP, PK_STRUCT)
+            ! Delegated for the same reason as `is_null` above: row nullness lives inside the
+            ! container, so writing a bit into this column's own bitmap would leave %is_null
+            ! still answering .false. -- a mutation that appears to succeed and changes nothing.
+            call col%container%set_null_row(i)
         case (PK_NONE)
             ! Unreachable through the public API: check_index above rejects every index on a
             ! kindless column (its row count is 0), so this arm is defensive only.
@@ -660,6 +670,11 @@ contains
             end do
         case (PK_DATE, PK_TIME, PK_TIMESTAMP, PK_DATE_VEC, PK_TIME_VEC, PK_TIMESTAMP_VEC)
             error stop EP//"clear_null: a temporal element becomes valid by writing a value to it"
+        case (PK_LIST, PK_MAP, PK_STRUCT)
+            ! Unlike a temporal element, a container row CAN be made present again without writing
+            ! a value: the row comes back with whatever elements its offsets still describe. See
+            ! parquet_list_column%clear_null, which says what that does and does not restore.
+            call col%container%clear_null_row(i)
         case (PK_NONE)
             ! Unreachable through the public API: check_index above rejects every index on a
             ! kindless column (its row count is 0), so this arm is defensive only.

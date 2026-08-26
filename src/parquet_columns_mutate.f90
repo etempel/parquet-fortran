@@ -302,6 +302,11 @@ contains
         case (PK_STRING, PK_STRING_VEC)
             ! the string store is reordered by its own reindex/delete_by_mask (DD1)
             continue ! GCOVR_EXCL_LINE -- gcov attribution artifact: a bare `continue` no-op
+        case (PK_LIST, PK_MAP, PK_STRUCT)
+            ! The container rebuilds itself: only it knows how a row is laid out. `cap` below is
+            ! then meaningless for this kind (the container carries its own), but setting it keeps
+            ! the cap >= nrows invariant that %capacity and ensure_capacity both read.
+            call self%container%gather_rows(idx)
         case default
             error stop EP//"gather_storage: column has no active storage"
         end select
@@ -404,6 +409,10 @@ contains
             ! the string store carries its own capacity (parquet_strings' ensure_*_cap), so `cap`
             ! is meaningless here and %capacity/%reserve/%shrink_to_fit forward to it instead
             continue ! GCOVR_EXCL_LINE -- gcov attribution artifact: a bare `continue` no-op
+        case (PK_LIST, PK_MAP, PK_STRUCT)
+            ! Same shape as the string kinds: the container owns its own capacity policy, so this
+            ! is a request forwarded on rather than an allocation performed here.
+            call self%container%reserve_rows(newcap)
         case default
             error stop EP//"ensure_capacity: column has no active storage"
         end select
@@ -507,6 +516,17 @@ contains
     module procedure grow_storage
         if (n < 0_int64) error stop EP//"grow_storage: negative row count"
         if (n == 0_int64) return
+        ! The container kinds fork HERE rather than gaining an arm inside ensure_capacity, because
+        ! the two operations are genuinely different and only share a caller: ensure_capacity
+        ! RESERVES room for rows that do not exist yet, while this has to APPEND n null rows.
+        ! Routing a container through ensure_capacity would reserve and then advance `nrows` past
+        ! rows the container had never created.
+        if (parquet_kind_is_container(self%kind)) then
+            call self%container%grow_rows(n)
+            self%nrows = self%nrows + n
+            self%cap = max(self%cap, self%nrows)
+            return
+        end if
         ! Two lines on top of ensure_capacity, which is the only place capacity grows. The string
         ! kinds reach here too and ensure_capacity is a no-op for them -- their storage grows
         ! through parquet_string_column's own append path (DD1) -- but nrows must still advance.
@@ -556,6 +576,14 @@ contains
             end if
         case (PK_NONE)
             continue ! GCOVR_EXCL_LINE -- gcov attribution artifact: a bare `continue` no-op
+        case (PK_LIST, PK_MAP, PK_STRUCT)
+            ! DELIBERATELY an abort rather than an arm. copy_storage fills a destination that
+            ! `deep_copy` has already sized with `out%init(...)` -- which refuses a container kind,
+            ! so `deep_copy` forks to `clone_into` well before reaching here. Anything that DOES
+            ! reach here is a caller that has not been taught about containers, and a silent wrong
+            ! copy cannot be taken back where a loud abort can. Add an arm if a real caller turns
+            ! up; do not add one speculatively.
+            error stop EP//"copy_storage: a container column is copied by clone_into, not here"
         case default
             error stop EP//"copy_storage: column has no active storage"
         end select
@@ -620,6 +648,12 @@ contains
         case (PK_STRING, PK_STRING_VEC)
             call parquet_string_column_append_column(self%str, other%str)
             self%nrows = old + n
+        case (PK_LIST, PK_MAP, PK_STRUCT)
+            ! Deferred, not forgotten: appending one container column onto another needs the
+            ! payload columns concatenated and the offsets rebased, which is the concrete type's
+            ! business and has no caller until the reader lands. Named explicitly so the failure
+            ! says what is missing rather than "column has no active storage", which is false.
+            error stop EP//"append_storage: appending a container column is not implemented yet"
         case default
             error stop EP//"append_storage: column has no active storage"
         end select
@@ -690,6 +724,10 @@ contains
             end do
             self%nrows = self%nrows + 1_int64
             return
+        case (PK_LIST, PK_MAP, PK_STRUCT)
+            ! Deferred for the same reason as append_storage above, and with the same reasoning
+            ! for saying so explicitly rather than falling through to a message that is not true.
+            error stop EP//"append_row_of: appending a container row is not implemented yet"
         case default
             error stop EP//"append_row_of: column has no active storage"
         end select
@@ -749,6 +787,10 @@ contains
             ! Unreachable through paste, which rejects the string kinds before it gets here --
             ! kept so this select is exhaustive over every storable kind, like its siblings above.
             error stop EP//"paste_storage: the string kinds cannot be overwritten in place" ! GCOVR_EXCL_LINE
+        case (PK_LIST, PK_MAP, PK_STRUCT)
+            ! Unreachable through paste, which rejects the container kinds before it gets here --
+            ! kept so this select stays exhaustive over every kind, like its siblings above.
+            error stop EP//"paste_storage: a container column cannot be overwritten in place" ! GCOVR_EXCL_LINE
         case default
             error stop EP//"paste_storage: column has no active storage"
         end select

@@ -364,6 +364,16 @@ STRING_TYPED_PREFIX = "parquet_string_column_"
 #: The files holding `parquet_column`'s own implementation, typed tier included.
 COLUMN_FILES = sorted(SRC.glob("parquet_columns*.f90"))
 
+#: The CONTAINER column modules -- `parquet_list` today, `parquet_map`/`parquet_struct` from
+#: Phases 4-5. Each holds a `type(parquet_column)` payload component and reaches it per ELEMENT,
+#: so `parquet_column`'s typed-tier rule applies to them exactly as it does to `parquet_tables`.
+#: Globbed rather than enumerated, so a sibling container module is covered the day it lands --
+#: this file's own "a static check that enumerates names goes stale silently" rule.
+CONTAINER_FILES = sorted(
+    set(SRC.glob("parquet_list*.f90")) | set(SRC.glob("parquet_map*.f90"))
+    | set(SRC.glob("parquet_struct*.f90"))
+)
+
 #: Prefix of the typed (non-polymorphic) accessor tier -- see feature_ifx.md.
 TYPED_PREFIX = "parquet_column_"
 
@@ -444,6 +454,8 @@ def check_no_type_bound_column_access():
       1. The TABLE layer must call the typed generics, never `%values%<binding>`.
       2. The typed tier itself must call the TYPED guards and helpers, never a `class`-dummy
          procedure and never a binding on its own `col` dummy.
+      3. The CONTAINER column modules must do the same for their `parquet_column` payload --
+         a set neither of the other two halves can see (see the comment on that half).
 
     Matched by shape, not from an enumerated list of procedure names, per this file's own rule.
     """
@@ -466,6 +478,33 @@ def check_no_type_bound_column_access():
     if not bindings:
         problems.append("src/parquet_columns.f90: found no type-bound procedure on parquet_column "
                         "-- this check can no longer see the type and is passing vacuously")
+
+    # 3. The CONTAINER column modules, which reach a `type(parquet_column)` payload per element.
+    #
+    # Neither half below would have caught this on its own: half 1 matches the literal `%values%`
+    # component name and scans TABLE_FILES, and half 2 scans submodules of `parquet_columns`. A
+    # container module is in neither set and matches neither pattern, so the rule would have been
+    # enforced everywhere except the newest place it applies.
+    #
+    # Matched on the BINDING name rather than on a component name, so it holds whatever a future
+    # container calls its payload -- `%payload%get_at(...)`, `%inner%is_null(...)` and
+    # `%values%set_at(...)` are all caught, while a per-COLUMN binding that has no typed twin
+    # (`%payload%append_values(...)`, `%payload%gather(...)`) is deliberately not: CLAUDE.md's
+    # rule bans the conversion on a per-cell path and explicitly permits it once per column.
+    container_re = re.compile(r"%\s*\w+\s*%\s*(" + "|".join(TYPED_TWINNED_BINDINGS) + r")\s*\(", re.I)
+    for path in CONTAINER_FILES:
+        for lineno, raw in enumerate(path.read_text().split("\n"), start=1):
+            match = container_re.search(strip_comment(raw))
+            if match:
+                problems.append(
+                    "%s:%d: reaches a `parquet_column` payload through the type-bound `%%%s(...)`. "
+                    "Call `%s%s(<designator>, ...)` instead -- a `type(parquet_column)` actual "
+                    "passed to a `class` dummy makes ifx build a runtime type descriptor in this "
+                    "procedure's prologue, unconditionally, on every call (~35 ns; feature_ifx.md). "
+                    "Nothing fails if this regresses:\n    %s"
+                    % (path.relative_to(REPO_ROOT), lineno, match.group(1), TYPED_PREFIX,
+                       match.group(1), raw.strip())
+                )
 
     # 1. The table layer.
     binding_re = re.compile(r"%\s*values\s*%\s*(" + "|".join(TYPED_TWINNED_BINDINGS) + r")\s*\(", re.I)
@@ -503,7 +542,15 @@ def check_no_type_bound_column_access():
                 continue
             if not current or not current.lower().startswith(TYPED_PREFIX):
                 continue
-            for called in re.findall(r"\b(\w+)\s*\(", code):
+            # A `%`-qualified name is a component or a BINDING reference, never a reference to a
+            # module procedure -- so it cannot be the bare call this clause is about, and the
+            # lookbehind is what keeps it out. It matters as soon as a typed procedure delegates
+            # to a container: `col%container%is_null_row(i)` names a binding on a
+            # `class(parquet_container_column)` designator, and a `class` actual passed to a
+            # `class` dummy builds no descriptor at all -- the cost this tier exists to remove
+            # comes only from a `type` actual. Type-bound calls on `col` itself are a real problem
+            # and are caught by the clause below.
+            for called in re.findall(r"(?<![%\w])(\w+)\s*\(", code):
                 if called in class_procs:
                     problems.append(
                         "%s:%d: typed procedure `%s` calls `%s`, which takes a "
@@ -1426,6 +1473,25 @@ def check_parquet_columns_stays_arrow_free():
     return _check_stays_arrow_free(
         "parquet_columns",
         "The column container is advertised as an Arrow-free import in its own right.")
+
+
+def check_parquet_list_stays_arrow_free():
+    """`use parquet_list` must not reach parquet_bindings.
+
+    A list column is pure in-memory storage: offsets, a row bitmap and one `parquet_column`
+    payload. Nothing in it needs Arrow, and a program that builds list-shaped data without ever
+    touching a file should pay for none. Pinned in its own right rather than through
+    `parquet_columns` (which it imports and which is itself checked) for the reason recorded on
+    that check: coverage inherited from a neighbour's import evaporates the day that import moves,
+    and does so silently.
+
+    It is also the first module that could acquire the dependency by accident rather than by
+    design -- Phase 2 gives a list column a reader, and the natural place to reach for
+    `parquet_bindings` is here rather than in `parquet_core` where it belongs.
+    """
+    return _check_stays_arrow_free(
+        "parquet_list",
+        "A list column is in-memory storage and is advertised as an Arrow-free import.")
 
 
 def check_parquet_temporal_stays_arrow_free():
@@ -3343,6 +3409,7 @@ CHECKS = (
     ("parquet_sorting stays Arrow-free", check_parquet_sorting_stays_arrow_free),
     ("parquet_sampling stays Arrow-free", check_parquet_sampling_stays_arrow_free),
     ("parquet_columns stays Arrow-free", check_parquet_columns_stays_arrow_free),
+    ("parquet_list stays Arrow-free", check_parquet_list_stays_arrow_free),
     ("parquet_temporal stays Arrow-free", check_parquet_temporal_stays_arrow_free),
     ("parquet_version stays Arrow-free", check_parquet_version_stays_arrow_free),
     ("parquet_spatial stays Arrow-free", check_parquet_spatial_stays_arrow_free),

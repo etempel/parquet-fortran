@@ -218,6 +218,7 @@ something a reader is expected to have.
 | [Risk-150](#risk-150--a-nearest-that-stopped-at-k-candidates-rather-than-at-a-radius-would-be-plausibly-wrong) | A `%nearest` that stopped at k CANDIDATES rather than at a radius would be plausibly wrong | 4 — covered |
 | [Risk-151](#risk-151--axis_point-taken-as-the-infinite-line-projection-disagrees-with-dist-and-both-look-right) | `axis_point` taken as the infinite-line projection disagrees with `dist`, and both look right | 4 — covered |
 | [Risk-152](#risk-152--two-tables-over-one-file-disagree-about-a-plain-list-columns-kind-and-both-answer-quietly) | Two tables over one file disagree about a plain `LIST` column's KIND, and both answer quietly | 1 — new |
+| [Risk-153](#risk-153--a-container-columns-row-nullness-has-two-possible-homes-and-writing-to-the-wrong-one-is-silent) | A container column's row nullness has TWO possible homes, and writing to the wrong one is silent | 1 — new |
 
 ---
 
@@ -281,6 +282,46 @@ has to be authored by placing specific row lengths in specific row groups. And *
 today's disagreement is rewritten by the T5 default flip**, so per `CLAUDE.md` it would have to say
 what to assert once the refusal lifts. The natural home for both is the phase that implements
 `list_columns=`.
+
+### Risk-153 — A container column's row nullness has TWO possible homes, and writing to the wrong one is silent
+
+A `parquet_column` whose kind is `PK_LIST`/`PK_MAP`/`PK_STRUCT` has a `validity` component like
+every other column, and **it must never be used.** Row nullness for a container kind lives inside
+the container object, and `parquet_column`'s three row-validity procedures
+(`parquet_column_is_null_row`, `_set_null_row`, `_clear_null_row`, all in
+`src/parquet_columns_validity.f90`) delegate to it through the deferred `is_null_row`/`set_null_row`/
+`clear_null_row` bindings on `parquet_container_column`.
+
+**Both halves of the split fail quietly, in opposite directions:**
+
+- A path that **writes** the column's own bitmap for a container kind — `ensure_bitmap` plus
+  `bit_set`, which is what every non-container arm does — appears to succeed and changes nothing a
+  reader can see: `%is_null(i)` asks the container, which was never told. A mutation that silently
+  does nothing.
+- A path that **reads** the column's own bitmap answers `.false.` for a row that genuinely is null.
+  A wrong answer, and the more dangerous half, because a null row's payload elements are
+  meaningless — a caller that believes the row is present will read whatever the offsets describe.
+
+**This was live, not hypothetical.** `%append_nulls(n)` on an adopted list column appended the rows
+correctly through the container and then fell through to `ensure_bitmap` + `bits_set_range`, so the
+rows were null in the container *and* marked null in a bitmap nothing read; `%is_null` meanwhile had
+no container arm at all and answered `.false.` for every one of them. Nothing failed to build,
+`%length()` was right, and only an assertion on `%is_null` after `%append_nulls` found it
+(`test_column_append_nulls`, `test/test_list.f90`).
+
+**What this forbids.** Every future `parquet_column` path that touches validity must dispatch on
+`parquet_kind_is_container(self%kind)` before reaching `self%validity`, and must delegate rather
+than duplicate. There are five such paths today (`is_null`, `set_null`, `clear_null`,
+`ensure_validity`, `has_validity_storage`) plus `append_nulls`, which returns early for a container
+kind rather than writing bits after `grow_rows`. The element forms
+(`parquet_column_is_null_elem` and siblings) are a separate question and are **not** delegated: a
+container row's elements are the container's business and `width` is 1, so `e` can only be 1 —
+whether those should mean "the row" or abort is open until a table can hold a container column.
+
+**Test.** Covered for the row forms by `test_column_append_nulls` and `test_ensure_validity`
+(`test/test_list.f90`), which assert through `parquet_column` rather than through
+`parquet_list_column` — that is the point, since asking the container directly cannot see the
+disagreement. The element forms are untested because nothing can reach them yet.
 
 ## 2. Risks with a proposed testing scenario
 

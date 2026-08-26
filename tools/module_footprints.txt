@@ -87,6 +87,20 @@ parquet_strings.f90
 parquet_temporal.f90
 parquet_wrapper.cpp
 
+[parquet_list]
+parquet_columns.f90
+parquet_columns_access.f90
+parquet_columns_mutate.f90
+parquet_columns_string.f90
+parquet_columns_structural.f90
+parquet_columns_util.f90
+parquet_columns_validity.f90
+parquet_list.f90
+parquet_settings_base.f90
+parquet_strings.f90
+parquet_temporal.f90
+parquet_wrapper.cpp
+
 [parquet_sorting]
 parquet_argsort.f90
 parquet_argsort_engine.f90
@@ -245,6 +259,7 @@ parquet_columns_validity.f90
 parquet_core.f90
 parquet_expkey.f90
 parquet_io.f90
+parquet_list.f90
 parquet_maml_base.f90
 parquet_maml_base_add_col_qc.f90
 parquet_metadata.f90

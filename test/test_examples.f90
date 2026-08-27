@@ -230,7 +230,8 @@ contains
     !> which are separate `public ::` entries and so separately droppable),
     !> parquet_columns (PK_FLOAT64/parquet_kind_name),
     !> parquet_strings (parquet_string_column), parquet_temporal (parquet_timestamp),
-    !> parquet_sorting (pf_argsort), parquet_settings (parquet_get_arrow_threads /
+    !> parquet_sorting (pf_argsort), parquet_healpix (pf_ang2pix_ring),
+    !> parquet_settings (parquet_get_arrow_threads /
     !> parquet_max_filter_depth), parquet_maml_base (parquet_maml_file), and the facade's own
     !> parquet_get_version.
     subroutine test_facade_covers_every_layer(error)
@@ -302,6 +303,15 @@ contains
         call check(error, all(sort_perm == [2, 3, 1]), &
             "pf_argsort must be reachable from use parquet alone and order the values")
         if (allocated(error)) return
+
+        ! parquet_healpix: the sphere pixelisation, whose public names are pf_*, not parquet_*.
+        block
+            integer(int64) :: hp_pix
+            call pf_ang2pix_ring(4_int64, 1.0_real64, 2.0_real64, hp_pix)
+            call check(error, hp_pix >= 0_int64 .and. hp_pix < 192_int64, &
+                "pf_ang2pix_ring must be reachable from use parquet alone and land in range")
+            if (allocated(error)) return
+        end block
 
         ! parquet_temporal: one element type, carrying its own null state.
         call ts%parse("2026-08-03T12:00:00")

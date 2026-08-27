@@ -1479,6 +1479,18 @@ contains
             new_unittest("copy=.false. over a strided section aborts", test_spatial_copy_false_strided_aborts), &
             new_unittest("threads= below one aborts", test_spatial_threads_below_one_aborts), &
             new_unittest("an axis query on a periodic index aborts", test_spatial_axis_periodic_aborts), &
+            new_unittest("an nside that is not a power of two aborts a disc query", &
+                         test_healpix_nside_not_power2_aborts), &
+            new_unittest("an nside of zero aborts a disc query", test_healpix_nside_zero_aborts), &
+            new_unittest("an nside past the int32 pixel index aborts", &
+                         test_healpix_nside_int32_aborts), &
+            new_unittest("an nside past the module ceiling aborts", test_healpix_nside_int64_aborts), &
+            new_unittest("a NaN disc radius aborts", test_healpix_radius_nan_aborts), &
+            new_unittest("a negative disc radius aborts", test_healpix_radius_negative_aborts), &
+            new_unittest("a zero-length disc centre aborts", test_healpix_vector_zero_aborts), &
+            new_unittest("a NaN in the disc centre aborts", test_healpix_vector_nan_aborts), &
+            new_unittest("an unknown scheme selector aborts", test_healpix_bad_scheme_aborts), &
+            new_unittest("a listpix too small for the disc aborts", test_healpix_buffer_aborts), &
             new_unittest("a sky query on a Euclidean index aborts", test_spatial_sky_on_euclidean_aborts), &
             new_unittest("a Euclidean query on a sky index aborts", test_spatial_euclidean_on_sky_aborts), &
             new_unittest("a plain bulk sweep on a sky index aborts", test_spatial_sky_bulk_aborts), &
@@ -2971,6 +2983,97 @@ contains
             failure_message="building from mismatched coordinate arrays was expected to abort", &
             required_stderr="x and y must be the same length")
     end subroutine test_spatial_length_mismatch_aborts
+
+    ! ---- parquet_healpix ----
+    !
+    ! Each asserts the LIBRARY's own message text and a nonzero exit, never the runtime's
+    ! `ERROR STOP` prefix or a particular status: both are processor-dependent and differ across
+    ! the three compilers this project builds with.
+
+    subroutine test_healpix_nside_not_power2_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "healpix_disc_nside_not_power2", &
+            expect_abort=.true., &
+            failure_message="an nside of 100 was expected to abort a disc query", &
+            required_stderr="nside must be a positive power of two")
+    end subroutine test_healpix_nside_not_power2_aborts
+
+    subroutine test_healpix_nside_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "healpix_disc_nside_zero", &
+            expect_abort=.true., &
+            failure_message="an nside of zero was expected to abort a disc query", &
+            required_stderr="nside must be a positive power of two")
+    end subroutine test_healpix_nside_zero_aborts
+
+    subroutine test_healpix_nside_int32_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        ! The message must name the INT32 ceiling, not the module's own: the value is legal for the
+        ! pixelisation and illegal only for the caller's integer kind, and a message naming 2**29
+        ! here would send someone looking for a defect in the wrong place.
+        call check_scenario_exit_status_and_stderr(error, "healpix_disc_nside_int32_overflow", &
+            expect_abort=.true., &
+            failure_message="nside 16384 was expected to abort in the int32 kind", &
+            required_stderr="at most 8192")
+    end subroutine test_healpix_nside_int32_aborts
+
+    subroutine test_healpix_nside_int64_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "healpix_disc_nside_int64_overflow", &
+            expect_abort=.true., &
+            failure_message="nside 2**30 was expected to abort", &
+            required_stderr="at most 536870912")
+    end subroutine test_healpix_nside_int64_aborts
+
+    subroutine test_healpix_radius_nan_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "healpix_disc_radius_nan", &
+            expect_abort=.true., &
+            failure_message="a NaN radius was expected to abort", &
+            required_stderr="radius is NaN")
+    end subroutine test_healpix_radius_nan_aborts
+
+    subroutine test_healpix_radius_negative_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "healpix_disc_radius_negative", &
+            expect_abort=.true., &
+            failure_message="a negative radius was expected to abort", &
+            required_stderr="radius must be at least zero")
+    end subroutine test_healpix_radius_negative_aborts
+
+    subroutine test_healpix_vector_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "healpix_disc_vector_zero", &
+            expect_abort=.true., &
+            failure_message="a zero-length centre vector was expected to abort", &
+            required_stderr="has zero length")
+    end subroutine test_healpix_vector_zero_aborts
+
+    subroutine test_healpix_vector_nan_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "healpix_disc_vector_nan", &
+            expect_abort=.true., &
+            failure_message="a NaN in the centre vector was expected to abort", &
+            required_stderr="holds a NaN")
+    end subroutine test_healpix_vector_nan_aborts
+
+    subroutine test_healpix_bad_scheme_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "healpix_disc_bad_scheme", &
+            expect_abort=.true., &
+            failure_message="an unknown scheme selector was expected to abort", &
+            required_stderr="scheme must be PF_HP_RING (0) or PF_HP_NEST (1)")
+    end subroutine test_healpix_bad_scheme_aborts
+
+    subroutine test_healpix_buffer_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        ! The message has to carry enough to size the buffer without guessing, which is the whole
+        ! reason this aborts rather than truncating -- so the assertion names the count reached.
+        call check_scenario_exit_status_and_stderr(error, "healpix_disc_buffer_too_small", &
+            expect_abort=.true., &
+            failure_message="a listpix too small for the disc was expected to abort", &
+            required_stderr="listpix holds 4 elements but the disc needs")
+    end subroutine test_healpix_buffer_aborts
 
     subroutine test_spatial_radius_not_positive_aborts(error)
         type(error_type), allocatable, intent(out) :: error

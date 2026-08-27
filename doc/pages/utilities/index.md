@@ -3,6 +3,7 @@ title: Utilities and code generation
 ordered_subpage: sorting.md
 ordered_subpage: random.md
 ordered_subpage: spatial.md
+ordered_subpage: healpix.md
 ordered_subpage: generated-tables.md
 ordered_subpage: embedding-maml-schemas.md
 ---
@@ -10,7 +11,7 @@ ordered_subpage: embedding-maml-schemas.md
 Things beyond the file being read or written: a general-purpose sorting API over plain Fortran
 arrays and this library's own column types, counter-based random numbers that survive a parallel
 loop — with the distributions and sampling built on them — spatial neighbour search over
-coordinate arrays, and the two generators meant to be copied into your own project.
+coordinate arrays, the HEALPix sphere pixelisation, and the two generators meant to be copied into your own project.
 
 - [Sorting arrays and columns](sorting.html) — `pf_sort` and `pf_argsort` over eleven element
   types, from plain arrays to a `parquet_column`, with multi-key sorts and group boundaries; then
@@ -30,6 +31,10 @@ coordinate arrays, and the two generators meant to be copied into your own proje
   and search on the sky by angular radius. Two or three dimensions, optional periodic boundaries,
   connected components for a Friends-of-Friends group finder, and a cell size the library measures
   for itself rather than asking you to pick.
+- [Sphere pixelisation with `parquet_healpix`](healpix.html) — HEALPix: the direction a pixel
+  covers and the pixel a direction falls in, in both numbering schemes, and the pixels of a disc.
+  Equal-area pixels on rings of constant latitude, both integer kinds, and no floating-point
+  exception raised — so a program running under `-ffpe-trap` needs no guard around a disc query.
 - [Generated table types](generated-tables.html) — `tools/generate_user_table_code.py`: named,
   typed accessors on your own `parquet_table` extension, generated from a MAML schema. Opening one
   from a file, from a slice, or from nothing at all (`%init`, `%init_slice`, `%init_empty`);

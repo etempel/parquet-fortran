@@ -192,6 +192,52 @@ end module test_module_surface_sampling
 !! **One library import, and it must stay that way.** A user who imports this module to get
 !! neighbour search must be able to cap its threads and silence its rebuild warning without also
 !! importing `parquet_settings`, which would drag in `parquet_bindings` and with it Arrow.
+!> `parquet_healpix` alone: the output pair, get and set, and the pixelisation itself.
+!!
+!! **One library import, and it must stay that way.** Everything this file exists to assert is a
+!! property of what a single `use` exports; a second import here silently restores the names and the
+!! suite goes on passing while testing nothing.
+module test_module_surface_healpix
+    use parquet_healpix                ! THE ONLY library import.
+    use iso_fortran_env, only : int64, real64
+    implicit none
+    private
+    public :: check_healpix_surface
+
+contains
+
+    !> Round-trips the knobs `parquet_healpix` re-exports, then uses the capability itself.
+    subroutine check_healpix_surface(what)
+        character(len=:), allocatable, intent(out) :: what !! the first knob that failed, or "".
+        character(len=:), allocatable :: tok
+        integer(int64) :: ipix, nlist, listpix(64)
+
+        what = ""
+        ! The output pair. This tier reads no knob of its own; it carries these because its bulk
+        ! forms clamp a requested thread count and say so through the shared channel, and a program
+        ! whose only import is this module must be able to quiet that without naming
+        ! parquet_settings -- which would put the C++ boundary back into an Arrow-free build.
+        call parquet_set_verbosity("silent")
+        call parquet_get_verbosity(tok)
+        if (tok /= "silent") what = "verbosity"
+        call parquet_set_verbosity("normal")
+        call parquet_set_message_stream("stderr")
+        call parquet_get_message_stream(tok)
+        if (what == "" .and. tok /= "stderr") what = "message_stream"
+        call parquet_set_message_stream("stdout")
+
+        ! And the capability itself: a re-export list that compiles while exporting no usable
+        ! procedure would satisfy every assertion above. PF_HP_NEST is named deliberately -- the
+        ! scheme selectors are separate `public ::` entries and so separately droppable.
+        call pf_ang2pix_nest(4_int64, 1.0_real64, 2.0_real64, ipix)
+        if (what == "" .and. (ipix < 0_int64 .or. ipix >= 192_int64)) what = "pf_ang2pix_nest"
+        call pf_query_disc(4_int64, [0.0_real64, 0.0_real64, 1.0_real64], 0.5_real64, listpix, &
+                           nlist, scheme=PF_HP_NEST)
+        if (what == "" .and. nlist <= 0_int64) what = "pf_query_disc"
+    end subroutine check_healpix_surface
+
+end module test_module_surface_healpix
+
 module test_module_surface_spatial
     use parquet_spatial                ! THE ONLY library import.
     use iso_fortran_env, only : int32, int64, real64
@@ -786,6 +832,7 @@ module test_module_surface
     use test_module_surface_sampling, only : check_sampling_surface
     use test_module_surface_version, only : check_version_surface
     use test_module_surface_spatial, only : check_spatial_surface
+    use test_module_surface_healpix, only : check_healpix_surface
     use test_module_surface_columns, only : check_columns_surface
     use test_module_surface_list, only : check_list_surface
     use test_module_surface_struct, only : check_struct_surface
@@ -891,6 +938,8 @@ contains
                 test_sampling_surface), &
             new_unittest("parquet_spatial alone builds an index and exposes every knob it reads", &
                 test_spatial_surface), &
+            new_unittest("parquet_healpix alone pixelises the sphere and exposes the output pair", &
+                         test_healpix_surface), &
             new_unittest("parquet_version alone reports the library version", &
                 test_version_surface), &
             new_unittest("parquet_io alone reaches every layer of the read/write API", &
@@ -971,6 +1020,16 @@ contains
         call check_spatial_surface(what)
         call check(error, what == "", "the spatial index was not usable through `use parquet_spatial` alone: " // what)
     end subroutine test_spatial_surface
+
+    !> The test-drive wrapper over check_healpix_surface.
+    subroutine test_healpix_surface(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: what
+
+        call check_healpix_surface(what)
+        call check(error, what == "", &
+            "the pixelisation was not usable through `use parquet_healpix` alone: " // what)
+    end subroutine test_healpix_surface
 
     !> The test-drive wrapper over check_version_surface.
     subroutine test_version_surface(error)

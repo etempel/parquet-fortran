@@ -1563,6 +1563,26 @@ def check_parquet_spatial_stays_arrow_free():
         "reaching the reader/writer stack would make it sixty.")
 
 
+def check_parquet_healpix_stays_arrow_free():
+    """`use parquet_healpix` must not drag the Arrow/Parquet C++ stack into a consumer's build.
+
+    The pixelisation is arithmetic over plain reals and integers and reaches nothing but
+    `parquet_settings_base`, so a consumer wanting sphere pixels compiles four files rather than
+    the sixty-odd the reader/writer stack costs. That is the whole reason this module exists here
+    rather than as a dependency on `libhealpix`, and it is a property of the `use` graph that
+    nothing in `fpm test` can see -- the library obviously has Arrow, so a stray import compiles
+    and tests perfectly well here and inflates every downstream build.
+
+    One check per tier rather than a few for the group is deliberate: a tier covered only
+    transitively loses its coverage silently the day the import it was riding on moves.
+    """
+    return _check_stays_arrow_free(
+        "parquet_healpix",
+        "The healpix tier exists so that a downstream project can drop its GPL libhealpix "
+        "dependency without acquiring an Arrow one; an import reaching the reader/writer stack "
+        "would defeat that.")
+
+
 def check_parquet_version_stays_arrow_free():
     """`use parquet_version` must not reach parquet_bindings.
 
@@ -3473,6 +3493,7 @@ CHECKS = (
     ("parquet_temporal stays Arrow-free", check_parquet_temporal_stays_arrow_free),
     ("parquet_version stays Arrow-free", check_parquet_version_stays_arrow_free),
     ("parquet_spatial stays Arrow-free", check_parquet_spatial_stays_arrow_free),
+    ("parquet_healpix stays Arrow-free", check_parquet_healpix_stays_arrow_free),
     ("parquet_get_version has exactly one home", check_get_version_has_one_home),
     ("parquet_random imports nothing from src/", check_parquet_random_stays_leaf),
     ("no submodule calls a sort-oracle procedure pointer",

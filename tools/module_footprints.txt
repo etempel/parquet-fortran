@@ -74,6 +74,13 @@ parquet_spatial_query.f90
 parquet_spatial_tune.f90
 parquet_wrapper.cpp
 
+[parquet_healpix]
+parquet_healpix.f90
+parquet_healpix_core.f90
+parquet_healpix_query.f90
+parquet_settings_base.f90
+parquet_wrapper.cpp
+
 [parquet_columns]
 parquet_columns.f90
 parquet_columns_access.f90
@@ -304,6 +311,9 @@ parquet_columns_util.f90
 parquet_columns_validity.f90
 parquet_core.f90
 parquet_expkey.f90
+parquet_healpix.f90
+parquet_healpix_core.f90
+parquet_healpix_query.f90
 parquet_io.f90
 parquet_list.f90
 parquet_maml_base.f90

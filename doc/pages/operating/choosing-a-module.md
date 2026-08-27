@@ -47,6 +47,7 @@ in every one of them.
 | `parquet_argsort` | 4 | no | `pf_argsort` over the six intrinsic types, plus `pf_sort_threads` |
 | `parquet_sampling` | 8 | no | permutations, subsets, resampling and weighted draws |
 | `parquet_spatial` | 9 | no | `pf_spatial_index`: neighbour and k-nearest search on a uniform grid, including on the sky |
+| `parquet_healpix` | 4 | no | `pf_query_disc` and friends: the HEALPix sphere pixelisation |
 | `parquet_columns` | 10 | no | `parquet_column`: a typed, null-aware column container |
 | `parquet_list` | 11 | no | `parquet_list_column` / `parquet_list_row`: variable-length list storage |
 | `parquet_struct` | 11 | no | `parquet_struct_column` / `parquet_struct_row`: one value per declared field per row |
@@ -126,6 +127,7 @@ anything else.
 | `parquet_strings` | `string_threads`, plus `verbosity` and `message_stream` |
 | `parquet_sampling` | `random_threads`, `random_parallel_min_elements` |
 | `parquet_spatial` | `spatial_threads`, `spatial_rebuild_warning`, the four sorting knobs, plus `verbosity` and `message_stream` |
+| `parquet_healpix` | `verbosity` and `message_stream` -- it can warn from a thread clamp |
 | `parquet_argsort` | `sort_threads`, `sort_radix_path`, `sort_counting_path`, `sort_counting_bucket_limit`, plus `verbosity` and `message_stream` |
 | `parquet_sorting` | the same six as `parquet_argsort` |
 | `parquet_settings`, and so `parquet_io`, `parquet_tables`, `parquet` | all of them |

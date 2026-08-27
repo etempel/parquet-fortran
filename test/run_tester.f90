@@ -46,6 +46,8 @@ program tester
     use test_diagnostics, only : collect_tests_diagnostics
     use test_random, only : collect_tests_parquet_random, collect_tests_parquet_random_perm
     use test_random_omp, only : collect_tests_parquet_random_omp
+    use test_healpix, only : collect_tests_parquet_healpix
+    use test_healpix_reference, only : collect_tests_healpix_reference
     use test_random_weighted, only : collect_tests_parquet_random_weighted
     use test_random_dist, only : collect_tests_parquet_random_dist
     use test_spatial, only : collect_tests_parquet_spatial
@@ -117,7 +119,9 @@ program tester
         new_testsuite("random_omp", collect_tests_parquet_random_omp), &
         new_testsuite("random_weighted", collect_tests_parquet_random_weighted), &
         new_testsuite("random_dist", collect_tests_parquet_random_dist), &
-        new_testsuite("spatial", collect_tests_parquet_spatial) &
+        new_testsuite("spatial", collect_tests_parquet_spatial), &
+        new_testsuite("healpix", collect_tests_parquet_healpix), &
+        new_testsuite("healpix_reference", collect_tests_healpix_reference) &
         ]
     !
     ! command line argument for a specific testsuite and test

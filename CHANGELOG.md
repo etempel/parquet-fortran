@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`parquet_healpix`: the HEALPix sphere pixelisation.** Direction to pixel and back
+  (`pf_ang2pix_ring`/`pf_ang2pix_nest`, `pf_pix2ang_*`, `pf_pix2vec_*`), conversion between the
+  RING and NEST numbering schemes (`pf_ring2nest`/`pf_nest2ring`), the pixels of a disc
+  (`pf_query_disc`, exact or overlapping, in either scheme) and angular separation
+  (`pf_angdist`). Every integer argument takes `integer(int32)` or `integer(int64)`; the scalar
+  conversions are `pure elemental`, so they accept whole arrays. No floating-point exception is
+  raised on valid input, so a program running under `-ffpe-trap` needs no guard around a call. A
+  new Arrow-free entry module (`use parquet_healpix` compiles four Fortran files).
 - **`parquet_spatial`: `pf_spatial_index`, a uniform-grid spatial index over plain coordinate
   arrays.** Ball search into a caller-owned buffer, the self-join as CSR, the pair list and
   count-only forms, all threaded; `k`-nearest search (`%nearest`) and every point's `k`-th

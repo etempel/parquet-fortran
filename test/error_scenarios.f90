@@ -2017,6 +2017,26 @@ program error_scenarios
         call scenario_spatial_copy_false_strided()
     case ("spatial_threads_below_one")
         call scenario_spatial_threads_below_one()
+    case ("healpix_disc_nside_not_power2")
+        call scenario_healpix_disc_nside_not_power2()
+    case ("healpix_disc_nside_zero")
+        call scenario_healpix_disc_nside_zero()
+    case ("healpix_disc_nside_int32_overflow")
+        call scenario_healpix_disc_nside_int32_overflow()
+    case ("healpix_disc_nside_int64_overflow")
+        call scenario_healpix_disc_nside_int64_overflow()
+    case ("healpix_disc_radius_nan")
+        call scenario_healpix_disc_radius_nan()
+    case ("healpix_disc_radius_negative")
+        call scenario_healpix_disc_radius_negative()
+    case ("healpix_disc_vector_zero")
+        call scenario_healpix_disc_vector_zero()
+    case ("healpix_disc_vector_nan")
+        call scenario_healpix_disc_vector_nan()
+    case ("healpix_disc_bad_scheme")
+        call scenario_healpix_disc_bad_scheme()
+    case ("healpix_disc_buffer_too_small")
+        call scenario_healpix_disc_buffer_too_small()
     case ("spatial_sky_query_on_euclidean")
         call scenario_spatial_sky_query_on_euclidean()
     case ("spatial_euclidean_query_on_sky")
@@ -18301,5 +18321,100 @@ contains
         call row%get(v)
         if (v(1) /= 40_int32 .or. v(2) /= 41_int32) error stop "a second-row-group value is wrong"
     end subroutine scenario_list_write_large_list_chunked
+
+    ! ---- parquet_healpix ----
+    !
+    ! Every abort `pf_query_disc` can produce. The conversions deliberately have none -- they are
+    ! `pure elemental` and total, so an nside that is not a power of two gives them a documented
+    ! garbage answer rather than an error, and validation lives here in the once-per-query entry
+    ! point instead. See src/parquet_healpix.f90's own header.
+
+    !> An nside that is not a power of two.
+    subroutine scenario_healpix_disc_nside_not_power2()
+        integer(int64) :: listpix(64), nlist
+
+        call pf_query_disc(100_int64, [0.0_real64, 0.0_real64, 1.0_real64], 0.1_real64, listpix, nlist)
+        print '(a)', "unexpectedly accepted nside= 100"
+    end subroutine scenario_healpix_disc_nside_not_power2
+
+    !> An nside of zero, which the power-of-two bit test alone would accept.
+    subroutine scenario_healpix_disc_nside_zero()
+        integer(int64) :: listpix(64), nlist
+
+        call pf_query_disc(0_int64, [0.0_real64, 0.0_real64, 1.0_real64], 0.1_real64, listpix, nlist)
+        print '(a)', "unexpectedly accepted nside= 0"
+    end subroutine scenario_healpix_disc_nside_zero
+
+    !> An nside above what a 32-bit pixel index can address, asked for in the int32 kind.
+    subroutine scenario_healpix_disc_nside_int32_overflow()
+        integer(int32) :: listpix(64), nlist
+
+        call pf_query_disc(16384_int32, [0.0_real64, 0.0_real64, 1.0_real64], 0.001_real64, listpix, nlist)
+        print '(a)', "unexpectedly accepted nside= 16384 in the int32 kind"
+    end subroutine scenario_healpix_disc_nside_int32_overflow
+
+    !> An nside above the module's own ceiling, asked for in the int64 kind.
+    subroutine scenario_healpix_disc_nside_int64_overflow()
+        integer(int64) :: listpix(64), nlist
+
+        call pf_query_disc(1073741824_int64, [0.0_real64, 0.0_real64, 1.0_real64], 1.0e-9_real64, &
+                           listpix, nlist)
+        print '(a)', "unexpectedly accepted nside= 2**30"
+    end subroutine scenario_healpix_disc_nside_int64_overflow
+
+    !> A NaN radius. Built at run time, so no constant expression can fold it away.
+    subroutine scenario_healpix_disc_radius_nan()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        integer(int64) :: listpix(64), nlist
+        real(real64) :: nan
+
+        nan = ieee_value(0.0_real64, ieee_quiet_nan)
+        call pf_query_disc(4_int64, [0.0_real64, 0.0_real64, 1.0_real64], nan, listpix, nlist)
+        print '(a)', "unexpectedly accepted a NaN radius"
+    end subroutine scenario_healpix_disc_radius_nan
+
+    !> A negative radius.
+    subroutine scenario_healpix_disc_radius_negative()
+        integer(int64) :: listpix(64), nlist
+
+        call pf_query_disc(4_int64, [0.0_real64, 0.0_real64, 1.0_real64], -0.5_real64, listpix, nlist)
+        print '(a)', "unexpectedly accepted a negative radius"
+    end subroutine scenario_healpix_disc_radius_negative
+
+    !> A centre vector of zero length, which names no direction at all.
+    subroutine scenario_healpix_disc_vector_zero()
+        integer(int64) :: listpix(64), nlist
+
+        call pf_query_disc(4_int64, [0.0_real64, 0.0_real64, 0.0_real64], 0.1_real64, listpix, nlist)
+        print '(a)', "unexpectedly accepted a zero-length centre vector"
+    end subroutine scenario_healpix_disc_vector_zero
+
+    !> A centre vector holding a NaN.
+    subroutine scenario_healpix_disc_vector_nan()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        integer(int64) :: listpix(64), nlist
+        real(real64) :: nan
+
+        nan = ieee_value(0.0_real64, ieee_quiet_nan)
+        call pf_query_disc(4_int64, [nan, 0.0_real64, 1.0_real64], 0.1_real64, listpix, nlist)
+        print '(a)', "unexpectedly accepted a NaN in the centre vector"
+    end subroutine scenario_healpix_disc_vector_nan
+
+    !> A scheme selector that is neither PF_HP_RING nor PF_HP_NEST.
+    subroutine scenario_healpix_disc_bad_scheme()
+        integer(int64) :: listpix(64), nlist
+
+        call pf_query_disc(4_int64, [0.0_real64, 0.0_real64, 1.0_real64], 0.1_real64, listpix, nlist, &
+                           scheme=7)
+        print '(a)', "unexpectedly accepted scheme= 7"
+    end subroutine scenario_healpix_disc_bad_scheme
+
+    !> A listpix buffer too small for the disc, which must abort rather than truncate.
+    subroutine scenario_healpix_disc_buffer_too_small()
+        integer(int64) :: listpix(4), nlist
+
+        call pf_query_disc(16_int64, [0.0_real64, 0.0_real64, 1.0_real64], 0.5_real64, listpix, nlist)
+        print '(a)', "unexpectedly filled a buffer too small for the result"
+    end subroutine scenario_healpix_disc_buffer_too_small
 
 end program error_scenarios

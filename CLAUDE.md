@@ -3431,6 +3431,31 @@ nagfor needs `FPM_CC`/`FPM_CXX` set explicitly and a shim to get OpenMP onto the
 warning output needs its own triage, and both are covered in
 [NAG's "explicitly imported but not used" warnings](#nags-explicitly-imported-but-not-used-warnings-most-are-false-positives).
 
+- **A statement may carry at most 255 CONTINUATION LINES, and nagfor is the only compiler that
+  enforces it.** F2008 C1003 caps a statement at 255 continuation lines; gfortran, ifx and flang all
+  accept more without a word, so a violation compiles clean everywhere else, passes CI, and breaks
+  only a nagfor build with `Error: Too many continuation lines` — naming the line the statement
+  *ends* on, which is hundreds of lines from the one someone added.
+
+  **The limit is PER STATEMENT, not per procedure, and that is what makes it easy to trip.**
+  `collect_tests_parquet_errors` (`test/test_errors.f90`) already builds its `unittest_type` array
+  in parts `p1 … pN` precisely because one constructor would blow the cap — and a *part* still
+  reached **258** and broke the build. **When a part fills up, add a new one rather than growing an
+  existing one**: declare `pN`, open it after the previous part's `]`, and add it to the
+  concatenation. Two things about that file's shape are load-bearing and are recorded in its own
+  comment: a single constructor is impossible, and the self-referential `testsuite = [testsuite, …]`
+  append makes nagfor double-free each entry's name string at run time.
+
+  **Splitting a part has one trap worth knowing**, because it is invisible to the eye and produces a
+  syntax error 12 lines away: every part's final element ends with a trailing `&` continuing onto
+  the `]` line, so a split that merely strips the `&` leaves the previous element's comma dangling
+  before the `]`. Close the new part by removing the **comma**, not the `&`.
+
+  `check_statement_continuation_lines` (`tools/check_source_conventions.py`) scans `src/`, `test/`,
+  `app/` and `bench/` by shape and fails the lint stage before nagfor ever sees it. It matches any
+  statement, so a long constructor added anywhere is covered without editing the check. As of
+  2026-08-27 the largest surviving part is `p4` at **247** — 8 below the cap, so this will recur.
+
 - **An INTERMEDIATE submodule must not reference a name it reaches by HOST ASSOCIATION from the
   module above -- nagfor then cannot compile ANY of its descendants.** `src/parquet_write.f90` is
   `submodule (parquet_core) parquet_write` and has four children. Giving its own code a reference to
@@ -3635,6 +3660,18 @@ FPM_BUILD_DIR=test_run/nag-warnsurvey fpm build --verbose 2>&1 | grep '^Warning:
   and **nothing in that NAG run will say so**, because in that run it really is unused. **The
   survey figures below were taken serially and predate this**, so re-derive rather than trusting
   their split.
+- **A name used only inside `#ifndef _OPENMP` — the MIRROR of the class above, and it fires in a
+  THREADED build rather than a serial one.** Same mechanism, opposite arm, and easy to misread as a
+  genuine dead import because the paragraph above says this class is "mostly historical".
+  Confirmed instance: `test/test_errors.f90` imports `skip_test` from testdrive, uses it at six
+  sites, and **every one of them is inside `#ifndef _OPENMP`** (they are the skip guards required by
+  ["A test that asserts THREADING must skip without OpenMP"](#a-test-that-asserts-threading-must-skip-without-openmp)),
+  so a shim-built NAG run compiles none of them and reports
+  `SKIP_TEST explicitly imported into TEST_ERRORS but not used`. **Do not remove the import**:
+  deleting it breaks every serial build — gfortran without OpenMP, flang, and `NAGFOR_OMP=0` — and
+  the NAG run that suggested it cannot see any of them. The three-condition decision rule below
+  already forbids it (condition (2) requires the name be absent with **both** arms of every
+  `#ifdef` included), which is exactly why that condition is worded the way it is.
 
 **So the decision rule is three conditions, not one.** Remove a flagged name from a scope only when
 (1) NAG flags it, **and** (2) it is absent from that file's own code with comments *and string

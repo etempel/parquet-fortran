@@ -3387,6 +3387,64 @@ def check_openmp_calls_are_guarded():
     return problems
 
 
+def check_statement_continuation_lines():
+    """No Fortran statement may carry more than 255 continuation lines.
+
+    F2008 C1003 caps a statement at 255 continuation lines. **Only nagfor enforces it** --
+    gfortran, ifx and flang all accept more without a word -- so a violation compiles clean on
+    every compiler CI and an ordinary `fpm test` use, and is found only when someone runs a
+    nagfor build. That is the same "invisible outside one toolchain" shape as the OpenMP-guard
+    and 132-column rules, and it earns a static check for the same reason.
+
+    Confirmed instance: `collect_tests_parquet_errors` (`test/test_errors.f90`) builds its
+    `unittest_type` array in parts precisely because one constructor would blow the limit, and
+    a part still reached **258** and broke the nagfor build with
+    `Error: Too many continuation lines`. The fix is to split the part, not to reflow it -- see
+    that subroutine's own comment, which records the two alternatives that do not work.
+
+    Matched by SHAPE rather than against a list of known statements, so a new long constructor
+    anywhere in the tree is covered without editing this check. Comment lines inside a continued
+    statement are not counted: they are not continuation lines, and counting them would report a
+    conforming statement as a violation.
+    """
+    problems = []
+    roots = [SRC, REPO_ROOT / "test", REPO_ROOT / "app", REPO_ROOT / "bench"]
+    scanned = 0
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for path in sorted(root.glob("*.f90")) + sorted(root.glob("*.F90")):
+            scanned += 1
+            run_start, run = 0, 0
+            for lineno, line in enumerate(path.read_text(encoding="utf-8",
+                                                         errors="replace").splitlines(), 1):
+                bare = line.strip()
+                if not bare or bare.startswith("!"):
+                    continue          # a comment line is not a continuation line
+                code = strip_comment(line).rstrip()
+                if run == 0:
+                    run_start = lineno
+                if code.endswith("&"):
+                    run += 1
+                    continue
+                if run > 255:
+                    problems.append("%s:%d: a statement carries %d continuation lines (max 255)"
+                                    % (path.relative_to(REPO_ROOT), run_start, run))
+                run = 0
+            if run > 255:
+                problems.append("%s:%d: a statement carries %d continuation lines (max 255)"
+                                % (path.relative_to(REPO_ROOT), run_start, run))
+    if not scanned:
+        return ["tools/check_source_conventions.py: no Fortran source found -- this check has "
+                "gone stale and is testing nothing"]
+    if problems:
+        return ["a Fortran statement may carry at most 255 continuation lines (F2008 C1003).",
+                "ONLY nagfor enforces this, so a violation builds clean under gfortran/ifx/flang",
+                "and breaks only a nagfor run. Split the statement -- for a test-suite array,",
+                "close the part and open a new one rather than growing the existing part:"] + problems
+    return []
+
+
 def check_contributing_is_an_index():
     """CONTRIBUTING.md names each tool ONCE, in its index table -- never in a paragraph.
 
@@ -3579,6 +3637,7 @@ CHECKS = (
     ("allocate extents from size() use int64", check_allocate_extent_kind),
     ("noinline directives carry both spellings", check_noinline_directives_are_paired),
     ("CONTRIBUTING.md names each tool once, in its index", check_contributing_is_an_index),
+    ("no statement exceeds 255 continuation lines", check_statement_continuation_lines),
 )
 
 

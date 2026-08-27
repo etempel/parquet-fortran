@@ -69,7 +69,18 @@ contains
         ! each entry's allocatable name string at run time ("Invalid deallocation of size N:
         ! block was already deallocated"), aborting the suite. Both traps are invisible under
         ! gfortran, so keep this shape: assign each part, then concatenate once.
-        type(unittest_type), allocatable :: p1(:), p2(:), p3(:), p4(:), p5(:), p6(:), p7(:)
+        !
+        ! EVERY PART IS ITSELF CAPPED AT 255 CONTINUATION LINES -- the limit applies per
+        ! statement, not to the subroutine, so adding entries to a part that is already near
+        ! the cap is what actually breaks the build. Only nagfor enforces it (gfortran, ifx and
+        ! flang all accept more), so a violation compiles clean everywhere else and is found
+        ! only by a nagfor run; p7 reached 258 that way and had to be split.
+        ! WHEN A PART IS FULL, ADD A NEW ONE rather than growing an existing one: declare pN,
+        ! open it after the previous part's `]`, and add it to the concatenation below.
+        ! check_testsuite_continuation_lines (tools/check_source_conventions.py) fails the lint
+        ! stage before nagfor ever sees it.
+        type(unittest_type), allocatable :: p1(:), p2(:), p3(:), p4(:), p5(:), p6(:), p7(:), &
+                                            p8(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -1551,7 +1562,9 @@ contains
             new_unittest("min_size = 0 aborts", test_spatial_components_min_size_aborts), &
             new_unittest("a negative vertex count aborts", test_spatial_components_nvert_aborts), &
             new_unittest("the automatic-rebuild warning is said, and can be silenced", &
-                test_spatial_rebuild_warning), &
+                test_spatial_rebuild_warning) &
+            ]
+        p8 = [ &
             new_unittest("reading a non-list column into a list column aborts", test_list_read_not_a_list_aborts), &
             new_unittest("a nested list payload aborts", test_list_read_nested_payload_aborts), &
             new_unittest("a struct list payload aborts", test_list_read_struct_payload_aborts), &
@@ -1643,7 +1656,7 @@ contains
             new_unittest("a streamed column that crosses the offset threshold keeps one width", &
                 test_list_write_large_list_chunked) &
             ]
-        testsuite = [p1, p2, p3, p4, p5, p6, p7]
+        testsuite = [p1, p2, p3, p4, p5, p6, p7, p8]
     end subroutine collect_tests_parquet_errors
 
 

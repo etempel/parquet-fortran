@@ -83,7 +83,9 @@ contains
             new_unittest("angdist reproduces the reference separations", &
                          test_angdist_matches_reference), &
             new_unittest("max_pixrad reproduces the reference pixel radii", &
-                         test_max_pixrad_matches_reference) &
+                         test_max_pixrad_matches_reference), &
+            new_unittest("max_pixrad is accurate where the reference itself is not", &
+                         test_max_pixrad_high_precision) &
             ]
     end subroutine collect_tests_healpix_reference
 
@@ -443,7 +445,26 @@ contains
         do k = 1, hv_n_nside
             nside = hv_nside(k)
             got = pf_max_pixrad(nside)
-            if (abs(got - hv_max_pixrad(k)) > 1.0e-9_real64 * hv_max_pixrad(k)) then
+            ! Relative to 1e-9, OR absolute to 1e-15, whichever is looser -- and the absolute
+            ! floor is about the REFERENCE, not about this library. `hv_max_pixrad` is healpy's
+            ! double-precision output, and healpy measures this angle by building the two vectors
+            ! and taking the angle between them; their z-components agree to ~1e-9 at the largest
+            ! nside, so that subtraction leaves the reference itself with about eight significant
+            ! digits. Checked against a 60-digit evaluation, the reference is 2.1e-11 relatively
+            ! wrong at nside = 2**20 and 1.5e-08 wrong at 2**29, where the true value is
+            ! 1.99110981231e-09 and the table says 1.99110984188e-09.
+            !
+            ! `hpx_max_pixrad` forms every small quantity directly instead (see its own comment)
+            ! and is accurate to ~1e-16 across the whole range, so at 2**29 it now disagrees with
+            ! the reference BY THE REFERENCE'S OWN ERROR. Tightening this back to a pure relative
+            ! bound would therefore assert that this library reproduces healpy's rounding rather
+            ! than that it computes the right answer -- which is also what made the old bound
+            ! compiler-dependent, since eight digits of headroom left the eighth digit to whether
+            ! a given toolchain contracted one expression into an FMA.
+            !
+            ! The floor is 1e-15 against an observed 3.0e-17 absolute discrepancy: a 30x margin,
+            ! still tight enough to catch any error above ~5e-07 relative at the smallest radius.
+            if (abs(got - hv_max_pixrad(k)) > max(1.0e-9_real64 * hv_max_pixrad(k), 1.0e-15_real64)) then
                 nbad = nbad + 1
                 if (nbad == 1) write (detail, '(a,i0,a,es16.9,a,es16.9)') &
                     "nside=", nside, " expected=", hv_max_pixrad(k), " got=", got
@@ -460,5 +481,48 @@ contains
         if (allocated(error)) return
         call check(error, nbad, 0, "max_pixrad disagreed with the reference vectors: " // trim(detail))
     end subroutine test_max_pixrad_matches_reference
+
+    !> `max_pixrad` against a 50-DIGIT evaluation of its own defining formula, not against healpy.
+    !>
+    !> **This test exists because the reference comparison above cannot catch a regression here.**
+    !> `hv_max_pixrad` is healpy's double-precision output, and healpy builds the two vectors and
+    !> measures the angle between them -- a subtraction of z-components that agree to ~1e-9 at the
+    !> largest nside, so the reference carries only about eight significant digits there. The test
+    !> above therefore had to gain an absolute floor to stop asserting that this library
+    !> reproduces healpy's rounding; and that floor is loose enough that the cancelling form would
+    !> pass it too. Something has to pin the accuracy, and it cannot be healpy.
+    !>
+    !> The oracle is `atan2(|c x v|, c.v)` over the same two vectors, evaluated at 50 decimal
+    !> digits with mpmath, so it shares the DEFINITION with `hpx_max_pixrad` and shares none of
+    !> its arithmetic. At 1e-12 relative the build-then-measure form fails at four of the seven
+    !> nside values below (4.3e-10 at 2**24, 5.5e-09 at 2**26, 2.0e-08 at 2**28, 1.5e-08 at
+    !> 2**29), while the shipped form holds ~1e-16 at every one -- which is the gap this pins.
+    subroutine test_max_pixrad_high_precision(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer :: k, nbad
+        real(real64) :: got
+        character(len=256) :: detail
+        !> nside values chosen so that the cancelling form fails at the last four.
+        integer(int64), parameter :: ns(7) = [1_int64, 16_int64, 1048576_int64, 16777216_int64, &
+                                              67108864_int64, 268435456_int64, 536870912_int64]
+        !> The true angle at each, to 18 significant digits (mpmath, 50-digit working precision).
+        real(real64), parameter :: truth(7) = [ &
+            8.41068670567930256e-01_real64, 6.60147614325134066e-02_real64, &
+            1.01944803956972594e-06_real64, 6.37155132949673289e-08_real64, &
+            1.59288784590150697e-08_real64, 3.98221962320834474e-09_real64, &
+            1.99110981230872048e-09_real64]
+
+        nbad = 0
+        detail = ""
+        do k = 1, size(ns)
+            got = pf_max_pixrad(ns(k))
+            if (abs(got - truth(k)) > 1.0e-12_real64 * truth(k)) then
+                nbad = nbad + 1
+                if (nbad == 1) write (detail, '(a,i0,a,es22.15,a,es22.15)') &
+                    "nside=", ns(k), " true=", truth(k), " got=", got
+            end if
+        end do
+        call check(error, nbad, 0, "max_pixrad lost precision: " // trim(detail))
+    end subroutine test_max_pixrad_high_precision
 
 end module test_healpix_reference

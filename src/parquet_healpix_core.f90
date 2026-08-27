@@ -46,17 +46,29 @@ contains
     ! ---- Angular separation ----
 
     module procedure pf_angdist
-        real(real64) :: cx, cy, cz, dot
+        real(real64) :: cx, cy, cz, dot, cross
 
         cx = vec1(2) * vec2(3) - vec1(3) * vec2(2)
         cy = vec1(3) * vec2(1) - vec1(1) * vec2(3)
         cz = vec1(1) * vec2(2) - vec1(2) * vec2(1)
         dot = vec1(1) * vec2(1) + vec1(2) * vec2(2) + vec1(3) * vec2(3)
+        cross = sqrt(cx * cx + cy * cy + cz * cz)
+        ! ATAN2(0, 0) IS PROHIBITED, not merely awkward: F2018 16.9.16 requires X to be nonzero
+        ! when Y is zero, so the (0, 0) case is non-conforming however reasonable "it is just
+        ! zero" sounds. gfortran, ifx and flang return 0 and raise nothing; nagfor returns NaN and
+        ! raises IEEE_INVALID, which under its default -ieee=stop TERMINATES the process. Only a
+        ! zero-length input can reach it -- with both vectors nonzero, a zero cross product means
+        ! parallel or antiparallel, and then the dot product is +-|v1||v2| and cannot also be zero.
+        if (cross == 0.0_real64 .and. dot == 0.0_real64) then
+            dist = 0.0_real64
+            return
+        end if
         ! atan2 rather than acos(dot): the cross product carries the small angles and the dot
         ! product the large ones, so this form keeps about an ulp across the whole range where
         ! acos(dot) loses half its digits near 0 and near pi. It is also scale-invariant, so the
-        ! inputs need not be normalised, and it raises nothing on any finite input.
-        dist = atan2(sqrt(cx * cx + cy * cy + cz * cz), dot)
+        ! inputs need not be normalised, and with the guard above it raises nothing on any finite
+        ! input.
+        dist = atan2(cross, dot)
     end procedure pf_angdist
 
     ! ---- Ring geometry ----
@@ -243,29 +255,44 @@ contains
     end procedure hpx_ringij2nest
 
     module procedure hpx_max_pixrad
-        real(real64) :: zc, sc, zv, sv, dphi, rn, c(3), v(3)
+        real(real64) :: zc, sc, zv, sv, dz, ds, sh, chord2, rn
 
         ! The most elongated pixels are those of the first equatorial ring, whose centres sit at
         ! z = 2/3; the farthest corner of one is its northern corner, on the quadrant meridian
         ! pi/(4*nside) away in longitude, at the z of the last cap ring.
+        !
+        ! EVERY SMALL QUANTITY IS FORMED DIRECTLY RATHER THAN AS A DIFFERENCE OF TWO LARGE ONES,
+        ! and that is what this procedure is really about. The two vectors converge as nside
+        ! grows, so an implementation that builds them and then measures the angle between them
+        ! subtracts z-components that agree to ~1e-9 -- catastrophic cancellation, leaving about
+        ! eight significant digits. Measured against a 60-digit evaluation, the build-then-measure
+        ! form is 4.3e-10 relatively wrong at nside = 2**24, 5.5e-09 at 2**26 and 2.0e-08 at
+        ! 2**28; the form below holds ~1e-16 across the whole range. (An `acos` of the dot product
+        ! is worse again and must not be reintroduced: 5.6e-05 at nside = 2**20 and EXACTLY ZERO
+        ! at 2**29. Zero is the dangerous one -- pf_query_disc's inclusive mode enlarges its radius
+        ! by this quantity, so a zero makes inclusive = .true. silently identical to
+        ! inclusive = .false. at high resolution, with nothing failing unless a test asserts the
+        ! enlargement itself.)
+        !
+        ! It also makes the answer COMPILER-INDEPENDENT. With eight digits of headroom, whether a
+        ! given toolchain contracts `1 - (n-1)**2/(3n**2)` into an FMA decided the eighth
+        ! significant digit, so the reference comparison at nside = 2**29 was really asserting
+        ! that this compiler rounds like the one that generated the reference table.
         rn = real(nside, real64)
         zc = hpx_twothird
-        sc = sqrt(1.0_real64 - zc * zc)
-        zv = 1.0_real64 - (rn - 1.0_real64) * (rn - 1.0_real64) / (3.0_real64 * rn * rn)
+        sc = sqrt((1.0_real64 - zc) * (1.0_real64 + zc))
+        ! dz = zv - zc, as the exact rational (2n-1)/(3n^2) rather than as a subtraction.
+        dz = (2.0_real64 * rn - 1.0_real64) / (3.0_real64 * rn * rn)
+        zv = zc + dz
         sv = sqrt(max(0.0_real64, (1.0_real64 - zv) * (1.0_real64 + zv)))
-        dphi = hpx_pi / (4.0_real64 * rn)
-        c = [sc, 0.0_real64, zc]
-        v = [sv * cos(dphi), sv * sin(dphi), zv]
-        ! Measured with atan2, never with acos of the dot product, and that is a correctness
-        ! matter rather than a refinement: the two vectors converge as nside grows, so their dot
-        ! product approaches 1 and an acos of it loses the whole answer to cancellation. Measured
-        ! against healpy, the acos form is 5.6e-05 relatively wrong at nside = 2**20 and returns
-        ! EXACTLY ZERO at nside = 2**29, where the true value is 1.99e-09. Zero is the dangerous
-        ! one: pf_query_disc's inclusive mode enlarges its radius by this quantity, so a zero makes
-        ! inclusive = .true. silently identical to inclusive = .false. at high resolution, with no
-        ! abort and no test failing unless one asserts the enlargement itself. This form holds
-        ! 4e-10 relative or better across the whole nside range.
-        call pf_angdist(c, v, r)
+        ! ds = sv - sc, likewise: (sv^2 - sc^2)/(sv + sc) = -dz*(zv + zc)/(sv + sc), which is a
+        ! quotient of well-separated quantities. sv + sc is never zero (sc = sqrt(5)/3 > 0).
+        ds = -dz * (zv + zc) / (sv + sc)
+        ! Chord, then 2*asin(chord/2). The half-angle sine keeps the longitude term accurate at
+        ! large nside where dphi itself underflows toward zero.
+        sh = sin(0.5_real64 * hpx_pi / (4.0_real64 * rn))
+        chord2 = ds * ds + 4.0_real64 * sc * sv * sh * sh + dz * dz
+        r = 2.0_real64 * asin(min(1.0_real64, sqrt(chord2) * 0.5_real64))
     end procedure hpx_max_pixrad
 
     module procedure hpx_max_pixrad_i64

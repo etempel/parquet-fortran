@@ -88,8 +88,19 @@ contains
         v0 = v0 / vnorm
         z0 = max(-1.0_real64, min(1.0_real64, v0(3)))
         st0 = sqrt(max(0.0_real64, (1.0_real64 - z0) * (1.0_real64 + z0)))
-        phi0 = atan2(v0(2), v0(1))
-        if (phi0 < 0.0_real64) phi0 = phi0 + hpx_twopi
+        ! A disc centred exactly on a POLE has v0(1) == v0(2) == 0, and ATAN2(0, 0) is prohibited
+        ! by F2018 16.9.16 -- so this is a guard against non-conforming code on an entirely
+        ! ordinary input, not against a caller mistake. nagfor returns NaN and raises
+        ! IEEE_INVALID there (terminating the process under its default -ieee=stop); gfortran, ifx
+        ! and flang return 0 and raise nothing, which is why the pole case went unnoticed.
+        ! Longitude is undefined at a pole and every branch below that uses phi0 is guarded by
+        ! st0 == 0, so any finite value is correct; zero is the conventional one.
+        if (v0(1) == 0.0_real64 .and. v0(2) == 0.0_real64) then
+            phi0 = 0.0_real64
+        else
+            phi0 = atan2(v0(2), v0(1))
+            if (phi0 < 0.0_real64) phi0 = phi0 + hpx_twopi
+        end if
 
         r = min(radius, hpx_pi)
         ! Inclusive mode is the exact walk at an enlarged radius, and the contract follows by

@@ -2818,6 +2818,47 @@ Compiler-independent rules. Anything specific to one compiler is in its own sect
   the ancestor module. Contained procedures *within* a module/submodule do inherit their host's
   `implicit none` via ordinary host association, so it does not need repeating inside each
   individual function/subroutine — one `implicit none` per submodule file is sufficient.
+- **`ATAN2(0.0, 0.0)` is PROHIBITED, and three of the four compilers here return 0 anyway.** F2018
+  16.9.16 requires `X` to be nonzero when `Y` is zero, so the both-zero case is non-conforming
+  however reasonable "the angle is just zero" sounds. gfortran, ifx and flang return `0` and raise
+  nothing; **nagfor returns NaN and raises `IEEE_INVALID`**, which under its default `-ieee=stop`
+  terminates the process. Measured directly rather than inferred:
+
+  ```
+   atan2(0,0)   = NaN   invalid raised = T        (nagfor 7.2)
+  ```
+
+  **The trap is that the reachable input usually looks nothing like "both arguments zero".** Two
+  shipped instances, both found only by a nagfor run: `pf_angdist` formed `atan2(|v1 x v2|, v1.v2)`,
+  which is `(0, 0)` exactly when either input vector has zero length; and `pf_query_disc` computed a
+  longitude as `atan2(v(2), v(1))`, which is `(0, 0)` for a disc centred on a **pole** — an entirely
+  ordinary, documented input. The second killed the process (exit 134) under `-ieee=stop` while
+  every other compiler answered correctly, so nothing in CI or in an ordinary `fpm test` could see
+  it.
+
+  So: **guard every `atan2` whose arguments can both vanish**, and work out what that means for the
+  actual geometry rather than assuming it cannot happen. `grep -n "atan2" src/*.f90` is the whole
+  audit — it is a rare enough intrinsic that reading every call site costs a minute.
+
+- **A quantity formed as a DIFFERENCE of two nearly-equal doubles carries about eight digits, and
+  what fills the other eight is the compiler.** Ordinary cancellation, with a consequence worth
+  stating separately: a test asserting such a value to better than ~1e-8 relative is really
+  asserting that this toolchain rounds like the one that produced the expectation, so it passes on
+  the compiler it was written against and fails elsewhere for no defect. `hpx_max_pixrad` measured
+  an angle between two vectors whose `z` components agree to ~1e-9 at large `nside`; the reference
+  table (healpy, double precision, same formula) was itself **1.5e-08 relatively wrong** there, and
+  the 1e-9 tolerance was in effect pinning a shared rounding accident.
+
+  **The fix is to form each small quantity directly rather than as a difference** — the exact
+  rational for a difference of z-components, `(a²-b²)/(a+b)` for a difference of sines, a
+  half-angle sine for a small longitude arc — which took that procedure from 2.0e-08 relative error
+  to ~1e-16 *and* made it compiler-independent. **Then check what the test's oracle is worth**: an
+  external reference computed the cancelling way cannot certify a cancellation-free implementation,
+  so the accuracy needs its own high-precision oracle (`mpmath` at 50 digits, sharing the
+  definition and none of the arithmetic) while the external comparison keeps a floor reflecting the
+  reference's own error. See `test_max_pixrad_high_precision` (`test/test_healpix_reference.f90`)
+  for both halves.
+
 - **`sign(1.0, x)` is NOT a portable test for a NEGATIVE ZERO — use the sign bit.** F2018 16.9.180
   makes `SIGN(A, B)` with a zero `B` **processor-dependent**: a processor that does not distinguish
   negative zero returns `|A|`, so `sign(1.0_real64, -0.0_real64)` is entitled to be `+1.0`. gfortran

@@ -48,6 +48,7 @@ program tester
     use test_random_omp, only : collect_tests_parquet_random_omp
     use test_healpix, only : collect_tests_parquet_healpix
     use test_healpix_reference, only : collect_tests_healpix_reference
+    use test_healpix_tier_b, only : collect_tests_healpix_tier_b
     use test_random_weighted, only : collect_tests_parquet_random_weighted
     use test_random_dist, only : collect_tests_parquet_random_dist
     use test_spatial, only : collect_tests_parquet_spatial
@@ -121,7 +122,8 @@ program tester
         new_testsuite("random_dist", collect_tests_parquet_random_dist), &
         new_testsuite("spatial", collect_tests_parquet_spatial), &
         new_testsuite("healpix", collect_tests_parquet_healpix), &
-        new_testsuite("healpix_reference", collect_tests_healpix_reference) &
+        new_testsuite("healpix_reference", collect_tests_healpix_reference), &
+        new_testsuite("healpix_tier_b", collect_tests_healpix_tier_b) &
         ]
     !
     ! command line argument for a specific testsuite and test

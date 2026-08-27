@@ -1567,7 +1567,7 @@ def check_parquet_healpix_stays_arrow_free():
     """`use parquet_healpix` must not drag the Arrow/Parquet C++ stack into a consumer's build.
 
     The pixelisation is arithmetic over plain reals and integers and reaches nothing but
-    `parquet_settings_base`, so a consumer wanting sphere pixels compiles four files rather than
+    `parquet_settings_base`, so a consumer wanting sphere pixels compiles six files rather than
     the sixty-odd the reader/writer stack costs. That is the whole reason this module exists here
     rather than as a dependency on `libhealpix`, and it is a property of the `use` graph that
     nothing in `fpm test` can see -- the library obviously has Arrow, so a stray import compiles

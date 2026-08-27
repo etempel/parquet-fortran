@@ -48,6 +48,9 @@ module test_healpix_reference
     !> Absolute tolerance on a recorded separation, in radians.
     real(real64), parameter :: dist_tol = 1.0e-12_real64
 
+    !> pi, for wrapping a longitude difference into `[-pi, pi]`.
+    real(real64), parameter :: pi_ref = 3.141592653589793238462643_real64
+
     !> Modulus the recorded disc checksums are taken to.
     integer(int64), parameter :: checksum_mod = 2305843009213693952_int64
 
@@ -85,7 +88,13 @@ contains
             new_unittest("max_pixrad reproduces the reference pixel radii", &
                          test_max_pixrad_matches_reference), &
             new_unittest("max_pixrad is accurate where the reference itself is not", &
-                         test_max_pixrad_high_precision) &
+                         test_max_pixrad_high_precision), &
+            new_unittest("vec2ang reproduces the reference angles", &
+                         test_vec2ang_matches_reference), &
+            new_unittest("the grid arithmetic reproduces the reference tables", &
+                         test_grid_matches_reference), &
+            new_unittest("ud_pix_nest reproduces the reference resolution changes", &
+                         test_ud_matches_reference) &
             ]
     end subroutine collect_tests_healpix_reference
 
@@ -524,5 +533,110 @@ contains
         end do
         call check(error, nbad, 0, "max_pixrad lost precision: " // trim(detail))
     end subroutine test_max_pixrad_high_precision
+
+    !> `pf_vec2ang` against the recorded angles, including the inputs an oracle cannot answer.
+    !>
+    !> **Three of the recorded cases are pinned to an EXACT value rather than to `healpy`, because
+    !> healpy is wrong on them** -- it forms `arccos(z / sqrt(sum(v**2)))`, which squares before
+    !> scaling and then inverts a cosine. Measured on healpy 1.20.0, against a true colatitude of
+    !> pi/4 for the first two: `[1e-300, 0, 1e-300]` gives NaN (its squares underflow, then it
+    !> divides by zero), `[1e300, 0, 1e300]` gives pi/2 (its squares overflow to infinity, so the
+    !> answer is 45 degrees wrong), and `[1e-08, 0, 1]` gives 0 where the true value is 1e-08 (the
+    !> quotient rounds to exactly 1.0 and `acos` of that is 0). The generator records this and
+    !> checks those three analytically; nothing here needs to know which is which, because the
+    !> table it walks already holds the right answers.
+    subroutine test_vec2ang_matches_reference(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer :: k, nbad
+        real(real64) :: v(3), th, ph, dphi
+        character(len=200) :: detail
+
+        nbad = 0
+        detail = ""
+        do k = 1, hv_n_v2a
+            v = hv_v2a_vec(3 * (k - 1) + 1:3 * (k - 1) + 3)
+            call pf_vec2ang(v, th, ph)
+            if (abs(th - hv_v2a_theta(k)) > 1.0e-14_real64 * max(1.0_real64, hv_v2a_theta(k))) then
+                nbad = nbad + 1
+                if (detail == "") write (detail, '(a,i0,a,es22.15,a,es22.15)') "theta case=", k, &
+                    " expected=", hv_v2a_theta(k), " got=", th
+                cycle
+            end if
+            dphi = abs(modulo(ph - hv_v2a_phi(k) + pi_ref, 2.0_real64 * pi_ref) - pi_ref)
+            if (dphi > 1.0e-14_real64) then
+                nbad = nbad + 1
+                if (detail == "") write (detail, '(a,i0,a,es22.15,a,es22.15)') "phi case=", k, &
+                    " expected=", hv_v2a_phi(k), " got=", ph
+            end if
+        end do
+        call check(error, hv_n_v2a > 0, "the vec2ang reference table was empty")
+        if (allocated(error)) return
+        call check(error, nbad, 0, "vec2ang disagreed with the reference: " // trim(detail))
+    end subroutine test_vec2ang_matches_reference
+
+    !> The grid arithmetic against the recorded tables, at every order the module accepts.
+    subroutine test_grid_matches_reference(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer :: k, nbad
+        integer(int64) :: nside
+        character(len=200) :: detail
+
+        nbad = 0
+        detail = ""
+        do k = 1, hv_n_grid
+            nside = hv_grid_nside(k)
+            if (pf_nside2npix(nside) /= hv_grid_npix(k)) then
+                nbad = nbad + 1
+                if (detail == "") write (detail, '(a,i0,a,i0,a,i0)') "npix nside=", nside, &
+                    " expected=", hv_grid_npix(k), " got=", pf_nside2npix(nside)
+            end if
+            if (pf_npix2nside(hv_grid_npix(k)) /= nside) nbad = nbad + 1
+            if (pf_nside2order(nside) /= hv_grid_order(k)) nbad = nbad + 1
+            if (pf_order2nside(hv_grid_order(k)) /= nside) nbad = nbad + 1
+            if (abs(pf_nside2pixarea(nside) - hv_grid_pixarea(k)) > &
+                1.0e-14_real64 * hv_grid_pixarea(k)) then
+                nbad = nbad + 1
+                if (detail == "") write (detail, '(a,i0,a,es22.15,a,es22.15)') "pixarea nside=", &
+                    nside, " expected=", hv_grid_pixarea(k), " got=", pf_nside2pixarea(nside)
+            end if
+            if (abs(pf_nside2resol(nside) - hv_grid_resol(k)) > &
+                1.0e-14_real64 * hv_grid_resol(k)) then
+                nbad = nbad + 1
+                if (detail == "") write (detail, '(a,i0,a,es22.15,a,es22.15)') "resol nside=", &
+                    nside, " expected=", hv_grid_resol(k), " got=", pf_nside2resol(nside)
+            end if
+        end do
+        call check(error, hv_n_grid > 0, "the grid reference table was empty")
+        if (allocated(error)) return
+        call check(error, nbad, 0, "the grid arithmetic disagreed with the reference: " // &
+                   trim(detail))
+    end subroutine test_grid_matches_reference
+
+    !> `pf_ud_pix_nest` against the recorded conversions.
+    !>
+    !> Each recorded index was obtained from a real direction at `order_in`, so `--verify-oracle`
+    !> can cross-check the result through `healpy`'s `ang2pix` at both resolutions -- `healpy` has
+    !> no entry point of this name to compare against directly.
+    subroutine test_ud_matches_reference(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer :: k, nbad
+        integer(int64) :: got
+        character(len=200) :: detail
+
+        nbad = 0
+        detail = ""
+        do k = 1, hv_n_ud
+            call pf_ud_pix_nest(hv_ud_ipix(k), hv_ud_order_in(k), hv_ud_order_out(k), got)
+            if (got /= hv_ud_result(k)) then
+                nbad = nbad + 1
+                if (detail == "") write (detail, '(a,i0,a,i0,a,i0,a,i0,a,i0)') "case=", k, &
+                    " ipix=", hv_ud_ipix(k), " order ", hv_ud_order_in(k), " -> ", &
+                    hv_ud_order_out(k), " got=", got
+            end if
+        end do
+        call check(error, hv_n_ud > 0, "the resolution-change reference table was empty")
+        if (allocated(error)) return
+        call check(error, nbad, 0, "ud_pix_nest disagreed with the reference: " // trim(detail))
+    end subroutine test_ud_matches_reference
 
 end module test_healpix_reference

@@ -374,6 +374,69 @@ def max_pixrad(nside):
     return angdist(c, v)
 
 
+# ---- Tier B: the additions of feature_healpix.md section 3.2 --------------------------------
+
+
+def ang2vec(theta, phi):
+    """Direction (theta, phi) -> its unit vector."""
+    st = math.sin(theta)
+    return (st * math.cos(phi), st * math.sin(phi), math.cos(theta))
+
+
+def vec2ang(v):
+    """Direction vector -> (theta, phi), phi in [0, 2*pi). Any nonzero length.
+
+    **Scaled by the largest component before anything is squared** (the rule
+    feature_healpix_tier_a.md TA-12 established for `pf_query_disc`). A direction is
+    scale-invariant, so `(1e-300, 0, 1e-300)` names a perfectly good one at 45 degrees from the
+    pole -- and squaring it first underflows both terms to zero, giving `atan2(0, 1e-300) = 0`,
+    which is wrong by the whole 45 degrees rather than by a rounding. `(1e300, 0, 1e300)`
+    overflows the other way to `atan2(inf, 1e300) = pi/2`, wrong by 45 degrees again and raising
+    IEEE_OVERFLOW on the way. Both were measured: healpy returns NaN for the first and pi/2 for
+    the second, so this is a case where the oracle is the thing that is wrong.
+
+    **`atan2(0, 0)` is prohibited** by F2018 16.9.16 and nagfor raises IEEE_INVALID on it, so both
+    calls are guarded: the transverse length and z both vanish only for the zero vector, and the
+    two transverse components both vanish at either POLE -- an ordinary input. Longitude is
+    undefined at a pole and zero is the conventional value.
+    """
+    scale = max(abs(v[0]), abs(v[1]), abs(v[2]))
+    if scale == 0.0:
+        return 0.0, 0.0
+    x, y, z = v[0] / scale, v[1] / scale, v[2] / scale
+    tr = math.sqrt(x * x + y * y)
+    theta = 0.0 if (tr == 0.0 and z == 0.0) else math.atan2(tr, z)
+    if x == 0.0 and y == 0.0:
+        phi = 0.0
+    else:
+        phi = math.atan2(y, x)
+        if phi < 0.0:
+            phi += TWOPI
+    return theta, phi
+
+
+def nside2pixarea(nside):
+    """Area of one pixel, in steradians. Exactly 4*pi/npix, since every pixel has equal area."""
+    return 4.0 * math.pi / npix_of(nside)
+
+
+def nside2resol(nside):
+    """Side of the equal-area square, in radians -- the pixelisation's resolution."""
+    return math.sqrt(nside2pixarea(nside))
+
+
+def ud_pix_nest(ipix, order_in, order_out):
+    """NEST resolution change: the parent, or the FIRST of the 4**k children."""
+    if order_out >= order_in:
+        return ipix << (2 * (order_out - order_in))
+    return ipix >> (2 * (order_in - order_out))
+
+
+def pix2ring_ring(nside, p):
+    """Which ring a RING-scheme pixel lies on, 1 .. 4*nside-1 from the north pole."""
+    return ring_decompose(nside, p)[0]
+
+
 def ring_above(nside, z):
     """Largest ring index whose centre z is >= `z`; 0 when none is."""
     az = abs(z)
@@ -698,6 +761,59 @@ def build_angdist_pairs():
     return pairs
 
 
+def build_vec2ang_cases():
+    """Directions for `vec2ang`, led by the ones where an unguarded `atan2` is non-conforming.
+
+    The poles and the zero vector make `atan2(0, 0)` reachable; the seam, the near-seam and the
+    components differing by 300 orders of magnitude are where a scale-sensitive implementation
+    goes wrong. Non-unit inputs are included deliberately -- the conversion is scale-invariant.
+    """
+    rng = random.Random(90210)
+    cases = [
+        (0.0, 0.0, 1.0),                          # north pole: atan2(0, 0) for phi
+        (0.0, 0.0, -1.0),                         # south pole: likewise
+        (0.0, 0.0, 7.5),                          # north pole, non-unit
+        (1.0, 0.0, 0.0),                          # the phi = 0 seam, on the equator
+        (1.0, 1.0e-17, 0.0),                      # just east of the seam
+        (1.0, -1.0e-17, 0.0),                     # just west: phi must come back near 2*pi
+        (-1.0, 0.0, 0.0),                         # phi = pi exactly
+        (0.0, 1.0, 0.0),                          # phi = pi/2 exactly
+        (0.0, -1.0, 0.0),                         # phi = 3*pi/2
+        (1.0e-300, 0.0, 1.0e-300),                # denormal-scale components
+        (1.0e300, 0.0, 1.0e300),                  # overflow-scale components
+        (3.0, 4.0, 0.0),                          # non-unit, exact 3-4-5
+        (1.0, 1.0, 1.0),
+        (1.0e-8, 0.0, 1.0),                       # a hair off the pole
+        (0.0, 0.0, 0.0),                          # the zero vector: theta = phi = 0 by convention
+    ]
+    while len(cases) < 40:
+        z = rng.uniform(-1.0, 1.0)
+        phi = rng.uniform(0.0, TWOPI)
+        s = math.sqrt(max(0.0, 1.0 - z * z))
+        scale = rng.choice([1.0, 1.0e-9, 1.0e9, 2.5])
+        cases.append((scale * s * math.cos(phi), scale * s * math.sin(phi), scale * z))
+    return cases
+
+
+def build_ud_cases():
+    """(`ipix`, `order_in`, `order_out`) triples for the nested resolution change.
+
+    Every case is anchored to a real direction rather than to an arbitrary index, so the emitted
+    result can be cross-checked against `ang2pix_nest` at both resolutions -- which is what
+    `--verify-oracle` does, since healpy has no same-named entry point.
+    """
+    rng = random.Random(31337)
+    cases = []
+    for oin, oout in [(0, 0), (0, 3), (3, 0), (1, 29), (29, 1), (10, 12), (12, 10),
+                      (20, 21), (21, 20), (29, 29), (5, 5), (2, 28)]:
+        for _ in range(5):
+            z = rng.uniform(-1.0, 1.0)
+            phi = rng.uniform(0.0, TWOPI)
+            theta = math.acos(z)
+            cases.append((ang2pix_nest(1 << oin, theta, phi), oin, oout))
+    return cases
+
+
 # --------------------------------------------------------------------------------------------
 # Emission
 # --------------------------------------------------------------------------------------------
@@ -752,6 +868,9 @@ def generate(healpy_version=None, numpy_version=None, hp_cxx_version=None):
     positions = build_positions()
     configs = build_disc_configs()
     pairs = build_angdist_pairs()
+    v2a = build_vec2ang_cases()
+    uds = build_ud_cases()
+    grid_orders = list(range(0, 30))
 
     n_nside = len(NSIDES)
     n_pos = len(positions)
@@ -797,6 +916,12 @@ def generate(healpy_version=None, numpy_version=None, hp_cxx_version=None):
     a("    integer, parameter :: hv_n_probe = %d" % n_probe)
     a("    !> Disc queries recorded.")
     a("    integer, parameter :: hv_n_disc = %d" % len(configs))
+    a("    !> Directions recorded for the vector/angle conversion.")
+    a("    integer, parameter :: hv_n_v2a = %d" % len(v2a))
+    a("    !> Resolution-change cases recorded.")
+    a("    integer, parameter :: hv_n_ud = %d" % len(uds))
+    a("    !> Orders covered by the grid arithmetic: every one this module accepts.")
+    a("    integer, parameter :: hv_n_grid = %d" % len(grid_orders))
     a("    !> Vector pairs recorded for the separation formula.")
     a("    integer, parameter :: hv_n_angdist = %d" % len(pairs))
     a("    !> Largest nside whose pixel indices still fit `integer(int32)`.")
@@ -946,6 +1071,61 @@ def generate(healpy_version=None, numpy_version=None, hp_cxx_version=None):
     a("    !> Largest centre-to-corner angular distance at each nside, in radians.")
     lines.extend(emit_real_array("hv_max_pixrad", [max_pixrad(n) for n in NSIDES]))
     a("")
+
+    # ---- Tier B ----
+
+    a("    ! ---- Tier B: vectors and angles ----")
+    a("")
+    a("    !> Directions for `pf_vec2ang`, three components each. The first entries are the cases")
+    a("    !! where an unguarded `atan2(0, 0)` would be non-conforming -- both poles and the zero")
+    a("    !! vector -- followed by the seam, extreme scales, and random directions.")
+    vv = []
+    for v in v2a:
+        vv.extend(v)
+    lines.extend(emit_real_array("hv_v2a_vec", vv, per_line=3))
+    a("")
+    a("    !> Colatitude of each, in radians. Zero for the zero vector, by convention.")
+    lines.extend(emit_real_array("hv_v2a_theta", [vec2ang(v)[0] for v in v2a]))
+    a("")
+    a("    !> Longitude of each, in radians, in `[0, 2*pi)`. Zero at either pole, where longitude")
+    a("    !! is undefined and any finite value is correct.")
+    lines.extend(emit_real_array("hv_v2a_phi", [vec2ang(v)[1] for v in v2a]))
+    a("")
+
+    a("    ! ---- Tier B: grid arithmetic ----")
+    a("")
+    a("    !> Every order this module accepts, 0 .. 29.")
+    lines.extend(emit_int_array("hv_grid_order", grid_orders))
+    a("")
+    a("    !> `nside` at each order.")
+    lines.extend(emit_int_array("hv_grid_nside", [1 << o for o in grid_orders]))
+    a("")
+    a("    !> `npix` at each order.")
+    lines.extend(emit_int_array("hv_grid_npix", [npix_of(1 << o) for o in grid_orders]))
+    a("")
+    a("    !> Pixel area at each order, in steradians.")
+    lines.extend(emit_real_array("hv_grid_pixarea", [nside2pixarea(1 << o) for o in grid_orders]))
+    a("")
+    a("    !> Pixel resolution at each order, in radians -- the side of the equal-area square.")
+    lines.extend(emit_real_array("hv_grid_resol", [nside2resol(1 << o) for o in grid_orders]))
+    a("")
+
+    a("    ! ---- Tier B: nested resolution change ----")
+    a("")
+    a("    !> NEST pixel index to convert, each obtained from a real direction at `hv_ud_order_in`.")
+    lines.extend(emit_int_array("hv_ud_ipix", [c[0] for c in uds]))
+    a("")
+    a("    !> The order that index belongs to.")
+    lines.extend(emit_int_array("hv_ud_order_in", [c[1] for c in uds]))
+    a("")
+    a("    !> The order to convert it to.")
+    lines.extend(emit_int_array("hv_ud_order_out", [c[2] for c in uds]))
+    a("")
+    a("    !> The converted index: the parent when coarsening, the FIRST of the 4**k children when")
+    a("    !! refining. The full child set is `hv_ud_result(k) .. + 4**(out-in) - 1`.")
+    lines.extend(emit_int_array("hv_ud_result", [ud_pix_nest(*c) for c in uds]))
+    a("")
+
     a("end module test_healpix_vectors")
     return "\n".join(lines) + "\n"
 
@@ -1052,6 +1232,96 @@ def self_test():
     check(angdist((1.0, 0.0, 0.0), (-1.0, 0.0, 0.0)) == math.pi, "angdist antipodal is exactly pi")
     check(abs(angdist((1.0, 0.0, 0.0), (0.0, 1.0, 0.0)) - HALFPI) < 1e-16, "angdist orthogonal")
 
+    # ---- Tier B ----
+
+    # ang2vec/vec2ang round trip, and the exact anchors at the poles and the seam.
+    for theta, phi in [(0.0, 0.0), (math.pi, 0.0), (HALFPI, 0.0), (HALFPI, math.pi),
+                       (0.3, 4.0), (2.9, 0.001), (1.0, TWOPI - 1e-12)]:
+        th2, ph2 = vec2ang(ang2vec(theta, phi))
+        check(abs(th2 - theta) < 1e-12, "vec2ang(ang2vec) theta round trip at %g" % theta)
+        if math.sin(theta) > 1e-9:
+            d = abs((ph2 - phi + math.pi) % TWOPI - math.pi)
+            check(d < 1e-12, "vec2ang(ang2vec) phi round trip at %g,%g" % (theta, phi))
+    check(vec2ang((0.0, 0.0, 1.0)) == (0.0, 0.0), "vec2ang at the north pole is exactly (0, 0)")
+    check(vec2ang((0.0, 0.0, -1.0)) == (math.pi, 0.0), "vec2ang at the south pole is (pi, 0)")
+    check(vec2ang((0.0, 0.0, 0.0)) == (0.0, 0.0), "vec2ang of the zero vector is (0, 0)")
+
+    # vec2pix agrees with ang2pix for every emitted position -- the tie that makes the vector
+    # form more than self-consistent.
+    for nside in (1, 4, 64, 1024):
+        for theta, phi in build_positions():
+            v = ang2vec(theta, phi)
+            th2, ph2 = vec2ang(v)
+            check(ang2pix_ring(nside, th2, ph2) == ang2pix_ring(nside, theta, phi),
+                  "vec2ang round trip preserves the RING pixel at nside=%d" % nside)
+            check(ang2pix_nest(nside, th2, ph2) == ang2pix_nest(nside, theta, phi),
+                  "vec2ang round trip preserves the NEST pixel at nside=%d" % nside)
+
+    # Grid arithmetic, exactly, at every order.
+    total = 0.0
+    for o in range(0, 30):
+        nside = 1 << o
+        check(npix_of(nside) == 12 * 4 ** o, "npix at order %d" % o)
+        check(order_of(nside) == o, "order round trip at %d" % o)
+        check(abs(nside2resol(nside) ** 2 - nside2pixarea(nside)) <= 1e-15 * nside2pixarea(nside),
+              "resol squared is pixarea at order %d" % o)
+        total = nside2pixarea(nside) * npix_of(nside)
+        check(abs(total - 4.0 * math.pi) < 1e-12, "pixarea sums to 4*pi at order %d" % o)
+
+    # The nested resolution change, against ang2pix_nest at both resolutions. This is the
+    # geometric identity, not a self-consistency check: it says the shift really is a change of
+    # resolution on the sphere.
+    rng = random.Random(777)
+    for oin, oout in [(0, 4), (4, 0), (10, 13), (13, 10), (2, 20), (20, 2), (7, 7)]:
+        for _ in range(20):
+            z = rng.uniform(-1.0, 1.0)
+            phi = rng.uniform(0.0, TWOPI)
+            theta = math.acos(z)
+            pin = ang2pix_nest(1 << oin, theta, phi)
+            pout = ang2pix_nest(1 << oout, theta, phi)
+            if oout <= oin:
+                check(ud_pix_nest(pin, oin, oout) == pout,
+                      "coarsening %d -> %d lands on the containing pixel" % (oin, oout))
+            else:
+                first = ud_pix_nest(pin, oin, oout)
+                check(first <= pout < first + 4 ** (oout - oin),
+                      "refining %d -> %d brackets the finer pixel" % (oin, oout))
+                check(ud_pix_nest(pout, oout, oin) == pin,
+                      "the finer pixel coarsens back to its parent")
+
+    # The children of a pixel partition exactly, and the round trip down-then-up returns the
+    # FIRST child rather than the original.
+    for oin, k in [(0, 1), (1, 2), (3, 1), (5, 3)]:
+        for pin in range(0, min(npix_of(1 << oin), 48)):
+            first = ud_pix_nest(pin, oin, oin + k)
+            check(all(ud_pix_nest(c, oin + k, oin) == pin
+                      for c in range(first, first + 4 ** k)),
+                  "the 4**%d children of NEST %d at order %d all coarsen back" % (k, pin, oin))
+        check(ud_pix_nest(ud_pix_nest(pin, oin, oin + k), oin + k, oin) == pin,
+              "up then down is the identity at order %d" % oin)
+
+    # The chord identities, which are what make the squared-chord substitution valid.
+    for a in [0.0, 1e-12, 1e-6, 0.001, 0.5, 1.0, 2.0, math.pi - 1e-9, math.pi]:
+        c2 = (2.0 * math.sin(0.5 * a)) ** 2
+        back = 2.0 * math.asin(min(1.0, 0.5 * math.sqrt(max(0.0, c2))))
+        check(abs(back - a) < 1e-9 * max(1.0, a), "chord round trip at %g" % a)
+    for _ in range(200):
+        z1, z2 = rng.uniform(-1, 1), rng.uniform(-1, 1)
+        p1, p2 = rng.uniform(0, TWOPI), rng.uniform(0, TWOPI)
+        v1 = ang2vec(math.acos(z1), p1)
+        v2 = ang2vec(math.acos(z2), p2)
+        c2 = sum((v1[i] - v2[i]) ** 2 for i in range(3))
+        check(abs((2.0 * math.sin(0.5 * angdist(v1, v2))) ** 2 - c2) < 1e-12,
+              "chord2 of the separation equals the squared chord")
+
+    # pix2ring is consistent with the ring the RING decomposition names.
+    for nside in (1, 2, 4, 8, 16):
+        for p in range(npix_of(nside)):
+            i = pix2ring_ring(nside, p)
+            check(1 <= i <= 4 * nside - 1, "ring index in range at nside=%d p=%d" % (nside, p))
+            check(abs(ring_z(nside, i) - pix2zphi_ring(nside, p)[0]) < 1e-15,
+                  "ring2z agrees with the pixel's own z at nside=%d p=%d" % (nside, p))
+
     if fails:
         sys.stderr.write("generate_healpix_reference --self-test FAILED (%d):\n" % len(fails))
         for f in fails[:40]:
@@ -1153,6 +1423,87 @@ def verify_oracle():
     for k, (v1, v2) in enumerate(build_angdist_pairs()):
         ref = hp.rotator.angdist(np.array(v1), np.array(v2))[0]
         check(abs(angdist(v1, v2) - ref) < 1e-12, "angdist pair %d" % k)
+
+    # ---- Tier B ----
+
+    # vec2ang. healpy raises on the zero vector and returns an unspecified longitude at a pole,
+    # so those cases are checked against the published convention instead of against healpy --
+    # they are precisely the cases healpy has no answer for.
+    # THREE OF THESE CASES ARE CHECKED ANALYTICALLY RATHER THAN AGAINST HEALPY, BECAUSE HEALPY
+    # IS WRONG ON THEM. healpy forms `arccos(z / sqrt(sum(v**2)))`, which squares before scaling
+    # and inverts a cosine; measured on healpy 1.20.0, against a true value of pi/4 for the first
+    # two:
+    #
+    #   (1e-300, 0, 1e-300)  healpy nan          (underflow, then a divide by zero)
+    #   (1e+300, 0, 1e+300)  healpy 1.5707963..  (overflow to inf, so pi/2 -- 45 degrees wrong)
+    #   (1e-08,  0, 1.0)     healpy 0.0          (arccos of a quotient that rounds to 1.0;
+    #                                             the true colatitude is 1e-08)
+    #
+    # The scaled `atan2` form this module uses returns pi/4, pi/4 and 1e-08. An oracle cannot
+    # certify an implementation on inputs where the oracle itself fails, so these are pinned to
+    # the exact value and the disagreement is recorded here rather than silently tolerated.
+    analytic = {(1.0e-300, 0.0, 1.0e-300): 0.25 * math.pi,
+                (1.0e300, 0.0, 1.0e300): 0.25 * math.pi,
+                (1.0e-8, 0.0, 1.0): 1.0e-8}
+    for k, v in enumerate(build_vec2ang_cases()):
+        th, ph = vec2ang(v)
+        if v == (0.0, 0.0, 0.0):
+            check((th, ph) == (0.0, 0.0), "vec2ang zero vector is the documented (0, 0)")
+            continue
+        if v in analytic:
+            check(abs(th - analytic[v]) <= 1e-15 * max(1.0, analytic[v]),
+                  "vec2ang case %d against its exact value (healpy fails this input)" % k)
+            continue
+        if v[0] == 0.0 and v[1] == 0.0:
+            check(ph == 0.0, "vec2ang case %d is at a pole and reports phi = 0" % k)
+            check(abs(th - (0.0 if v[2] > 0 else math.pi)) < 1e-15,
+                  "vec2ang case %d has the right polar theta" % k)
+            continue
+        rth, rph = hp.vec2ang(np.array(v))
+        check(abs(th - float(rth[0])) < 1e-12, "vec2ang theta case %d" % k)
+        d = abs((ph - float(rph[0]) + math.pi) % TWOPI - math.pi)
+        check(d < 1e-12, "vec2ang phi case %d" % k)
+
+    # vec2pix, against healpy's own vec2pix at every emitted position.
+    for nside in NSIDES:
+        vecs = [ang2vec(t_, p_) for t_, p_ in positions]
+        arr = np.array(vecs)
+        rr = hp.vec2pix(nside, arr[:, 0], arr[:, 1], arr[:, 2], nest=False)
+        rn = hp.vec2pix(nside, arr[:, 0], arr[:, 1], arr[:, 2], nest=True)
+        for k, v in enumerate(vecs):
+            th, ph = vec2ang(v)
+            check(ang2pix_ring(nside, th, ph) == int(rr[k]), "vec2pix_ring nside=%d k=%d" % (nside, k))
+            check(ang2pix_nest(nside, th, ph) == int(rn[k]), "vec2pix_nest nside=%d k=%d" % (nside, k))
+
+    # Grid arithmetic.
+    for o in range(0, 30):
+        nside = 1 << o
+        check(npix_of(nside) == int(hp.nside2npix(nside)), "nside2npix at order %d" % o)
+        check(order_of(nside) == int(hp.nside2order(nside)), "nside2order at order %d" % o)
+        check(nside == int(hp.order2nside(o)), "order2nside at order %d" % o)
+        check(nside == int(hp.npix2nside(npix_of(nside))), "npix2nside at order %d" % o)
+        check(abs(nside2pixarea(nside) - float(hp.nside2pixarea(nside)))
+              <= 1e-14 * nside2pixarea(nside), "nside2pixarea at order %d" % o)
+        check(abs(nside2resol(nside) - float(hp.nside2resol(nside)))
+              <= 1e-14 * nside2resol(nside), "nside2resol at order %d" % o)
+
+    # The nested resolution change. healpy has no same-named entry point, so the check is the
+    # geometric one: coarsening a pixel obtained from a direction must land on the pixel healpy
+    # gives for the same direction at the coarser resolution.
+    rng = random.Random(5150)
+    for oin, oout in [(0, 5), (5, 0), (12, 15), (15, 12), (3, 25), (25, 3)]:
+        th = np.array([math.acos(rng.uniform(-1.0, 1.0)) for _ in range(40)])
+        ph = np.array([rng.uniform(0.0, TWOPI) for _ in range(40)])
+        pin = hp.ang2pix(1 << oin, th, ph, nest=True)
+        pout = hp.ang2pix(1 << oout, th, ph, nest=True)
+        for k in range(len(th)):
+            if oout <= oin:
+                check(ud_pix_nest(int(pin[k]), oin, oout) == int(pout[k]),
+                      "ud_pix_nest coarsen %d->%d k=%d" % (oin, oout, k))
+            else:
+                first = ud_pix_nest(int(pin[k]), oin, oout)
+                check(first <= int(pout[k]) < first + 4 ** (oout - oin),
+                      "ud_pix_nest refine %d->%d k=%d" % (oin, oout, k))
 
     if fails:
         sys.stderr.write("generate_healpix_reference --verify-oracle FAILED (%d):\n" % len(fails))

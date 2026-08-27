@@ -221,7 +221,7 @@ Every layer underneath is importable on its own, and several cost a great deal l
 | `parquet_argsort` | 4 | no | `pf_argsort` over the six intrinsic types |
 | `parquet_sampling` | 8 | no | permutations, subsets, resampling, weighted draws |
 | `parquet_spatial` | 9 | no | `pf_spatial_index`: neighbour and k-nearest search on a uniform grid, including on the sky |
-| `parquet_healpix` | 4 | no | the HEALPix sphere pixelisation: direction to pixel, both schemes, and disc queries |
+| `parquet_healpix` | 6 | no | the HEALPix sphere pixelisation: direction to pixel, both schemes, and disc queries |
 | `parquet_columns` | 10 | no | the `parquet_column` container |
 | `parquet_list` | 11 | no | `parquet_list_column`: variable-length list storage |
 | `parquet_struct` | 11 | no | `parquet_struct_column`: one value per declared field per row |
@@ -230,7 +230,7 @@ Every layer underneath is importable on its own, and several cost a great deal l
 | `parquet_settings` | 3 | **yes** | the process-global knobs, and `parquet_get_arrow_version` |
 | `parquet_io` | 53 | **yes** | reading and writing files, without the table layer |
 | `parquet_tables` | 71 | **yes** | the `parquet_table` container |
-| `parquet` | 83 | **yes** | everything, through one `use` |
+| `parquet` | 85 | **yes** | everything, through one `use` |
 
 **One caveat, and it is the one that matters: no import makes the *package* Arrow-free.** `link` is a package-level key in `fpm.toml` and fpm cannot prune a C++ translation unit, so depending on parquet-fortran compiles `src/parquet_wrapper.cpp` and links `-larrow -larrow_compute -lparquet` whichever module you name — `use parquet_temporal` included. Without Arrow's headers the build fails at `arrow/api.h` regardless. What the *Arrow-free* rows guarantee is narrower and is about the Fortran graph: none of the modules fpm compiles for that import names `parquet_bindings`.
 

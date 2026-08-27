@@ -76,7 +76,9 @@ parquet_wrapper.cpp
 
 [parquet_healpix]
 parquet_healpix.f90
+parquet_healpix_bulk.f90
 parquet_healpix_core.f90
+parquet_healpix_grid.f90
 parquet_healpix_query.f90
 parquet_settings_base.f90
 parquet_wrapper.cpp
@@ -312,7 +314,9 @@ parquet_columns_validity.f90
 parquet_core.f90
 parquet_expkey.f90
 parquet_healpix.f90
+parquet_healpix_bulk.f90
 parquet_healpix_core.f90
+parquet_healpix_grid.f90
 parquet_healpix_query.f90
 parquet_io.f90
 parquet_list.f90

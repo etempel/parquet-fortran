@@ -39,16 +39,16 @@ contains
         if (.not. hpx_nside_ok(nside, nside_max)) then
             call hpx_itoa(nside, got)
             call hpx_itoa(nside_max, limit)
-            error stop "pf_query_disc: nside must be a positive power of two at most " // limit // &
+            error stop what // ": nside must be a positive power of two at most " // limit // &
                 ", got " // got
         end if
-        if (ieee_is_nan(radius)) error stop "pf_query_disc: radius is NaN"
+        if (ieee_is_nan(radius)) error stop what // ": radius is NaN"
         if (radius < 0.0_real64) then
             call hpx_rtoa(radius, got)
-            error stop "pf_query_disc: radius must be at least zero, got " // got
+            error stop what // ": radius must be at least zero, got " // got
         end if
         if (ieee_is_nan(vec(1)) .or. ieee_is_nan(vec(2)) .or. ieee_is_nan(vec(3))) then
-            error stop "pf_query_disc: the disc centre vector holds a NaN"
+            error stop what // ": the disc centre vector holds a NaN"
         end if
         ! Tested on the LARGEST COMPONENT rather than on the squared length. A direction is scale
         ! invariant, so `[1e-300, 0, 1e-300]` names a perfectly good one -- but squaring it
@@ -58,14 +58,14 @@ contains
         ! worse than either. The walk normalises the same way for the same reason.
         scale = max(abs(vec(1)), abs(vec(2)), abs(vec(3)))
         if (.not. ieee_is_finite(scale)) then
-            error stop "pf_query_disc: the disc centre vector is not finite"
+            error stop what // ": the disc centre vector is not finite"
         end if
         if (scale <= 0.0_real64) then
-            error stop "pf_query_disc: the disc centre vector has zero length"
+            error stop what // ": the disc centre vector has zero length"
         end if
         if (scheme /= PF_HP_RING .and. scheme /= PF_HP_NEST) then
             call hpx_itoa(int(scheme, int64), got)
-            error stop "pf_query_disc: scheme must be PF_HP_RING (0) or PF_HP_NEST (1), got " // got
+            error stop what // ": scheme must be PF_HP_RING (0) or PF_HP_NEST (1), got " // got
         end if
     end procedure hpx_check_disc_args
 
@@ -73,9 +73,13 @@ contains
         real(real64) :: v0(3), vnorm, scale, z0, st0, phi0, r, cosr, theta0
         real(real64) :: zmax, zmin, zr, strr, denom, num, a, dphi, w, half
         integer(int64) :: irmin, irmax, i, first, nr, shifted, jlo, jhi, cnt, tail
-        logical :: whole, use32
+        logical :: whole, use32, counting
 
         use32 = present(out32)
+        ! Neither output present is the COUNTING mode: the same walk with its stores switched off,
+        ! which is what makes `pf_query_disc_count` unable to disagree with `pf_query_disc` by
+        ! construction rather than by test.
+        counting = .not. (present(out32) .or. present(out64))
         nlist = 0_int64
 
         ! ---- The query direction, once ----
@@ -227,6 +231,12 @@ contains
 
             ! The scheme and the output kind are decided once per run rather than per pixel, so a
             ! RING result costs one integer store per pixel and a NEST result one Morton encode.
+            if (counting) then
+                ! Nothing to store, and nothing about the count depends on the scheme: a bijection
+                ! between the two numberings cannot change how many pixels there are.
+                nlist = nlist + count
+                return
+            end if
             if (scheme == PF_HP_NEST) then
                 if (use32) then
                     do k = 0_int64, count - 1_int64
@@ -263,7 +273,7 @@ contains
             ! The capacity, the count reached so far, and the query that produced it: without the
             ! last two a caller cannot size the buffer without guessing, which is the whole reason
             ! this abort exists rather than a silent truncation.
-            error stop "pf_query_disc: listpix holds " // t_cap // " elements but the disc needs " // &
+            error stop what // ": listpix holds " // t_cap // " elements but the disc needs " // &
                 "at least " // t_have // " (nside " // t_nside // ", radius " // t_rad // " rad)"
         end subroutine report_full
 
@@ -277,9 +287,9 @@ contains
         if (present(scheme)) sch = scheme
         inc = .false.
         if (present(inclusive)) inc = inclusive
-        call hpx_check_disc_args(nside, hpx_nside_max, vec, radius, sch)
+        call hpx_check_disc_args(nside, hpx_nside_max, vec, radius, sch, "pf_query_disc")
         call hpx_query_disc_core(nside, vec, radius, sch, inc, nlist, &
-                                 int(size(listpix), int64), out64=listpix)
+                                 int(size(listpix), int64), "pf_query_disc", out64=listpix)
     end procedure hpx_query_disc_i64
 
     module procedure hpx_query_disc_i32
@@ -294,10 +304,103 @@ contains
         ! The int32 ceiling is checked here rather than inside the walk, because it is a property
         ! of the CALLER's integer kind rather than of the pixelisation: nside 16384 is perfectly
         ! valid and simply cannot be addressed with a 32-bit pixel index.
-        call hpx_check_disc_args(int(nside, int64), hpx_nside_max_i32, vec, radius, sch)
+        call hpx_check_disc_args(int(nside, int64), hpx_nside_max_i32, vec, radius, sch, &
+                                 "pf_query_disc")
         call hpx_query_disc_core(int(nside, int64), vec, radius, sch, inc, n64, &
-                                 int(size(listpix), int64), out32=listpix)
+                                 int(size(listpix), int64), "pf_query_disc", out32=listpix)
         nlist = int(n64, int32)
     end procedure hpx_query_disc_i32
+
+    ! ---- Counting, and the self-sizing form ----
+    !
+    ! Both reach the same walk as `pf_query_disc`. Nothing here re-derives a ring bound, an arc or
+    ! a membership rule -- three implementations of "which pixels are in this disc" would be three
+    ! things to keep agreeing, and the count's whole value is that it answers the same question the
+    ! list does.
+
+    module procedure hpx_query_disc_count_i64
+        integer :: sch
+        logical :: inc
+
+        sch = PF_HP_RING
+        if (present(scheme)) sch = scheme
+        inc = .false.
+        if (present(inclusive)) inc = inclusive
+        call hpx_check_disc_args(nside, hpx_nside_max, vec, radius, sch, "pf_query_disc_count")
+        ! No output array, so the walk counts; `huge` as the capacity makes the abort unreachable,
+        ! which it must be -- there is no buffer here to be too small. The count itself cannot
+        ! overflow either kind: the largest possible answer is npix, 805306368 at the int32 ceiling
+        ! and 3458764513820540928 at the int64 one, both comfortably inside.
+        call hpx_query_disc_core(nside, vec, radius, sch, inc, nlist, huge(0_int64), &
+                                 "pf_query_disc_count")
+    end procedure hpx_query_disc_count_i64
+
+    module procedure hpx_query_disc_count_i32
+        integer :: sch
+        logical :: inc
+        integer(int64) :: n64
+
+        sch = PF_HP_RING
+        if (present(scheme)) sch = scheme
+        inc = .false.
+        if (present(inclusive)) inc = inclusive
+        call hpx_check_disc_args(int(nside, int64), hpx_nside_max_i32, vec, radius, sch, &
+                                 "pf_query_disc_count")
+        call hpx_query_disc_core(int(nside, int64), vec, radius, sch, inc, n64, huge(0_int64), &
+                                 "pf_query_disc_count")
+        nlist = int(n64, int32)
+    end procedure hpx_query_disc_count_i32
+
+    module procedure hpx_query_disc_alloc_i64
+        integer :: sch
+        logical :: inc
+        integer(int64) :: cap
+
+        sch = PF_HP_RING
+        if (present(scheme)) sch = scheme
+        inc = .false.
+        if (present(inclusive)) inc = inclusive
+        call hpx_check_disc_args(nside, hpx_nside_max, vec, radius, sch, "pf_query_disc_alloc")
+        ! Count, allocate exactly, emit. Two walks of the ring geometry buy an exact size with no
+        ! allocation inside the ring loop and no over-allocation -- against a doubling buffer,
+        ! which would allocate mid-walk and could hand back twice the memory the answer needs.
+        call hpx_query_disc_core(nside, vec, radius, sch, inc, nlist, huge(0_int64), &
+                                 "pf_query_disc_alloc")
+        ! Allocated and ZERO-LENGTH when the disc is empty, never unallocated, so that `size()` is
+        ! the only thing a caller ever tests.
+        allocate (listpix(nlist))
+        if (nlist > 0_int64) then
+            ! `cap` is a COPY of the count, not `nlist` itself: passing one variable to both an
+            ! `intent(out)` and an `intent(in)` dummy of the same call is illegal aliasing
+            ! (F2018 15.5.2.13), and gfortran resolves it by zeroing the variable on entry -- so
+            ! the capacity would read as 0 and the walk would abort on its first pixel.
+            cap = nlist
+            call hpx_query_disc_core(nside, vec, radius, sch, inc, nlist, cap, &
+                                     "pf_query_disc_alloc", out64=listpix)
+        end if
+    end procedure hpx_query_disc_alloc_i64
+
+    module procedure hpx_query_disc_alloc_i32
+        integer :: sch
+        logical :: inc
+        integer(int64) :: n64, cap
+
+        sch = PF_HP_RING
+        if (present(scheme)) sch = scheme
+        inc = .false.
+        if (present(inclusive)) inc = inclusive
+        call hpx_check_disc_args(int(nside, int64), hpx_nside_max_i32, vec, radius, sch, &
+                                 "pf_query_disc_alloc")
+        call hpx_query_disc_core(int(nside, int64), vec, radius, sch, inc, n64, huge(0_int64), &
+                                 "pf_query_disc_alloc")
+        allocate (listpix(n64))
+        if (n64 > 0_int64) then
+            ! A copy, for the aliasing reason `hpx_query_disc_alloc_i64` states.
+            cap = n64
+            call hpx_query_disc_core(int(nside, int64), vec, radius, sch, inc, n64, cap, &
+                                     "pf_query_disc_alloc", out32=listpix)
+        end if
+        nlist = int(n64, int32)
+    end procedure hpx_query_disc_alloc_i32
 
 end submodule parquet_healpix_query

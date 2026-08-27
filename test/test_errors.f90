@@ -1495,6 +1495,17 @@ contains
             new_unittest("a NaN in the disc centre aborts", test_healpix_vector_nan_aborts), &
             new_unittest("an unknown scheme selector aborts", test_healpix_bad_scheme_aborts), &
             new_unittest("a listpix too small for the disc aborts", test_healpix_buffer_aborts), &
+            new_unittest("query_disc_count names ITSELF when it rejects an nside", &
+                         test_healpix_count_names_itself), &
+            new_unittest("query_disc_alloc names ITSELF when it rejects a scheme", &
+                         test_healpix_alloc_names_itself), &
+            new_unittest("a bulk form rejects an invalid nside", test_healpix_bulk_nside_aborts), &
+            new_unittest("a bulk form rejects arrays that do not conform", &
+                         test_healpix_bulk_size_aborts), &
+            new_unittest("a bulk form rejects threads= below one", &
+                         test_healpix_bulk_threads_aborts), &
+            new_unittest("a bulk form rejects a vec array of the wrong shape", &
+                         test_healpix_bulk_vec_shape_aborts), &
             new_unittest("a sky query on a Euclidean index aborts", test_spatial_sky_on_euclidean_aborts), &
             new_unittest("a Euclidean query on a sky index aborts", test_spatial_euclidean_on_sky_aborts), &
             new_unittest("a plain bulk sweep on a sky index aborts", test_spatial_sky_bulk_aborts), &
@@ -3078,6 +3089,64 @@ contains
             failure_message="a listpix too small for the disc was expected to abort", &
             required_stderr="listpix holds 4 elements but the disc needs")
     end subroutine test_healpix_buffer_aborts
+
+    ! ---- Tier B ----
+    !
+    ! The first two assert the PLUMBING rather than the rule: three entry points share one
+    ! validator, and each must name itself in its messages, or a caller is sent to read the
+    ! documentation of a routine they never called. The nine rules themselves are covered nine
+    ! ways by the scenarios above and are deliberately not re-tested per entry point.
+
+    subroutine test_healpix_count_names_itself(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "healpix_disc_count_bad_nside", &
+            expect_abort=.true., &
+            failure_message="query_disc_count was expected to reject an nside of 6", &
+            required_stderr="pf_query_disc_count: nside must be a positive power of two")
+    end subroutine test_healpix_count_names_itself
+
+    subroutine test_healpix_alloc_names_itself(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "healpix_disc_alloc_bad_scheme", &
+            expect_abort=.true., &
+            failure_message="query_disc_alloc was expected to reject scheme= 9", &
+            required_stderr="pf_query_disc_alloc: scheme must be PF_HP_RING (0) or PF_HP_NEST (1)")
+    end subroutine test_healpix_alloc_names_itself
+
+    subroutine test_healpix_bulk_nside_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        ! The bulk forms validate where the elemental forms they wrap do not: the check is once
+        ! per array, and a bad nside read from a file would otherwise become a whole array of
+        ! silently wrong pixels rather than one loud failure.
+        call check_scenario_exit_status_and_stderr(error, "healpix_bulk_nside_invalid", &
+            expect_abort=.true., &
+            failure_message="a bulk call with nside 0 was expected to abort", &
+            required_stderr="pf_ang2pix_ring_bulk: nside must be a positive power of two")
+    end subroutine test_healpix_bulk_nside_aborts
+
+    subroutine test_healpix_bulk_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "healpix_bulk_size_mismatch", &
+            expect_abort=.true., &
+            failure_message="a bulk call with a short output array was expected to abort", &
+            required_stderr="every array must have the same extent")
+    end subroutine test_healpix_bulk_size_aborts
+
+    subroutine test_healpix_bulk_threads_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "healpix_bulk_threads_zero", &
+            expect_abort=.true., &
+            failure_message="a bulk call with threads= 0 was expected to abort", &
+            required_stderr="threads= must be at least 1")
+    end subroutine test_healpix_bulk_threads_aborts
+
+    subroutine test_healpix_bulk_vec_shape_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "healpix_bulk_vec_shape", &
+            expect_abort=.true., &
+            failure_message="a bulk call with a (2, n) vec array was expected to abort", &
+            required_stderr="vec must be shaped (3, n)")
+    end subroutine test_healpix_bulk_vec_shape_aborts
 
     subroutine test_spatial_radius_not_positive_aborts(error)
         type(error_type), allocatable, intent(out) :: error

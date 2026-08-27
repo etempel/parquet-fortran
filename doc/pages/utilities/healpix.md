@@ -24,7 +24,7 @@ call pf_pix2vec_nest(nside, ipix, vec)                         ! and where is th
 call pf_query_disc(nside, vec, 0.01_real64, listpix, nfound)   ! which pixels lie within 0.01 rad?
 ```
 
-`use parquet_healpix` compiles four of this library's Fortran files and reaches no reader, no
+`use parquet_healpix` compiles six of this library's Fortran files and reaches no reader, no
 writer and no Arrow — see [Which module do I import?](../operating/choosing-a-module.html) for the
 whole table. Everything here is also available through `use parquet`.
 
@@ -181,6 +181,184 @@ digits when `z` is within an ulp or two of ±1. At `nside = 2**20` the first rin
 
 If that matters, work in unit vectors through `pf_pix2vec_ring`/`pf_pix2vec_nest`, which are the
 primitive form — `pf_pix2ang_*` is derived from them, not the other way round.
+
+## Directions as vectors
+
+```fortran
+call pf_ang2vec(theta, phi, vec)          ! direction -> unit vector
+call pf_vec2ang(vec, theta, phi)          ! and back; phi comes out in [0, 2*pi)
+call pf_vec2pix_ring(nside, vec, ipix)    ! vector straight to a pixel, either scheme
+call pf_vec2pix_nest(nside, vec, ipix)
+```
+
+**`vec` never needs normalising, and its components may span any magnitude.** Everything here
+divides by the largest component before anything is squared, so `[1e-300, 0, 1e-300]` and
+`[1e300, 0, 1e300]` both name the same direction — 45 degrees from the pole — and neither raises a
+floating-point exception on the way. That is worth knowing because it is not automatic: squaring
+first underflows the one and overflows the other, and the answers you get are wrong by the whole 45
+degrees rather than by a rounding.
+
+**`pf_vec2pix_*` is not `pf_ang2pix_*` with an angle computed first**, and that is why it exists:
+`pf_ang2pix_*` begins by taking the cosine of `theta`, which a caller holding a unit vector already
+has. Going through the angle throws away an inverse tangent and a cosine, and a rounding at each
+end.
+
+**Longitude is undefined at a pole and is reported as `0` there**; the zero vector reports
+`theta = 0, phi = 0`. Both are documented answers rather than accidents — `atan2(0, 0)` is
+prohibited by the Fortran standard and raises an exception on some compilers, so those inputs are
+guarded rather than passed through.
+
+### One limit worth knowing before you use vectors at extreme resolution
+
+**Above about `nside = 2**24`, a direction vector can no longer name a pixel near a pole.** A
+ring's latitude is its `z`, and near a pole consecutive rings converge: the gap between ring `i`
+and ring `i+1` is `(2i+1)/(3*nside**2)`, which at `nside = 2**29` is `3.5e-18` at the first ring
+and `1.5e-16` at the sixty-fifth — 0.02 and 0.68 of one ulp of `z = 1`. Two adjacent rings there
+are not distinct double-precision numbers, so no implementation can recover the right one from a
+unit vector.
+
+`pf_ang2pix_*` is unaffected: it works from `theta`, where the same rings are millions of ulps
+apart. So at extreme resolution near a pole, keep angles rather than vectors — and note that every
+`nside` a survey actually uses is far below where this begins.
+
+## Grid arithmetic
+
+```fortran
+pf_nside2npix(nside)      pf_npix2nside(npix)
+pf_nside2order(nside)     pf_order2nside(order)
+pf_nside2pixarea(nside)   ! steradians
+pf_nside2resol(nside)     ! radians -- the side of the equal-area square
+pf_max_pixrad(nside)      ! radians -- centre to farthest corner
+pf_pix2ring_ring(nside, ipix)   pf_pix2ring_nest(nside, ipix)   pf_ring2z(nside, iring)
+```
+
+All `pure elemental` functions, so each accepts whole arrays, and each takes the integer kind you
+pass. Rings are indexed `1 .. 4*nside-1` from the north pole, ring `nside` being the first of the
+equatorial belt.
+
+**An argument outside the domain gives `-1`** — `-2` for `pf_ring2z`, whose valid results include
+`-1`. That is one rule for the whole family, and it is forced rather than chosen: these are `pure`
+procedures, and a `pure` procedure may not contain an `error stop`. So:
+
+```fortran
+nside = pf_npix2nside(npix_read_from_a_file)
+if (nside < 0) error stop "that file's pixel count is not a HEALPix one"
+```
+
+**`pf_npix2nside` is the validity check on a pixel count**, and the `-1` is what makes it one. A
+valid count is `12 * 4**order`, so the whole test is integer arithmetic and is exact at every
+resolution.
+
+**The int32 and int64 forms have different domains, and the boundary is the API ceiling rather than
+an arithmetic accident**: `nside` up to 8192 for int32, up to `2**29` for int64. So
+`pf_order2nside(20_int32)` reports `-1` rather than a perfectly representable `1048576` that no
+int32 entry point of this module would then accept.
+
+**A caller who ignores the sentinel gets a wrong answer, not an abort.** That is the same trade
+`pf_ang2pix_nest(0, ...)` already makes, and it is the price of these being usable on arrays.
+
+## Changing resolution in NEST
+
+```fortran
+call pf_ud_pix_nest(ipix, order_in, order_out, ipix_out)
+```
+
+In NEST the four pixels covering one pixel of the next-coarser grid are consecutive, so a
+resolution change is a bit shift and nothing rounds. Coarsening gives the containing pixel;
+**refining gives the LOWEST-indexed of the `4**k` children**, the full set being
+`ipix_out .. ipix_out + 4**k - 1`. Equal orders are the identity.
+
+`order_in` and `order_out` take the same integer kind as `ipix` — `pf_nside2order`'s result kind
+follows its argument, so the two fit together without a cast. Either order outside `0 .. 29`, or a
+negative `ipix`, gives `-1`.
+
+This replaces round-tripping through angles to move between two resolutions, which is what a
+program running a coarse and a fine grid side by side would otherwise do. That detour is lossy;
+this is exact.
+
+## The three disc forms
+
+```fortran
+call pf_query_disc(nside, vec, radius, listpix, nlist [, scheme] [, inclusive])        ! your buffer
+call pf_query_disc_alloc(nside, vec, radius, listpix, nlist [, scheme] [, inclusive])  ! its buffer
+call pf_query_disc_count(nside, vec, radius, nlist [, scheme] [, inclusive])           ! no buffer
+```
+
+All three answer the same question and run the same walk, so they cannot disagree.
+
+**`pf_query_disc_alloc` is the one to reach for by default.** `listpix` comes back allocated to
+exactly `nlist`, so there is no capacity to get wrong and no abort for getting it wrong. An empty
+result allocates a **zero-length** array rather than leaving it unallocated, so `size()` is the
+only thing you ever test and an `if (.not. allocated(listpix))` branch written against it is dead
+code.
+
+**`pf_query_disc` stays the form for a hot loop**, where allocating per call is the thing you are
+avoiding. It is the only one that can abort on a buffer, and the price of that is that sizing the
+buffer is yours.
+
+**`pf_query_disc_count` answers the size alone**, walking the disc with its stores switched off. It
+touches no array, so nothing can overflow. `scheme` changes nothing about a count and is accepted
+only so that one call can be switched between the three forms without editing its arguments.
+
+`pf_query_disc_alloc` walks the disc **twice** — once to count, once to fill — which is what buys
+an exact size with no allocation inside the walk and no over-allocation.
+
+## Comparing angles without computing them
+
+```fortran
+c2 = pf_chord2_from_angle(radius)              ! (2*sin(radius/2))**2
+if (sum((v1 - v2)**2) <= c2) ...               ! the same test as pf_angdist(v1,v2) <= radius
+angle = pf_angle_from_chord2(c2)               ! and back
+```
+
+Where you already hold unit vectors, this is the same comparison with **no inverse trigonometry per
+candidate** — the chord is strictly increasing in the angle, so ordering by squared chord and
+ordering by angle are the same order. Convert the radius once, outside the loop.
+
+**Two warnings, and they compound.** `pf_chord2_from_angle` takes **radians** and returns the
+**square** of the chord. `parquet_spatial` carries the same definition internally in the other
+units — degrees in, the chord itself out — so a value moved between the two tiers without
+converting is wrong by a factor of 57 and then squared. Nothing can catch that for you at compile
+time, because the two are both plain `real64`.
+
+`pf_angle_from_chord2` clamps at both ends, so a `chord2` a rounding below 0 or above 4 — which
+your own arithmetic can easily produce — gives 0 or pi rather than raising.
+
+## Converting a whole array at once
+
+Every conversion has a `_bulk` form taking arrays and an optional `threads=`:
+
+```fortran
+call pf_ang2pix_ring_bulk(nside, theta, phi, ipix [, threads])
+call pf_vec2pix_nest_bulk(nside, vec, ipix [, threads])      ! vec is (3, n)
+call pf_ang2vec_bulk(theta, phi, vec [, threads])
+call pf_pix2vec_ring_bulk(nside, ipix, vec [, threads])
+```
+
+and likewise `pf_ang2pix_nest_bulk`, `pf_pix2ang_ring_bulk`, `pf_pix2ang_nest_bulk`,
+`pf_vec2pix_ring_bulk`, `pf_pix2vec_nest_bulk` and `pf_vec2ang_bulk`.
+
+**What they buy differs, and it is worth knowing which case you are in.** The scalar
+`pf_ang2pix_*` and `pf_pix2ang_*` are `pure elemental`, so you already have an array form — `call
+pf_ang2pix_ring(nside, theta, phi, ipix)` compiles today — and you already have threading by
+writing your own `!$omp parallel do`. For those four the bulk form adds the threading *discipline*:
+a thread count that goes serial inside somebody else's parallel region instead of nesting, and that
+is clamped to what your CPU affinity mask actually allows. For the other six, whose scalar form
+takes a single `vec(3)`, there is no array form without them.
+
+**The bulk forms validate; the elemental forms they wrap do not.** A bulk call checks `nside`, that
+the arrays conform, and that an explicit `threads=` is at least 1, and aborts naming the problem.
+That is the opposite of the rule stated under [What is validated and what is
+not](#what-is-validated-and-what-is-not), and deliberately: the check is once per array rather than
+once per element, and the realistic mistake at a bulk call site is a bad `nside` read from a file,
+which a loop of a total procedure would turn into millions of silently wrong pixels.
+
+**The result is identical at every thread count**, bit for bit: each element is a function of its
+own inputs alone and there is no accumulation anywhere. A zero-sized array is a defined no-op.
+
+Note the spelling: this module's array-with-threads forms end in `_bulk`, where `parquet_random`'s
+array forms are spelled `pf_random_fill_*`. Two tiers, two conventions, and neither is going to
+change.
 
 ## Migrating from `libhealpix`
 

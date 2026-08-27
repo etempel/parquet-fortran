@@ -9,14 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`parquet_healpix`: the HEALPix sphere pixelisation.** Direction to pixel and back
-  (`pf_ang2pix_ring`/`pf_ang2pix_nest`, `pf_pix2ang_*`, `pf_pix2vec_*`), conversion between the
-  RING and NEST numbering schemes (`pf_ring2nest`/`pf_nest2ring`), the pixels of a disc
-  (`pf_query_disc`, exact or overlapping, in either scheme) and angular separation
-  (`pf_angdist`). Every integer argument takes `integer(int32)` or `integer(int64)`; the scalar
-  conversions are `pure elemental`, so they accept whole arrays. No floating-point exception is
-  raised on valid input, so a program running under `-ffpe-trap` needs no guard around a call. A
-  new Arrow-free entry module (`use parquet_healpix` compiles four Fortran files).
+- **`parquet_healpix`: the HEALPix sphere pixelisation.** Direction to pixel and back, from angles
+  or from unit vectors (`pf_ang2pix_ring`/`pf_ang2pix_nest`, `pf_vec2pix_*`, `pf_pix2ang_*`,
+  `pf_pix2vec_*`, `pf_ang2vec`/`pf_vec2ang`), conversion between the RING and NEST numbering
+  schemes (`pf_ring2nest`/`pf_nest2ring`) and between resolutions within NEST
+  (`pf_ud_pix_nest`), and the pixels of a disc — exact or overlapping, in either scheme, into your
+  buffer (`pf_query_disc`), into one the library sizes itself (`pf_query_disc_alloc`), or as a
+  count alone (`pf_query_disc_count`). Grid arithmetic over `nside`, `npix`, order, pixel area,
+  resolution, ring index and ring latitude (`pf_nside2npix`, `pf_npix2nside`, `pf_nside2order`,
+  `pf_order2nside`, `pf_nside2pixarea`, `pf_nside2resol`, `pf_max_pixrad`, `pf_pix2ring_*`,
+  `pf_ring2z`), angular separation (`pf_angdist`) and the squared-chord pair that replaces it in a
+  comparison (`pf_chord2_from_angle`/`pf_angle_from_chord2`). Every conversion also has a `_bulk`
+  form over whole arrays with an optional `threads=`. Every integer argument takes
+  `integer(int32)` or `integer(int64)`; the scalar conversions are `pure elemental`, so they
+  accept whole arrays. No floating-point exception is raised on valid input, so a program running
+  under `-ffpe-trap` needs no guard around a call. A new Arrow-free entry module (`use
+  parquet_healpix` compiles six Fortran files).
 - **`parquet_spatial`: `pf_spatial_index`, a uniform-grid spatial index over plain coordinate
   arrays.** Ball search into a caller-owned buffer, the self-join as CSR, the pair list and
   count-only forms, all threaded; `k`-nearest search (`%nearest`) and every point's `k`-th

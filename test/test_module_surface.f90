@@ -210,7 +210,10 @@ contains
     subroutine check_healpix_surface(what)
         character(len=:), allocatable, intent(out) :: what !! the first knob that failed, or "".
         character(len=:), allocatable :: tok
-        integer(int64) :: ipix, nlist, listpix(64)
+        integer(int64) :: ipix, nlist, listpix(64), npix
+        integer(int64), allocatable :: alloclist(:)
+        real(real64) :: vec(3), th(4), ph(4)
+        integer(int64) :: bulkpix(4)
 
         what = ""
         ! The output pair. This tier reads no knob of its own; it carries these because its bulk
@@ -234,6 +237,23 @@ contains
         call pf_query_disc(4_int64, [0.0_real64, 0.0_real64, 1.0_real64], 0.5_real64, listpix, &
                            nlist, scheme=PF_HP_NEST)
         if (what == "" .and. nlist <= 0_int64) what = "pf_query_disc"
+
+        ! Tier B, one name per group, for the same reason as above: a re-export list that compiles
+        ! while exporting no usable procedure would satisfy every assertion before this point.
+        npix = pf_nside2npix(4_int64)
+        if (what == "" .and. npix /= 192_int64) what = "pf_nside2npix"
+        if (what == "" .and. pf_npix2nside(npix) /= 4_int64) what = "pf_npix2nside"
+        call pf_ang2vec(1.0_real64, 2.0_real64, vec)
+        call pf_vec2pix_ring(4_int64, vec, ipix)
+        if (what == "" .and. (ipix < 0_int64 .or. ipix >= npix)) what = "pf_vec2pix_ring"
+        call pf_query_disc_count(4_int64, vec, 0.5_real64, nlist)
+        if (what == "" .and. nlist <= 0_int64) what = "pf_query_disc_count"
+        call pf_query_disc_alloc(4_int64, vec, 0.5_real64, alloclist, nlist)
+        if (what == "" .and. size(alloclist) /= int(nlist)) what = "pf_query_disc_alloc"
+        th = [0.5_real64, 1.0_real64, 1.5_real64, 2.0_real64]
+        ph = [0.0_real64, 1.0_real64, 2.0_real64, 3.0_real64]
+        call pf_ang2pix_ring_bulk(4_int64, th, ph, bulkpix, threads=2)
+        if (what == "" .and. any(bulkpix < 0_int64)) what = "pf_ang2pix_ring_bulk"
     end subroutine check_healpix_surface
 
 end module test_module_surface_healpix

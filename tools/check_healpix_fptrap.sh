@@ -12,7 +12,7 @@
 #     module's promise is actually about, and only a trapping build reproduces it.
 #   * it runs inside the whole test binary, where anything else in the process may have raised a
 #     flag first. This runs one program that does nothing else.
-#   * it links the whole library. This compiles four Fortran files with a bare compiler and no
+#   * it links the whole library. This compiles six Fortran files with a bare compiler and no
 #     Arrow anywhere, so it also demonstrates -- rather than asserting -- that the tier really is
 #     free of the reader/writer stack. That is the same thing tools/check_argsort_standalone.sh
 #     proves one tier over, and for the same reason: nothing in `fpm test` can see it, because the
@@ -78,8 +78,10 @@ program healpix_fptrap
 
     real(real64), parameter :: pi = 3.141592653589793238462643_real64
     real(real64), parameter :: two_thirds = 2.0_real64 / 3.0_real64
-    integer(int64), allocatable :: listpix(:)
+    integer(int64), allocatable :: listpix(:), alloclist(:)
     integer(int64) :: nside, ipix, nlist, sink, p
+    real(real64) :: bt(2048), bp(2048), bv(3, 2048)
+    integer(int64) :: bi(2048)
     integer(int32) :: ipix32
     real(real64) :: theta, phi, vec(3), other(3), dist
     integer :: k, c
@@ -126,6 +128,93 @@ program healpix_fptrap
         end do
     end do
 
+    ! ---- Tier B ----
+    !
+    ! The grid arithmetic, the vector conversions and the chord pair, over the inputs that would
+    ! divide by zero, take a square root of a negative, invert a cosine outside its domain, or
+    ! reach ATAN2(0, 0) -- prohibited by the standard, and fatal under nagfor.
+    do k = 0, 30
+        nside = ishft(1_int64, k)
+        sink = sink + max(-1_int64, pf_nside2npix(nside))
+        sink = sink + max(-1_int64, pf_nside2order(nside))
+        sink = sink + max(-1_int64, pf_order2nside(int(k, int64)))
+        sink = sink + max(-1_int64, pf_npix2nside(12_int64 * nside * nside))
+        dist = pf_nside2pixarea(nside)
+        dist = pf_nside2resol(nside)
+        dist = pf_ring2z(nside, 1_int64)
+        dist = pf_ring2z(nside, 4_int64 * nside - 1_int64)
+        dist = pf_ring2z(nside, 0_int64)
+        sink = sink + max(-1_int64, pf_pix2ring_ring(nside, 0_int64))
+        sink = sink + max(-1_int64, pf_pix2ring_nest(nside, 0_int64))
+        call pf_ud_pix_nest(5_int64, int(k, int64), 0_int64, p)
+        sink = sink + p
+        call pf_ud_pix_nest(5_int64, 0_int64, int(k, int64), p)
+        sink = sink + p
+    end do
+    ! The sentinel inputs, which take every early-return branch.
+    dist = pf_nside2pixarea(0_int64)
+    dist = pf_nside2resol(-1_int64)
+    dist = pf_ring2z(3_int64, 1_int64)
+    sink = sink + max(-1_int64, pf_npix2nside(0_int64))
+    sink = sink + max(-1_int64, pf_npix2nside(47_int64))
+
+    ! Vector conversions, including both poles and the zero vector -- the three inputs for which
+    ! ATAN2 alone has no answer -- and components spanning 600 orders of magnitude.
+    do c = 1, 8
+        select case (c)
+        case (1); vec = [0.0_real64, 0.0_real64, 1.0_real64]
+        case (2); vec = [0.0_real64, 0.0_real64, -1.0_real64]
+        case (3); vec = [0.0_real64, 0.0_real64, 0.0_real64]
+        case (4); vec = [1.0_real64, 0.0_real64, 0.0_real64]
+        case (5); vec = [1.0e-300_real64, 0.0_real64, 1.0e-300_real64]
+        case (6); vec = [1.0e300_real64, 0.0_real64, 1.0e300_real64]
+        case (7); vec = [1.0e-8_real64, 0.0_real64, 1.0_real64]
+        case default; vec = [-0.3_real64, 0.7_real64, -0.5_real64]
+        end select
+        call pf_vec2ang(vec, theta, phi)
+        call pf_ang2vec(theta, phi, other)
+        call pf_vec2pix_ring(1024_int64, vec, ipix)
+        sink = sink + ipix
+        call pf_vec2pix_nest(1024_int64, vec, ipix)
+        sink = sink + ipix
+    end do
+
+    ! The chord pair, at both ends of its range and a rounding outside each.
+    do c = 1, 7
+        select case (c)
+        case (1); dist = 0.0_real64
+        case (2); dist = pi
+        case (3); dist = 1.0e-300_real64
+        case (4); dist = -1.0e-15_real64
+        case (5); dist = 4.0_real64
+        case (6); dist = 4.0_real64 + 1.0e-9_real64
+        case default; dist = 1.234_real64
+        end select
+        theta = pf_chord2_from_angle(dist)
+        phi = pf_angle_from_chord2(dist)
+        theta = pf_angle_from_chord2(pf_chord2_from_angle(dist))
+    end do
+
+    ! The bulk forms, over a fixture reaching both poles and the seam, threaded and serial.
+    do c = 1, size(bt)
+        bt(c) = pi * real(c - 1, real64) / real(size(bt) - 1, real64)
+        bp(c) = modulo(2.399963_real64 * real(c, real64), 2.0_real64 * pi)
+    end do
+    call pf_ang2vec_bulk(bt, bp, bv)
+    call pf_vec2ang_bulk(bv, bt, bp)
+    call pf_ang2pix_ring_bulk(256_int64, bt, bp, bi)
+    sink = sink + bi(1)
+    call pf_ang2pix_nest_bulk(256_int64, bt, bp, bi, threads=2)
+    sink = sink + bi(1)
+    call pf_pix2ang_ring_bulk(256_int64, bi, bt, bp)
+    call pf_pix2ang_nest_bulk(256_int64, bi, bt, bp, threads=2)
+    call pf_vec2pix_ring_bulk(256_int64, bv, bi)
+    sink = sink + bi(1)
+    call pf_vec2pix_nest_bulk(256_int64, bv, bi, threads=2)
+    sink = sink + bi(1)
+    call pf_pix2vec_ring_bulk(256_int64, bi, bv)
+    call pf_pix2vec_nest_bulk(256_int64, bi, bv, threads=2)
+
     ! Disc queries: every shape the walk has a branch for, in both schemes and both modes.
     do c = 1, 9
         select case (c)
@@ -148,6 +237,11 @@ program healpix_fptrap
         sink = sink + nlist
         call pf_query_disc(1_int64, vec, dist, listpix, nlist, scheme=PF_HP_NEST)
         sink = sink + nlist
+        ! The two Tier B disc forms take the same walk; the alloc form takes it twice.
+        call pf_query_disc_count(64_int64, vec, dist, nlist, inclusive=.true.)
+        sink = sink + nlist
+        call pf_query_disc_alloc(64_int64, vec, dist, alloclist, nlist, scheme=PF_HP_NEST)
+        sink = sink + nlist
     end do
 
     if (sink == -1_int64) print *, sink
@@ -155,7 +249,8 @@ program healpix_fptrap
 end program healpix_fptrap
 EOF
 
-SRC="src/parquet_settings_base.f90 src/parquet_healpix.f90 src/parquet_healpix_core.f90 src/parquet_healpix_query.f90"
+SRC="src/parquet_settings_base.f90 src/parquet_healpix.f90 src/parquet_healpix_core.f90 \
+     src/parquet_healpix_grid.f90 src/parquet_healpix_query.f90 src/parquet_healpix_bulk.f90"
 
 status=0
 for opt in -O0 -O2; do

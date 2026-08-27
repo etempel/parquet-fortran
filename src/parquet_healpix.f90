@@ -15,7 +15,7 @@
 !!
 !! **This module is Arrow-free by construction and that is the point of its tier.** It reaches
 !! `iso_fortran_env`, `ieee_arithmetic` and `parquet_settings_base`, and nothing else, so
-!! `use parquet_healpix` in a downstream project compiles four Fortran files rather than the
+!! `use parquet_healpix` in a downstream project compiles six Fortran files rather than the
 !! sixty-odd the reader/writer stack costs. `check_parquet_healpix_stays_arrow_free`
 !! (tools/check_source_conventions.py) and `tools/module_footprints.txt` are what keep that true --
 !! a `use` line added here can silently multiply what every consumer compiles, and no test can see
@@ -41,7 +41,8 @@ module parquet_healpix
     use, intrinsic :: iso_fortran_env, only: int32, int64, real64
     use, intrinsic :: ieee_arithmetic, only: ieee_is_nan, ieee_is_finite
     use parquet_settings_base, only: parquet_set_verbosity, parquet_get_verbosity, &
-        parquet_set_message_stream, parquet_get_message_stream
+        parquet_set_message_stream, parquet_get_message_stream, &
+        parquet_clamp_to_affinity, parquet_auto_thread_count
     implicit none
     private
 
@@ -50,9 +51,25 @@ module parquet_healpix
     public :: pf_pix2ang_ring, pf_pix2ang_nest
     public :: pf_pix2vec_ring, pf_pix2vec_nest
     public :: pf_ring2nest, pf_nest2ring
-    public :: pf_query_disc
+    public :: pf_query_disc, pf_query_disc_count, pf_query_disc_alloc
     public :: pf_angdist
     public :: pf_max_pixrad
+    !
+    ! ---- Tier B ----
+    !
+    public :: pf_ang2vec, pf_vec2ang
+    public :: pf_vec2pix_ring, pf_vec2pix_nest
+    public :: pf_nside2npix, pf_npix2nside
+    public :: pf_nside2order, pf_order2nside
+    public :: pf_nside2pixarea, pf_nside2resol
+    public :: pf_pix2ring_ring, pf_pix2ring_nest, pf_ring2z
+    public :: pf_ud_pix_nest
+    public :: pf_chord2_from_angle, pf_angle_from_chord2
+    public :: pf_ang2pix_ring_bulk, pf_ang2pix_nest_bulk
+    public :: pf_pix2ang_ring_bulk, pf_pix2ang_nest_bulk
+    public :: pf_vec2pix_ring_bulk, pf_vec2pix_nest_bulk
+    public :: pf_pix2vec_ring_bulk, pf_pix2vec_nest_bulk
+    public :: pf_ang2vec_bulk, pf_vec2ang_bulk
     !
     ! ---- Settings this module's own code reads, re-exported so a narrow import can configure it ----
     !
@@ -103,6 +120,16 @@ module parquet_healpix
     real(real64), parameter :: hpx_twopi = 2.0_real64 * hpx_pi
     !> The |z| at which the polar caps meet the equatorial belt.
     real(real64), parameter :: hpx_twothird = 2.0_real64 / 3.0_real64
+    !> `sqrt(pi/3)`, the constant in `pf_nside2resol`.
+    !!
+    !! A compile-time constant so that the resolution costs one division and contains no `sqrt` of
+    !! a runtime value -- one less thing to reason about for the module's IEEE promise.
+    real(real64), parameter :: hpx_sqrt_pi_third = 1.023326707946488151_real64
+
+    !> Largest resolution order, `log2(hpx_nside_max)`.
+    integer(int64), parameter :: hpx_order_max = 29_int64
+    !> Largest resolution order whose `nside` the int32 entry points accept, `log2(8192)`.
+    integer(int32), parameter :: hpx_order_max_i32 = 13_int32
 
     ! ---- Morton-order bit masks ----
     !
@@ -261,6 +288,45 @@ module parquet_healpix
         module procedure hpx_query_disc_i32
         module procedure hpx_query_disc_i64
     end interface pf_query_disc
+
+    !> How many pixels a disc holds, without materialising the list.
+    !!
+    !! Answers exactly the `nlist` that `pf_query_disc` would report for the same arguments, and
+    !! does it by running the same walk with its stores switched off -- so the two cannot disagree,
+    !! and sizing a buffer from this needs no margin. It touches no output array at all, so there
+    !! is nothing to overflow and no capacity abort.
+    !!
+    !! Validates its arguments exactly as `pf_query_disc` does, minus the buffer check, and every
+    !! message names this routine. `scheme` and `inclusive` are optional with the same defaults
+    !! (`PF_HP_RING`, `.false.`); `scheme` changes nothing about the count and is accepted so that
+    !! one call can be switched between the three entry points without editing its arguments.
+    interface pf_query_disc_count
+        module procedure hpx_query_disc_count_i32
+        module procedure hpx_query_disc_count_i64
+    end interface pf_query_disc_count
+
+    !> Pixels of a disc, into an array this routine allocates to the exact size needed.
+    !!
+    !! **The form that removes the buffer-too-small failure entirely.** `listpix` comes back
+    !! `allocated` with `size(listpix) == nlist`, so there is no capacity to get wrong and no abort
+    !! for getting it wrong -- against `pf_query_disc`, where sizing the buffer is the caller's
+    !! problem and every downstream project has invented its own answer to it.
+    !!
+    !! **An empty result allocates a ZERO-LENGTH array, never an unallocated one**, so `size()` is
+    !! the only thing a caller ever has to test and an `if (.not. allocated(listpix))` branch
+    !! written against this API is dead code.
+    !!
+    !! **It walks the disc TWICE** -- once to count, once to emit -- which is what buys the exact
+    !! size with no allocation inside the ring loop and no over-allocation. Where that matters,
+    !! `pf_query_disc` into a reused buffer is the form to use: it is the hot-path shape and it is
+    !! not going away. Everything else should prefer this one.
+    !!
+    !! Contract, ordering, the inclusive bound and the small-disc limit are all exactly
+    !! `pf_query_disc`'s; only the buffer's ownership differs.
+    interface pf_query_disc_alloc
+        module procedure hpx_query_disc_alloc_i32
+        module procedure hpx_query_disc_alloc_i64
+    end interface pf_query_disc_alloc
 
     ! ---- Interfaces: position <-> pixel ----
     !
@@ -577,30 +643,773 @@ module parquet_healpix
 
         !> The disc walk itself, over `integer(int64)` and writing into whichever output is present.
         !>
-        !> Both output arrays are optional and exactly one is passed, which is what lets the two
+        !> Both output arrays are optional and at most one is passed, which is what lets the two
         !> public kinds share one walk without the int32 form allocating a temporary the size of the
         !> caller's buffer -- the same shape `pf_spatial_index`'s scans use for the same reason.
+        !>
+        !> **Passing NEITHER is the counting mode**, and it is what `pf_query_disc_count` and the
+        !> first pass of `pf_query_disc_alloc` use: every ring bound, every arc trim and every
+        !> membership test is the same code, so a count cannot disagree with the list it predicts by
+        !> construction rather than by test. In that mode `cap` should be `huge(0_int64)`, which
+        !> makes the capacity abort unreachable.
         module subroutine hpx_query_disc_core(nside, vec, radius, scheme, inclusive, nlist, cap, &
-                                              out32, out64)
+                                              what, out32, out64)
             integer(int64), intent(in) :: nside !! resolution parameter, already validated.
             real(real64), intent(in) :: vec(3) !! disc centre, already validated, any length.
             real(real64), intent(in) :: radius !! disc radius, radians, already validated.
             integer, intent(in) :: scheme !! `PF_HP_RING` or `PF_HP_NEST`, already validated.
             logical, intent(in) :: inclusive !! whether to return the overlap superset.
-            integer(int64), intent(out) :: nlist !! number of pixels written.
+            integer(int64), intent(out) :: nlist !! number of pixels written, or counted.
             integer(int64), intent(in) :: cap !! capacity of the output array, in elements.
+            character(len=*), intent(in) :: what !! calling entry point, for a capacity message.
             integer(int32), intent(out), optional :: out32(:) !! int32 output buffer.
             integer(int64), intent(out), optional :: out64(:) !! int64 output buffer.
         end subroutine hpx_query_disc_core
 
-        !> Validates the arguments shared by both `pf_query_disc` kinds, and aborts on any fault.
-        module subroutine hpx_check_disc_args(nside, nside_max, vec, radius, scheme)
+        !> `pf_query_disc_count`, int32 kinds.
+        module subroutine hpx_query_disc_count_i32(nside, vec, radius, nlist, scheme, inclusive)
+            integer(int32), intent(in) :: nside !! resolution parameter, a positive power of two.
+            real(real64), intent(in) :: vec(3) !! direction of the disc centre; any nonzero length.
+            real(real64), intent(in) :: radius !! disc radius, radians, >= 0.
+            integer(int32), intent(out) :: nlist !! how many pixels the disc holds.
+            integer, intent(in), optional :: scheme !! `PF_HP_RING` (default) or `PF_HP_NEST`.
+            logical, intent(in), optional :: inclusive !! overlap superset; default `.false.`.
+        end subroutine hpx_query_disc_count_i32
+
+        !> `pf_query_disc_count`, int64 kinds.
+        module subroutine hpx_query_disc_count_i64(nside, vec, radius, nlist, scheme, inclusive)
+            integer(int64), intent(in) :: nside !! resolution parameter, a positive power of two.
+            real(real64), intent(in) :: vec(3) !! direction of the disc centre; any nonzero length.
+            real(real64), intent(in) :: radius !! disc radius, radians, >= 0; above pi acts as pi.
+            integer(int64), intent(out) :: nlist !! how many pixels the disc holds.
+            integer, intent(in), optional :: scheme !! `PF_HP_RING` (default) or `PF_HP_NEST`.
+            logical, intent(in), optional :: inclusive !! overlap superset; default `.false.`.
+        end subroutine hpx_query_disc_count_i64
+
+        !> `pf_query_disc_alloc`, int32 kinds.
+        module subroutine hpx_query_disc_alloc_i32(nside, vec, radius, listpix, nlist, scheme, &
+                                                   inclusive)
+            integer(int32), intent(in) :: nside !! resolution parameter, a positive power of two.
+            real(real64), intent(in) :: vec(3) !! direction of the disc centre; any nonzero length.
+            real(real64), intent(in) :: radius !! disc radius, radians, >= 0.
+            integer(int32), allocatable, intent(out) :: listpix(:) !! allocated to exactly `nlist`.
+            integer(int32), intent(out) :: nlist !! how many pixels the disc holds.
+            integer, intent(in), optional :: scheme !! `PF_HP_RING` (default) or `PF_HP_NEST`.
+            logical, intent(in), optional :: inclusive !! overlap superset; default `.false.`.
+        end subroutine hpx_query_disc_alloc_i32
+
+        !> `pf_query_disc_alloc`, int64 kinds.
+        module subroutine hpx_query_disc_alloc_i64(nside, vec, radius, listpix, nlist, scheme, &
+                                                   inclusive)
+            integer(int64), intent(in) :: nside !! resolution parameter, a positive power of two.
+            real(real64), intent(in) :: vec(3) !! direction of the disc centre; any nonzero length.
+            real(real64), intent(in) :: radius !! disc radius, radians, >= 0; above pi acts as pi.
+            integer(int64), allocatable, intent(out) :: listpix(:) !! allocated to exactly `nlist`.
+            integer(int64), intent(out) :: nlist !! how many pixels the disc holds.
+            integer, intent(in), optional :: scheme !! `PF_HP_RING` (default) or `PF_HP_NEST`.
+            logical, intent(in), optional :: inclusive !! overlap superset; default `.false.`.
+        end subroutine hpx_query_disc_alloc_i64
+
+        !> Validates the arguments shared by all three disc entry points, and aborts on any fault.
+        !>
+        !> `what` names the calling entry point so that every message identifies the call the
+        !> caller actually made -- the same shape `parquet_spatial`'s `sky_chords(deg, what)` uses,
+        !> and the reason three entry points can share one validator without any of them reporting
+        !> a routine name the caller never wrote.
+        module subroutine hpx_check_disc_args(nside, nside_max, vec, radius, scheme, what)
             integer(int64), intent(in) :: nside !! the resolution parameter to check.
             integer(int64), intent(in) :: nside_max !! the ceiling for the caller's integer kind.
             real(real64), intent(in) :: vec(3) !! the disc centre to check.
             real(real64), intent(in) :: radius !! the disc radius to check.
             integer, intent(in) :: scheme !! the resolved scheme selector to check.
+            character(len=*), intent(in) :: what !! the calling entry point, for every message.
         end subroutine hpx_check_disc_args
+    end interface
+
+    ! ---- Tier B: public generic interfaces, angles and vectors ----
+
+    !> Unit vector of the direction `(theta, phi)`.
+    !!
+    !! `theta` is colatitude in radians (0 at the north pole), `phi` is longitude in radians and
+    !! may lie outside `[0, 2*pi)`. The result is a unit vector to within rounding.
+    !!
+    !! **Total and `pure`: it validates nothing and never aborts.** A `theta` outside `[0, pi]`
+    !! produces the vector of the reflected direction rather than an error. Not `elemental`,
+    !! because `vec` is rank 1 -- see `pf_ang2vec_bulk` for the array form.
+    interface pf_ang2vec
+        module procedure hpx_ang2vec
+    end interface pf_ang2vec
+
+    !> Colatitude and longitude of the direction `vec` points in.
+    !!
+    !! `vec` need not be normalised and its components may span any magnitude: the conversion
+    !! divides by the largest component before anything is squared, so `[1e-300, 0, 1e-300]` and
+    !! `[1e300, 0, 1e300]` both name the same direction, 45 degrees from the pole, and neither
+    !! raises an IEEE exception. `theta` comes back in `[0, pi]` and `phi` in `[0, 2*pi)`.
+    !!
+    !! **Longitude is undefined at a pole and is reported as 0 there**, which is the conventional
+    !! choice; the zero vector reports `theta = 0, phi = 0`. Both are documented answers rather
+    !! than accidents -- `atan2(0, 0)` is prohibited by the standard and raises `IEEE_INVALID` on
+    !! some compilers, so those two inputs are guarded rather than passed through.
+    !!
+    !! **Computed as `atan2(transverse, z)`, never as `acos(z/|v|)`**, which loses half its digits
+    !! near either pole: for `[1e-8, 0, 1]` the quotient rounds to exactly 1 and an `acos` returns
+    !! 0 where the true colatitude is 1e-8.
+    interface pf_vec2ang
+        module procedure hpx_vec2ang
+    end interface pf_vec2ang
+
+    !> Pixel containing the direction `vec` points in, in the RING scheme.
+    !!
+    !! The vector form is the more primitive one: `pf_ang2pix_ring` begins by taking the cosine of
+    !! `theta`, which a caller holding a unit vector already has. `vec` need not be normalised, and
+    !! is scaled by its largest component before anything is squared.
+    !!
+    !! **Total and `pure`: it validates nothing and never aborts**, on the same rule as
+    !! `pf_ang2pix_ring`. Not `elemental`, because `vec` is rank 1 -- see `pf_vec2pix_ring_bulk`.
+    interface pf_vec2pix_ring
+        module procedure hpx_vec2pix_ring_i32
+        module procedure hpx_vec2pix_ring_i64
+    end interface pf_vec2pix_ring
+
+    !> Pixel containing the direction `vec` points in, in the NEST scheme.
+    !!
+    !! See `pf_vec2pix_ring`; this is the same conversion into the other numbering scheme.
+    interface pf_vec2pix_nest
+        module procedure hpx_vec2pix_nest_i32
+        module procedure hpx_vec2pix_nest_i64
+    end interface pf_vec2pix_nest
+
+    ! ---- Tier B: public generic interfaces, grid arithmetic ----
+    !
+    ! Every function in this group is `pure elemental` and TOTAL, so none of them can abort -- a
+    ! `pure` procedure may not contain an `error stop`, which is an image control statement. Each
+    ! reports an argument outside its domain by returning a value the valid range cannot hold:
+    ! **-1** for every one of them, except `pf_ring2z`, whose results include -1 and which reports
+    ! -2. A caller who ignores that gets a wrong answer rather than an abort, exactly as
+    ! `pf_ang2pix_nest(0, ...)` already does.
+    !
+    ! The int32 and int64 specifics have DIFFERENT domains, and the boundary is each kind's API
+    ! ceiling rather than an arithmetic accident: `nside` up to 8192 for int32 (order 13) and up
+    ! to 2**29 for int64 (order 29). So `pf_order2nside(20_int32)` reports -1 rather than a
+    ! representable 1048576 that no int32 entry point of this module would accept.
+
+    !> Number of pixels at resolution `nside`: `12*nside**2`. -1 if `nside` is out of domain.
+    interface pf_nside2npix
+        module procedure hpx_nside2npix_i32
+        module procedure hpx_nside2npix_i64
+    end interface pf_nside2npix
+
+    !> Resolution parameter of a pixel count, or **-1 when `npix` is not a valid one**.
+    !!
+    !! **This is the validity check on a pixel count read from a file**, and the -1 is what makes
+    !! it one: `if (pf_npix2nside(n) < 0)` is the test. A valid `npix` is `12 * 4**order`, so the
+    !! whole check is integer arithmetic -- divisibility by 12, then a power of four -- with no
+    !! square root and nothing to reason about at the resolutions where a double stops
+    !! representing consecutive integers.
+    interface pf_npix2nside
+        module procedure hpx_npix2nside_i32
+        module procedure hpx_npix2nside_i64
+    end interface pf_npix2nside
+
+    !> `log2(nside)`, the resolution order. -1 if `nside` is out of domain.
+    interface pf_nside2order
+        module procedure hpx_nside2order_i32
+        module procedure hpx_nside2order_i64
+    end interface pf_nside2order
+
+    !> `2**order`, the resolution parameter. -1 if `order` is out of domain.
+    !!
+    !! The domain is the caller's kind ceiling: `0 .. 13` for int32, `0 .. 29` for int64.
+    interface pf_order2nside
+        module procedure hpx_order2nside_i32
+        module procedure hpx_order2nside_i64
+    end interface pf_order2nside
+
+    !> Area of one pixel at `nside`, in steradians: `4*pi/npix`, exactly and for every pixel.
+    !!
+    !! -1 if `nside` is out of domain. Steradians, not square degrees: this module is radians
+    !! throughout, and the conversion is `* (180/pi)**2` at the call site where it is visible.
+    interface pf_nside2pixarea
+        module procedure hpx_nside2pixarea_i32
+        module procedure hpx_nside2pixarea_i64
+    end interface pf_nside2pixarea
+
+    !> Pixel resolution at `nside`, in radians -- the side of the equal-area square.
+    !!
+    !! `sqrt(pf_nside2pixarea(nside))`, which is a definition rather than an approximation: it is
+    !! the quantity a caller sizing a grid or a search cell wants. -1 if `nside` is out of domain.
+    interface pf_nside2resol
+        module procedure hpx_nside2resol_i32
+        module procedure hpx_nside2resol_i64
+    end interface pf_nside2resol
+
+    !> Ring a RING-scheme pixel lies on, indexed `1 .. 4*nside-1` from the north pole.
+    !!
+    !! Ring `nside` is the first of the equatorial belt and ring `2*nside` is the equator. -1 if
+    !! `nside` is out of domain or `ipix` is outside `0 .. 12*nside**2 - 1`.
+    interface pf_pix2ring_ring
+        module procedure hpx_pix2ring_ring_i32
+        module procedure hpx_pix2ring_ring_i64
+    end interface pf_pix2ring_ring
+
+    !> Ring a NEST-scheme pixel lies on, on the same 1-based index as `pf_pix2ring_ring`.
+    interface pf_pix2ring_nest
+        module procedure hpx_pix2ring_nest_i32
+        module procedure hpx_pix2ring_nest_i64
+    end interface pf_pix2ring_nest
+
+    !> `z = cos(theta)` of ring `iring`, counted `1 .. 4*nside-1` from the north pole.
+    !!
+    !! **-2, not -1, when the arguments are out of domain**: a ring's `z` legitimately reaches -1
+    !! in the limit, so -1 could not signal anything here.
+    interface pf_ring2z
+        module procedure hpx_ring2z_i32
+        module procedure hpx_ring2z_i64
+    end interface pf_ring2z
+
+    !> Nested-scheme resolution change: the parent, or the FIRST of the `4**k` children.
+    !!
+    !! In NEST the four pixels covering one pixel of the next-coarser grid are consecutive, so a
+    !! resolution change is a bit shift and nothing rounds. Coarsening (`order_out < order_in`)
+    !! gives the containing pixel; refining gives the **lowest-indexed** of the `4**k` children,
+    !! the full set being `ipix_out .. ipix_out + 4**k - 1`. Equal orders are the identity.
+    !!
+    !! `order_in` and `order_out` take the same integer kind as `ipix`. **Total and `pure
+    !! elemental`**: either order outside `0 .. 29`, or a negative `ipix`, yields -1 rather than an
+    !! abort or an out-of-range shift. An `ipix` above `12 * 4**order_in - 1` is not checked -- it
+    !! costs a multiply on the axis a caller sweeps -- and produces a correspondingly out-of-range
+    !! result.
+    interface pf_ud_pix_nest
+        module procedure hpx_ud_pix_nest_i32
+        module procedure hpx_ud_pix_nest_i64
+    end interface pf_ud_pix_nest
+
+    !> Squared chord length subtending `angle` radians on the unit sphere: `(2*sin(angle/2))**2`.
+    !!
+    !! **The cheap substitute for a repeated `pf_angdist`.** Where a caller already holds unit
+    !! vectors, `sum((v1-v2)**2) <= pf_chord2_from_angle(r)` is the same test as
+    !! `pf_angdist(v1,v2) <= r` with no inverse trigonometry per candidate. The chord is strictly
+    !! increasing in the angle over `[0, pi]`, so comparing squared chords orders exactly as
+    !! comparing angles does.
+    !!
+    !! **Radians in, and the SQUARE of the chord out.** `parquet_spatial` carries the same
+    !! definition internally in the other units -- degrees in, the chord itself out -- so the two
+    !! differ twice over. That tier and this one may not share code (this one reaches nothing but
+    !! `parquet_settings_base`), so the agreement is checked by a test that imports both.
+    interface pf_chord2_from_angle
+        module procedure hpx_chord2_from_angle
+    end interface pf_chord2_from_angle
+
+    !> Angle in radians subtended by a squared chord: `2*asin(sqrt(chord2)/2)`.
+    !!
+    !! The inverse of `pf_chord2_from_angle`, clamped at both ends so that a `chord2` slightly
+    !! below 0 or above 4 -- which a caller's own arithmetic can easily produce -- yields 0 or pi
+    !! rather than raising `IEEE_INVALID` inside `sqrt` or `asin`.
+    interface pf_angle_from_chord2
+        module procedure hpx_angle_from_chord2
+    end interface pf_angle_from_chord2
+
+    ! ---- Interfaces: Tier B grid arithmetic and vector conversions ----
+    !
+    ! Implemented in submodule parquet_healpix_grid. Nothing in that file touches a ring walk, a
+    ! face or a Morton code: it is closed-form arithmetic on `nside` and on angles, which is why
+    ! it is a file of its own rather than more of parquet_healpix_core.
+
+    interface
+        !> Unit vector of `(theta, phi)`. See `pf_ang2vec`.
+        pure module subroutine hpx_ang2vec(theta, phi, vec)
+            real(real64), intent(in) :: theta !! colatitude, radians.
+            real(real64), intent(in) :: phi !! longitude, radians; any value.
+            real(real64), intent(out) :: vec(3) !! the unit vector of that direction.
+        end subroutine hpx_ang2vec
+
+        !> Divides `vec` by its largest component and then by its norm, giving a unit vector.
+        !>
+        !> **The scaling is what makes every vector entry point scale-invariant**, and it is the
+        !> rule TA-12 established for `pf_query_disc`: a direction given as `[1e-300, 0, 1e-300]`
+        !> is a perfectly good one at 45 degrees from the pole, and squaring its components before
+        !> scaling underflows both to zero -- an answer wrong by the whole 45 degrees, not by a
+        !> rounding. `[1e300, 0, 1e300]` overflows the other way and raises `IEEE_OVERFLOW` on the
+        !> journey. Both were measured against `healpy` 1.20.0, which returns NaN for the first
+        !> and `pi/2` for the second.
+        !>
+        !> A zero vector yields `[0, 0, 0]` rather than a division by zero; every caller treats
+        !> that as the documented degenerate direction.
+        pure module subroutine hpx_vec_unit(vec, x, y, z)
+            real(real64), intent(in) :: vec(3) !! a direction; any length, including zero.
+            real(real64), intent(out) :: x !! first component of the unit vector.
+            real(real64), intent(out) :: y !! second component.
+            real(real64), intent(out) :: z !! third component, clamped into `[-1, 1]`.
+        end subroutine hpx_vec_unit
+
+        !> Longitude of a direction whose unit components are `x` and `y`, in `[0, 2*pi)`.
+        !>
+        !> **`atan2(0, 0)` is prohibited** by F2018 16.9.16, and both arguments vanish at either
+        !> POLE -- an entirely ordinary input, not a caller mistake. nagfor returns NaN and raises
+        !> `IEEE_INVALID` there, terminating the process under its default `-ieee=stop`, while
+        !> gfortran, ifx and flang return 0 silently. Longitude is undefined at a pole, so 0 is as
+        !> correct as anything and is the conventional choice.
+        pure module function hpx_xy2phi(x, y) result(phi)
+            real(real64), intent(in) :: x !! first component.
+            real(real64), intent(in) :: y !! second component.
+            real(real64) :: phi !! the longitude, radians, in `[0, 2*pi)`; 0 at a pole.
+        end function hpx_xy2phi
+
+        !> Colatitude and longitude of `vec`. See `pf_vec2ang`.
+        pure module subroutine hpx_vec2ang(vec, theta, phi)
+            real(real64), intent(in) :: vec(3) !! a direction; any nonzero length.
+            real(real64), intent(out) :: theta !! colatitude, radians, in `[0, pi]`.
+            real(real64), intent(out) :: phi !! longitude, radians, in `[0, 2*pi)`.
+        end subroutine hpx_vec2ang
+
+    end interface
+
+    ! ---- Interfaces: Tier B direction-to-pixel and resolution change ----
+    !
+    ! Implemented in parquet_healpix_core, beside the `ang2pix` workers and the NEST codec they
+    ! share.
+
+    interface
+        !> `pf_vec2pix_ring`, int32 kinds.
+        pure module subroutine hpx_vec2pix_ring_i32(nside, vec, ipix)
+            integer(int32), intent(in) :: nside !! resolution parameter.
+            real(real64), intent(in) :: vec(3) !! a direction; any nonzero length.
+            integer(int32), intent(out) :: ipix !! the RING pixel containing it.
+        end subroutine hpx_vec2pix_ring_i32
+
+        !> `pf_vec2pix_ring`, int64 kinds.
+        pure module subroutine hpx_vec2pix_ring_i64(nside, vec, ipix)
+            integer(int64), intent(in) :: nside !! resolution parameter.
+            real(real64), intent(in) :: vec(3) !! a direction; any nonzero length.
+            integer(int64), intent(out) :: ipix !! the RING pixel containing it.
+        end subroutine hpx_vec2pix_ring_i64
+
+        !> `pf_vec2pix_nest`, int32 kinds.
+        pure module subroutine hpx_vec2pix_nest_i32(nside, vec, ipix)
+            integer(int32), intent(in) :: nside !! resolution parameter.
+            real(real64), intent(in) :: vec(3) !! a direction; any nonzero length.
+            integer(int32), intent(out) :: ipix !! the NEST pixel containing it.
+        end subroutine hpx_vec2pix_nest_i32
+
+        !> `pf_vec2pix_nest`, int64 kinds.
+        pure module subroutine hpx_vec2pix_nest_i64(nside, vec, ipix)
+            integer(int64), intent(in) :: nside !! resolution parameter.
+            real(real64), intent(in) :: vec(3) !! a direction; any nonzero length.
+            integer(int64), intent(out) :: ipix !! the NEST pixel containing it.
+        end subroutine hpx_vec2pix_nest_i64
+
+        !> `pf_ud_pix_nest`, int32.
+        pure elemental module subroutine hpx_ud_pix_nest_i32(ipix, order_in, order_out, ipix_out)
+            integer(int32), intent(in) :: ipix !! a NEST pixel index at `order_in`.
+            integer(int32), intent(in) :: order_in !! the order it belongs to, `0 .. 29`.
+            integer(int32), intent(in) :: order_out !! the order to convert it to, `0 .. 29`.
+            integer(int32), intent(out) :: ipix_out !! the result, or -1 out of domain.
+        end subroutine hpx_ud_pix_nest_i32
+
+        !> `pf_ud_pix_nest`, int64.
+        pure elemental module subroutine hpx_ud_pix_nest_i64(ipix, order_in, order_out, ipix_out)
+            integer(int64), intent(in) :: ipix !! a NEST pixel index at `order_in`.
+            integer(int64), intent(in) :: order_in !! the order it belongs to, `0 .. 29`.
+            integer(int64), intent(in) :: order_out !! the order to convert it to, `0 .. 29`.
+            integer(int64), intent(out) :: ipix_out !! the result, or -1 out of domain.
+        end subroutine hpx_ud_pix_nest_i64
+
+        !> The shared int64 worker behind `pf_ang2pix_ring` and `pf_vec2pix_ring`.
+        pure module function hpx_zphi2pix_ring(nside, z, phi) result(ipix)
+            integer(int64), intent(in) :: nside !! resolution parameter.
+            real(real64), intent(in) :: z !! `cos(theta)` of the direction.
+            real(real64), intent(in) :: phi !! its longitude, radians; any value.
+            integer(int64) :: ipix !! the RING pixel containing it.
+        end function hpx_zphi2pix_ring
+
+        !> The shared int64 worker behind `pf_ang2pix_nest` and `pf_vec2pix_nest`.
+        pure module function hpx_zphi2pix_nest(nside, z, phi) result(ipix)
+            integer(int64), intent(in) :: nside !! resolution parameter.
+            real(real64), intent(in) :: z !! `cos(theta)` of the direction.
+            real(real64), intent(in) :: phi !! its longitude, radians; any value.
+            integer(int64) :: ipix !! the NEST pixel containing it.
+        end function hpx_zphi2pix_nest
+    end interface
+
+    interface
+        !> `pf_nside2npix`, int32.
+        pure elemental module function hpx_nside2npix_i32(nside) result(npix)
+            integer(int32), intent(in) :: nside !! resolution parameter, `1 .. 8192`.
+            integer(int32) :: npix !! `12*nside**2`, or -1 out of domain.
+        end function hpx_nside2npix_i32
+
+        !> `pf_nside2npix`, int64.
+        pure elemental module function hpx_nside2npix_i64(nside) result(npix)
+            integer(int64), intent(in) :: nside !! resolution parameter, `1 .. 2**29`.
+            integer(int64) :: npix !! `12*nside**2`, or -1 out of domain.
+        end function hpx_nside2npix_i64
+
+        !> `pf_npix2nside`, int32.
+        pure elemental module function hpx_npix2nside_i32(npix) result(nside)
+            integer(int32), intent(in) :: npix !! a pixel count to validate and invert.
+            integer(int32) :: nside !! the resolution parameter, or -1 if `npix` is not valid.
+        end function hpx_npix2nside_i32
+
+        !> `pf_npix2nside`, int64.
+        pure elemental module function hpx_npix2nside_i64(npix) result(nside)
+            integer(int64), intent(in) :: npix !! a pixel count to validate and invert.
+            integer(int64) :: nside !! the resolution parameter, or -1 if `npix` is not valid.
+        end function hpx_npix2nside_i64
+
+        !> `pf_nside2order`, int32.
+        pure elemental module function hpx_nside2order_i32(nside) result(order)
+            integer(int32), intent(in) :: nside !! resolution parameter, `1 .. 8192`.
+            integer(int32) :: order !! `log2(nside)`, or -1 out of domain.
+        end function hpx_nside2order_i32
+
+        !> `pf_nside2order`, int64.
+        pure elemental module function hpx_nside2order_i64(nside) result(order)
+            integer(int64), intent(in) :: nside !! resolution parameter, `1 .. 2**29`.
+            integer(int64) :: order !! `log2(nside)`, or -1 out of domain.
+        end function hpx_nside2order_i64
+
+        !> `pf_order2nside`, int32.
+        pure elemental module function hpx_order2nside_i32(order) result(nside)
+            integer(int32), intent(in) :: order !! resolution order, `0 .. 13` for this kind.
+            integer(int32) :: nside !! `2**order`, or -1 out of domain.
+        end function hpx_order2nside_i32
+
+        !> `pf_order2nside`, int64.
+        pure elemental module function hpx_order2nside_i64(order) result(nside)
+            integer(int64), intent(in) :: order !! resolution order, `0 .. 29` for this kind.
+            integer(int64) :: nside !! `2**order`, or -1 out of domain.
+        end function hpx_order2nside_i64
+
+        !> `pf_nside2pixarea`, int32.
+        pure elemental module function hpx_nside2pixarea_i32(nside) result(area)
+            integer(int32), intent(in) :: nside !! resolution parameter, `1 .. 8192`.
+            real(real64) :: area !! steradians per pixel, or -1 out of domain.
+        end function hpx_nside2pixarea_i32
+
+        !> `pf_nside2pixarea`, int64.
+        pure elemental module function hpx_nside2pixarea_i64(nside) result(area)
+            integer(int64), intent(in) :: nside !! resolution parameter, `1 .. 2**29`.
+            real(real64) :: area !! steradians per pixel, or -1 out of domain.
+        end function hpx_nside2pixarea_i64
+
+        !> `pf_nside2resol`, int32.
+        pure elemental module function hpx_nside2resol_i32(nside) result(resol)
+            integer(int32), intent(in) :: nside !! resolution parameter, `1 .. 8192`.
+            real(real64) :: resol !! radians per pixel side, or -1 out of domain.
+        end function hpx_nside2resol_i32
+
+        !> `pf_nside2resol`, int64.
+        pure elemental module function hpx_nside2resol_i64(nside) result(resol)
+            integer(int64), intent(in) :: nside !! resolution parameter, `1 .. 2**29`.
+            real(real64) :: resol !! radians per pixel side, or -1 out of domain.
+        end function hpx_nside2resol_i64
+
+        !> `pf_pix2ring_ring`, int32.
+        pure elemental module function hpx_pix2ring_ring_i32(nside, ipix) result(iring)
+            integer(int32), intent(in) :: nside !! resolution parameter.
+            integer(int32), intent(in) :: ipix !! a RING pixel index.
+            integer(int32) :: iring !! its ring, `1 .. 4*nside-1`, or -1 out of domain.
+        end function hpx_pix2ring_ring_i32
+
+        !> `pf_pix2ring_ring`, int64.
+        pure elemental module function hpx_pix2ring_ring_i64(nside, ipix) result(iring)
+            integer(int64), intent(in) :: nside !! resolution parameter.
+            integer(int64), intent(in) :: ipix !! a RING pixel index.
+            integer(int64) :: iring !! its ring, `1 .. 4*nside-1`, or -1 out of domain.
+        end function hpx_pix2ring_ring_i64
+
+        !> `pf_pix2ring_nest`, int32.
+        pure elemental module function hpx_pix2ring_nest_i32(nside, ipix) result(iring)
+            integer(int32), intent(in) :: nside !! resolution parameter.
+            integer(int32), intent(in) :: ipix !! a NEST pixel index.
+            integer(int32) :: iring !! its ring, `1 .. 4*nside-1`, or -1 out of domain.
+        end function hpx_pix2ring_nest_i32
+
+        !> `pf_pix2ring_nest`, int64.
+        pure elemental module function hpx_pix2ring_nest_i64(nside, ipix) result(iring)
+            integer(int64), intent(in) :: nside !! resolution parameter.
+            integer(int64), intent(in) :: ipix !! a NEST pixel index.
+            integer(int64) :: iring !! its ring, `1 .. 4*nside-1`, or -1 out of domain.
+        end function hpx_pix2ring_nest_i64
+
+        !> `pf_ring2z`, int32.
+        pure elemental module function hpx_ring2z_i32(nside, iring) result(z)
+            integer(int32), intent(in) :: nside !! resolution parameter.
+            integer(int32), intent(in) :: iring !! ring index, `1 .. 4*nside-1`.
+            real(real64) :: z !! `cos(theta)` of that ring, or -2 out of domain.
+        end function hpx_ring2z_i32
+
+        !> `pf_ring2z`, int64.
+        pure elemental module function hpx_ring2z_i64(nside, iring) result(z)
+            integer(int64), intent(in) :: nside !! resolution parameter.
+            integer(int64), intent(in) :: iring !! ring index, `1 .. 4*nside-1`.
+            real(real64) :: z !! `cos(theta)` of that ring, or -2 out of domain.
+        end function hpx_ring2z_i64
+
+        !> `pf_chord2_from_angle`.
+        pure elemental module function hpx_chord2_from_angle(angle) result(chord2)
+            real(real64), intent(in) :: angle !! an angle in radians.
+            real(real64) :: chord2 !! the square of the chord it subtends on the unit sphere.
+        end function hpx_chord2_from_angle
+
+        !> `pf_angle_from_chord2`.
+        pure elemental module function hpx_angle_from_chord2(chord2) result(angle)
+            real(real64), intent(in) :: chord2 !! a squared chord; clamped into `[0, 4]`.
+            real(real64) :: angle !! the angle it subtends, radians, in `[0, pi]`.
+        end function hpx_angle_from_chord2
+    end interface
+
+    ! ---- Tier B: bulk forms ----
+    !
+    ! **Every conversion this module offers has a bulk form**, which is a rule rather than a list:
+    ! a module where some conversions have one and some do not is a module that gets asked about
+    ! the rest. What each one buys differs, and is worth stating plainly rather than implying:
+    !
+    !   * For the four whose scalar form is `pure elemental` -- `pf_ang2pix_*` and `pf_pix2ang_*`
+    !     -- a caller ALREADY has the array form, because an elemental procedure accepts array
+    !     actuals, and already has threading by writing `!$omp parallel do` around their own loop.
+    !     The bulk form adds the threading DISCIPLINE and nothing else: a thread count resolved
+    !     through the same rule every other tier in this library uses, which returns 1 inside
+    !     somebody else's parallel region instead of nesting, and which is clamped to the CPU
+    !     affinity mask instead of opening 64 threads onto 2 processors.
+    !   * For the other six, whose scalar form takes a rank-1 `vec(3)` and so cannot be elemental,
+    !     the bulk form supplies an array capability that does not otherwise exist.
+    !
+    ! **They are separate names rather than specifics of the existing generics, and that is
+    ! measured rather than stylistic.** Fortran permits an elemental and a non-elemental specific
+    ! in one generic and resolves an array-actual reference to the non-elemental one, so folding
+    ! them in is legal and does work -- and it would silently break every array call to those
+    ! generics from a `pure` procedure or a `do concurrent`, because the reference would then
+    ! resolve to the impure bulk specific and be rejected. `pf_ang2pix_ring` and friends are
+    ! published as `pure elemental`; that is a contract, and a name added here must not break it.
+    !
+    ! All eight below validate: `nside` once, array conformance, and an explicit `threads` of less
+    ! than one. That is the opposite of the elemental forms they wrap, which validate nothing -- and
+    ! it is right, because the check is once per array rather than once per element, and the
+    ! realistic mistake at a bulk call site is a bad `nside` read from a file or three arrays that
+    ! do not conform. A zero-sized input is a defined no-op.
+    !
+    ! Every one is bit-identical at every thread count: each element is a function of its own
+    ! inputs alone, there is no reduction anywhere, and the schedule is static.
+    !> Bulk `pf_ang2pix_ring`, optionally threaded. See the banner above for what this buys.
+    interface pf_ang2pix_ring_bulk
+        module procedure hpx_ang2pix_ring_bulk_i32
+        module procedure hpx_ang2pix_ring_bulk_i64
+    end interface pf_ang2pix_ring_bulk
+
+    !> Bulk `pf_ang2pix_nest`, optionally threaded. See the banner above for what this buys.
+    interface pf_ang2pix_nest_bulk
+        module procedure hpx_ang2pix_nest_bulk_i32
+        module procedure hpx_ang2pix_nest_bulk_i64
+    end interface pf_ang2pix_nest_bulk
+
+    !> Bulk `pf_pix2ang_ring`, optionally threaded. See the banner above for what this buys.
+    interface pf_pix2ang_ring_bulk
+        module procedure hpx_pix2ang_ring_bulk_i32
+        module procedure hpx_pix2ang_ring_bulk_i64
+    end interface pf_pix2ang_ring_bulk
+
+    !> Bulk `pf_pix2ang_nest`, optionally threaded. See the banner above for what this buys.
+    interface pf_pix2ang_nest_bulk
+        module procedure hpx_pix2ang_nest_bulk_i32
+        module procedure hpx_pix2ang_nest_bulk_i64
+    end interface pf_pix2ang_nest_bulk
+
+    !> Bulk `pf_vec2pix_ring`, optionally threaded. See the banner above for what this buys.
+    interface pf_vec2pix_ring_bulk
+        module procedure hpx_vec2pix_ring_bulk_i32
+        module procedure hpx_vec2pix_ring_bulk_i64
+    end interface pf_vec2pix_ring_bulk
+
+    !> Bulk `pf_vec2pix_nest`, optionally threaded. See the banner above for what this buys.
+    interface pf_vec2pix_nest_bulk
+        module procedure hpx_vec2pix_nest_bulk_i32
+        module procedure hpx_vec2pix_nest_bulk_i64
+    end interface pf_vec2pix_nest_bulk
+
+    !> Bulk `pf_pix2vec_ring`, optionally threaded. See the banner above for what this buys.
+    interface pf_pix2vec_ring_bulk
+        module procedure hpx_pix2vec_ring_bulk_i32
+        module procedure hpx_pix2vec_ring_bulk_i64
+    end interface pf_pix2vec_ring_bulk
+
+    !> Bulk `pf_pix2vec_nest`, optionally threaded. See the banner above for what this buys.
+    interface pf_pix2vec_nest_bulk
+        module procedure hpx_pix2vec_nest_bulk_i32
+        module procedure hpx_pix2vec_nest_bulk_i64
+    end interface pf_pix2vec_nest_bulk
+    !> Bulk `pf_ang2vec`, optionally threaded.
+    !!
+    !! `theta`, `phi` and `vec(3, n)` must conform. This is the one conversion with a named
+    !! downstream caller in the projects this module was written for -- a survey pipeline turning
+    !! several million target positions into unit vectors -- and it has no array form at all
+    !! without this.
+    interface pf_ang2vec_bulk
+        module procedure hpx_ang2vec_bulk
+    end interface pf_ang2vec_bulk
+
+    !> Bulk `pf_vec2ang`, optionally threaded.
+    interface pf_vec2ang_bulk
+        module procedure hpx_vec2ang_bulk
+    end interface pf_vec2ang_bulk
+
+    ! ---- Interfaces: Tier B bulk forms ----
+    !
+    ! Implemented in submodule parquet_healpix_bulk, the only file in this tier containing an
+    ! OpenMP directive.
+
+    interface
+        !> `pf_ang2pix_ring_bulk`, int32 kinds.
+        module subroutine hpx_ang2pix_ring_bulk_i32(nside, theta, phi, ipix, threads)
+            integer(int32), intent(in) :: nside !! resolution parameter, a positive power of two.
+            real(real64), intent(in) :: theta(:) !! colatitudes, radians.
+            real(real64), intent(in) :: phi(:) !! longitudes, radians; any values.
+            integer(int32), intent(out) :: ipix(:) !! the pixel containing each direction.
+            integer, intent(in), optional :: threads !! threads to open; absent resolves automatically.
+        end subroutine hpx_ang2pix_ring_bulk_i32
+        !> `pf_ang2pix_ring_bulk`, int64 kinds.
+        module subroutine hpx_ang2pix_ring_bulk_i64(nside, theta, phi, ipix, threads)
+            integer(int64), intent(in) :: nside !! resolution parameter, a positive power of two.
+            real(real64), intent(in) :: theta(:) !! colatitudes, radians.
+            real(real64), intent(in) :: phi(:) !! longitudes, radians; any values.
+            integer(int64), intent(out) :: ipix(:) !! the pixel containing each direction.
+            integer, intent(in), optional :: threads !! threads to open; absent resolves automatically.
+        end subroutine hpx_ang2pix_ring_bulk_i64
+        !> `pf_ang2pix_nest_bulk`, int32 kinds.
+        module subroutine hpx_ang2pix_nest_bulk_i32(nside, theta, phi, ipix, threads)
+            integer(int32), intent(in) :: nside !! resolution parameter, a positive power of two.
+            real(real64), intent(in) :: theta(:) !! colatitudes, radians.
+            real(real64), intent(in) :: phi(:) !! longitudes, radians; any values.
+            integer(int32), intent(out) :: ipix(:) !! the pixel containing each direction.
+            integer, intent(in), optional :: threads !! threads to open; absent resolves automatically.
+        end subroutine hpx_ang2pix_nest_bulk_i32
+        !> `pf_ang2pix_nest_bulk`, int64 kinds.
+        module subroutine hpx_ang2pix_nest_bulk_i64(nside, theta, phi, ipix, threads)
+            integer(int64), intent(in) :: nside !! resolution parameter, a positive power of two.
+            real(real64), intent(in) :: theta(:) !! colatitudes, radians.
+            real(real64), intent(in) :: phi(:) !! longitudes, radians; any values.
+            integer(int64), intent(out) :: ipix(:) !! the pixel containing each direction.
+            integer, intent(in), optional :: threads !! threads to open; absent resolves automatically.
+        end subroutine hpx_ang2pix_nest_bulk_i64
+        !> `pf_pix2ang_ring_bulk`, int32 kinds.
+        module subroutine hpx_pix2ang_ring_bulk_i32(nside, ipix, theta, phi, threads)
+            integer(int32), intent(in) :: nside !! resolution parameter, a positive power of two.
+            integer(int32), intent(in) :: ipix(:) !! pixel indices.
+            real(real64), intent(out) :: theta(:) !! each pixel centre's colatitude, radians.
+            real(real64), intent(out) :: phi(:) !! each pixel centre's longitude, radians.
+            integer, intent(in), optional :: threads !! threads to open; absent resolves automatically.
+        end subroutine hpx_pix2ang_ring_bulk_i32
+        !> `pf_pix2ang_ring_bulk`, int64 kinds.
+        module subroutine hpx_pix2ang_ring_bulk_i64(nside, ipix, theta, phi, threads)
+            integer(int64), intent(in) :: nside !! resolution parameter, a positive power of two.
+            integer(int64), intent(in) :: ipix(:) !! pixel indices.
+            real(real64), intent(out) :: theta(:) !! each pixel centre's colatitude, radians.
+            real(real64), intent(out) :: phi(:) !! each pixel centre's longitude, radians.
+            integer, intent(in), optional :: threads !! threads to open; absent resolves automatically.
+        end subroutine hpx_pix2ang_ring_bulk_i64
+        !> `pf_pix2ang_nest_bulk`, int32 kinds.
+        module subroutine hpx_pix2ang_nest_bulk_i32(nside, ipix, theta, phi, threads)
+            integer(int32), intent(in) :: nside !! resolution parameter, a positive power of two.
+            integer(int32), intent(in) :: ipix(:) !! pixel indices.
+            real(real64), intent(out) :: theta(:) !! each pixel centre's colatitude, radians.
+            real(real64), intent(out) :: phi(:) !! each pixel centre's longitude, radians.
+            integer, intent(in), optional :: threads !! threads to open; absent resolves automatically.
+        end subroutine hpx_pix2ang_nest_bulk_i32
+        !> `pf_pix2ang_nest_bulk`, int64 kinds.
+        module subroutine hpx_pix2ang_nest_bulk_i64(nside, ipix, theta, phi, threads)
+            integer(int64), intent(in) :: nside !! resolution parameter, a positive power of two.
+            integer(int64), intent(in) :: ipix(:) !! pixel indices.
+            real(real64), intent(out) :: theta(:) !! each pixel centre's colatitude, radians.
+            real(real64), intent(out) :: phi(:) !! each pixel centre's longitude, radians.
+            integer, intent(in), optional :: threads !! threads to open; absent resolves automatically.
+        end subroutine hpx_pix2ang_nest_bulk_i64
+        !> `pf_vec2pix_ring_bulk`, int32 kinds.
+        module subroutine hpx_vec2pix_ring_bulk_i32(nside, vec, ipix, threads)
+            integer(int32), intent(in) :: nside !! resolution parameter, a positive power of two.
+            real(real64), intent(in) :: vec(:,:) !! directions, shaped `(3, n)`; any nonzero length.
+            integer(int32), intent(out) :: ipix(:) !! the pixel containing each direction.
+            integer, intent(in), optional :: threads !! threads to open; absent resolves automatically.
+        end subroutine hpx_vec2pix_ring_bulk_i32
+        !> `pf_vec2pix_ring_bulk`, int64 kinds.
+        module subroutine hpx_vec2pix_ring_bulk_i64(nside, vec, ipix, threads)
+            integer(int64), intent(in) :: nside !! resolution parameter, a positive power of two.
+            real(real64), intent(in) :: vec(:,:) !! directions, shaped `(3, n)`; any nonzero length.
+            integer(int64), intent(out) :: ipix(:) !! the pixel containing each direction.
+            integer, intent(in), optional :: threads !! threads to open; absent resolves automatically.
+        end subroutine hpx_vec2pix_ring_bulk_i64
+        !> `pf_vec2pix_nest_bulk`, int32 kinds.
+        module subroutine hpx_vec2pix_nest_bulk_i32(nside, vec, ipix, threads)
+            integer(int32), intent(in) :: nside !! resolution parameter, a positive power of two.
+            real(real64), intent(in) :: vec(:,:) !! directions, shaped `(3, n)`; any nonzero length.
+            integer(int32), intent(out) :: ipix(:) !! the pixel containing each direction.
+            integer, intent(in), optional :: threads !! threads to open; absent resolves automatically.
+        end subroutine hpx_vec2pix_nest_bulk_i32
+        !> `pf_vec2pix_nest_bulk`, int64 kinds.
+        module subroutine hpx_vec2pix_nest_bulk_i64(nside, vec, ipix, threads)
+            integer(int64), intent(in) :: nside !! resolution parameter, a positive power of two.
+            real(real64), intent(in) :: vec(:,:) !! directions, shaped `(3, n)`; any nonzero length.
+            integer(int64), intent(out) :: ipix(:) !! the pixel containing each direction.
+            integer, intent(in), optional :: threads !! threads to open; absent resolves automatically.
+        end subroutine hpx_vec2pix_nest_bulk_i64
+        !> `pf_pix2vec_ring_bulk`, int32 kinds.
+        module subroutine hpx_pix2vec_ring_bulk_i32(nside, ipix, vec, threads)
+            integer(int32), intent(in) :: nside !! resolution parameter, a positive power of two.
+            integer(int32), intent(in) :: ipix(:) !! pixel indices.
+            real(real64), intent(out) :: vec(:,:) !! each pixel centre, shaped `(3, n)`.
+            integer, intent(in), optional :: threads !! threads to open; absent resolves automatically.
+        end subroutine hpx_pix2vec_ring_bulk_i32
+        !> `pf_pix2vec_ring_bulk`, int64 kinds.
+        module subroutine hpx_pix2vec_ring_bulk_i64(nside, ipix, vec, threads)
+            integer(int64), intent(in) :: nside !! resolution parameter, a positive power of two.
+            integer(int64), intent(in) :: ipix(:) !! pixel indices.
+            real(real64), intent(out) :: vec(:,:) !! each pixel centre, shaped `(3, n)`.
+            integer, intent(in), optional :: threads !! threads to open; absent resolves automatically.
+        end subroutine hpx_pix2vec_ring_bulk_i64
+        !> `pf_pix2vec_nest_bulk`, int32 kinds.
+        module subroutine hpx_pix2vec_nest_bulk_i32(nside, ipix, vec, threads)
+            integer(int32), intent(in) :: nside !! resolution parameter, a positive power of two.
+            integer(int32), intent(in) :: ipix(:) !! pixel indices.
+            real(real64), intent(out) :: vec(:,:) !! each pixel centre, shaped `(3, n)`.
+            integer, intent(in), optional :: threads !! threads to open; absent resolves automatically.
+        end subroutine hpx_pix2vec_nest_bulk_i32
+        !> `pf_pix2vec_nest_bulk`, int64 kinds.
+        module subroutine hpx_pix2vec_nest_bulk_i64(nside, ipix, vec, threads)
+            integer(int64), intent(in) :: nside !! resolution parameter, a positive power of two.
+            integer(int64), intent(in) :: ipix(:) !! pixel indices.
+            real(real64), intent(out) :: vec(:,:) !! each pixel centre, shaped `(3, n)`.
+            integer, intent(in), optional :: threads !! threads to open; absent resolves automatically.
+        end subroutine hpx_pix2vec_nest_bulk_i64
+        !> `pf_ang2vec_bulk`. Not generic: no integer argument to be generic over.
+        module subroutine hpx_ang2vec_bulk(theta, phi, vec, threads)
+            real(real64), intent(in) :: theta(:) !! colatitudes, radians.
+            real(real64), intent(in) :: phi(:) !! longitudes, radians; any values.
+            real(real64), intent(out) :: vec(:,:) !! the unit vectors, shaped `(3, n)`.
+            integer, intent(in), optional :: threads !! threads to open; absent resolves automatically.
+        end subroutine hpx_ang2vec_bulk
+
+        !> `pf_vec2ang_bulk`. Not generic: no integer argument to be generic over.
+        module subroutine hpx_vec2ang_bulk(vec, theta, phi, threads)
+            real(real64), intent(in) :: vec(:,:) !! directions, shaped `(3, n)`; any nonzero length.
+            real(real64), intent(out) :: theta(:) !! each direction's colatitude, radians.
+            real(real64), intent(out) :: phi(:) !! each direction's longitude, radians.
+            integer, intent(in), optional :: threads !! threads to open; absent resolves automatically.
+        end subroutine hpx_vec2ang_bulk
+
+        !> Threads to open for a bulk call of `n` elements, after every rule and the affinity clamp.
+        module function hpx_threads(threads, n, what) result(nt)
+            integer, intent(in), optional :: threads !! an explicit request; absent resolves automatically.
+            integer(int64), intent(in) :: n !! elements the call will process.
+            character(len=*), intent(in) :: what !! the calling entry point, for the message.
+            integer :: nt !! threads to open; 1 means run serially.
+        end function hpx_threads
+
+        !> Aborts unless every extent matches `n`, naming the caller and the offending sizes.
+        module subroutine hpx_check_bulk_sizes(n, sizes, what)
+            integer(int64), intent(in) :: n !! the expected extent.
+            integer(int64), intent(in) :: sizes(:) !! the extents to compare against it.
+            character(len=*), intent(in) :: what !! the calling entry point, for the message.
+        end subroutine hpx_check_bulk_sizes
     end interface
 
     ! ---- Interfaces: small shared helpers ----

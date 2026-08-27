@@ -306,11 +306,18 @@ contains
     ! ---- Position -> pixel ----
 
     module procedure hpx_ang2pix_ring_i64
-        real(real64) :: z, za, tt, temp1, temp2, tp, tmp, rn
+        ! Split into a `z`/`phi` worker so that `pf_vec2pix_ring` can reach it without computing
+        ! `theta = acos(z)` only for this line to take its cosine again. Every operation below the
+        ! cosine is unchanged and in its original order, which is what keeps the result
+        ! bit-identical to what the frozen vectors were generated against.
+        ipix = hpx_zphi2pix_ring(nside, cos(theta), phi)
+    end procedure hpx_ang2pix_ring_i64
+
+    module procedure hpx_zphi2pix_ring
+        real(real64) :: za, tt, temp1, temp2, tp, tmp, rn
         integer(int64) :: jp, jm, ir, kshift, ip
 
         rn = real(nside, real64)
-        z = cos(theta)
         za = abs(z)
         tt = modulo(phi / hpx_halfpi, 4.0_real64)
         if (za <= hpx_twothird) then
@@ -342,7 +349,7 @@ contains
                 ipix = 12_int64 * nside * nside - 2_int64 * ir * (ir + 1_int64) + ip
             end if
         end if
-    end procedure hpx_ang2pix_ring_i64
+    end procedure hpx_zphi2pix_ring
 
     module procedure hpx_ang2pix_ring_i32
         integer(int64) :: p
@@ -351,12 +358,88 @@ contains
         ipix = int(p, int32)
     end procedure hpx_ang2pix_ring_i32
 
+    ! ---- Direction to pixel ----
+    !
+    ! These reach the same `z`/`phi` workers `pf_ang2pix_*` does, one step further in: a caller
+    ! holding a unit vector already has `z`, so routing through `pf_vec2ang` would compute an
+    ! inverse tangent for this file to undo with a cosine, and lose a rounding at each end.
+
+    module procedure hpx_vec2pix_ring_i64
+        real(real64) :: x, y, z
+
+        call hpx_vec_unit(vec, x, y, z)
+        ipix = hpx_zphi2pix_ring(nside, z, hpx_xy2phi(x, y))
+    end procedure hpx_vec2pix_ring_i64
+
+    module procedure hpx_vec2pix_ring_i32
+        integer(int64) :: p
+
+        call hpx_vec2pix_ring_i64(int(nside, int64), vec, p)
+        ipix = int(p, int32)
+    end procedure hpx_vec2pix_ring_i32
+
+    module procedure hpx_vec2pix_nest_i64
+        real(real64) :: x, y, z
+
+        call hpx_vec_unit(vec, x, y, z)
+        ipix = hpx_zphi2pix_nest(nside, z, hpx_xy2phi(x, y))
+    end procedure hpx_vec2pix_nest_i64
+
+    module procedure hpx_vec2pix_nest_i32
+        integer(int64) :: p
+
+        call hpx_vec2pix_nest_i64(int(nside, int64), vec, p)
+        ipix = int(p, int32)
+    end procedure hpx_vec2pix_nest_i32
+
+    ! ---- Nested resolution change ----
+
+    module procedure hpx_ud_pix_nest_i64
+        ! The guard is not about caller mistakes so much as about the SHIFT: a shift whose
+        ! magnitude reaches the integer's bit size is not defined by the standard and is a
+        ! diagnosable condition under -fcheck=all, so a procedure that shifted whatever it was
+        ! given could abort in a checked build on input a released build merely gets wrong.
+        ! Bounding both orders to 0 .. 29 makes the largest legal shift 58 bits.
+        !
+        ! The UPPER bound on `ipix` (< 12 * 4**order_in) is deliberately not checked: it costs a
+        ! multiply on the one axis a caller may sweep, and an out-of-range input already produces
+        ! a visibly out-of-range result.
+        if (ipix < 0_int64 .or. order_in < 0_int64 .or. order_in > hpx_order_max .or. &
+            order_out < 0_int64 .or. order_out > hpx_order_max) then
+            ipix_out = -1_int64
+        else if (order_out >= order_in) then
+            ipix_out = ishft(ipix, int(2_int64 * (order_out - order_in)))
+        else
+            ipix_out = ishft(ipix, -int(2_int64 * (order_in - order_out)))
+        end if
+    end procedure hpx_ud_pix_nest_i64
+
+    module procedure hpx_ud_pix_nest_i32
+        integer(int64) :: p
+
+        ! The int32 form caps both orders at 13, its own nside ceiling, rather than at 29: an
+        ! order above 13 names a resolution whose pixel indices this kind cannot hold, so a
+        ! result computed for it could only be an overflow waiting to happen.
+        if (ipix < 0_int32 .or. order_in < 0_int32 .or. order_in > hpx_order_max_i32 .or. &
+            order_out < 0_int32 .or. order_out > hpx_order_max_i32) then
+            ipix_out = -1_int32
+        else
+            call hpx_ud_pix_nest_i64(int(ipix, int64), int(order_in, int64), &
+                                     int(order_out, int64), p)
+            ipix_out = int(p, int32)
+        end if
+    end procedure hpx_ud_pix_nest_i32
+
     module procedure hpx_ang2pix_nest_i64
-        real(real64) :: z, za, tt, temp1, temp2, tp, tmp, rn
+        ! See `hpx_ang2pix_ring_i64`: the same split, for the same reason.
+        ipix = hpx_zphi2pix_nest(nside, cos(theta), phi)
+    end procedure hpx_ang2pix_nest_i64
+
+    module procedure hpx_zphi2pix_nest
+        real(real64) :: za, tt, temp1, temp2, tp, tmp, rn
         integer(int64) :: jp, jm, ifp, ifm, face, ix, iy, ntt
 
         rn = real(nside, real64)
-        z = cos(theta)
         za = abs(z)
         tt = modulo(phi / hpx_halfpi, 4.0_real64)
         if (za <= hpx_twothird) then
@@ -405,7 +488,7 @@ contains
             end if
         end if
         ipix = face * nside * nside + ior(hpx_spread_bits(ix), ishft(hpx_spread_bits(iy), 1))
-    end procedure hpx_ang2pix_nest_i64
+    end procedure hpx_zphi2pix_nest
 
     module procedure hpx_ang2pix_nest_i32
         integer(int64) :: p

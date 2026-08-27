@@ -2041,6 +2041,18 @@ program error_scenarios
         call scenario_healpix_disc_bad_scheme()
     case ("healpix_disc_buffer_too_small")
         call scenario_healpix_disc_buffer_too_small()
+    case ("healpix_disc_count_bad_nside")
+        call scenario_healpix_disc_count_bad_nside()
+    case ("healpix_disc_alloc_bad_scheme")
+        call scenario_healpix_disc_alloc_bad_scheme()
+    case ("healpix_bulk_nside_invalid")
+        call scenario_healpix_bulk_nside_invalid()
+    case ("healpix_bulk_size_mismatch")
+        call scenario_healpix_bulk_size_mismatch()
+    case ("healpix_bulk_threads_zero")
+        call scenario_healpix_bulk_threads_zero()
+    case ("healpix_bulk_vec_shape")
+        call scenario_healpix_bulk_vec_shape()
     case ("spatial_sky_query_on_euclidean")
         call scenario_spatial_sky_query_on_euclidean()
     case ("spatial_euclidean_query_on_sky")
@@ -18455,5 +18467,75 @@ contains
         call pf_query_disc(16_int64, [0.0_real64, 0.0_real64, 1.0_real64], 0.5_real64, listpix, nlist)
         print '(a)', "unexpectedly filled a buffer too small for the result"
     end subroutine scenario_healpix_disc_buffer_too_small
+
+    ! ---- Tier B ----
+    !
+    ! **Six scenarios, not twenty-seven, and the difference is deliberate.** The nine validation
+    ! rules `pf_query_disc` aborts on are the SHARED validator's, and the ten scenarios above
+    ! already cover them nine ways. Re-running all nine against each new entry point would test
+    ! the same code three times and the new plumbing zero times more. What is actually new is that
+    ! three entry points now share one validator and each must name ITSELF in the message, and
+    ! that the bulk forms have three rules of their own that nothing else has.
+
+    !> `pf_query_disc_count` on an nside that is not a power of two: the message must name it.
+    subroutine scenario_healpix_disc_count_bad_nside()
+        integer(int64) :: nlist
+
+        call pf_query_disc_count(6_int64, [0.0_real64, 0.0_real64, 1.0_real64], 0.1_real64, nlist)
+        print '(a)', "unexpectedly accepted nside= 6"
+    end subroutine scenario_healpix_disc_count_bad_nside
+
+    !> `pf_query_disc_alloc` on an unknown scheme: the message must name it, not its sibling.
+    subroutine scenario_healpix_disc_alloc_bad_scheme()
+        integer(int64) :: nlist
+        integer(int64), allocatable :: listpix(:)
+
+        call pf_query_disc_alloc(4_int64, [0.0_real64, 0.0_real64, 1.0_real64], 0.1_real64, &
+                                 listpix, nlist, scheme=9)
+        print '(a)', "unexpectedly accepted scheme= 9"
+    end subroutine scenario_healpix_disc_alloc_bad_scheme
+
+    !> A bulk form on an invalid nside. The elemental form it wraps would return nonsense here.
+    subroutine scenario_healpix_bulk_nside_invalid()
+        real(real64) :: theta(3), phi(3)
+        integer(int64) :: ipix(3)
+
+        theta = [0.1_real64, 0.5_real64, 1.0_real64]
+        phi = [0.0_real64, 1.0_real64, 2.0_real64]
+        call pf_ang2pix_ring_bulk(0_int64, theta, phi, ipix)
+        print '(a)', "unexpectedly accepted nside= 0"
+    end subroutine scenario_healpix_bulk_nside_invalid
+
+    !> Three arrays that do not conform.
+    subroutine scenario_healpix_bulk_size_mismatch()
+        real(real64) :: theta(3), phi(3)
+        integer(int64) :: ipix(2)
+
+        theta = [0.1_real64, 0.5_real64, 1.0_real64]
+        phi = [0.0_real64, 1.0_real64, 2.0_real64]
+        call pf_ang2pix_ring_bulk(16_int64, theta, phi, ipix)
+        print '(a)', "unexpectedly accepted a short output array"
+    end subroutine scenario_healpix_bulk_size_mismatch
+
+    !> An explicit thread count below one.
+    subroutine scenario_healpix_bulk_threads_zero()
+        real(real64) :: theta(3), phi(3)
+        integer(int64) :: ipix(3)
+
+        theta = [0.1_real64, 0.5_real64, 1.0_real64]
+        phi = [0.0_real64, 1.0_real64, 2.0_real64]
+        call pf_ang2pix_ring_bulk(16_int64, theta, phi, ipix, threads=0)
+        print '(a)', "unexpectedly accepted threads= 0"
+    end subroutine scenario_healpix_bulk_threads_zero
+
+    !> A vector array whose first extent is not 3.
+    subroutine scenario_healpix_bulk_vec_shape()
+        real(real64) :: vec(2, 3)
+        integer(int64) :: ipix(3)
+
+        vec = 1.0_real64
+        call pf_vec2pix_ring_bulk(16_int64, vec, ipix)
+        print '(a)', "unexpectedly accepted a vec array of the wrong shape"
+    end subroutine scenario_healpix_bulk_vec_shape
 
 end program error_scenarios

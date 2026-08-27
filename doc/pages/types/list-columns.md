@@ -278,8 +278,8 @@ same length. A list under a `STRUCT` is addressable by its dotted path (`"nested
 other leaf.
 
 A column whose elements are themselves a container — a `list<list<...>>`, a `list<struct<...>>`, a
-`list<map<...>>` — is refused with a message naming the element type. Nesting arrives in a later
-release.
+`list<map<...>>` — reads too, and the nesting is not depth-limited. See
+[Nested containers](#nested-containers) below for how to reach the payload.
 
 **A list column and a vector column are two readings of the same file column, and the caller's
 chosen output type picks which.** A `LIST` column whose rows happen to be uniformly 3 long reads
@@ -381,10 +381,71 @@ Open the file with `list_columns="container"` to have every variable-length `LIS
 classified as one, from the schema alone -- see
 [Opening a table](../tables/table-open.html).
 
+## Nested containers
+
+A list's payload may itself be a container — `list<struct<...>>`, `list<map<...>>`,
+`list<list<...>>` — **on read**. The nesting is not depth-limited: `deep_nested` in this project's
+own fixtures is a `list<struct<name, tags:list<string>, meta:map<string,int32>>>` and reads whole.
+
+Two things make that work, and both are worth knowing before reaching for it.
+
+**Nesting is built by ADOPTION, never declared.** `%init` fixes one payload *kind*, and a nested
+payload is a kind plus a whole inner schema — so `%init(PK_STRUCT)` would produce a list whose
+payload is a struct column with no fields, which has no route out of it. `%init` therefore refuses a
+container kind and says so. Build the inner container first and hand it over:
+
+```fortran
+type(parquet_struct_column)                  :: sc
+type(parquet_column)                         :: payload
+type(parquet_list_column)                    :: lc
+class(parquet_container_column), allocatable :: cc
+integer(int64), allocatable                  :: offsets(:)
+
+call sc%init(["id"], [PK_INT32])          ! build the inner container, fields and all
+! ... fill it ...
+allocate(cc, source=sc)
+call payload%adopt_container(cc)          ! -> a PK_STRUCT parquet_column; cc is left empty
+offsets = [0_int64, 2_int64, 2_int64, 4_int64]
+call lc%adopt_rows(offsets, payload)      ! -> list<struct<id:int32>>
+```
+
+**The payload is reached with `%nested`, not `%get`.** `%get`'s specifics cover the nine scalar and
+temporal payload kinds, and there is no array shape a `list<struct<...>>` row could be copied into.
+`%nested` hands back the flattened inner container plus the half-open range of *its* rows that
+belong to this row:
+
+```fortran
+h = lc%view(i)
+call h%nested(inner, lo, hi)
+select type (inner)
+type is (parquet_struct_column)
+    do k = lo, hi
+        r = inner%view(k)
+        call r%get_field("id", value)
+    end do
+end select
+```
+
+`inner` comes back null, and `lo > hi`, when the payload is not a container or the row is null or
+empty — so a caller that has not checked `%element_kind()` gets an empty loop rather than a wrong
+answer. The pointer is borrowed and is invalidated by anything that rebuilds the payload.
+
+`%kind_text()` reports the whole nested spelling (`list<struct<x:int32,y:string>>`), and it is the
+only query that recurses: `%kindof()` stays `PK_LIST` at every depth.
+
+**A nested leaf is also addressable directly**, by a descent path — `"list_of_struct[].x"` names the
+`x` field of the struct elements and reads as an ordinary `integer(int32)` column of one value per
+*element*. `[]` descends into a list, `{key}` and `{value}` into a map, and they compose
+(`"deep_nested[].tags[]"`). Such a path resolves but is deliberately **not** listed by
+`parquet_get_column_names`, and is refused by `qc:`, `parquet_filter` and `sort_by=`, which apply to
+scalar leaves only.
+
 ## What this module does not do yet
 
-- **No nesting.** A list of lists, a list of structs and a list of maps are not available; the
-  payload must be one of the nine scalar kinds. `STRUCT` columns have their own type — see
-  [Struct columns with `parquet_struct_column`](struct-columns.html) — but a struct cannot be a
-  list's payload and a list cannot be a struct's field. `MAP` is not available at all yet.
+- **No nested WRITING.** A nested column reads (see [Nested containers](#nested-containers)) and
+  cannot be written back: `parquet_write_column` refuses one, naming the column and the payload
+  kind. A nested column read from a file can therefore be inspected but not round-tripped.
+- **No `list<fixed_size_list<...>>`.** A `*_VEC` payload is refused on every path, `%init` and
+  `%adopt_rows` alike. That is a different shape from a container payload — a fixed-width vector
+  inside a variable-length list — and this library neither reads nor writes it at any depth.
 - **No `%append` between container columns**, and no `%paste` at all — see above.

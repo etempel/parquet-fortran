@@ -2092,77 +2092,69 @@ contains
         integer(int64), allocatable :: ids(:)
         integer :: i
         logical :: saw_unreadable, ok
-        character(len=*), parameter :: f = "test/fixtures/map_list_types.parquet"
+        character(len=*), parameter :: f = "test/fixtures/map_payloads.parquet"
         !
         ! map_list_types.parquet carries a map whose VALUES are themselves maps, which this
         ! library cannot read at any nesting depth. Opening the file must still work: the column
         ! gets a slot, appears in the listing, and is simply marked unreadable.
         !
-        ! The unreadable column here has been replaced TWICE, each time because the library learned
-        ! to read what it used to name -- which is the shape to expect of this test rather than a
-        ! sign of churn. It was extended_types.parquet's `v_uint32` until parquet_get_column_type
-        ! gained the narrowest-lossless mapping (test_widened_types_are_readable below pins the
-        ! other side of that change), then `map_col` until a MAP column became an ordinary PK_MAP
-        ! table column. `map_of_map` is the current choice because its unreadability is structural:
-        ! a map's value type must be one of the nine element tokens, and a MAP is not one of them.
-        ! If nested containers are ever supported, pick another column from this same fixture --
-        ! `struct_of_map.attrs` is the most durable, since it is a name that does not resolve at all
-        ! rather than a type that might one day be read.
+        ! The unreadable column here has been replaced THREE times, each time because the library
+        ! learned to read what it used to name -- which is the shape to expect of this test rather
+        ! than a sign of churn. It was extended_types.parquet's `v_uint32` until
+        ! parquet_get_column_type gained the narrowest-lossless mapping
+        ! (test_widened_types_are_readable below pins the other side of that change), then
+        ! `map_col` until a MAP column became an ordinary PK_MAP table column, then `map_of_map`
+        ! until Phase 7 taught a map to hold a container value.
+        !
+        ! `m_intkey` is the current choice and should be the LAST one, because its unreadability is
+        ! not a deferral: a map's keys must be strings, which is a decided scope for v1 rather than
+        ! a phase's unfinished business (feature_map_list_struct.md, "Map key type and duplicate
+        ! handling"). Every predecessor named a type some later phase went on to read. If this one
+        ! ever has to move too, prefer another DECIDED restriction over anything a roadmap mentions.
         call parquet_open_table(t, f)
         call check(error, t%nrows() > 0, "a file with a foreign column should still open")
         if (allocated(error)) return
         call t%column_names(names)
         saw_unreadable = .false.
         do i = 1, size(names)
-            if (trim(names(i)) == "map_of_map") saw_unreadable = .true.
+            if (trim(names(i)) == "m_intkey") saw_unreadable = .true.
         end do
         call check(error, saw_unreadable, "an unsupported column should still be listed")
         if (allocated(error)) return
-        call check(error, .not. t%is_supported("map_of_map"), &
-            "a map whose value type is itself a map should report as unsupported")
+        call check(error, .not. t%is_supported("m_intkey"), &
+            "a map with non-string keys should report as unsupported")
         if (allocated(error)) return
-        call check(error, t%kind("map_of_map") == PK_NONE, &
+        call check(error, t%kind("m_intkey") == PK_NONE, &
             "an unsupported column should have no PK_* kind")
         if (allocated(error)) return
-        call check(error, t%residency("map_of_map") == RES_EMPTY, &
+        call check(error, t%residency("m_intkey") == RES_EMPTY, &
             "an unsupported column should hold no values")
         if (allocated(error)) return
         ! The NEGATIVE CONTROL for the clause above, and it is what stops this test passing against
-        ! a classification pass that simply refused every map: a map with a readable value type in
-        ! the same file is supported, and is a PK_MAP column.
-        call check(error, t%is_supported("map_col"), &
-            "a map with a readable value type should be supported")
+        ! a classification pass that simply refused every map: a map with STRING keys in the same
+        ! file is supported, and is a PK_MAP column. The two differ only in the key type.
+        call check(error, t%is_supported("m_int32"), &
+            "a map with string keys and a readable value type should be supported")
         if (allocated(error)) return
-        call check(error, t%kind("map_col") == PK_MAP, "a readable map column reports PK_MAP")
+        call check(error, t%kind("m_int32") == PK_MAP, "a readable map column reports PK_MAP")
         if (allocated(error)) return
-        ! A supported column in the same file still works normally. It has to be a genuine SCALAR
-        ! leaf: every top-level column in this fixture is a container, and `list_col` -- the
-        ! obvious-looking choice -- is a RAGGED list<int32> (rows of length 2, 0, 3), so it aborts
-        ! on read for want of a single width.
-        !
-        ! `%is_supported` reports .true. for it all the same, and that is correct rather than a
-        ! wart: a plain LIST carries no width in the schema, so a list<int32> whose rows are all
-        ! the same length IS an ordinary vector column (see test/fixtures/list_widths.parquet's
-        ! `uniform`). Whether a given plain-LIST column is usable is a property of the DATA, which
-        ! %is_supported does not read -- %width is the query that resolves it for real.
-        ! `struct_of_struct.inner.a` is an int32 leaf reached through a struct path, so it is
-        ! readable in the ordinary way and makes this arm about the unsupported SIBLING, which is
-        ! what the test is for.
-        call check(error, t%is_supported("struct_of_struct.inner.a"), &
+        ! A supported SCALAR column in the same file still works normally, which makes this arm
+        ! about the unsupported SIBLING rather than about the file. `rowid` is a plain int32 leaf.
+        call check(error, t%is_supported("rowid"), &
             "a supported column in the same file should still be readable")
         if (allocated(error)) return
-        call check(error, t%residency("struct_of_struct.inner.a") == RES_EMPTY, &
+        call check(error, t%residency("rowid") == RES_EMPTY, &
             "a supported column starts empty like any other")
         if (allocated(error)) return
-        call t%get("struct_of_struct.inner.a", ids)
-        call check(error, t%residency("struct_of_struct.inner.a") == RES_FULL, &
+        call t%get("rowid", ids)
+        call check(error, t%residency("rowid") == RES_FULL, &
             "a supported column should still be readable despite an unsupported sibling")
         if (allocated(error)) return
         call check(error, size(ids) == t%nrows(), &
             "the readable sibling should yield one value per row")
         if (allocated(error)) return
         ! And a soft-failing read of the unsupported column reports rather than aborts.
-        call t%get("map_of_map", names, found=ok)
+        call t%get("m_intkey", names, found=ok)
         call check(error, .not. ok, "a soft-failing read of an unsupported column should report .false.")
     end subroutine test_unsupported_column
     !

@@ -401,15 +401,49 @@ A dotted path may equally resolve to a variable-length `LIST` leaf, which reads 
 one does — including into a 2-D array when its rows happen to be uniform. There is no
 dotted-path-specific behaviour in either direction.
 
-A path must resolve all the way down to a leaf column: naming an intermediate struct directly
-(`"main.inner"`, or just `"main"` when `main` is itself a struct) is not readable by any type this
-library supports and fails the same way as any other unknown column
-(`error stop "...: column not found in parquet file: ..."`) — there is no struct/record output type
-to read it into. A `MAP` column is not reachable along a struct path either — neither as an
-intermediate hop nor as the terminal leaf — and is rejected with the same "column not found" class
-of error rather than a silent wrong answer or a crash. That restriction is about the *dotted path*
-only: a **top-level** `MAP` column is read and written through
-[`parquet_map_column`](map-columns.html), like any other container.
+A dotted path must resolve all the way down to a leaf column: naming an **intermediate struct**
+directly (`"main.inner"`) is not readable this way and fails like any other unknown column
+(`error stop "...: column not found in parquet file: ..."`). Reading it as a struct would mean
+changing what `parquet_get_column_names` enumerates, which every caller that iterates a file's
+columns would see, so it is declined on purpose. Note a **top-level** struct is different and does
+read, through [`parquet_map_column`](struct-columns.html)'s sibling
+[`parquet_struct_column`](struct-columns.html) — it is simply not *listed*, so an opened
+`parquet_table` never holds one.
+
+A **`MAP`** terminal leaf, by contrast, does resolve (`"main.attrs"`) and reads through
+[`parquet_map_column`](map-columns.html). It did not until recently, and the old refusal was a
+defect rather than a limitation: the path was listed by `parquet_get_column_names` and then failed
+to resolve, which is a listing that lies.
+
+### Descent paths: addressing a container's child
+
+Beyond field names, a path may **descend into a container**: `[]` names a list's element array,
+`{key}` and `{value}` a map's keys and values. They compose with each other and with field names to
+any depth.
+
+| path | names |
+|---|---|
+| `"struct_of_list.values"` | a struct field, as always |
+| `"list_of_struct[].x"` | the `x` field of the struct **elements** of a list |
+| `"map_of_struct{value}.x"` | the same through a map's values |
+| `"deep_nested[].tags[]"` | composes freely |
+
+The suffixes name a **role** rather than Arrow's own child field name, deliberately: Arrow writes a
+list's child as `element` or `item` depending on which tool produced the file, so keying on the name
+would make a path file-dependent. A field genuinely called `[]` is unreachable by path and says so
+rather than silently yielding the container's child.
+
+Three properties are worth stating plainly, because each is a deliberate choice rather than an
+accident:
+
+- A descent path reads as an ordinary column of **one value per element**, not per row — so
+  `"list_of_struct[].x"` over a 3-row list holding 1+0+2 elements is a 3-element column, and it is
+  the *elements* that number 3, not the rows.
+- It **resolves but is not listed**. `parquet_get_column_names` still enumerates struct leaves only,
+  so a deeply nested file does not turn into a combinatorial listing every caller has to filter.
+- It is **refused by `qc:`, `parquet_filter` and `sort_by=`**, which apply to scalar leaves only,
+  permanently. A filter answer with one entry per element would be silently misaligned with every
+  other column, so the refusal is explicit rather than left to fail further down.
 
 **Null handling** combines every level a path passes through: a leaf is reported/treated as Null
 (via `null_value=`/`is_valid=`, [above](#null-values)) if the top-level struct itself is missing for

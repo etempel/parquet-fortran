@@ -226,6 +226,9 @@ something a reader is expected to have.
 | [Risk-158](#risk-158--a-skipped-column-is-safe-only-because-it-is-res_empty-and-res_partial-would-make-the-same-skip-a-silent-misalignment) | A skipped column is safe only because it is `RES_EMPTY`, and `RES_PARTIAL` would make the same skip a silent misalignment | 3 — not testable |
 | [Risk-159](#risk-159--a-columns-validity-readers-and-writers-delegate-to-its-container-asymmetrically-and-two-public-queries-then-disagree-about-the-same-row) | A column's validity READERS and WRITERS delegate to its container asymmetrically, and two public queries then disagree about the same row | 4 — covered |
 | [Risk-160](#risk-160--append_from-rebases-a-containers-offsets-and-dropping-the-rebase-is-a-plausible-wrong-answer) | `append_from` rebases a container's offsets, and dropping the rebase is a plausible wrong answer | 4 — covered |
+| [Risk-161](#risk-161--a-nested-read-that-sizes-the-inner-container-from-the-outer-row-count) | A nested read that sizes the inner container from the OUTER row count | 4 — covered |
+| [Risk-162](#risk-162--resolve_struct_path-and-struct_path_exists-are-independent-walks-and-must-agree) | `resolve_struct_path` and `struct_path_exists` are independent walks and must agree | 4 — covered |
+| [Risk-163](#risk-163--a-descent-path-reaching-qc-a-filter-or-a-sort-key-is-a-silent-misalignment) | A descent path reaching `qc:`, a filter or a sort key is a silent misalignment | 4 — covered |
 
 ---
 
@@ -6623,3 +6626,62 @@ concatenate at a row-group boundary where an off-by-one is invisible in the row 
 caller needs a fixture whose rows have DISTINCT lengths across the join — `list_widths.parquet`'s
 `ragged` column cycles 1,2,3,4, which is why the assertions above can name specific rows.
 
+
+### Risk-161 — A nested read that sizes the inner container from the OUTER row count
+
+A `list<struct<...>>` has two different lengths, and they are equal on the most obvious fixture. The
+outer list has `nrows` rows; its payload has `offsets(nrows+1)` **elements**, and only the second
+sizes the inner container. Getting it wrong produces a container of the right *row count* with the
+wrong contents, or a truncated one — no abort, no failed assertion, and a self-comparison against
+the same reader cannot see it either.
+
+**What makes it easy to hit**: any fixture whose rows all hold exactly one element makes the two
+quantities equal, so a test written against such a column passes against the defect. The same trap
+is why `parquet_check_read_row_count` had to become descent-aware — it compared a descent read
+against the FILE's row count, which is a third quantity again.
+
+**Test — covered.** `test_read_list_of_struct` and `test_read_deep_nested`
+(`test/test_container_nested.f90`) assert the per-row LENGTHS (1, 0, 2) rather than the row count,
+over `test/fixtures/map_list_types.parquet`, whose row 2 is empty and row 3 largest by design.
+`scenario_list_read_struct_payload` asserts the same three lengths out of process.
+**Keep the differing lengths and the empty row**: a fixture with uniform row lengths would silently
+retire this test's whole value.
+
+### Risk-162 — `resolve_struct_path` and `struct_path_exists` are independent walks and must agree
+
+`src/parquet_wrapper.cpp` resolves a column path twice, in two functions that share no code: the
+throwing `resolve_struct_path` and the non-throwing `struct_path_exists`. The duplication is
+deliberate and its reason is recorded at the second one — a `throw` from the first was empirically
+found to escape an enclosing `try`/`catch` under this project's mixed gfortran-driven link.
+
+**The failure is worse than either walk being wrong alone.** If the probe accepts a path the
+resolver refuses, `parquet_column_exists` answers `.true.` and the read then aborts about a name the
+same reader just confirmed — a caller that checked first has no way to avoid it. If the probe
+refuses one the resolver accepts, a readable column is invisible. Both are quiet: neither shows up
+until a specific path shape is used.
+
+Every leaf-admission rule therefore has to be changed in BOTH, in the same commit. Phase 7 changed
+two (a `MAP` leaf became addressable; a `STRUCT` leaf became addressable at the end of a descent
+path) and both were touched together.
+
+**Test — covered.** `test_map_stays_unreadable` (`test/test_list_read.f90`) probes with
+`parquet_column_exists` and then READS the same path, for a map under a struct; and asserts the
+surviving refusal (an intermediate struct) from both sides too. A one-sided change breaks it.
+
+### Risk-163 — A descent path reaching `qc:`, a filter or a sort key is a silent misalignment
+
+`qc:` and `parquet_filter` are scalar-leaf-only **permanently**, and a read-time sort orders rows.
+A descent path (`list_of_struct[].x`) resolves perfectly well and has **one entry per element**, so
+none of the three can use it — but nothing about the path makes that obvious, and each of them takes
+a caller-supplied column name.
+
+Without an explicit refusal the clause is evaluated against a container's flattened child and
+produces one answer per element, silently misaligned with every other column: a filter mask of the
+wrong length, or a row order derived from something that is not rows. **A wrong answer, not an
+error**, and it would look like a filter that simply selected oddly.
+
+**Test — covered.** `filter_descent_path` and `sort_key_descent_path`
+(`test/error_scenarios.f90`) assert the refusals, each with a NEGATIVE CONTROL beside it —
+`filter_descent_path_control` filters on an ordinary dotted struct leaf of the same file and must
+still work, so a guard that refused every dotted path would fail. The `qc:` arm shares the same
+predicate (`path_has_descent`) and is refused at `parquet_reader_set_qc`.

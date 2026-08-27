@@ -19,7 +19,7 @@ permanent. The two are complementary and the choice is about what you want back:
 | | dotted path | `parquet_struct_column` |
 |---|---|---|
 | what you get | one flat column per leaf | the whole struct as one object |
-| nesting | any depth | one level (a field must be a scalar) |
+| nesting | any depth | a field may be a list or a map; a field that is a struct is not read as one |
 | the struct's own nullness | not visible — it is combined into each leaf's mask | `%is_null(i)`, separately |
 | writing | not available | `parquet_write_column` |
 
@@ -222,7 +222,11 @@ The field set — names, order and kinds — comes from the **file**, not from t
 not called first and anything the column held is replaced. Filtering, sampling and sorting compose
 with it as with any other read: they only ever remove or reorder rows.
 
-A field whose own type is a nested struct, list or map is refused, with a message naming the field.
+A field whose own type is a **list or a map** is read as that container, and is reached with
+`%nested` on the narrowed row handle — see
+[Nested containers](list-columns.html#nested-containers) for the shape, which is the same one a
+list's own nested payload uses. A field that is itself a **struct** is refused, with a message
+naming the field and pointing at its dotted leaves, which read at any depth.
 
 ## Writing a struct column to a file
 
@@ -267,7 +271,14 @@ LEAVES under their dotted paths and never the struct itself, so an opened table 
 
 ## What this module does not do yet
 
-- **No nesting.** A field must be one of the nine scalar kinds; a struct of structs, a struct of
-  lists and a struct of maps are not available. The dotted-path reader still reaches any of those
-  as flat leaf columns.
-- **No `MAP` container** at all yet.
+- **No nested WRITING.** A field that is a list or a map reads, and cannot be written back:
+  `parquet_write_column` refuses such a column, naming the field.
+- **No struct-valued field, as a struct.** A field whose own type is a `STRUCT` is refused, because
+  reading it would need an intermediate struct to be addressable by a dotted path — which this
+  library declines on purpose, since it would change what a column-iterating caller sees. The
+  dotted-path reader reaches its leaves at any depth, unchanged.
+- **A struct read FROM A FILE is listed as its dotted leaves**, not as a struct column, because
+  `parquet_get_column_names` expands a top-level struct into `person.name`, `person.age` and so on
+  and never emits `person` itself. `parquet_read_column(reader, "person", sc)` reads it as a struct
+  perfectly well — but an opened `parquet_table`, which takes its columns from that listing, never
+  holds one. Building a struct column in memory and adding it with `%add_column` is unaffected.

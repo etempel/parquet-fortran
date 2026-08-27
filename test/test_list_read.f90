@@ -81,7 +81,7 @@ contains
             new_unittest("get_column_shape reports the container shape", test_column_shape), &
             new_unittest("get_column_type still reports the element type", test_column_type_unchanged), &
             new_unittest("reading a list column twice replaces rather than appends", test_read_twice_replaces), &
-            new_unittest("a MAP column and a map under a struct stay unreadable", test_map_stays_unreadable) &
+            new_unittest("a map under a struct resolves; an intermediate struct does not", test_map_stays_unreadable) &
             ]
     end subroutine collect_tests_parquet_list_read
 
@@ -1044,9 +1044,22 @@ contains
             "and the top-level one with its own 2, 0, 3 -- the two are not the same column")
     end subroutine test_struct_nested_ragged_matches_top_level
 
-    !> The NEGATIVE CONTROL on widening struct-path resolution to accept a LIST leaf: a MAP is
-    !> still refused, at the top level and under a struct alike. Without this, "the dotted path
-    !> now resolves" would be indistinguishable from "the dotted path now resolves to anything".
+    !> What struct-path resolution accepts, and what it still refuses -- the control that keeps
+    !> "the dotted path now resolves" from meaning "the dotted path now resolves to anything".
+    !!
+    !! **This test was inverted in Phase 7 and its history is worth knowing.** It used to assert
+    !! that a MAP under a struct did NOT resolve, with the comment *"and must stay that way"* --
+    !! correct while nothing could receive one, and wrong the moment `parquet_map_column` could.
+    !! `collect_column_leaf_paths` has always LISTED `struct_of_map.attrs`, so refusing to resolve
+    !! it made `parquet_get_column_names` advertise a name that then failed: the same "listing that
+    !! lies" T6 had Phase 2 fix for lists, left open for maps. See feature_container_phase7.md's
+    !! M4/D5/Q3.
+    !!
+    !! **The refusal that REMAINS is what makes this a control**: an intermediate STRUCT still does
+    !! not resolve, because a dotted path names a LEAF by this library's long-standing convention
+    !! and lifting that would change what a column-iterating caller sees. If a later phase lifts it
+    !! too, this becomes an equality test against a struct column rather than a deletion -- what it
+    !! asserts today is that the two leaf rules are genuinely different, not that maps are special.
     subroutine test_map_stays_unreadable(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive error.
         type(parquet_reader) :: r
@@ -1062,17 +1075,34 @@ contains
         call parquet_get_column_type(r, "map_col", t)
         call check(error, t == "unknown", "and reports an unknown element type")
         if (allocated(error)) return
-        ! A MAP under a STRUCT is not addressable at all, and must stay that way.
-        call check(error, .not. parquet_column_exists(r, "struct_of_map.attrs"), &
-            "a MAP under a struct must still not resolve")
+        ! A MAP under a STRUCT now resolves and reads, exactly as the LIST beside it does.
+        call check(error, parquet_column_exists(r, "struct_of_map.attrs"), &
+            "a MAP under a struct resolves")
         if (allocated(error)) return
-        ! The LIST under a struct in the same file must, which is what makes the line above a
-        ! control rather than a claim that nothing changed.
+        call parquet_get_column_shape(r, "struct_of_map.attrs", shape)
+        call check(error, shape == "map", "and reports itself as a map")
+        if (allocated(error)) return
+        ! ... and its TYPE query still answers "unknown", which is the frozen contract: a container
+        ! is not a leaf kind, so widening resolution must not have widened that.
+        call parquet_get_column_type(r, "struct_of_map.attrs", t)
+        call check(error, t == "unknown", "while its element type stays unknown")
+        if (allocated(error)) return
+        ! The LIST under a struct in the same file must too, which is what makes the pair evidence
+        ! rather than a claim that everything now resolves.
         call check(error, parquet_column_exists(r, "struct_of_list.values"), &
             "a LIST under a struct must resolve")
         if (allocated(error)) return
         call parquet_get_column_shape(r, "struct_of_list.values", shape)
         call check(error, shape == "list", "and report itself as a list")
+        if (allocated(error)) return
+        ! THE SURVIVING REFUSAL, and the reason this test is still a control: an intermediate
+        ! STRUCT does not resolve. A dotted path names a leaf; `struct_of_struct.inner.a` is how
+        ! its contents are reached, at any depth.
+        call check(error, .not. parquet_column_exists(r, "struct_of_struct.inner"), &
+            "an intermediate struct must still not resolve")
+        if (allocated(error)) return
+        call check(error, parquet_column_exists(r, "struct_of_struct.inner.a"), &
+            "while its own leaf does, at depth two")
         call parquet_close_reader(r)
     end subroutine test_map_stays_unreadable
 

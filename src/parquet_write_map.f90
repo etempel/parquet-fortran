@@ -122,6 +122,23 @@ contains
         type(parquet_column), pointer :: kcol, vcol
         type(parquet_map_column), target :: values_c !! row-masked rebuild; unused on the fast path.
         type(parquet_map_column), pointer :: v !! the column actually written.
+        character(len=:), allocatable :: nested_kname !! scratch for the nested-write refusal.
+
+        ! WRITING A NESTED CONTAINER IS REFUSED, and this guard is why D2 could open the in-memory
+        ! gate without opening a write path nobody built. Phase 7 made nesting READABLE only
+        ! (feature_container_phase7.md's Q2), while D2 widened `%adopt_*` so a caller can now BUILD
+        ! a map whose value is a container -- from a file, or by hand. Without an explicit
+        ! refusal here that column reaches the Arrow builders, which have no shape for it.
+        !
+        ! Refused by KIND rather than by schema token: there is deliberately no nested MAML token
+        ! (D8), so the type-mismatch guard further down would fire anyway -- but with a message
+        ! about a token mismatch, which points at the schema rather than at the real reason.
+        if (parquet_kind_is_container(values%element_kind())) then
+            call parquet_kind_name(values%element_kind(), nested_kname)
+            error stop "parquet_write_column: column '"//trim(name)//"' has a nested value ("// &
+                nested_kname//"); writing a container inside a container is not supported "// &
+                "(reading one is)"
+        end if
 
         context = "parquet_write_column"
         if (chunked) context = "parquet_write_column_chunk"

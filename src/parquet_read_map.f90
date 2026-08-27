@@ -42,6 +42,10 @@ contains
         case (PF_ELEM_DATE);      kind = PK_DATE
         case (PF_ELEM_TIME);      kind = PK_TIME
         case (PF_ELEM_TIMESTAMP); kind = PK_TIMESTAMP
+        ! A CONTAINER value, read by descending to `<name>{value}` -- see read_map_impl.
+        case (PF_ELEM_LIST);      kind = PK_LIST
+        case (PF_ELEM_MAP);       kind = PK_MAP
+        case (PF_ELEM_STRUCT);    kind = PK_STRUCT
         case default
             error stop "parquet_read_column: unsupported map value type for column: "//trim(name)
         end select
@@ -79,8 +83,16 @@ contains
         allocate(row_valid(max(nrows, 1_c_long_long)))
         allocate(value_valid(max(nentries, 1_c_long_long)))
         call fill_map_keys(reader, name, rg, nrows, nentries, nkeychars, offsets, row_valid, keys)
-        call fill_map_values(reader, name, rg, nrows, nentries, nvalchars, unit_sel, kind, &
-            value_valid, vals, context)
+        if (kind == PK_LIST .or. kind == PK_MAP .or. kind == PK_STRUCT) then
+            ! A NESTED value, read as a column in its own right at the DESCENT path
+            ! `<name>{value}`. The keys, the offsets and the row validity all came from
+            ! fill_map_keys above and are unaffected -- only the VALUES have no typed buffer a
+            ! container could be filled into. See feature_container_phase7.md's D4 (7b) and D6.
+            call read_nested_payload(reader, trim(name)//"{value}", rg, kind, vals, context)
+        else
+            call fill_map_values(reader, name, rg, nrows, nentries, nvalchars, unit_sel, kind, &
+                value_valid, vals, context)
+        end if
         allocate(row_present(nrows))
         row_present = row_valid(1:nrows) /= 0_c_int8_t
         call values%adopt_rows(offsets, keys, vals, row_valid=row_present)

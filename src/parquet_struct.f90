@@ -57,8 +57,9 @@ module parquet_struct
     use parquet_columns, only : parquet_column, parquet_container_column, parquet_kind_name, &
         parquet_column_get_at, parquet_column_set_at, parquet_column_is_null, &
         parquet_column_set_null, parquet_column_clear_null, &
+        parquet_column_container, parquet_kind_is_container, &
         PK_NONE, PK_INT32, PK_INT64, PK_FLOAT32, PK_FLOAT64, PK_LOGICAL, PK_STRING, &
-        PK_DATE, PK_TIME, PK_TIMESTAMP, PK_STRUCT
+        PK_DATE, PK_TIME, PK_TIMESTAMP, PK_STRUCT, PK_LIST, PK_MAP
     use parquet_strings, only : parquet_string_column
     use parquet_temporal, only : parquet_date, parquet_time, parquet_timestamp
     ! The emit channel for the one soft-fail warning this module can print, plus the two knobs
@@ -275,6 +276,7 @@ module parquet_struct
         procedure :: is_valid => psr_is_valid       !! Whether this handle refers to a live row.
         procedure :: is_null => psr_is_null         !! Whether the referenced ROW is a null struct.
         procedure :: row_index => psr_row_index     !! The 1-based row this handle refers to.
+        procedure :: nested => psr_nested           !! The inner container, when the field is one.
         procedure :: field_count => psr_field_count !! Number of declared fields.
         procedure :: field_name => psr_field_name   !! Name of the k-th declared field.
         procedure :: is_narrowed => psr_is_narrowed !! Whether %field has narrowed this handle.
@@ -548,7 +550,7 @@ contains
         out = "struct<"
         do j = 1, size(self%fields)
             call self%field_names%copy_to(j, nm)
-            call field_kind_text(self%fields(j)%kindof(), kt)
+            call nested_field_text(self%fields(j), self%fields(j)%kindof(), kt)
             if (j > 1) out = out//","
             out = out//trim(nm)//":"//kt
         end do
@@ -635,6 +637,16 @@ contains
             end do
             if (.not. is_supported_field(kinds(j))) then
                 call parquet_kind_name(kinds(j), kname)
+                if (parquet_kind_is_container(kinds(j))) then
+                    ! A container field is nesting, and %init cannot express it: `kinds(:)` carries
+                    ! one PK_* discriminator per field, while a nested field is a kind PLUS an inner
+                    ! schema. Build the inner container, hand it to a parquet_column with
+                    ! %adopt_container, and pass that column to %adopt_fields. See
+                    ! feature_container_phase7.md's D1.
+                    error stop EP//"init: field '"//trim(names(j))//"' is a nested "//kname// &
+                        " field and cannot be declared here; build the inner container, hand it "// &
+                        "to a parquet_column with %adopt_container, and pass that column to %adopt_fields"
+                end if
                 error stop EP//"init: "//kname//" is not a supported struct field kind (field '"// &
                     trim(names(j))//"')"
             end if
@@ -759,7 +771,7 @@ contains
                     error stop EP//"adopt_fields: duplicate field name: "//trim(names(j))
                 end if
             end do
-            if (.not. is_supported_field(fields(j)%kindof())) then
+            if (.not. is_adoptable_field(fields(j)%kindof())) then
                 call parquet_kind_name(fields(j)%kindof(), kname)
                 error stop EP//"adopt_fields: "//kname//" is not a supported struct field kind "// &
                     "(field '"//trim(names(j))//"')"
@@ -970,7 +982,7 @@ contains
                 if (present(message)) message = "a field column has a different row count from the struct"
                 return
             end if
-            if (.not. is_supported_field(self%fields(j)%kindof())) then
+            if (.not. is_adoptable_field(self%fields(j)%kindof())) then
                 if (present(message)) message = "a field has an unsupported kind"
                 return
             end if
@@ -1551,6 +1563,41 @@ contains
         end if
         res = self%col%fields(self%field_idx)%kindof()
     end function psr_field_kind
+    !
+    !> Hands back the inner container behind a NESTED field, plus this row's index within it.
+    !!
+    !! The struct twin of `parquet_list_row%nested`, and the simplest of the three: a struct field
+    !! column holds exactly one entry per struct row, so there is no range -- `row` is just this
+    !! handle's own row index, returned for symmetry so a caller never has to remember which of the
+    !! two indices applies. Needs a NARROWED handle, the same as `%field_kind` and `%get_field`:
+    !!
+    !! ```fortran
+    !! h = sc%view(i)
+    !! f = h%field("vals")
+    !! call f%nested(inner, row)
+    !! select type (inner)
+    !! type is (parquet_list_column)
+    !!     r = inner%view(row)
+    !!     call r%get(values)
+    !! end select
+    !! ```
+    !!
+    !! `inner` comes back NULL when the field is not a container, so a caller that has not checked
+    !! `%field_kind()` gets a `select type` that matches nothing rather than a wrong answer. The
+    !! pointer is BORROWED and is invalidated by anything that rebuilds the field column.
+    subroutine psr_nested(self, inner, row)
+        class(parquet_struct_row), intent(in) :: self                  !! the NARROWED handle.
+        class(parquet_container_column), pointer, intent(out) :: inner !! the inner container, or null.
+        integer(int64), intent(out) :: row                             !! this row's index within it.
+        call check_handle(self, "nested")
+        if (self%field_idx <= 0) then
+            error stop EP//"nested: this handle denotes a whole row; narrow it with %field first"
+        end if
+        inner => null()
+        row = self%idx
+        if (.not. parquet_kind_is_container(self%col%fields(self%field_idx)%kindof())) return
+        call parquet_column_container(self%col%fields(self%field_idx), inner)
+    end subroutine psr_nested
     !
     !> Narrows this handle to the named field; see the binding's own documentation.
     function psr_field(self, name, warn) result(h)
@@ -2144,7 +2191,8 @@ contains
     !> Whether a PK_* kind may be a struct column's field.
     !!
     !! The nine SCALAR value kinds. A `*_VEC` kind is excluded because a fixed-width vector inside
-    !! a struct is `struct<fixed_size_list<...>>`, which is Phase 7's nesting question and not
+    !! a struct is `struct<fixed_size_list<...>>`, which is a shape this library does not read or
+    !! write at any depth, and is not
     !! expressible by giving the field a width. `PK_LIST`/`PK_MAP`/`PK_STRUCT` are excluded for
     !! the same reason -- a container field is nesting, and `%init` would have no way to be told
     !! what the inner container holds.
@@ -2159,6 +2207,19 @@ contains
             res = .false.
         end select
     end function is_supported_field
+    !
+    !> Whether a PK_* kind may be ADOPTED as a struct field.
+    !!
+    !! Wider than `is_supported_field` by exactly the three container kinds. `%init` fixes each
+    !! field's KIND; a nested field is a kind plus a whole inner schema, which `%init`'s
+    !! `kinds(:)` array has no way to carry -- so nesting is reachable only by building the inner
+    !! container and handing it over with `%adopt_container` + `%adopt_fields`. The `*_VEC` kinds
+    !! stay refused on both paths. See feature_container_phase7.md's D1 and D2.
+    pure function is_adoptable_field(kind) result(res)
+        integer, intent(in) :: kind !! a PK_* discriminator.
+        logical :: res              !! whether it may be adopted as a struct field.
+        res = is_supported_field(kind) .or. parquet_kind_is_container(kind)
+    end function is_adoptable_field
     !
     !> Writes the short lowercase name of a field kind, for `kind_text` and error messages.
     !!
@@ -2184,6 +2245,32 @@ contains
         case default;        out = "unsupported"
         end select
     end subroutine field_kind_text
+    !
+    !> Writes a field's type spelling, recursing when the field is itself a container.
+    !!
+    !! `field_kind_text` is `pure` and answers from the discriminator alone, which is all an error
+    !! message needs. A NESTED field's spelling additionally needs the inner container to describe
+    !! itself -- so it cannot be pure, and it cannot be derived from the kind at all. Keeping the two
+    !! apart is what lets every error message stay pure while `%kind_text` reports the nested form.
+    !! See feature_container_phase7.md's D3.
+    !!
+    !! `%kind_text` is the ONLY name in this library that recurses: `%kindof()` stays `PK_STRUCT` at
+    !! every depth and `parquet_kind_name` stays `"PK_STRUCT"`. A caller that needs the inner shape
+    !! descends and asks the inner object.
+    subroutine nested_field_text(col, kind, out)
+        type(parquet_column), intent(in), target :: col   !! the field column.
+        integer, intent(in) :: kind                       !! its PK_* kind.
+        character(len=:), allocatable, intent(out) :: out !! the type spelling.
+        class(parquet_container_column), pointer :: inner
+        if (parquet_kind_is_container(kind)) then
+            call parquet_column_container(col, inner)
+            if (associated(inner)) then
+                call inner%kind_text(out)
+                return
+            end if
+        end if
+        call field_kind_text(kind, out)
+    end subroutine nested_field_text
     !
     !> Writes decimal text for an integer, for `%summary`. A subroutine for the same reason as
     !! `field_kind_text` above.

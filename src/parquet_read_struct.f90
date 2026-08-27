@@ -59,10 +59,22 @@ contains
         case (PF_ELEM_DATE);      kind = PK_DATE
         case (PF_ELEM_TIME);      kind = PK_TIME
         case (PF_ELEM_TIMESTAMP); kind = PK_TIMESTAMP
+        ! A LIST or MAP field, read recursively through its own dotted path -- see
+        ! read_struct_container_field. A nested STRUCT field is deliberately NOT here: it is not one
+        ! of the four shapes scope (c) covers, and reading it would need an intermediate struct to
+        ! be addressable by a dotted path, which this library refuses on purpose (a path resolves to
+        ! a LEAF -- see doc/pages/types/supported-data-types.md, and the intermediate-struct error
+        ! scenario that pins it). Its own leaves already read at ANY depth through their dotted
+        ! paths, which is what the message below points at.
+        case (PF_ELEM_LIST);      kind = PK_LIST
+        case (PF_ELEM_MAP);       kind = PK_MAP
+        case (PF_ELEM_STRUCT)
+            error stop "parquet_read_column: field '"//trim(fieldname)//"' of struct column '"// &
+                trim(colname)//"' is itself a struct; read its leaves by their own dotted paths "// &
+                "(e.g. '"//trim(colname)//"."//trim(fieldname)//".<field>'), which works at any depth"
         case default
             error stop "parquet_read_column: field '"//trim(fieldname)//"' of struct column '"// &
-                trim(colname)//"' has a type this library cannot read into a struct column "// &
-                "(a nested struct, list or map field is not supported)"
+                trim(colname)//"' has a type this library cannot read into a struct column"
         end select
     end subroutine struct_field_kind
 
@@ -154,6 +166,22 @@ contains
 
         n = int(nrows, kind=int64)
         whole = (rg <= 0_c_long_long)
+        ! A NESTED field is handled first and returns, BEFORE the %init below -- which refuses a
+        ! container kind by design, because %init fixes a kind and a container is a kind plus a
+        ! whole inner schema (feature_container_phase7.md's D1). The field is read through its own
+        ! dotted path by the reader that already handles that container type, including a recursive
+        ! call for PK_STRUCT. That is the whole of Phase 7's 7a half, and it is this small because
+        ! the struct read path was already built on "every field of a struct is an ordinary column
+        ! at a dotted path": a container field is one too.
+        !
+        ! No `ok` mask, for the same reason PK_STRING needs none: a container carries its own
+        ! per-ROW validity inside itself, so there is no caller-side mask to apply and writing one
+        ! into the field column's bitmap as well would be a second, redundant copy of the same fact
+        ! -- and the two could then disagree.
+        if (kind == PK_LIST .or. kind == PK_MAP) then
+            call read_struct_container_field(reader, path, rg, kind, field, context)
+            return
+        end if
         ! Every field starts as an empty column of the right kind, and a non-empty one then
         ! REPLACES that by adopting its values array. The up-front %init is what makes the
         ! zero-row case come out as a correctly typed empty field instead of adopting a scratch
@@ -238,7 +266,7 @@ contains
             return
         case default
             ! Not reachable: struct_field_kind has already refused every family this does not
-            ! cover, so `kind` is always one of the nine above. Kept as a second line of defence.
+            ! cover, so `kind` is always one of the twelve above. Kept as a second line of defence.
             error stop trim(context)//": unsupported struct field kind for column: "//trim(path) ! GCOVR_EXCL_LINE
         end select
         ! Per-FIELD nullness, applied once for the six kinds that reported a mask. The three
@@ -254,6 +282,49 @@ contains
             end do
         end select
     end subroutine read_struct_field
+
+    !> Reads one CONTAINER field of a struct column and hands it to `field` as a container column.
+    !!
+    !! Split out of `read_struct_field` rather than written inline because each arm needs its own
+    !! local of a different derived type, and three more locals in a procedure that already declares
+    !! ten would make the scalar arms harder to read than the nesting is worth.
+    !!
+    !! Every arm goes through the ORDINARY public read for that container type at the field's dotted
+    !! path, so a nested field costs no new C++ crossing and inherits every guard, every null rule
+    !! and every row-group scoping decision those paths already make. `%adopt_container` is then the
+    !! single writer of a container kind, exactly as it is everywhere else.
+    subroutine read_struct_container_field(reader, path, rg, kind, field, context)
+        type(parquet_reader), intent(in) :: reader     !! open reader.
+        character(len=*), intent(in) :: path           !! the field's dotted column path.
+        integer(c_long_long), intent(in) :: rg         !! 1-based row group, or <= 0 for the whole column.
+        integer, intent(in) :: kind                    !! PK_LIST or PK_MAP.
+        type(parquet_column), intent(inout) :: field   !! receives the container.
+        character(len=*), intent(in) :: context        !! calling entry point, for error messages.
+        type(parquet_list_column) :: lc
+        type(parquet_map_column) :: mc
+        class(parquet_container_column), allocatable :: cc
+        logical :: whole
+        whole = (rg <= 0_c_long_long)
+        select case (kind)
+        case (PK_LIST)
+            if (whole) then
+                call parquet_read_column(reader, path, lc)
+            else
+                call parquet_read_column_chunk(reader, path, rg, lc)
+            end if
+            allocate(cc, source=lc)
+        case (PK_MAP)
+            if (whole) then
+                call parquet_read_column(reader, path, mc)
+            else
+                call parquet_read_column_chunk(reader, path, rg, mc)
+            end if
+            allocate(cc, source=mc)
+        case default
+            error stop trim(context)//": unsupported container field kind for column: "//trim(path) ! GCOVR_EXCL_LINE
+        end select
+        call field%adopt_container(cc)
+    end subroutine read_struct_container_field
 
     module procedure parquet_read_struct_column
         call check_reader_open(reader, "parquet_read_column")

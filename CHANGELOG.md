@@ -66,8 +66,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   addressable by its dotted path. `parquet_write_column`/`parquet_write_column_chunk` write one back
   out as a genuine variable-length `LIST` column, declared in a schema as `list[<elemtype>]`; the
   value type decides the file's physical shape, so a 2-D array still writes a fixed-width vector
-  column and a `parquet_list_column` always writes a `LIST`. **Not yet**: a list cannot be nested
-  inside another container.
+  column and a `parquet_list_column` always writes a `LIST`. A list may now hold a container — a list of
+  structs, of maps or of lists — **on read**; the payload is reached with `parquet_list_row%nested`,
+  and a nested leaf is addressable directly by a descent path (`"list_of_struct[].x"`). **Not yet**:
+  writing a nested container, which is refused with a message naming the column and the payload
+  kind.
 - **`parquet_struct`: `parquet_struct_column`, a `STRUCT` column, plus `parquet_struct_row`, a
   lightweight handle to one of its rows.** Every row holds one value per declared field and the
   fields may have different types; the field set is fixed by `%init(names, kinds)` and covers the
@@ -82,7 +85,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file; `parquet_write_column`/`parquet_write_column_chunk` write one back out, declared in a
   schema as `struct` — the field layout comes from the column object, never from MAML. Addressing
   a struct's leaves by their dotted paths (`"person.age"`) is unchanged and still reaches any
-  depth of nesting. **Not yet**: a field cannot itself be a struct, list or map.
+  depth of nesting. A field may now be a list or a map **on read**, reached with
+  `parquet_struct_row%nested`; a field that is itself a struct is still refused, and its leaves are
+  read by their dotted paths as before. **Not yet**: writing a struct whose field is a container.
 - **`parquet_map`: `parquet_map_column`, a `MAP` column, plus `parquet_map_row`, a lightweight
   handle to one of its rows.** Every row holds zero or more `key -> value` entries; keys are
   strings and the value kind is fixed by `%init(value_kind)` and covers the nine scalar kinds.
@@ -96,8 +101,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   module (`use parquet_map` compiles eleven Fortran files). `parquet_read_column`/
   `parquet_read_column_chunk` read a `MAP` column from a Parquet file straight into one, whole or
   one row group at a time; `parquet_write_column`/`parquet_write_column_chunk` write one back out,
-  declared in a schema as `map[<valuetype>]`. **Not yet**: its keys must be strings and its values
-  cannot themselves be containers. A
+  declared in a schema as `map[<valuetype>]`. A value may now be a container **on read**, reached with
+  `parquet_map_row%nested`, and `parquet_get_map_value_type` reports `list`/`map`/`struct` for one.
+  A map under a `STRUCT` path (`"person.attrs"`) is now readable too, closing a name that was
+  listed and would not resolve. **Not yet**: its keys must be strings, and writing a map whose
+  value is a container is refused. A
   map's total entry count is capped at 2,147,483,647 — Arrow has no `large_map` to widen into, so
   a column past it is refused rather than written in a wider form.
 - **A `parquet_table` column can be a list, a map or a struct.** A `MAP` column is classified as a

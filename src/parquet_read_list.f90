@@ -39,10 +39,61 @@ contains
         case (PF_ELEM_DATE);      kind = PK_DATE
         case (PF_ELEM_TIME);      kind = PK_TIME
         case (PF_ELEM_TIMESTAMP); kind = PK_TIMESTAMP
+        ! A CONTAINER payload, read by descending to `<name>[]` -- see read_list_impl.
+        case (PF_ELEM_LIST);      kind = PK_LIST
+        case (PF_ELEM_MAP);       kind = PK_MAP
+        case (PF_ELEM_STRUCT);    kind = PK_STRUCT
         case default
             error stop "parquet_read_column: unsupported list element type for column: "//trim(name)
         end select
     end subroutine list_payload_kind
+
+    !> Reads a container column at `path` and hands it to `col` as a container `parquet_column`.
+    !!
+    !! Shared by the list and map read paths, which need the identical three lines for their nested
+    !! payload and value respectively. Every arm goes through the ORDINARY public read for that
+    !! container type, so nesting reuses the whole path rather than duplicating any of it, and
+    !! `%adopt_container` stays the single writer of a container kind.
+    module subroutine read_nested_payload(reader, path, rg, kind, col, context)
+        type(parquet_reader), intent(in) :: reader     !! open reader.
+        character(len=*), intent(in) :: path           !! the descent path of the child.
+        integer(c_long_long), intent(in) :: rg         !! 1-based row group, or <= 0 for the whole column.
+        integer, intent(in) :: kind                    !! PK_LIST, PK_MAP or PK_STRUCT.
+        type(parquet_column), intent(inout) :: col     !! receives the container.
+        character(len=*), intent(in) :: context        !! calling entry point, for error messages.
+        type(parquet_list_column) :: lc
+        type(parquet_map_column) :: mc
+        type(parquet_struct_column) :: sc
+        class(parquet_container_column), allocatable :: cc
+        logical :: whole
+        whole = (rg <= 0_c_long_long)
+        select case (kind)
+        case (PK_LIST)
+            if (whole) then
+                call parquet_read_column(reader, path, lc)
+            else
+                call parquet_read_column_chunk(reader, path, rg, lc)
+            end if
+            allocate(cc, source=lc)
+        case (PK_MAP)
+            if (whole) then
+                call parquet_read_column(reader, path, mc)
+            else
+                call parquet_read_column_chunk(reader, path, rg, mc)
+            end if
+            allocate(cc, source=mc)
+        case (PK_STRUCT)
+            if (whole) then
+                call parquet_read_column(reader, path, sc)
+            else
+                call parquet_read_column_chunk(reader, path, rg, sc)
+            end if
+            allocate(cc, source=sc)
+        case default
+            error stop trim(context)//": unsupported nested payload kind for column: "//trim(path) ! GCOVR_EXCL_LINE
+        end select
+        call col%adopt_container(cc)
+    end subroutine read_nested_payload
 
     !> The shared body of both list read specifics: `row_group` <= 0 reads the whole column, and
     !> any positive value reads exactly that row group.
@@ -76,8 +127,20 @@ contains
         allocate(offsets(nrows + 1_c_long_long))
         allocate(row_valid(max(nrows, 1_c_long_long)))
         allocate(elem_valid(max(nelems, 1_c_long_long)))
-        call fill_list_payload(reader, name, rg, nrows, nelems, nchars, unit_sel, kind, &
-            offsets, row_valid, elem_valid, payload, context)
+        if (kind == PK_LIST .or. kind == PK_MAP .or. kind == PK_STRUCT) then
+            ! A NESTED payload. The offsets and the row validity still come from the list itself;
+            ! the payload does not, because there is no typed values buffer a container could be
+            ! filled into. It is read instead as a column in its own right at the DESCENT path
+            ! `<name>[]` -- which the ordinary reader for that container type already handles, so a
+            ! nested payload costs no new crossing and inherits every guard and null rule that
+            ! path already makes. See feature_container_phase7.md's D4 (7b) and D6.
+            call parquet_read_list_offsets_fill(reader%handle, trim(name)//char(0), rg, nrows, &
+                nelems, offsets, row_valid)
+            call read_nested_payload(reader, trim(name)//"[]", rg, kind, payload, context)
+        else
+            call fill_list_payload(reader, name, rg, nrows, nelems, nchars, unit_sel, kind, &
+                offsets, row_valid, elem_valid, payload, context)
+        end if
         allocate(row_present(nrows))
         row_present = row_valid(1:nrows) /= 0_c_int8_t
         call values%adopt_rows(offsets, payload, row_valid=row_present)

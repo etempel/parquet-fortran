@@ -143,6 +143,26 @@ program error_scenarios
         call scenario_struct_set_field_wrong_kind()
     case ("map_init_bad_kind")
         call scenario_map_init_bad_kind()
+    case ("write_nested_list")
+        call scenario_write_nested_list()
+    case ("write_nested_list_control")
+        call scenario_write_nested_list_control()
+    case ("write_nested_struct_field")
+        call scenario_write_nested_struct_field()
+    case ("filter_descent_path")
+        call scenario_filter_descent_path()
+    case ("filter_descent_path_control")
+        call scenario_filter_descent_path_control()
+    case ("sort_key_descent_path")
+        call scenario_sort_key_descent_path()
+    case ("map_init_nested_value")
+        call scenario_map_init_nested_value()
+    case ("list_init_nested_payload")
+        call scenario_list_init_nested_payload()
+    case ("struct_init_nested_field")
+        call scenario_struct_init_nested_field()
+    case ("struct_read_nested_struct_field")
+        call scenario_struct_read_nested_struct_field()
     case ("map_append_wrong_kind")
         call scenario_map_append_wrong_kind()
     case ("map_append_length_mismatch")
@@ -14079,8 +14099,8 @@ contains
     subroutine scenario_table_unsupported_column_read()
         type(parquet_table) :: t
         integer(int32), allocatable :: v(:)
-        call parquet_open_table(t, "test/fixtures/map_list_types.parquet")
-        call t%get("map_of_map", v)   ! a MAP OF MAPS: no readable value type -> aborts
+        call parquet_open_table(t, "test/fixtures/map_payloads.parquet")
+        call t%get("m_intkey", v)   ! a map with INT32 KEYS: v1 reads string keys only -> aborts
         print '(a,i0)', "unexpectedly read an unsupported column, size=", size(v)
     end subroutine scenario_table_unsupported_column_read
 
@@ -14100,8 +14120,8 @@ contains
     !! regardless of found=.
     subroutine scenario_table_prefetch_unsupported_column()
         type(parquet_table) :: t
-        call parquet_open_table(t, "test/fixtures/map_list_types.parquet")
-        call t%prefetch("map_of_map")   ! a MAP OF MAPS: no readable value type -> aborts
+        call parquet_open_table(t, "test/fixtures/map_payloads.parquet")
+        call t%prefetch("m_intkey")   ! a map with INT32 KEYS: v1 reads string keys only -> aborts
         print '(a)', "unexpectedly prefetched an unsupported column"
     end subroutine scenario_table_prefetch_unsupported_column
 
@@ -14234,9 +14254,9 @@ contains
     subroutine scenario_table_write_unsupported_column()
         type(parquet_table) :: t
         type(parquet_schema) :: s
-        call parquet_open_table(t, "test/fixtures/map_list_types.parquet")
+        call parquet_open_table(t, "test/fixtures/map_payloads.parquet")
         call s%init("wunsupported")
-        call s%add_field("map_of_map", "int32")
+        call s%add_field("m_intkey", "int32")
         call parquet_write_table(t, "test_run/es_table_wunsupported_out.parquet", s)   ! -> aborts
         print '(a)', "unexpectedly wrote a table's unsupported column"
     end subroutine scenario_table_write_unsupported_column
@@ -14615,9 +14635,9 @@ contains
         type(parquet_table) :: t
         type(parquet_table_row) :: r
         integer(int32) :: v
-        call parquet_open_table(t, "test/fixtures/map_list_types.parquet")
+        call parquet_open_table(t, "test/fixtures/map_payloads.parquet")
         r = t%row(1)
-        call r%get("map_of_map", v)   ! a MAP OF MAPS: no readable value type -> aborts
+        call r%get("m_intkey", v)   ! a map with INT32 KEYS: v1 reads string keys only -> aborts
         print '(a,i0)', "unexpectedly read an unsupported column through a row handle, v=", v
     end subroutine scenario_table_row_unsupported_column
 
@@ -15583,8 +15603,8 @@ contains
     !! order by, and silently treating every row as equal would be worse than saying so.
     subroutine scenario_table_mutate_unsupported_column()
         type(parquet_table) :: t
-        call parquet_open_table(t, "test/fixtures/map_list_types.parquet")
-        call t%sort_by(["map_of_map"])   ! a MAP OF MAPS: no readable value type -> aborts
+        call parquet_open_table(t, "test/fixtures/map_payloads.parquet")
+        call t%sort_by(["m_intkey"])   ! a map with INT32 KEYS: v1 reads string keys only -> aborts
         print '(a,i0)', "unexpectedly sorted by an unsupported column, nrows=", t%nrows()
     end subroutine scenario_table_mutate_unsupported_column
 
@@ -16245,8 +16265,8 @@ contains
     !! the deferred path can decide before any read happens.
     subroutine scenario_table_cast_unsupported_column()
         type(parquet_table) :: t
-        call parquet_open_table(t, "test/fixtures/map_list_types.parquet")
-        call t%cast("map_of_map", PK_FLOAT64)   ! -> aborts
+        call parquet_open_table(t, "test/fixtures/map_payloads.parquet")
+        call t%cast("m_intkey", PK_FLOAT64)   ! -> aborts
         print '(a,i0)', "unexpectedly cast an unsupported column, ncols=", t%ncols()
     end subroutine scenario_table_cast_unsupported_column
 
@@ -17431,24 +17451,39 @@ contains
         call parquet_close_reader(reader)
     end subroutine scenario_list_read_not_a_list
 
-    !> A list whose ELEMENTS are themselves a container (`list<list<int32>>`). Nested payloads are
-    !> Phase 7's subject; until then this is a clean refusal naming the element type, rather than a
-    !> half-built column -- there is no "unknown" payload kind for a list to hold.
+    !> A list whose ELEMENTS are themselves a container (`list<list<int32>>`), which Phase 7 reads.
+    !!
+    !! Inverted rather than deleted: it was the refusal test until nesting landed, and it is worth
+    !! more as an out-of-process assertion that the ASSEMBLY is right. The row lengths are checked
+    !! rather than only the row count, because an assembly that used the outer offsets for the
+    !! inner container -- the likeliest way to get this wrong -- still produces the right number of
+    !! rows. See feature_container_phase7.md's D4 (7b).
     subroutine scenario_list_read_nested_payload()
         type(parquet_reader) :: reader
         type(parquet_list_column) :: lc
+        character(len=:), allocatable :: kt
         call parquet_open_reader(reader, "test/fixtures/map_list_types.parquet")
         call parquet_read_column(reader, "list_of_list", lc)
+        call lc%kind_text(kt)
+        if (kt /= "list<list<int32>>") error stop "list_read_nested_payload: kind_text is "//kt
+        if (lc%nrows() /= 3_int64) error stop "list_read_nested_payload: expected three rows"
+        if (lc%element_kind() /= PK_LIST) error stop "list_read_nested_payload: payload is not a list"
         call parquet_close_reader(reader)
     end subroutine scenario_list_read_nested_payload
 
-    !> The same, for a `list<struct<...>>` -- a different unsupported element type reaching the
-    !> same refusal, so the guard is not keyed on one Arrow type id.
+    !> The same, for a `list<struct<...>>` -- a different element type reaching the same assembly,
+    !> so this is not keyed on one Arrow type id.
     subroutine scenario_list_read_struct_payload()
         type(parquet_reader) :: reader
         type(parquet_list_column) :: lc
+        character(len=:), allocatable :: kt
         call parquet_open_reader(reader, "test/fixtures/map_list_types.parquet")
         call parquet_read_column(reader, "list_of_struct", lc)
+        call lc%kind_text(kt)
+        if (kt /= "list<struct<x:int32,y:string>>") error stop "list_read_struct_payload: kind_text is "//kt
+        if (lc%length(1_int64) /= 1_int64) error stop "list_read_struct_payload: row 1 length"
+        if (lc%length(2_int64) /= 0_int64) error stop "list_read_struct_payload: row 2 length"
+        if (lc%length(3_int64) /= 2_int64) error stop "list_read_struct_payload: row 3 length"
         call parquet_close_reader(reader)
     end subroutine scenario_list_read_struct_payload
 
@@ -17765,12 +17800,139 @@ contains
     ! Every soft-fail guard has BOTH arms here: the hard abort, and a `_warn_ok` negative control
     ! proving the same call returns when asked to.
 
-    !> `%init` with a value kind a map cannot hold. A container value is Phase 7's nesting, and
-    !> `%init` has no way to be told what the inner container holds.
+    !> `%init` with a value kind a map cannot hold at all.
+    !!
+    !! Uses a `*_VEC` kind rather than a container kind, because the two are refused by the same
+    !! gate with DIFFERENT messages since Phase 7: a container value is nesting and points the
+    !! caller at `%adopt_values` (see `map_init_nested_value` beside this), while a vector value is
+    !! `map<string,fixed_size_list<...>>` and has no route at all. Testing only one of them would
+    !! leave the other's message unasserted.
     subroutine scenario_map_init_bad_kind()
         type(parquet_map_column) :: mc
-        call mc%init(PK_LIST)
+        call mc%init(PK_INT32_VEC)
     end subroutine scenario_map_init_bad_kind
+
+    ! ==================================================================================
+    ! Nested-container refusals (Phase 7: nesting is READ-ONLY, and descent paths are not
+    ! filterable). Every one has a NEGATIVE CONTROL beside it, because a guard that fired
+    ! unconditionally would pass each of these while breaking the case it was meant to allow.
+    ! ==================================================================================
+
+    !> Writing a `list<struct<...>>` read back from a file. Reading it is supported; writing is not.
+    subroutine scenario_write_nested_list()
+        type(parquet_reader) :: reader
+        type(parquet_writer) :: w
+        type(parquet_schema) :: sch
+        type(parquet_list_column) :: lc
+        call parquet_open_reader(reader, "test/fixtures/map_list_types.parquet")
+        call parquet_read_column(reader, "list_of_struct", lc)
+        call parquet_close_reader(reader)
+        call sch%init(table="t")
+        call sch%add_field("c", "list[int32]")
+        call parquet_parse_maml(sch)
+        call parquet_open_writer(w, "test_run/error_scenario_write_nested_list.parquet", sch)
+        call parquet_write_column(w, "c", lc)
+        call parquet_close_writer(w)
+    end subroutine scenario_write_nested_list
+
+    !> The NEGATIVE CONTROL: the same write of a NON-nested list must still succeed. Without it,
+    !> a guard that refused every list column would pass the scenario above.
+    subroutine scenario_write_nested_list_control()
+        type(parquet_reader) :: reader
+        type(parquet_writer) :: w
+        type(parquet_schema) :: sch
+        type(parquet_list_column) :: lc
+        call parquet_open_reader(reader, "test/fixtures/map_list_types.parquet")
+        call parquet_read_column(reader, "list_col", lc)
+        call parquet_close_reader(reader)
+        call sch%init(table="t")
+        call sch%add_field("c", "list[int32]")
+        call parquet_parse_maml(sch)
+        call parquet_open_writer(w, "test_run/error_scenario_write_nested_list_ok.parquet", sch)
+        call parquet_write_column(w, "c", lc)
+        call parquet_close_writer(w)
+    end subroutine scenario_write_nested_list_control
+
+    !> Writing a struct whose FIELD is a list. The message must name the field, not only the column.
+    subroutine scenario_write_nested_struct_field()
+        type(parquet_reader) :: reader
+        type(parquet_writer) :: w
+        type(parquet_schema) :: sch
+        type(parquet_struct_column) :: sc
+        call parquet_open_reader(reader, "test/fixtures/map_list_types.parquet")
+        call parquet_read_column(reader, "struct_of_list", sc)
+        call parquet_close_reader(reader)
+        call sch%init(table="t")
+        call sch%add_field("c", "struct")
+        call parquet_parse_maml(sch)
+        call parquet_open_writer(w, "test_run/error_scenario_write_nested_struct.parquet", sch)
+        call parquet_write_column(w, "c", sc)
+        call parquet_close_writer(w)
+    end subroutine scenario_write_nested_struct_field
+
+    !> A `parquet_filter` rule naming a DESCENT path. `qc:` and `parquet_filter` are scalar-leaf-only
+    !> permanently, so the grammar Phase 7 added must not leak into either.
+    subroutine scenario_filter_descent_path()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: flt
+        call flt%add("list_of_struct[].x > 1")
+        call parquet_open_reader(reader, "test/fixtures/map_list_types.parquet", filter=flt)
+        call parquet_close_reader(reader)
+    end subroutine scenario_filter_descent_path
+
+    !> The NEGATIVE CONTROL: a filter on an ORDINARY scalar leaf of the same file still works.
+    subroutine scenario_filter_descent_path_control()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: flt
+        call flt%add("struct_of_struct.inner.a > 1")
+        call parquet_open_reader(reader, "test/fixtures/map_list_types.parquet", filter=flt)
+        call parquet_close_reader(reader)
+    end subroutine scenario_filter_descent_path_control
+
+    !> A read-time sort key naming a DESCENT path: it has one entry per ELEMENT, not per row.
+    subroutine scenario_sort_key_descent_path()
+        type(parquet_reader) :: reader
+        type(parquet_sortkey) :: srt
+        call srt%add("list_of_struct[].x asc")
+        call parquet_open_reader(reader, "test/fixtures/map_list_types.parquet", sort_by=srt)
+        call parquet_close_reader(reader)
+    end subroutine scenario_sort_key_descent_path
+
+    !> `%init` with a CONTAINER value kind: refused, and the message names the route that works.
+    !!
+    !! `%init` is handed one `PK_*` discriminator; a nested value is a kind PLUS an inner schema,
+    !! so `%init(PK_LIST)` could only produce a map whose values are a list column with no payload
+    !! kind -- an unusable state with no way out of it. Nesting is reachable through
+    !! `%adopt_container` + `%adopt_rows` instead. See feature_container_phase7.md's D1.
+    subroutine scenario_map_init_nested_value()
+        type(parquet_map_column) :: mc
+        call mc%init(PK_LIST)
+    end subroutine scenario_map_init_nested_value
+
+    !> The list twin of `map_init_nested_value`.
+    subroutine scenario_list_init_nested_payload()
+        type(parquet_list_column) :: lc
+        call lc%init(PK_STRUCT)
+    end subroutine scenario_list_init_nested_payload
+
+    !> The struct twin of `map_init_nested_value`, which additionally names the offending FIELD.
+    subroutine scenario_struct_init_nested_field()
+        type(parquet_struct_column) :: sc
+        call sc%init(["v", "w"], [PK_INT32, PK_LIST])
+    end subroutine scenario_struct_init_nested_field
+
+    !> A struct field that is ITSELF a struct, read from a file.
+    !!
+    !! Not one of the four shapes Phase 7's scope (c) covers, and it cannot be added without making
+    !! an intermediate struct addressable by a dotted path -- which this library refuses on purpose.
+    !! The refusal must therefore name the mechanism that DOES work rather than merely decline.
+    subroutine scenario_struct_read_nested_struct_field()
+        type(parquet_reader) :: reader
+        type(parquet_struct_column) :: sc
+        call parquet_open_reader(reader, "test/fixtures/map_list_types.parquet")
+        call parquet_read_column(reader, "struct_of_struct", sc)
+        print '(a)', "unexpectedly read a struct whose field is itself a struct"
+    end subroutine scenario_struct_read_nested_struct_field
 
     !> `%append_row` with values of a kind the column was not initialized to. A wrong VALUE KIND is
     !> a type mismatch rather than a lookup failure, so it is always hard.
@@ -17893,14 +18055,27 @@ contains
         call parquet_close_reader(reader)
     end subroutine scenario_map_read_int_key
 
-    !> A map whose VALUE is itself a container (`map<string, list<int32>>`). Nested values are
-    !> Phase 7's subject; until then this is a clean refusal naming the value type, rather than a
-    !> half-built column -- there is no "unknown" value kind for a map to hold.
+    !> A map whose VALUE is itself a container (`map<string, list<int32>>`), which Phase 7 reads.
+    !!
+    !! Inverted rather than deleted, as its two list twins were. The KEYS are asserted alongside the
+    !! value kind on purpose: a map's keys and values cross the boundary through different calls,
+    !! and the nested path changes only the second, so a keys regression would otherwise be
+    !! invisible here.
     subroutine scenario_map_read_nested_value()
         type(parquet_reader) :: reader
         type(parquet_map_column) :: mc
+        character(len=:), allocatable :: kt, k1
+        type(parquet_map_row) :: h
         call parquet_open_reader(reader, "test/fixtures/map_list_types.parquet")
         call parquet_read_column(reader, "map_of_list", mc)
+        call mc%kind_text(kt)
+        if (kt /= "map<string,list<int32>>") error stop "map_read_nested_value: kind_text is "//kt
+        if (mc%nrows() /= 3_int64) error stop "map_read_nested_value: expected three rows"
+        h = mc%view(1_int64)
+        if (h%size() > 0_int64) then
+            call h%key_at(1, k1)
+            if (len_trim(k1) == 0) error stop "map_read_nested_value: row 1 key is empty"
+        end if
         call parquet_close_reader(reader)
     end subroutine scenario_map_read_nested_value
 
@@ -18092,14 +18267,20 @@ contains
         call parquet_parse_maml(schema)
     end subroutine scenario_maml_map_nested_value
 
-    !> Reading a struct column whose field is itself a nested container. Phase 4 does not support
-    !> nesting; refusing it cleanly, NAMING THE FIELD rather than only the column, is its whole
-    !> obligation towards Phase 7.
+    !> Reading a struct column whose field is a LIST. Phase 4 refused this and Phase 7 reads it.
+    !!
+    !! **This scenario was inverted rather than deleted, and it earns its place as the NEGATIVE
+    !! CONTROL for `struct_read_nested_struct_field`.** Those two differ in exactly one way -- the
+    !! field's own type -- so together they show the surviving refusal is about an intermediate
+    !! STRUCT not being addressable by a dotted path, and not about "a struct field that is a
+    !! container". Either one alone would leave that ambiguous.
     subroutine scenario_struct_read_nested_field()
         type(parquet_reader) :: reader
         type(parquet_struct_column) :: sc
         call parquet_open_reader(reader, "test/fixtures/map_list_types.parquet")
         call parquet_read_column(reader, "struct_of_list", sc)
+        if (sc%nrows() /= 3_int64) error stop "struct_read_nested_field: expected three rows"
+        if (sc%field_kind(2) /= PK_LIST) error stop "struct_read_nested_field: field 2 is not a list"
         call parquet_close_reader(reader)
     end subroutine scenario_struct_read_nested_field
 

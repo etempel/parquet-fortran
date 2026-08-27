@@ -52,9 +52,9 @@ module parquet_list
     ! (tools/check_source_conventions.py).
     use parquet_columns, only : parquet_column, parquet_container_column, parquet_kind_name, &
         parquet_column_data_ptr, parquet_column_get_at, parquet_column_is_null, &
-        parquet_column_set_null, &
+        parquet_column_set_null, parquet_column_container, parquet_kind_is_container, &
         PK_NONE, PK_INT32, PK_INT64, PK_FLOAT32, PK_FLOAT64, PK_LOGICAL, PK_STRING, &
-        PK_DATE, PK_TIME, PK_TIMESTAMP, PK_LIST
+        PK_DATE, PK_TIME, PK_TIMESTAMP, PK_LIST, PK_MAP, PK_STRUCT
     use parquet_temporal, only : parquet_date, parquet_time, parquet_timestamp
     !
     implicit none
@@ -217,6 +217,7 @@ module parquet_list
         procedure :: is_empty => plv_is_empty       !! Whether the referenced row holds no elements.
         procedure :: element_kind => plv_element_kind !! The payload's PK_* kind.
         procedure :: row_index => plv_row_index     !! The 1-based row this handle refers to.
+        procedure :: nested => plv_nested           !! The inner container, when the payload is one.
         procedure, private :: plv_get_i32           !! get specific for an int32 payload.
         procedure, private :: plv_get_i64           !! get specific for an int64 payload.
         procedure, private :: plv_get_f32           !! get specific for a float32 payload.
@@ -447,7 +448,7 @@ contains
         class(parquet_list_column), intent(in) :: self     !! the column.
         character(len=:), allocatable, intent(out) :: out  !! the description.
         character(len=:), allocatable :: pk
-        call payload_kind_text(self%elem_kind, pk)
+        call nested_payload_text(self%payload, self%elem_kind, pk)
         out = "list<"//pk//">"
     end subroutine lc_kind_text
     !
@@ -504,6 +505,15 @@ contains
         call self%clear()
         if (.not. is_supported_payload(payload_kind)) then
             call parquet_kind_name(payload_kind, kname)
+            if (parquet_kind_is_container(payload_kind)) then
+                ! A container payload is nesting, and %init cannot express it: it is handed one
+                ! PK_* discriminator, while a nested payload is a kind PLUS an inner schema. Build
+                ! the inner container, hand it to a parquet_column with %adopt_container, and pass
+                ! that column to %adopt_rows. See feature_container_phase7.md's D1.
+                error stop EP//"init: "//kname//" is a nested payload and cannot be declared here; "// &
+                    "build the inner container, hand it to a parquet_column with %adopt_container, "// &
+                    "and pass that column to %adopt_rows"
+            end if
             error stop EP//"init: "//kname//" is not a supported list payload kind"
         end if
         n = 0_int64
@@ -594,7 +604,7 @@ contains
         if (.not. allocated(offsets)) error stop EP//"adopt_rows: offsets is not allocated"
         n = size(offsets, kind=int64) - 1_int64
         if (n < 0_int64) error stop EP//"adopt_rows: offsets must hold at least one entry"
-        if (.not. is_supported_payload(payload%kindof())) then
+        if (.not. is_adoptable_payload(payload%kindof())) then
             call parquet_kind_name(payload%kindof(), kname)
             error stop EP//"adopt_rows: "//kname//" is not a supported list payload kind"
         end if
@@ -1123,6 +1133,48 @@ contains
         n = self%col%length_i64(self%idx)
     end function plv_length
     !
+    !> Hands back the inner container behind a NESTED payload, plus the payload rows this row owns.
+    !!
+    !! This is the only route from a nested list column to what is inside it, and it exists because
+    !! `%get`'s nine specifics cover the scalar and temporal payload kinds and nothing else -- there
+    !! is no array shape a `list<struct<...>>` row could be copied into. So the caller is handed the
+    !! flattened inner container and the half-open range of its rows that belong to THIS row:
+    !!
+    !! ```fortran
+    !! h = lc%view(i)
+    !! call h%nested(inner, lo, hi)
+    !! select type (inner)
+    !! type is (parquet_struct_column)
+    !!     do k = lo, hi
+    !!         r = inner%view(k)
+    !!         call r%get_field("id", value)
+    !!     end do
+    !! end select
+    !! ```
+    !!
+    !! `inner` comes back NULL, and `lo > hi`, when the payload is not a container -- so a caller
+    !! that has not checked `%element_kind()` gets an empty loop rather than a wrong answer. A null
+    !! or empty row also yields `lo > hi`, which is the same convention `%length` reports as 0.
+    !!
+    !! The pointer is BORROWED from the column and is valid only while that column is unchanged:
+    !! anything that rebuilds the payload (`%gather_rows`, `%append_from`, `%grow_rows`) invalidates
+    !! it, exactly as `parquet_table`'s `%col` pointers are invalidated by a row-structural mutation.
+    subroutine plv_nested(self, inner, lo, hi)
+        class(parquet_list_row), intent(in) :: self                    !! the handle.
+        class(parquet_container_column), pointer, intent(out) :: inner !! the inner container, or null.
+        integer(int64), intent(out) :: lo                              !! first payload row of this row.
+        integer(int64), intent(out) :: hi                              !! last payload row; hi < lo when empty.
+        call check_handle(self, "nested")
+        inner => null()
+        lo = 1_int64
+        hi = 0_int64
+        if (.not. parquet_kind_is_container(self%col%elem_kind)) return
+        call parquet_column_container(self%col%payload, inner)
+        if (self%col%is_null_row(self%idx)) return
+        lo = self%col%offsets(self%idx) + 1_int64
+        hi = self%col%offsets(self%idx + 1_int64)
+    end subroutine plv_nested
+    !
     !> Whether the referenced row is a null (absent) list.
     function plv_is_null(self) result(res)
         class(parquet_list_row), intent(in) :: self !! the handle.
@@ -1562,7 +1614,8 @@ contains
     !> Whether a PK_* kind may be a list column's payload.
     !!
     !! The nine SCALAR value kinds. A `*_VEC` kind is excluded because a fixed-width vector inside
-    !! a variable-length list is `list<fixed_size_list<...>>`, which is Phase 7's nesting question
+    !! a variable-length list is `list<fixed_size_list<...>>`, which is a shape this library does not
+    !! read or write at any depth --
     !! and not expressible by giving the payload a width. `PK_LIST`/`PK_MAP`/`PK_STRUCT` are
     !! excluded for the same reason -- a container payload is nesting, and `%init` would have no
     !! way to be told what the inner container holds.
@@ -1577,6 +1630,25 @@ contains
             res = .false.
         end select
     end function is_supported_payload
+    !
+    !> Whether a PK_* kind may be ADOPTED as a list column's payload.
+    !!
+    !! Wider than `is_supported_payload` by exactly the three container kinds, and the asymmetry is
+    !! the point rather than an oversight: `%init` fixes a payload KIND, while a nested payload is a
+    !! kind plus a whole inner schema, and `%init(PK_STRUCT)` would produce a list whose payload is a
+    !! struct column with no fields -- an unusable state with no route out of it. So nesting is
+    !! reachable only by building the inner container first and handing it over with
+    !! `%adopt_container` + `%adopt_rows`. See feature_container_phase7.md's D1 and D2.
+    !!
+    !! The `*_VEC` kinds stay refused on BOTH paths: a fixed-width vector inside a variable-length
+    !! list is `list<fixed_size_list<...>>`, which is a different question from a container payload
+    !! and is not expressible by giving the payload a width. Widening this gate by deleting it
+    !! rather than by naming the admitted kinds would silently admit them too.
+    pure function is_adoptable_payload(kind) result(res)
+        integer, intent(in) :: kind !! a PK_* discriminator.
+        logical :: res              !! whether it may be adopted as a list payload.
+        res = is_supported_payload(kind) .or. parquet_kind_is_container(kind)
+    end function is_adoptable_payload
     !
     !> Writes the short lowercase name of a payload kind, for `kind_text` and error messages.
     !!
@@ -1605,6 +1677,32 @@ contains
         case default;        out = "unsupported"
         end select
     end subroutine payload_kind_text
+    !
+    !> Writes the payload's type spelling, recursing when the payload is itself a container.
+    !!
+    !! `payload_kind_text` is `pure` and answers from the discriminator alone, which is all an error
+    !! message needs. A NESTED payload's spelling additionally needs the inner container to describe
+    !! itself -- so it cannot be pure, and it cannot be derived from the kind at all. Keeping the two
+    !! apart is what lets every error message stay pure while `%kind_text` reports `list<struct>` and
+    !! `list<list<int32>>`. See feature_container_phase7.md's D3.
+    !!
+    !! `%kind_text` is the ONLY name in this library that recurses: `%kindof()` stays `PK_LIST` at
+    !! every depth and `parquet_kind_name` stays `"PK_LIST"`. A caller that needs the inner shape
+    !! descends and asks the inner object.
+    subroutine nested_payload_text(payload, kind, out)
+        type(parquet_column), intent(in), target :: payload !! the flattened payload column.
+        integer, intent(in) :: kind                         !! the payload's PK_* kind.
+        character(len=:), allocatable, intent(out) :: out   !! the type spelling.
+        class(parquet_container_column), pointer :: inner
+        if (parquet_kind_is_container(kind)) then
+            call parquet_column_container(payload, inner)
+            if (associated(inner)) then
+                call inner%kind_text(out)
+                return
+            end if
+        end if
+        call payload_kind_text(kind, out)
+    end subroutine nested_payload_text
     !
     !> Writes decimal text for an integer, for `%summary`. A subroutine for the same reason as
     !! `payload_kind_text` above.

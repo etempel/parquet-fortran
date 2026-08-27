@@ -77,6 +77,8 @@ contains
                          test_disc_alloc_matches), &
             new_unittest("query_disc_alloc allocates a zero-length array for an empty disc", &
                          test_disc_alloc_empty), &
+            new_unittest("query_disc_alloc agrees whether or not its run record overflows", &
+                         test_disc_alloc_run_record), &
             new_unittest("query_disc_alloc holds a disc the fixed-buffer form could not", &
                          test_disc_alloc_beyond_a_buffer), &
             new_unittest("every bulk form equals its scalar form at every thread count", &
@@ -784,6 +786,72 @@ contains
     end subroutine test_disc_count_matches
 
     !> `pf_query_disc_alloc` returns the same pixels, in the same order, sized exactly.
+    !> Checks `pf_query_disc_alloc` against `pf_query_disc` on two discs chosen to take its two
+    !> different emitting paths.
+    !>
+    !> **Why two discs rather than one.** The self-sizing form counts first, and on that counting
+    !> walk it RECORDS where each run of pixels landed, so that the emitting pass replays those
+    !> runs instead of walking the ring geometry a second time. The record is a fixed-size buffer
+    !> (`hpx_alloc_runs_max`, 1024 runs), and a disc large enough to overflow it falls back to the
+    !> second walk. Both paths must produce the same answer, and nothing in the public interface
+    !> distinguishes them -- so the two cases below are chosen by measurement rather than by
+    !> argument, and the measurement is recorded here because it is the only evidence that this
+    !> test covers two paths and not one twice:
+    !>
+    !>   nside 128, radius 1.2, centre on the seam ->  794 runs recorded, replay path
+    !>   nside 256, radius 1.2, same centre        -> 1400+ runs, record overflows, fallback path
+    !>
+    !> A centre on the `phi = 0` seam is what makes the run count high for the pixel count: nearly
+    !> every ring's arc wraps through the seam and so arrives as two runs rather than one. If a
+    !> future change to `hpx_alloc_runs_max` moves the boundary, re-measure and update both the
+    !> numbers above and the resolutions below; a version of this test where both cases fit in the
+    !> record would still pass while checking half of what it claims.
+    !>
+    !> **Confirmed by negative control, since neither path can be observed from outside.** Breaking
+    !> only the replay of recorded runs fails this test at `nside=128` and nowhere else; breaking
+    !> only the fall-back second walk fails it at `nside=256` and nowhere else. That is what
+    !> establishes that the two cases take different paths, rather than the run counts above, which
+    !> only predict it.
+    subroutine test_disc_alloc_run_record(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        real(real64), parameter :: seam(3) = [1.0_real64, 0.0_real64, 0.0_real64]
+        integer(int64), parameter :: cases(2) = [128_int64, 256_int64]
+        integer(int64) :: nside, nlist, nalloc, k
+        integer(int64), allocatable :: buf(:), got(:)
+        integer :: c, sch, nbad
+        character(len=200) :: detail
+
+        nbad = 0
+        detail = ""
+        do c = 1, size(cases)
+            nside = cases(c)
+            do sch = 0, 1
+                call pf_query_disc_count(nside, seam, 1.2_real64, nlist, scheme=sch)
+                allocate (buf(max(1_int64, nlist)))
+                call pf_query_disc(nside, seam, 1.2_real64, buf, nlist, scheme=sch)
+                call pf_query_disc_alloc(nside, seam, 1.2_real64, got, nalloc, scheme=sch)
+                if (nalloc /= nlist .or. int(size(got), int64) /= nlist) then
+                    nbad = nbad + 1
+                    if (detail == "") write (detail, '(a,i0,a,i0,a,i0,a,i0,a,i0)') &
+                        "nside=", nside, " scheme=", sch, ": alloc gave ", nalloc, &
+                        " (array ", size(got), ") against ", nlist
+                else
+                    do k = 1_int64, nlist
+                        if (got(k) /= buf(k)) then
+                            nbad = nbad + 1
+                            if (detail == "") write (detail, '(a,i0,a,i0,a,i0,a,i0,a,i0)') &
+                                "nside=", nside, " scheme=", sch, " element ", k, ": alloc gave ", &
+                                got(k), " against ", buf(k)
+                            exit
+                        end if
+                    end do
+                end if
+                deallocate (buf, got)
+            end do
+        end do
+        call check(error, nbad, 0, "query_disc_alloc disagreed with query_disc: " // trim(detail))
+    end subroutine test_disc_alloc_run_record
+
     subroutine test_disc_alloc_matches(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
         integer :: c, nbad, ncase

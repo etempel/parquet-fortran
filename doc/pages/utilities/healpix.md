@@ -300,8 +300,10 @@ buffer is yours.
 touches no array, so nothing can overflow. `scheme` changes nothing about a count and is accepted
 only so that one call can be switched between the three forms without editing its arguments.
 
-`pf_query_disc_alloc` walks the disc **twice** — once to count, once to fill — which is what buys
-an exact size with no allocation inside the walk and no over-allocation.
+`pf_query_disc_alloc` counts first and then fills, which is what buys an exact size with no
+allocation inside the walk and no over-allocation. The counting pass records where each run of
+pixels landed, so the filling pass replays those runs rather than walking the ring geometry a
+second time; a disc large enough to exhaust that record simply walks again.
 
 ## Comparing angles without computing them
 

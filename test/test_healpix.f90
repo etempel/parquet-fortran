@@ -80,6 +80,8 @@ contains
                          test_disc_zero_radius), &
             new_unittest("RING results ascend and NEST results hold the same pixels", &
                          test_disc_ordering_and_schemes), &
+            new_unittest("a NEST disc is the ring2nest image of its RING twin, over a sweep", &
+                         test_disc_nest_sweep), &
             new_unittest("an inclusive disc contains every pixel the rim passes through", &
                          test_disc_inclusive_covers_the_rim), &
             new_unittest("an inclusive disc stays within radius plus one pixel radius", &
@@ -520,6 +522,116 @@ contains
     !> The ordering half is what makes the RING promise testable at all -- a set comparison passes
     !> against a walk that emits a seam-crossing arc in two runs the wrong way round, which is the
     !> one place the order can go wrong.
+    !> Sweeps the NEST disc result against the RING one across resolution, radius, centre and
+    !> inclusiveness, checking that the two hold exactly the same pixels.
+    !>
+    !> **This is the test that holds `hpx_ringij2nest_run` to `hpx_ringij2nest`.** The disc walk
+    !> emits NEST results by STEPPING a Morton code along a run of consecutive ring positions
+    !> rather than decoding each position, which is worth about 7x on a NEST result and is the one
+    !> place in this module where a fast path restates a correspondence instead of calling it. The
+    !> scalar form is still the definition -- `pf_ring2nest` reaches it -- so comparing the two
+    !> here is a genuine cross-check rather than a round trip through one implementation.
+    !>
+    !> The sweep is chosen to reach every way the stepper can be asked to move. `nside` 1 and 2
+    !> have no polar-cap rings at all, so the belt logic runs alone; the larger resolutions
+    !> exercise both caps. The pole centres make whole rings; the seam centre makes runs that wrap
+    !> through `phi = 0` and so arrive as two blocks; the small radii make runs of one and two
+    !> pixels, where a stepper that is wrong only on its second element would otherwise hide. Both
+    !> inclusive modes run, because the enlarged radius changes which rings are reached.
+    subroutine test_disc_nest_sweep(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer(int64), parameter :: sweep_nside(6) = [1_int64, 2_int64, 4_int64, 8_int64, &
+                                                       16_int64, 64_int64]
+        real(real64), parameter :: sweep_rad(6) = [0.001_real64, 0.05_real64, 0.3_real64, &
+                                                   1.0_real64, 2.5_real64, 3.14159265358979_real64]
+        integer(int64) :: nside, npix, nring, nnest, m, mapped
+        integer(int64), allocatable :: ring(:), nest(:)
+        logical, allocatable :: seen(:)
+        real(real64) :: v0(3), sq
+        integer :: ins, ir, ic, iinc, nbad, ncase
+        logical :: inc
+        character(len=200) :: detail
+
+        nbad = 0
+        ncase = 0
+        detail = ""
+        do ins = 1, size(sweep_nside)
+            nside = sweep_nside(ins)
+            npix = 12_int64 * nside * nside
+            allocate (ring(npix), nest(npix), seen(0:npix - 1_int64))
+            do ir = 1, size(sweep_rad)
+                do ic = 1, 5
+                    call sweep_centre(ic, v0)
+                    do iinc = 0, 1
+                        inc = (iinc == 1)
+                        call pf_query_disc(nside, v0, sweep_rad(ir), ring, nring, &
+                                           scheme=PF_HP_RING, inclusive=inc)
+                        call pf_query_disc(nside, v0, sweep_rad(ir), nest, nnest, &
+                                           scheme=PF_HP_NEST, inclusive=inc)
+                        ncase = ncase + 1
+                        if (nnest /= nring) then
+                            nbad = nbad + 1
+                            if (detail == "") write (detail, '(a,i0,a,f8.4,a,i0,a,l1,a,i0,a,i0)') &
+                                "nside=", nside, " r=", sweep_rad(ir), " centre=", ic, &
+                                " inclusive=", inc, ": nest count ", nnest, " vs ring ", nring
+                            cycle
+                        end if
+                        if (nring == 0_int64) cycle
+                        seen = .false.
+                        do m = 1_int64, nnest
+                            seen(nest(m)) = .true.
+                        end do
+                        do m = 1_int64, nring
+                            call pf_ring2nest(nside, ring(m), mapped)
+                            if (.not. seen(mapped)) then
+                                nbad = nbad + 1
+                                if (detail == "") write (detail, &
+                                    '(a,i0,a,f8.4,a,i0,a,l1,a,i0,a,i0)') &
+                                    "nside=", nside, " r=", sweep_rad(ir), " centre=", ic, &
+                                    " inclusive=", inc, ": RING pixel ", ring(m), &
+                                    " is missing from the NEST result as ", mapped
+                                exit
+                            end if
+                        end do
+                    end do
+                end do
+            end do
+            deallocate (ring, nest, seen)
+        end do
+
+        ! Equal counts plus every RING pixel present in the NEST result is set equality, since the
+        ! two sets are then the same size and one contains the other.
+        call check(error, ncase, 360, "the sweep did not run every case it enumerates")
+        if (allocated(error)) return
+        call check(error, nbad, 0, "a NEST disc did not hold its RING twin's pixels: " // &
+                   trim(detail))
+
+    contains
+
+        !> The five disc centres the sweep uses, as unit vectors.
+        subroutine sweep_centre(which, v)
+            integer, intent(in) :: which !! 1 = north pole, 2 = south pole, 3 = equator on the
+                                         !! seam, 4 = equator between two faces, 5 = a general
+                                         !! direction on no symmetry axis.
+            real(real64), intent(out) :: v(3) !! the centre direction.
+
+            select case (which)
+            case (1)
+                v = [0.0_real64, 0.0_real64, 1.0_real64]
+            case (2)
+                v = [0.0_real64, 0.0_real64, -1.0_real64]
+            case (3)
+                v = [1.0_real64, 0.0_real64, 0.0_real64]
+            case (4)
+                v = [sqrt(0.5_real64), sqrt(0.5_real64), 0.0_real64]
+            case default
+                sq = sqrt(1.0_real64 - 0.4_real64 * 0.4_real64)
+                v = [sq * cos(1.1_real64), sq * sin(1.1_real64), 0.4_real64]
+            end select
+        end subroutine sweep_centre
+
+    end subroutine test_disc_nest_sweep
+
     subroutine test_disc_ordering_and_schemes(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first fault.
         integer(int64) :: nside, npix, nring, nnest, m, mapped

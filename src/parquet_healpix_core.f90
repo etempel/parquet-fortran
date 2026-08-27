@@ -254,6 +254,146 @@ contains
         ipnest = face * nside * nside + ior(hpx_spread_bits(ix), ishft(hpx_spread_bits(iy), 1))
     end procedure hpx_ringij2nest
 
+    module procedure hpx_ringij2nest_run
+        integer(int64) :: i, face, t, ix, iy, kshift, d, tsum, jp_l, jm_l, ifp, ifm
+        integer(int64) :: nside2, k, ipn, jpm, jmm, four_n, mx, my
+        integer :: region
+        logical :: use32
+
+        if (count <= 0_int64) return
+        use32 = present(out32)
+        nside2 = nside * nside
+        four_n = 4_int64 * nside
+
+        ! ---- The first position, decoded exactly as `hpx_ringij2nest` decodes it ----
+        !
+        ! Everything after this is a step, so this is the only place the two forms can disagree,
+        ! and it is deliberately the same arithmetic rather than a simplification of it.
+        if (jr < nside) then
+            region = 1
+            i = jr
+            face = jstart / i
+            t = modulo(jstart, i)
+            ix = nside - i + t
+            iy = nside - 1_int64 - t
+        else if (jr > 3_int64 * nside) then
+            region = 2
+            i = four_n - jr
+            face = 8_int64 + jstart / i
+            t = modulo(jstart, i)
+            ix = t
+            iy = i - 1_int64 - t
+        else
+            region = 3
+            kshift = iand(jr - nside, 1_int64)
+            d = jr - 2_int64 * nside
+            tsum = 2_int64 * jstart + nside - kshift - 1_int64
+            if (iand(tsum, 1_int64) /= iand(d, 1_int64)) tsum = tsum + 1_int64
+            jp_l = (tsum + d) / 2_int64
+            jm_l = (tsum - d) / 2_int64
+            ! The phi = 0 seam, as in the scalar form. Applying it here and not again on later
+            ! positions is not a difference: it adds `4*nside` to BOTH indices, which raises both
+            ! face numbers by four and so changes neither their comparison nor their low two bits,
+            ! and leaves both remainders alone. It matters only where an index is negative, where
+            ! Fortran's truncation toward zero would otherwise give the wrong face -- and once
+            ! stepped past that, the two agree again.
+            if (jp_l < 0_int64 .or. jm_l < 0_int64) then
+                jp_l = jp_l + four_n
+                jm_l = jm_l + four_n
+            end if
+            ifp = jp_l / nside
+            ifm = jm_l / nside
+            jpm = jp_l - ifp * nside
+            jmm = jm_l - ifm * nside
+            ix = jmm
+            iy = nside - 1_int64 - jpm
+            face = belt_face(ifp, ifm)
+        end if
+
+        mx = hpx_spread_bits(ix)
+        my = ishft(hpx_spread_bits(iy), 1)
+
+        do k = 0_int64, count - 1_int64
+            ipn = face * nside2 + ior(mx, my)
+            if (use32) then
+                out32(offset + k + 1_int64) = int(ipn, int32)
+            else
+                out64(offset + k + 1_int64) = ipn
+            end if
+            ! The advance is skipped on the last position, so the state is never stepped past the
+            ! end of the run -- which is what keeps a face counter from running off its own range
+            ! at the end of a ring.
+            if (k == count - 1_int64) exit
+            select case (region)
+            case (1)
+                ! North cap. Within a face the position runs diagonally: `x` up, `y` down. At the
+                ! quadrant boundary it restarts at that face's own corner.
+                t = t + 1_int64
+                if (t == i) then
+                    t = 0_int64
+                    face = face + 1_int64
+                    mx = hpx_spread_bits(nside - i)
+                    my = ishft(hpx_spread_bits(nside - 1_int64), 1)
+                else
+                    mx = iand(ior(mx, hpx_m1_odd) + 1_int64, hpx_m1)
+                    my = iand(my - 2_int64, hpx_m1_odd)
+                end if
+            case (2)
+                ! South cap: the same diagonal, from the opposite corner.
+                t = t + 1_int64
+                if (t == i) then
+                    t = 0_int64
+                    face = face + 1_int64
+                    mx = 0_int64
+                    my = ishft(hpx_spread_bits(i - 1_int64), 1)
+                else
+                    mx = iand(ior(mx, hpx_m1_odd) + 1_int64, hpx_m1)
+                    my = iand(my - 2_int64, hpx_m1_odd)
+                end if
+            case default
+                ! Belt. Both diagonal indices advance by one per position -- the parity fixup above
+                ! is the same for `jstart` and `jstart+1`, so their sum rises by exactly two -- and
+                ! each carries into its own face counter on a multiple of `nside`. Tracking the
+                ! remainders directly is what removes the two integer divisions per pixel.
+                jmm = jmm + 1_int64
+                if (jmm == nside) then
+                    jmm = 0_int64
+                    ifm = ifm + 1_int64
+                    mx = 0_int64
+                else
+                    mx = iand(ior(mx, hpx_m1_odd) + 1_int64, hpx_m1)
+                end if
+                jpm = jpm + 1_int64
+                if (jpm == nside) then
+                    jpm = 0_int64
+                    ifp = ifp + 1_int64
+                    my = ishft(hpx_spread_bits(nside - 1_int64), 1)
+                else
+                    my = iand(my - 2_int64, hpx_m1_odd)
+                end if
+                face = belt_face(ifp, ifm)
+            end select
+        end do
+
+    contains
+
+        !> Which of the twelve faces a belt position lies on, from its two diagonal face indices.
+        pure function belt_face(a, b) result(f)
+            integer(int64), intent(in) :: a !! face index of the `jp` diagonal.
+            integer(int64), intent(in) :: b !! face index of the `jm` diagonal.
+            integer(int64) :: f !! the face, 0 .. 11.
+
+            if (a == b) then
+                f = iand(a, 3_int64) + 4_int64
+            else if (a < b) then
+                f = iand(a, 3_int64)
+            else
+                f = iand(b, 3_int64) + 8_int64
+            end if
+        end function belt_face
+
+    end procedure hpx_ringij2nest_run
+
     module procedure hpx_max_pixrad
         real(real64) :: zc, sc, zv, sv, dz, ds, sh, chord2, rn
 
@@ -319,7 +459,22 @@ contains
 
         rn = real(nside, real64)
         za = abs(z)
-        tt = modulo(phi / hpx_halfpi, 4.0_real64)
+        ! `phi` in [0, 2*pi) -- every well-formed input -- already lands in [0, 4), so the
+        ! reduction is a no-op there and a compare is enough to skip it. That is worth doing rather
+        ! than leaving to `modulo` because gfortran compiles real `modulo` to the x87 `fprem` loop,
+        ! measured at 28% of this procedure and at 71% of `pf_query_disc`'s ring walk where the same
+        ! intrinsic appears. One conditional step then covers any `phi` within a revolution of the
+        ! interval, and `modulo` still backs it up beyond that, so the result is unchanged for every
+        ! input rather than for the ones expected here. Both steps are exact: `tt - 4` is exact by
+        ! Sterbenz's lemma for `tt` in [4, 8), and `tt + 4` is the single rounding `modulo` performs.
+        tt = phi / hpx_halfpi
+        if (tt >= 4.0_real64) then
+            tt = tt - 4.0_real64
+            if (tt >= 4.0_real64) tt = modulo(tt, 4.0_real64)
+        else if (tt < 0.0_real64) then
+            tt = tt + 4.0_real64
+            if (tt < 0.0_real64) tt = modulo(tt, 4.0_real64)
+        end if
         if (za <= hpx_twothird) then
             ! Equatorial belt. jp and jm index the two families of diagonal lines the belt's
             ! pixels are bounded by, so their difference names the ring and their sum the position
@@ -331,7 +486,10 @@ contains
             ir = nside + 1_int64 + jp - jm
             kshift = 1_int64 - iand(ir, 1_int64)
             ip = (jp + jm - nside + kshift + 1_int64) / 2_int64
-            ip = modulo(ip, 4_int64 * nside)
+            ! `nside` is a power of two, so `4*nside` is one and the remainder is a mask. This
+            ! is exact for a negative `ip` too: `iand(x, 2**k - 1)` is `modulo(x, 2**k)` in two's
+            ! complement, which matters because `ip` can be -1 at the phi = 0 seam.
+            ip = iand(ip, 4_int64 * nside - 1_int64)
             ipix = 2_int64 * nside * (nside - 1_int64) + (ir - 1_int64) * 4_int64 * nside + ip
         else
             ! Polar cap. The two formulas continue each other exactly at |z| = 2/3, so the
@@ -441,7 +599,22 @@ contains
 
         rn = real(nside, real64)
         za = abs(z)
-        tt = modulo(phi / hpx_halfpi, 4.0_real64)
+        ! `phi` in [0, 2*pi) -- every well-formed input -- already lands in [0, 4), so the
+        ! reduction is a no-op there and a compare is enough to skip it. That is worth doing rather
+        ! than leaving to `modulo` because gfortran compiles real `modulo` to the x87 `fprem` loop,
+        ! measured at 28% of this procedure and at 71% of `pf_query_disc`'s ring walk where the same
+        ! intrinsic appears. One conditional step then covers any `phi` within a revolution of the
+        ! interval, and `modulo` still backs it up beyond that, so the result is unchanged for every
+        ! input rather than for the ones expected here. Both steps are exact: `tt - 4` is exact by
+        ! Sterbenz's lemma for `tt` in [4, 8), and `tt + 4` is the single rounding `modulo` performs.
+        tt = phi / hpx_halfpi
+        if (tt >= 4.0_real64) then
+            tt = tt - 4.0_real64
+            if (tt >= 4.0_real64) tt = modulo(tt, 4.0_real64)
+        else if (tt < 0.0_real64) then
+            tt = tt + 4.0_real64
+            if (tt < 0.0_real64) tt = modulo(tt, 4.0_real64)
+        end if
         if (za <= hpx_twothird) then
             temp1 = rn * (0.5_real64 + tt)
             temp2 = rn * (z * 0.75_real64)
@@ -459,8 +632,9 @@ contains
             else
                 face = iand(ifm, 3_int64) + 8_int64
             end if
-            ix = modulo(jm, nside)
-            iy = nside - 1_int64 - modulo(jp, nside)
+            ! A mask again, for the reason `hpx_zphi2pix_ring` gives: `nside` is a power of two.
+            ix = iand(jm, nside - 1_int64)
+            iy = nside - 1_int64 - iand(jp, nside - 1_int64)
         else
             ntt = int(tt, int64)
             tp = tt - real(ntt, real64)

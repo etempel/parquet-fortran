@@ -150,6 +150,14 @@ module parquet_healpix
     integer(int64), parameter :: hpx_m2 = int(z'3333333333333333', int64)
     !> Bit mask 0x5555555555555555 -- the even bit positions.
     integer(int64), parameter :: hpx_m1 = int(z'5555555555555555', int64)
+    !> Bit mask 0xAAAAAAAAAAAAAAAA -- the odd bit positions, where a NEST index holds its `y`.
+    !!
+    !! Built by shifting rather than written as a literal because the literal's high bit is set and
+    !! so exceeds `huge(0_int64)`, which gfortran rejects in `int(boz, int64)`. It exists for
+    !! `hpx_ringij2nest_run`, which steps a Morton code rather than rebuilding it: adding one to
+    !! the `x` field needs the carry to run through the `y` field's bit positions, so those are
+    !! filled with ones first and masked off afterwards.
+    integer(int64), parameter :: hpx_m1_odd = ishft(hpx_m1, 1)
 
     ! ---- Per-face ring and phi offsets ----
     !
@@ -538,6 +546,35 @@ module parquet_healpix
             integer(int64) :: ipnest !! the pixel's NEST index.
         end function hpx_ringij2nest
 
+        !> Writes a whole RUN of consecutive ring positions as NEST indices, stepping rather than
+        !> decoding each one.
+        !>
+        !> **Why this exists beside `hpx_ringij2nest` rather than instead of it.** `pf_query_disc`
+        !> emits its answer as runs of consecutive positions on one ring, and calling the scalar
+        !> form per pixel pays a full decode each time -- an integer division, a parity fixup and
+        !> two bit-spreads. Measured against the RING scheme on the same disc, that made a NEST
+        !> result cost **7.7x** a RING one (15.2 against 1.98 nanoseconds per pixel under gfortran),
+        !> which is more than the entire rest of the query.
+        !>
+        !> **What makes stepping possible** is that all three of the pixelisation's regions move the
+        !> same way along a ring: one step increases the within-face `x` by one and decreases `y` by
+        !> one, until the run crosses a face boundary, where both restart at a known corner. So the
+        !> decode happens once per run, and the Morton code is then stepped in place -- an increment
+        !> on the even bits and a decrement on the odd ones -- instead of being rebuilt.
+        !>
+        !> The scalar form remains the definition: this must agree with it for every `(jr, j)`, and
+        !> `test_healpix.f90`'s scheme-agreement test is what holds it to that through the public
+        !> API.
+        pure module subroutine hpx_ringij2nest_run(nside, jr, jstart, count, offset, out32, out64)
+            integer(int64), intent(in) :: nside !! resolution parameter.
+            integer(int64), intent(in) :: jr !! ring index, 1 .. 4*nside-1, from the north pole.
+            integer(int64), intent(in) :: jstart !! first index within the ring, 0-based.
+            integer(int64), intent(in) :: count !! how many consecutive positions to write.
+            integer(int64), intent(in) :: offset !! elements already written to the output.
+            integer(int32), intent(inout), optional :: out32(:) !! int32 destination, or absent.
+            integer(int64), intent(inout), optional :: out64(:) !! int64 destination, or absent.
+        end subroutine hpx_ringij2nest_run
+
         !> Largest angular distance from a pixel centre to one of its own corners, in radians.
         !>
         !> This is the margin `pf_query_disc`'s inclusive mode enlarges its radius by, and the
@@ -653,7 +690,7 @@ module parquet_healpix
         !> construction rather than by test. In that mode `cap` should be `huge(0_int64)`, which
         !> makes the capacity abort unreachable.
         module subroutine hpx_query_disc_core(nside, vec, radius, scheme, inclusive, nlist, cap, &
-                                              what, out32, out64)
+                                              what, out32, out64, runs, nruns)
             integer(int64), intent(in) :: nside !! resolution parameter, already validated.
             real(real64), intent(in) :: vec(3) !! disc centre, already validated, any length.
             real(real64), intent(in) :: radius !! disc radius, radians, already validated.
@@ -664,6 +701,11 @@ module parquet_healpix
             character(len=*), intent(in) :: what !! calling entry point, for a capacity message.
             integer(int32), intent(out), optional :: out32(:) !! int32 output buffer.
             integer(int64), intent(out), optional :: out64(:) !! int64 output buffer.
+            !> Column `k` records the `k`-th run this walk emitted, as `(ring, the ring's first
+            !! RING index, the run's first index within the ring, its length)`. Present only from
+            !! `pf_query_disc_alloc`, which uses it to emit without walking the geometry twice.
+            integer(int64), intent(out), optional :: runs(:,:)
+            integer(int64), intent(out), optional :: nruns !! runs recorded, or -1 if `runs` filled.
         end subroutine hpx_query_disc_core
 
         !> `pf_query_disc_count`, int32 kinds.

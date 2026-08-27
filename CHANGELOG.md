@@ -115,6 +115,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`parquet_healpix` is faster, with no interface change.** `pf_query_disc` is 1.3-1.6x faster
+  under gfortran; a disc returned in the NEST scheme is about 3x faster in either compiler;
+  `pf_query_disc_alloc` is about 2x faster; and `pf_ang2pix_ring`/`pf_ang2pix_nest`/`pf_vec2pix_*`
+  are 1.1-1.3x faster. Results are unchanged.
 - **`parquet_write_table`'s `copy_metadata=`/`metadata_keys=` no longer carry a key the writer
   generates itself** — `DATE`, `name`, the two `IVOA.VOTable-Parquet.*` keys and every
   `column.<name>.<attr>` entry. `copy_metadata=.true.` skips them; `metadata_keys=` naming one is

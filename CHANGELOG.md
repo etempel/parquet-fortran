@@ -18,7 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   count alone (`pf_query_disc_count`). Grid arithmetic over `nside`, `npix`, order, pixel area,
   resolution, ring index and ring latitude (`pf_nside2npix`, `pf_npix2nside`, `pf_nside2order`,
   `pf_order2nside`, `pf_nside2pixarea`, `pf_nside2resol`, `pf_max_pixrad`, `pf_pix2ring_*`,
-  `pf_ring2z`), angular separation (`pf_angdist`) and the squared-chord pair that replaces it in a
+  `pf_ring2z`), angular separation between two directions (`pf_angdist`) or between two RA/Dec
+  positions in degrees (`pf_angdist_deg`), and the squared-chord pair that replaces it in a
   comparison (`pf_chord2_from_angle`/`pf_angle_from_chord2`). Every conversion also has a `_bulk`
   form over whole arrays with an optional `threads=`. Every integer argument takes
   `integer(int32)` or `integer(int64)`; the scalar conversions are `pure elemental`, so they

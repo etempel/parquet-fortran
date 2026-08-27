@@ -256,6 +256,36 @@ product rounds to exactly 1 and returns 0, and near `pi`. The inputs need not be
 an angle**: `|v1 - v2|**2 <= (2*sin(r/2))**2` is the same test with no inverse trigonometry in it,
 and no per-candidate transcendental at all.
 
+If your positions are RA/Dec in degrees rather than vectors, there is a direct form:
+
+```fortran
+d = pf_angdist_deg(ra1, dec1, ra2, dec2)      ! degrees in, degrees out
+```
+
+It is `pure elemental`, so it broadcasts over whole arrays — which `pf_angdist` cannot, its
+arguments being arrays already — and it is **31% cheaper than converting to vectors and calling
+`pf_angdist`**, because working in the frame where only the RA difference survives removes one of
+the four sine/cosine pairs.
+
+**This is the one place the module takes a bare `dec`, and it can because the answer does not
+depend on which declination convention you mean.** Everywhere else a bare `dec` is refused and
+RA/Dec lives on [`pf_healpix_grid`](#carrying-the-grid-in-an-object) with its `frame=`, because
+`theta = pi/2 - dec` and the mirrored `theta = pi/2 + dec` send the same number to opposite
+hemispheres. Those two differ by a reflection, and a reflection does not change the angle between
+two directions, so this procedure gives the same answer under either — and the test suite asserts
+that, bit for bit.
+
+Right ascension may be any value: it is folded into one turn internally, so an accumulated hour
+angle or a negative RA needs no preparation, and a separation that straddles RA 0 keeps full
+precision. Accuracy is within **7.8e-15 degrees** of a 60-digit evaluation across the edge cases —
+the seam, both poles, coincident and antipodal positions — and that worst case is at the pole,
+where it is `cos(dec)` losing relative precision rather than the formula. `acos` of the dot product
+and the haversine were both measured and rejected: the first is 2.0e-07 degrees wrong a millionth
+of a degree from the pole, the second 9.5e-07 just inside antipodal.
+
+Like every elemental procedure here it is **total**: it validates nothing and never aborts, so a
+NaN argument gives a NaN result rather than an error.
+
 ## What is validated and what is not
 
 **`pf_query_disc` validates its arguments and aborts on a bad one** — an `nside` that is not a

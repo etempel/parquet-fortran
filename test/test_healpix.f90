@@ -34,7 +34,7 @@ module test_healpix
     use parquet_healpix
     use iso_fortran_env, only : int32, int64, real64
     use, intrinsic :: ieee_arithmetic, only : ieee_get_flag, ieee_set_flag, ieee_support_flag, &
-        ieee_invalid, ieee_divide_by_zero, ieee_overflow
+        ieee_invalid, ieee_divide_by_zero, ieee_overflow, ieee_value, ieee_quiet_nan, ieee_is_nan
     use testdrive, only : new_unittest, unittest_type, error_type, check
     implicit none
     private
@@ -91,7 +91,12 @@ contains
                          test_disc_int32_ceiling), &
             new_unittest("no IEEE exception is raised by any entry point", test_no_ieee_exceptions), &
             new_unittest("results are identical from many threads and from one", test_thread_safety), &
-            new_unittest("angdist is stable at both ends of its range", test_angdist_extremes) &
+            new_unittest("angdist is stable at both ends of its range", test_angdist_extremes), &
+            new_unittest("angdist_deg reproduces a 60-digit evaluation on every edge case", &
+                         test_angdist_deg_reference), &
+            new_unittest("angdist_deg agrees with angdist, and keeps its four symmetries", &
+                         test_angdist_deg_agrees), &
+            new_unittest("angdist_deg is total: NaN in, NaN out", test_angdist_deg_total) &
             ]
     end subroutine collect_tests_parquet_healpix
 
@@ -1041,6 +1046,239 @@ contains
             sig = sig + listpix(m) * m
         end do
     end function case_signature
+
+    !> `pf_angdist_deg` against a 60-DIGIT evaluation of its own defining formula, case by case.
+    !>
+    !> **Every input below is exactly representable in binary64**, deliberately, so that what this
+    !> measures is the formula's error and not the inputs'. That distinction is not pedantry: a
+    !> separation of 1e-09 degrees written as the difference of two numbers near 360 carries about
+    !> 1e-05 relative input error before any formula runs, so a test built from such inputs
+    !> measures binary64 rather than the library and would pass against a much worse
+    !> implementation.
+    !>
+    !> The cases are the ones that discriminate between the candidate formulas, and the bound is
+    !> set so that the rejected ones fail it: `acos` of the dot product misses by 2.0e-07 degrees
+    !> near the pole and the haversine by 9.5e-07 just inside antipodal, against the 1e-12 asserted
+    !> here and the 7.8e-15 actually achieved. Reproduce the table with `mpmath` at 60 digits from
+    !> `atan2(|v1 x v2|, v1.v2)`.
+    subroutine test_angdist_deg_reference(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer, parameter :: nq = 15
+        real(real64), parameter :: qa1(nq) = [ &
+            359.5_real64, &
+            360.0_real64, &
+            720.25_real64, &
+            -0.25_real64, &
+            0.0_real64, &
+            0.0_real64, &
+            17.0_real64, &
+            0.0_real64, &
+            0.0_real64, &
+            0.0_real64, &
+            0.0_real64, &
+            45.25_real64, &
+            0.0_real64, &
+            123.25_real64, &
+            0.0_real64]
+        real(real64), parameter :: qd1(nq) = [ &
+            0.0_real64, &
+            0.0_real64, &
+            0.0_real64, &
+            0.0_real64, &
+            89.9999990463256835938_real64, &
+            90.0_real64, &
+            90.0_real64, &
+            0.0_real64, &
+            89.5_real64, &
+            0.0_real64, &
+            0.0_real64, &
+            -45.25_real64, &
+            -70.0_real64, &
+            -31.5_real64, &
+            90.0_real64]
+        real(real64), parameter :: qa2(nq) = [ &
+            0.25_real64, &
+            0.000244140625_real64, &
+            0.25_real64, &
+            0.25_real64, &
+            180.0_real64, &
+            123.5_real64, &
+            230.0_real64, &
+            9.09494701772928237915e-13_real64, &
+            0.000244140625_real64, &
+            179.999999046325683594_real64, &
+            180.0_real64, &
+            45.25_real64, &
+            0.5_real64, &
+            124.75_real64, &
+            0.0_real64]
+        real(real64), parameter :: qd2(nq) = [ &
+            0.0_real64, &
+            0.0_real64, &
+            0.0_real64, &
+            0.0_real64, &
+            89.9999990463256835938_real64, &
+            45.0_real64, &
+            90.0_real64, &
+            0.0_real64, &
+            89.5_real64, &
+            0.0_real64, &
+            0.0_real64, &
+            -45.25_real64, &
+            -70.0_real64, &
+            -30.25_real64, &
+            -90.0_real64]
+        real(real64), parameter :: want(nq) = [ &
+            0.75_real64, &
+            0.000244140625_real64, &
+            2.6172567683030617969e-59_real64, &
+            0.5_real64, &
+            0.0000019073486328125_real64, &
+            45.0_real64, &
+            6.27369360166581369792e-60_real64, &
+            9.09494701772928237915e-13_real64, &
+            0.00000213050183065608730972_real64, &
+            179.999999046325683594_real64, &
+            180.0_real64, &
+            0.0_real64, &
+            0.171009592506928063872_real64, &
+            1.79438664828566646748_real64, &
+            180.0_real64]
+        integer :: k, nbad
+        real(real64) :: got, worst
+        character(len=160) :: detail
+
+        nbad = 0
+        worst = 0.0_real64
+        detail = ""
+        do k = 1, nq
+            got = pf_angdist_deg(qa1(k), qd1(k), qa2(k), qd2(k))
+            worst = max(worst, abs(got - want(k)))
+            if (abs(got - want(k)) > 1.0e-12_real64) then
+                nbad = nbad + 1
+                if (nbad == 1) write (detail, '(a,i0,a,es22.15,a,es22.15)') &
+                    "case ", k, " want=", want(k), " got=", got
+            end if
+        end do
+        call check(error, nbad, 0, "angdist_deg disagreed with the 60-digit values: " // trim(detail))
+        if (allocated(error)) return
+        ! A vacuity guard on the table itself: an empty or accidentally-zeroed table would pass
+        ! every comparison above.
+        call check(error, nq >= 15, "the angdist_deg reference table lost its cases")
+        if (allocated(error)) return
+        ! Set the bound negative to have the run report the largest disagreement it found.
+        call check(error, worst <= 1.0e-12_real64, "angdist_deg worst absolute error exceeded 1e-12 deg")
+    end subroutine test_angdist_deg_reference
+
+    !> `pf_angdist_deg` equals `pf_angdist` of the same two directions, and holds four symmetries.
+    !>
+    !> The agreement is the load-bearing half: the two procedures share no arithmetic beyond
+    !> `atan2`, one working from unit vectors and the other in the frame where only the right
+    !> ascension difference survives, so a defect in either would have to be reproduced exactly by
+    !> the other to hide here.
+    !>
+    !> The four symmetries are each a property the doc-comment claims, and three of them are
+    !> asserted EXACTLY rather than to a tolerance, because each is an exact identity of the
+    !> arithmetic rather than an approximation:
+    !>
+    !> * swapping the two positions negates `dl` and `y2` and touches nothing else;
+    !> * **reflecting both declinations** negates `sd1`, `sd2` and hence `y2`, and leaves `x`
+    !>   alone -- which is why this module can offer a free RA/Dec entry point here and nowhere
+    !>   else, the two live declination conventions differing by exactly this reflection;
+    !> * adding whole turns to either right ascension is removed by the fold;
+    !> * the elemental form broadcasts to the same values the scalar form gives.
+    subroutine test_angdist_deg_agrees(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first fault.
+        integer :: i, j, ncase
+        real(real64) :: a1, d1, a2, d2, got, ref, v1(3), v2(3), rad
+        real(real64) :: acol(7), dcol(7), bulk(7)
+        real(real64), parameter :: r2d = 180.0_real64 / pi
+
+        ncase = 0
+        do i = 0, 12
+            a1 = 30.0_real64 * real(i, real64)
+            d1 = -90.0_real64 + 15.0_real64 * real(i, real64)
+            do j = 0, 12
+                a2 = 27.5_real64 * real(j, real64)
+                d2 = 90.0_real64 - 14.0_real64 * real(j, real64)
+                call pf_ang2vec((90.0_real64 - d1) * pi / 180.0_real64, a1 * pi / 180.0_real64, v1)
+                call pf_ang2vec((90.0_real64 - d2) * pi / 180.0_real64, a2 * pi / 180.0_real64, v2)
+                call pf_angdist(v1, v2, rad)
+                got = pf_angdist_deg(a1, d1, a2, d2)
+                ncase = ncase + 1
+                ! 1e-11 degrees is 4e-8 arcsec, and about four orders above the 2e-15 the two
+                ! forms actually differ by; it is loose because the vector route reaches the same
+                ! angle through four sine/cosine pairs where this reaches it through three, not
+                ! because either is in doubt.
+                call check(error, got, rad * r2d, "angdist_deg disagreed with angdist", &
+                           thr=1.0e-11_real64)
+                if (allocated(error)) return
+                ! Swapping the two positions is an exact identity in real arithmetic and a
+                ! few-ulp one in binary64, so this is asserted to a tolerance rather than to the
+                ! bit. `y1` is `cos(dec2)*sin(dl)`, so the swap gives it the OTHER declination's
+                ! cosine; the two expressions are different roundings of one quantity, and only
+                ! the reflection and fold identities below survive exactly.
+                call check(error, pf_angdist_deg(a2, d2, a1, d1), got, &
+                           "angdist_deg was not symmetric in its two positions", thr=1.0e-12_real64)
+                if (allocated(error)) return
+                ! Reflecting both declinations: the mirrored convention, and the reason this
+                ! procedure needs no frame argument.
+                call check(error, pf_angdist_deg(a1, -d1, a2, -d2), got, &
+                           "reflecting both declinations changed the separation", thr=0.0_real64)
+                if (allocated(error)) return
+                ! Whole turns of right ascension, in both directions and on both arguments.
+                call check(error, pf_angdist_deg(a1 + 360.0_real64, d1, a2, d2), got, &
+                           "adding a turn to the first RA changed the separation", thr=0.0_real64)
+                if (allocated(error)) return
+                call check(error, pf_angdist_deg(a1, d1, a2 - 720.0_real64, d2), got, &
+                           "removing two turns from the second RA changed the separation", &
+                           thr=0.0_real64)
+                if (allocated(error)) return
+            end do
+        end do
+        ! Without this the loops could be skipped entirely and every assertion above would go
+        ! unexercised while the test still passed.
+        call check(error, ncase, 169, "the angdist_deg sweep did not run its whole grid")
+        if (allocated(error)) return
+
+        ! Elemental: one call over arrays must give exactly what seven scalar calls give.
+        acol = [0.0_real64, 45.0_real64, 90.0_real64, 180.0_real64, 270.0_real64, &
+                359.5_real64, 123.25_real64]
+        dcol = [0.0_real64, 30.0_real64, -30.0_real64, 89.0_real64, -89.0_real64, &
+                0.5_real64, -31.5_real64]
+        bulk = pf_angdist_deg(acol, dcol, 10.0_real64, -20.0_real64)
+        do i = 1, 7
+            call check(error, bulk(i), pf_angdist_deg(acol(i), dcol(i), 10.0_real64, -20.0_real64), &
+                       "the elemental form did not match the scalar form", thr=0.0_real64)
+            if (allocated(error)) return
+        end do
+        call check(error, pf_angdist_deg(12.5_real64, 34.5_real64, 12.5_real64, 34.5_real64), &
+                   0.0_real64, "a position was not exactly zero degrees from itself", thr=0.0_real64)
+    end subroutine test_angdist_deg_agrees
+
+    !> `pf_angdist_deg` is total: it validates nothing, aborts on nothing, and propagates NaN.
+    !>
+    !> This is the module's rule for every elemental entry point, and it is asserted rather than
+    !> assumed because the procedure it replaces downstream aborted on a NaN result instead. A
+    !> caller who wants that check keeps it at their own boundary, where it runs once per array
+    !> rather than once per element.
+    subroutine test_angdist_deg_total(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first fault.
+        real(real64) :: nan, got
+
+        nan = ieee_value(0.0_real64, ieee_quiet_nan)
+        got = pf_angdist_deg(nan, 0.0_real64, 10.0_real64, 20.0_real64)
+        call check(error, ieee_is_nan(got), "a NaN right ascension did not give a NaN separation")
+        if (allocated(error)) return
+        got = pf_angdist_deg(0.0_real64, nan, 10.0_real64, 20.0_real64)
+        call check(error, ieee_is_nan(got), "a NaN declination did not give a NaN separation")
+        if (allocated(error)) return
+        ! A declination outside [-90, 90] is read as the direction it names rather than refused:
+        ! dec = 100 is the same direction as dec = 80 at the opposite right ascension.
+        call check(error, pf_angdist_deg(0.0_real64, 100.0_real64, 180.0_real64, 80.0_real64), &
+                   0.0_real64, "an out-of-range declination was not read as the direction it names", &
+                   thr=1.0e-13_real64)
+    end subroutine test_angdist_deg_total
 
     !> `pf_angdist` is exact at the two ends of its range and stable just inside them.
     !>

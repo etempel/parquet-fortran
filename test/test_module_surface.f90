@@ -275,6 +275,13 @@ contains
         call grid%init(4_int64, PF_HP_NEST, frame=PF_HP_DEC_NORTH)
         call grid%radec2pix(30.0_real64, 40.0_real64, other)
         if (what == "" .and. other /= ipix) what = "PF_HP_DEC_NORTH"
+
+        ! Added after the three tiers: the free RA/Dec separation. Checked against a value the
+        ! geometry fixes rather than against a range -- two points on the equator 90 degrees apart
+        ! in right ascension are 90 degrees apart on the sphere -- so a procedure that compiled but
+        ! answered nonsense would still be caught here.
+        if (what == "" .and. abs(pf_angdist_deg(10.0_real64, 0.0_real64, 100.0_real64, 0.0_real64) &
+                                 - 90.0_real64) > 1.0e-12_real64) what = "pf_angdist_deg"
     end subroutine check_healpix_surface
 
 end module test_module_surface_healpix

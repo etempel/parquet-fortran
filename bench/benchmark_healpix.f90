@@ -103,6 +103,8 @@ program benchmark_healpix
         call mode_overhead()
     case ("grid")
         call mode_grid()
+    case ("dist")
+        call mode_dist()
     case ("all")
         call mode_conv()
         call mode_bulk()
@@ -110,6 +112,7 @@ program benchmark_healpix
         call mode_cross()
         call mode_disc()
         call mode_grid()
+        call mode_dist()
     case default
         write(error_unit, '(a)') "benchmark_healpix: unknown --mode '" // mode // "'"
         error stop 1
@@ -529,6 +532,106 @@ contains
             best_b * 1.0e9_real64 / real(nq, real64), best_b / best_f
         flush(output_unit)
     end subroutine grid_row
+
+    !> The three costs an "convert once, then use vectors?" decision turns on, and the answer.
+    !>
+    !> **The question this exists to answer.** A caller holding RA/Dec has two routes to an angular
+    !> separation: call `pf_angdist_deg` directly, or convert to unit vectors with `pf_ang2vec`
+    !> once and call `pf_angdist` thereafter. The second is only worth it if the conversion is
+    !> amortised over enough separations, and "enough" is a ratio of three measured numbers rather
+    !> than a matter of opinion -- so this mode measures all three on one fixture in one run and
+    !> prints the break-even directly.
+    !>
+    !> Two break-evens are printed because two shapes occur, and they differ by a factor of two:
+    !>
+    !> * **one moving point against a fixed catalogue** whose vectors are already in hand -- the
+    !>   MCMC shape, one `pf_ang2vec` per query and then `N` separations. Pays off from
+    !>   `N > conv / (deg - vec)`.
+    !> * **every position converted, each used K times** -- an all-pairs or repeated-sweep shape,
+    !>   where each separation carries two conversions amortised over K uses each. Pays off from
+    !>   `K > 2*conv / (deg - vec)`.
+    !>
+    !> If `deg <= vec` neither ever pays off, and the mode says so rather than printing a negative
+    !> break-even.
+    subroutine mode_dist()
+        integer(int64) :: nq, i
+        integer :: rep
+        real(real64) :: t0, c_conv, c_vec, c_deg, sink, d, be1, be2
+        real(real64), allocatable :: ra(:), dec(:), v1(:,:), v2(:,:)
+
+        nq = min(nel, 2000000_int64)
+        allocate(ra(nq), dec(nq), v1(3, nq), v2(3, nq))
+        do i = 1_int64, nq
+            ra(i) = 360.0_real64 * modulo(real(i, real64) * 0.6180339887498948_real64, 1.0_real64)
+            dec(i) = -70.0_real64 + 90.0_real64 * &
+                     modulo(real(i, real64) * 0.3819660112501051_real64, 1.0_real64)
+        end do
+        do i = 1_int64, nq
+            call pf_ang2vec((90.0_real64 - dec(i)) * pi / 180.0_real64, ra(i) * pi / 180.0_real64, &
+                            v1(:, i))
+            call pf_ang2vec((90.0_real64 - dec(i)) * pi / 180.0_real64, &
+                            (ra(i) + 0.4_real64) * pi / 180.0_real64, v2(:, i))
+        end do
+
+        write(output_unit, '(a)') '---- mode=dist: RA/Dec separations, direct or through vectors ----'
+        write(output_unit, '(a)') ''
+        write(output_unit, '(a,i0,a)') 'Fastest of 5 passes over ', nq, ' pairs, nanoseconds per call.'
+        write(output_unit, '(a)') ''
+
+        c_conv = huge(0.0_real64)
+        do rep = 1, 5
+            t0 = omp_get_wtime()
+            do i = 1_int64, nq
+                call pf_ang2vec((90.0_real64 - dec(i)) * pi / 180.0_real64, &
+                                ra(i) * pi / 180.0_real64, v1(:, i))
+            end do
+            c_conv = min(c_conv, omp_get_wtime() - t0)
+        end do
+        c_conv = c_conv * 1.0e9_real64 / real(nq, real64)
+
+        c_vec = huge(0.0_real64)
+        do rep = 1, 5
+            sink = 0.0_real64
+            t0 = omp_get_wtime()
+            do i = 1_int64, nq
+                call pf_angdist(v1(:, i), v2(:, i), d)
+                sink = sink + d
+            end do
+            c_vec = min(c_vec, omp_get_wtime() - t0)
+        end do
+        c_vec = c_vec * 1.0e9_real64 / real(nq, real64)
+
+        c_deg = huge(0.0_real64)
+        do rep = 1, 5
+            t0 = omp_get_wtime()
+            do i = 1_int64, nq
+                sink = sink + pf_angdist_deg(ra(i), dec(i), ra(i) + 0.4_real64, dec(i))
+            end do
+            c_deg = min(c_deg, omp_get_wtime() - t0)
+        end do
+        c_deg = c_deg * 1.0e9_real64 / real(nq, real64)
+
+        write(output_unit, '(a30,f10.3)') 'pf_ang2vec  (one position)', c_conv
+        write(output_unit, '(a30,f10.3)') 'pf_angdist  (two vectors)', c_vec
+        write(output_unit, '(a30,f10.3)') 'pf_angdist_deg (two RA/Dec)', c_deg
+        write(output_unit, '(a)') ''
+        if (c_deg <= c_vec) then
+            write(output_unit, '(a)') 'The direct form is at least as fast per separation as the'
+            write(output_unit, '(a)') 'vector form, so converting first never pays off, at any count.'
+        else
+            be1 = c_conv / (c_deg - c_vec)
+            be2 = 2.0_real64 * c_conv / (c_deg - c_vec)
+            write(output_unit, '(a,f8.1,a)') 'break-even, one query point vs a catalogue : N > ', be1, &
+                ' separations per conversion'
+            write(output_unit, '(a,f8.1,a)') 'break-even, every position converted       : K > ', be2, &
+                ' separations per position'
+        end if
+        write(output_unit, '(a)') ''
+        write(output_unit, '(a,es14.7)') 'checksum (ignore): ', sink
+        write(output_unit, '(a)') ''
+        flush(output_unit)
+        deallocate(ra, dec, v1, v2)
+    end subroutine mode_dist
 
     !> Times one entry point across the `nside` sweep and prints its row.
     subroutine conv_row(n, sweep, what)

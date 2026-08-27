@@ -58,7 +58,7 @@ point in the library.
 
 ### Every page at a glance
 
-All 28 pages, in reading order. (This list, each group's own page list and the
+All 29 pages, in reading order. (This list, each group's own page list and the
 `ordered_subpage:` frontmatter are kept consistent by
 `tools/check_source_conventions.py`, which fails the CI lint stage when they drift.)
 

@@ -3538,6 +3538,19 @@ warning output needs its own triage, and both are covered in
   example, and it is the only assertion available when the entries that would prove the bug are
   themselves undefined. Guard it with `ieee_support_flag`.
 
+  **And the flag is very often the TEST'S OWN, which makes that line read as a defect in the
+  library.** `Warning: Floating underflow occurred` at the end of an otherwise green `fpm test`
+  named no test, no suite and no line; it came from `v = base * scales(k)` in
+  `test_vec2pix_scale_invariant` (`test/test_healpix_tier_b.f90`), where scaling a unit vector by
+  `1e-300` is *the point* of the fixture and produces subnormals by construction. The library
+  raised nothing at any of the five scales. So a test that deliberately builds an extreme fixture
+  must save the flag on entry and restore it on exit — and the clear it needs anyway is what turns
+  the nuisance into an assertion, since with the fixture's own contribution cleared, anything read
+  back names only the library call. That is how `hpx_vec_unit`'s "neither underflow nor overflow is
+  reachable" comment became a test. **Bisect to it by suite and then by test name** (`run_tester
+  <suite>` / `run_tester <suite> "<name>"`, `PARQUET_TEST_NO_PRIME=1`): the flag is per-thread and
+  survives to `STOP`, so exactly one run in each sweep reports the warning.
+
 - **A compile-time fork needs a check that RUNS under every compiler that selects an arm.**
   `tools/check_random_kernels.sh` could not run under nagfor at all (it hardcoded gfortran's `-cpp`;
   NAG spells it `-fpp`), so the one arm nagfor ships had only ever been verified by a gfortran
@@ -4897,6 +4910,27 @@ Three things about doing it *here* specifically:
   `!less(b, a)` are the same predicate and there are no ties for the merge to break. The realistic
   defect was a different edit (substituting the tiebreaker-free comparator), and that one was
   caught. A mutation that is not a behaviour change is not evidence about the tests at all.
+- **A mutation meant to raise an IEEE FLAG is optimised away far more readily than one meant to
+  change an answer, and it fails in the direction that reads as a weak test.** Three attempts in a
+  row at making `hpx_vec_unit` raise `ieee_underflow` without changing its result were all silently
+  removed, so all three "survived": `tiny(1.0_real64) * tiny(1.0_real64)` is a constant expression
+  and never runs; `(z * 1e-200) * 1e-200` raised when written in a main program and **not** when
+  written inside the procedure; and `z * z * (tiny(1.0_real64) * 0.001_real64)` raised nowhere. And
+  `volatile` is not the escape hatch — F2018 forbids it on a local of a `pure` procedure, which is
+  what most numeric kernels here are. What works is a **two-step underflow through a named variable
+  whose value stays live**, so there is nothing to constant-fold and nothing to delete:
+
+```fortran
+mut = z * 1.0e-300_real64
+mut = mut * 1.0e-10_real64   ! subnormal: raises underflow at RUNTIME
+n = n + mut                  ! n >= 1 here, so bit-for-bit a no-op -- but not removable
+```
+
+  **Prove the mutation raises before reading anything into the test's verdict.** A three-line
+  standalone program compiled the same way settles it in seconds, and is what separated "the
+  assertion is broken" from "the mutation is not a behaviour change". Prove the assertion's read
+  side separately too, by raising the flag inside the test's own measured window: that isolates a
+  broken mechanism from an inert mutation, and both checks are cheap.
 - **A change that makes something cheaper by NOT doing work can be entirely correct and still
   reduce a documented feature to a no-op — and a suite that asserts answers cannot see it.** When
   removing work, enumerate who was relying on that work having been done, and do it by grepping the

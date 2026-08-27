@@ -24,6 +24,7 @@ module test_healpix_tier_b
     use parquet_healpix
     use test_healpix_vectors
     use iso_fortran_env, only : int32, int64, real64
+    use ieee_arithmetic, only : ieee_get_flag, ieee_set_flag, ieee_support_flag, ieee_underflow
     use testdrive, only : new_unittest, unittest_type, error_type, check
     implicit none
     private
@@ -216,18 +217,34 @@ contains
     !> before scaling underflows `[1e-300, 0, 1e-300]` to zero and overflows `[1e300, 0, 1e300]` to
     !> infinity, each giving an answer wrong by 45 degrees rather than by a rounding. `healpy`
     !> 1.20.0 returns NaN for the first and pi/2 for the second.
+    !>
+    !> **Building the fixture raises `ieee_underflow`, and the library must not.** `base * 1e-300`
+    !> is subnormal for every component below about 1e-8, which is most of them, so the scaling on
+    !> this test's own line raises the flag -- and nagfor reports a raised flag as
+    !> `Warning: Floating underflow occurred` at STOP, where it names neither a test nor a line and
+    !> reads as a defect in the library. So the flag is saved on entry and restored on exit, and
+    !> the same clear-and-read turns the nuisance into an assertion: `hpx_vec_unit` divides by the
+    !> largest component before squaring anything, so no scale in this list may raise underflow
+    !> inside `pf_vec2pix_*`. That claim was previously only a comment on that procedure.
     subroutine test_vec2pix_scale_invariant(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
         real(real64), parameter :: scales(5) = [1.0e-300_real64, 1.0e-30_real64, 1.0_real64, &
                                                 1.0e30_real64, 1.0e300_real64]
         integer(int64), parameter :: nside = 64_int64
-        integer :: k, j, nbad
+        integer :: k, j, nbad, nflag
         integer(int64) :: want_r, want_n, got
         real(real64) :: base(3), v(3)
-        character(len=160) :: detail
+        logical :: watch, saved, raised
+        character(len=160) :: detail, flagdetail
+
+        watch = ieee_support_flag(ieee_underflow, 1.0_real64)
+        saved = .false.
+        if (watch) call ieee_get_flag(ieee_underflow, saved)
 
         nbad = 0
+        nflag = 0
         detail = ""
+        flagdetail = ""
         do j = 1, hv_n_pos
             call pf_ang2vec(hv_theta(j), hv_phi(j), base)
             call pf_vec2pix_ring(nside, base, want_r)
@@ -238,6 +255,9 @@ contains
                 ! longer names anything; skip it rather than assert about it.
                 if (all(v == 0.0_real64)) cycle
                 if (.not. all(v == v)) cycle
+                ! Clear whatever the scaling above raised, so that what is read back below names
+                ! only the two library calls between here and the read.
+                if (watch) call ieee_set_flag(ieee_underflow, .false.)
                 call pf_vec2pix_ring(nside, v, got)
                 if (got /= want_r) then
                     nbad = nbad + 1
@@ -250,10 +270,25 @@ contains
                     if (nbad == 1) write (detail, '(a,es10.2,a,i0,a,i0,a,i0)') "NEST scale=", &
                         scales(k), " pos=", j, " expected=", want_n, " got=", got
                 end if
+                if (watch) then
+                    call ieee_get_flag(ieee_underflow, raised)
+                    if (raised) then
+                        nflag = nflag + 1
+                        if (nflag == 1) write (flagdetail, '(a,es10.2,a,i0)') &
+                            "scale=", scales(k), " pos=", j
+                    end if
+                end if
             end do
         end do
+        ! Restore what the caller had, rather than `saved .or. raised`: everything raised in
+        ! between was either this test's own scaling or a failure already recorded above.
+        if (watch) call ieee_set_flag(ieee_underflow, saved)
+
         call check(error, nbad, 0, "vec2pix was not invariant under the vector's scale: " // &
                    trim(detail))
+        if (allocated(error)) return
+        call check(error, nflag, 0, "vec2pix raised ieee_underflow on a scaled direction: " // &
+                   trim(flagdetail))
     end subroutine test_vec2pix_scale_invariant
 
     !> `pf_vec2ang(pf_ang2vec(theta, phi))` returns the direction it was given.

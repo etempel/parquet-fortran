@@ -374,7 +374,7 @@ contains
             sq = 0_int64
             do m = 1_int64, nlist
                 s = modulo(s + listpix(m), checksum_mod)
-                sq = modulo(sq + modulo(listpix(m) * listpix(m), checksum_mod), checksum_mod)
+                sq = modulo(sq + square_mod(listpix(m)), checksum_mod)
             end do
             if (s /= hv_disc_sum(q) .or. sq /= hv_disc_sumsq(q)) then
                 nbad = nbad + 1
@@ -638,5 +638,35 @@ contains
         if (allocated(error)) return
         call check(error, nbad, 0, "ud_pix_nest disagreed with the reference: " // trim(detail))
     end subroutine test_ud_matches_reference
+
+    !> `(a * a) mod checksum_mod`, computed without ever overflowing a 64-bit integer.
+    !>
+    !> A recorded pixel index reaches 4.1e12 here, so its square is about 1.7e25 and a plain
+    !> `a * a` overflows int64. That overflow is undefined behaviour: gfortran, ifx and flang wrap
+    !> silently, and `nagfor -C=intovf` -- which `fpm.toml`'s `nagdeb` profile turns on -- makes it
+    !> a fatal runtime error. The wrapped answer happens to be the RIGHT one, because 2**61 divides
+    !> 2**64 so reducing a wrapped product modulo 2**61 still gives the true product modulo 2**61,
+    !> which is why this reproduced the reference checksums on every other compiler. It is still
+    !> undefined, and CLAUDE.md's "a compiler that WRAPS may still use the overflow's undefinedness
+    !> to delete a branch somewhere else" rule applies to a test exactly as it does to the library.
+    !>
+    !> Splitting `a` at bit 30 keeps every partial product inside int64: with `a = ah*2**30 + al`,
+    !> `a*a` is `ah*ah*2**60 + 2*ah*al*2**30 + al*al`, of which the first term contributes only its
+    !> lowest bit once the result is reduced modulo 2**61. Reducing `a` itself first is what bounds
+    !> `ah` below 2**31, and is exact for the same reason the wrapping was: `a` and `a mod 2**61`
+    !> have the same square modulo 2**61.
+    pure function square_mod(a) result(res)
+        integer(int64), intent(in) :: a !! a non-negative pixel index.
+        integer(int64) :: res           !! `(a*a) mod checksum_mod`, in `[0, checksum_mod)`.
+        integer(int64), parameter :: mask30 = 1073741823_int64
+        integer(int64) :: r, hi, lo, mid
+
+        r = iand(a, checksum_mod - 1_int64)
+        lo = iand(r, mask30)
+        hi = ishft(r, -30)
+        mid = iand(hi * lo, mask30)
+        res = iand(ishft(iand(hi * hi, 1_int64), 60) + ishft(2_int64 * mid, 30) + lo * lo, &
+                   checksum_mod - 1_int64)
+    end function square_mod
 
 end module test_healpix_reference

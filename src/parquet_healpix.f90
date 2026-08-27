@@ -145,6 +145,8 @@ module parquet_healpix
     real(real64), parameter :: hpx_halfpi = 0.5_real64 * hpx_pi
     !> 2*pi.
     real(real64), parameter :: hpx_twopi = 2.0_real64 * hpx_pi
+    !> 1 / (2*pi), for turning a division by `hpx_twopi` into a multiplication.
+    real(real64), parameter :: hpx_inv_twopi = 1.0_real64 / hpx_twopi
     !> The |z| at which the polar caps meet the equatorial belt.
     real(real64), parameter :: hpx_twothird = 2.0_real64 / 3.0_real64
     !> `sqrt(pi/3)`, the constant in `pf_nside2resol`.
@@ -235,15 +237,21 @@ module parquet_healpix
     !! **The free procedures remain the primary API and this is sugar over them.** Every binding
     !! delegates to one, so results are identical by construction rather than by test.
     !!
-    !! **The delegation is inlined, but it is not free on every compiler.** `bench/benchmark_healpix.sh
-    !! --mode=grid` measures each binding against the free procedure it calls, best of five passes
+    !! **The delegation costs nothing measurable, and the one measurement that appeared to say
+    !! otherwise was comparing two different computations.** `bench/benchmark_healpix.sh
+    !! --mode=grid` times each binding against the free procedure it calls, best of five passes
     !! over two million elements at `nside = 1024`. Under gfortran 15.2.1 every row is within 5%
-    !! (worst 1.05x). Under ifx 2026.1 three rows are, `%ang2pix` costs **1.12x**, and `%pix2ang`
-    !! costs **0.67x** -- that is, the bound form is a third FASTER than the free one. Both figures
-    !! reproduce to three digits across four runs, so neither is noise, and the sub-unity one is
-    !! what rules out dispatch as the explanation: a call that was not inlined could not beat the
-    !! procedure it delegates to. What differs is how ifx optimises the merged body at each site.
-    !! Take the object for what it says at the call, not for speed, and measure if a loop is hot.
+    !! (worst 1.047x). Under ifx 2026.1 the rows spread from 0.66x to 1.09x, which reads as a
+    !! dispatch cost and is not one: **ifx collapses a hand-written loop of ELEMENTAL calls into
+    !! one array-wide call through a temporary** -- the behaviour `bench/benchmark_healpix.sh`'s
+    !! own header documents for `--mode=bulk`, and why it appends `-heap-arrays` -- and it does
+    !! that to the free column only, because a type-bound call carrying a passed object is not
+    !! collapsed. Three facts settle it. On the row with the largest deviation the BOUND column
+    !! agrees across compilers (`%pix2ang` 18.58 ns under ifx against 18.54 under gfortran) while
+    !! the free column does not (28.08 against 17.70), so it is the free column that moved. The
+    !! deviation appears on every elemental row and on no other. And `%query_disc`, the one row
+    !! whose free form is not elemental and so cannot be collapsed, measures **0.998** under ifx
+    !! and 1.002 under gfortran. The binding is a call, and a call is what it costs.
     !!
     !! **`%init` is the only binding that validates, and the only one that can abort.** Everything
     !! elemental is total, exactly as the free conversions are: a grid `%init` has never run on

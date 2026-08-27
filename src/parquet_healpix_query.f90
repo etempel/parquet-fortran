@@ -115,13 +115,14 @@ contains
     module procedure hpx_query_disc_core
         real(real64) :: v0(3), vnorm, scale, z0, st0, phi0, r, cosr, theta0
         real(real64) :: zmax, zmin, zr, strr, denom, num, a, dphi, w, winv, half
-        integer(int64) :: irmin, irmax, i, first, nr, shifted, jlo, jhi, cnt, tail
+        integer(int64) :: irmin, irmax, i, first, nr, shifted, jlo, jhi, cnt, tail, nr_prev
         logical :: whole, counting, recording
 
         ! Neither output present is the COUNTING mode: the same walk with its stores switched off,
         ! which is what makes `pf_query_disc_count` unable to disagree with `pf_query_disc` by
         ! construction rather than by test.
         counting = .not. (present(out32) .or. present(out64))
+        nr_prev = -1_int64
         recording = present(runs) .and. present(nruns)
         if (present(nruns)) nruns = 0_int64
         nlist = 0_int64
@@ -202,13 +203,25 @@ contains
                 end if
             end if
 
-            w = hpx_twopi / real(nr, real64)
-            ! The arc ends below divide by `w` three times; one reciprocal serves all three. This
-            ! is the one arithmetic change in this walk that is NOT bit-identical -- it can move an
-            ! end by one pixel -- and it is safe for the reason this file's header already gives:
-            ! the arc is deliberately generous and then trimmed by the membership rule, so the arc
-            ! arithmetic does not have to be exact. The rule itself is untouched.
-            winv = real(nr, real64) / hpx_twopi
+            ! `w` and `winv` depend only on the ring's LENGTH, and consecutive rings very often
+            ! share one: every ring of the equatorial belt has 4*nside pixels, and the belt is
+            ! most of the sphere. Recomputing them only when `nr` changes turns two divisions per
+            ! ring into one comparison for every ring after the first of each run. Measured on the
+            ! gate's own shape (nside 1024, RING, exact, 0.5 deg), the pair was about 13 % of the
+            ! per-ring cost.
+            !
+            ! `winv` is the reciprocal the arc ends below divide by three times. It is formed as a
+            ! multiplication rather than a division, and that -- like the reciprocal itself -- is
+            ! NOT bit-identical: it can move an end by one pixel. It is safe for the reason this
+            ! file's header already gives: the arc is deliberately generous and then trimmed by
+            ! the membership rule, so the arc arithmetic does not have to be exact. `w` is a
+            ! different matter and stays an exact division, because the rule itself is written in
+            ! terms of it.
+            if (nr /= nr_prev) then
+                w = hpx_twopi / real(nr, real64)
+                winv = real(nr, real64) * hpx_inv_twopi
+                nr_prev = nr
+            end if
             half = 0.5_real64 * real(shifted, real64)
 
             if (whole) then
@@ -240,7 +253,19 @@ contains
                 end do
                 if (jlo > jhi) cycle
                 cnt = jhi - jlo + 1_int64
-                jlo = modulo(jlo, nr)
+                ! Wrap the run's start into 0 .. nr-1 by adjustment rather than by `modulo`, whose
+                ! int64 form is a hardware integer division -- about 13 % of the per-ring cost on
+                ! the gate's shape, for a value that is at most one revolution out. `jlo` is
+                ! bounded by construction (the arc spans at most a full ring plus its two-pixel
+                ! margin, and the recentring branch above clamps to one revolution), so each loop
+                ! runs at most once in practice; they are loops rather than `if`s so that the
+                ! result is `modulo` unconditionally, not merely within that bound.
+                do while (jlo < 0_int64)
+                    jlo = jlo + nr
+                end do
+                do while (jlo >= nr)
+                    jlo = jlo - nr
+                end do
             end if
 
             if (nlist + cnt > cap) call report_full(cnt)

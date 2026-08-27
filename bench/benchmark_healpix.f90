@@ -371,13 +371,27 @@ contains
     !> **Bar: within 5 percent on every row.** A larger figure is a finding about that compiler, to
     !> be written into the guide page, not a reason to widen the bar.
     !>
-    !> **What it found, 2026-08-27, machine B, two million elements at nside 1024, best of five.**
-    !> gfortran 15.2.1 clears the bar everywhere, worst row 1.048. ifx 2026.1 does not: `ang2pix`
-    !> is 1.11-1.12 and `pix2ang` is 0.665-0.666 -- the bound form a third FASTER than the free one
-    !> -- both reproducing to three digits over four runs. The sub-unity figure is the useful one:
-    !> a delegation that had not been inlined could not beat what it delegates to, so this is the
-    !> optimiser choosing differently at two call sites, not dispatch. Recorded in the guide page
-    !> and in the type's doc-comment rather than smoothed away.
+    !> **What it found, machine B, two million elements at nside 1024, best of five.** gfortran
+    !> 15.2.1 clears the bar on every row, worst 1.047. ifx 2026.1 spreads from 0.66 to 1.09 --
+    !> `pix2ang` has the bound form a third FASTER than the free one -- and that spread is a
+    !> property of THIS BENCHMARK under ifx rather than of the type.
+    !>
+    !> **Read the free column before concluding anything from a ratio here.** ifx collapses a
+    !> hand-written loop of elemental calls into one array-wide call through a temporary; it is
+    !> the same behaviour `benchmark_healpix.sh`'s header documents for `--mode=bulk`, and it is
+    !> why that script appends `-heap-arrays`. It applies to the free column and not to the bound
+    !> one, because a type-bound call carrying a passed object is not collapsed -- so under ifx
+    !> the two columns of an elemental row are not the same computation. The evidence is in the
+    !> absolute figures rather than the ratios: on `pix2ang`, the row that deviates most, the
+    !> bound column is 18.58 ns under ifx against 18.54 under gfortran while the free column is
+    !> 28.08 against 17.70, so it is the free column that moved; every elemental row deviates and
+    !> no other does; and `query_disc`, whose free form is not elemental and cannot be collapsed,
+    !> measures 0.998 under ifx and 1.002 under gfortran.
+    !>
+    !> So the bar is met in the sense that matters, and the rows that miss it are measuring the
+    !> compiler's loop transformation rather than the binding. Do not widen the bar and do not
+    !> "fix" the type; if this needs to become a like-for-like comparison under ifx, the free arm
+    !> has to be made uncollapsible, which changes what the free column means.
     subroutine mode_grid()
         integer(int64) :: nsg, nq, k, nlist, sink
         integer :: rep, r

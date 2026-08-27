@@ -18,24 +18,59 @@
 submodule(parquet_healpix) parquet_healpix_bulk
     implicit none
 
-    !> Below this many elements the AUTOMATIC path stays serial.
+    !> Elements per thread the automatic path insists on before it opens another one.
+    !!
+    !! **The rule is a team size bounded by the work available, not a threshold on the call.** A
+    !! single element count cannot serve both a small machine and a large one: set it high enough
+    !! that a 192-thread team is never opened below its own crossover and an 8-core machine loses
+    !! threading entirely for every array beneath that; set it low enough for the 8-core machine
+    !! and the large one takes a measured regression on the default path. What is stable across
+    !! both is the work *one* thread needs to be worth waking, so that is what this number is, and
+    !! the team follows from it: `nt = min(nt_auto, n / hpx_min_elements_per_thread)`. Threading
+    !! then begins at twice this many elements (the first point at which two threads are
+    !! justified) and reaches the full team only when there is full-team work to do.
     !!
     !! Not a setting, deliberately: it changes only how fast the library runs, never what it
     !! answers, and no caller has asked to control it -- admitting it as a knob would mean a
     !! default assertion, a round trip, an observed effect with a negative control, a reset, a
     !! printed row and an environment variable, for a number nobody names.
     !!
-    !! **PROVISIONAL.** A thread-scaling measurement needs an idle machine and has not been taken;
-    !! this value is a conservative placeholder chosen so that small calls cannot be made slower by
-    !! threading them, and it is to be replaced by the measured crossover point (feature
-    !! `feature_healpix_tier_b.md` section 7.8, target T2). An explicit `threads=` overrides it,
-    !! on the rule that an explicit argument always wins.
-    integer(int64), parameter :: hpx_parallel_min_elements = 20000_int64
+    !! An explicit `threads=` overrides all of it, on the rule that an explicit argument always
+    !! wins.
+    !! **Measured, not guessed.** `bench/benchmark_healpix.sh --mode=cross` walks a ladder from
+    !! 100 to 10^6 elements and reports, per form and per team size, the first rung at which
+    !! `threads=N` is strictly faster than `threads=1`. Across all 18 specifics on machine B
+    !! (gfortran 15.2.1, 384 processors, idle) the worst two-thread crossover was **1000 elements**
+    !! -- 500 per thread -- and every larger team crossed over at 100-2000 elements, i.e. 16-31 per
+    !! thread. The value below is twice the worst of those, so the serial-to-threaded transition
+    !! carries a factor of two in hand and every larger team carries thirty to sixty.
+    integer(int64), parameter :: hpx_min_elements_per_thread = 1000_int64
+
+    !> The largest team the AUTOMATIC path will open, whatever the machine offers.
+    !!
+    !! Measured rather than assumed: see `feature_healpix_tier_b.md` section 15. Past this size
+    !! libgomp's own fork/join cost grows faster than the work another thread removes, for a tier
+    !! whose per-element work is tens of nanoseconds. A caller who wants the whole machine can
+    !! still ask for it with `threads=`.
+    integer, parameter :: hpx_max_auto_threads = 64
 
 contains
 
+    !> The smallest array the automatic path will hand to a team of `nt`.
+    !!
+    !! The threshold stated as a function of the team, which is the form the rule is easiest to
+    !! reason about: `hpx_threads` applies it the other way round, deriving the team from the
+    !! array. Both say that every thread opened gets `hpx_min_elements_per_thread` elements.
+    pure function hpx_parallel_min_elements(nt) result(nmin)
+        integer, intent(in) :: nt !! team size being considered, >= 1.
+        integer(int64) :: nmin !! elements below which that team is not worth opening.
+
+        nmin = hpx_min_elements_per_thread * int(nt, int64)
+    end function hpx_parallel_min_elements
+
     module procedure hpx_threads
         integer :: n_req
+        integer(int64) :: nt_work
 
         if (present(threads)) then
             if (threads < 1) error stop what // ": threads= must be at least 1"
@@ -45,12 +80,27 @@ contains
             nt = parquet_clamp_to_affinity(threads, "healpix")
             return
         end if
-        ! No cap of this tier's own: it has no thread setting, and section 6 of the design keeps it
-        ! that way. `omp_get_level() == 0` inside `parquet_auto_thread_count` is what makes a call
-        ! from inside somebody else's parallel region serial rather than nested.
-        n_req = parquet_auto_thread_count(0, "healpix")
-        nt = n_req
-        if (n < hpx_parallel_min_elements) nt = 1
+        ! `omp_get_level() == 0` inside `parquet_auto_thread_count` is what makes a call from
+        ! inside somebody else's parallel region serial rather than nested; the cap is this tier's
+        ! own and is passed through the same helper rather than applied afterwards, so that the
+        ! affinity clamp still has the last word.
+        n_req = parquet_auto_thread_count(hpx_max_auto_threads, "healpix")
+        ! Bound the team by the work available. Asking for one thread per full block of
+        ! `hpx_min_elements_per_thread` is the same statement as requiring at least
+        ! `hpx_parallel_min_elements(nt)` elements before a team of `nt` is opened, and it
+        ! degrades correctly in both directions: on a small machine `n_req` binds and this never
+        ! fires, while on a large one a mid-sized array gets the few threads that pay rather than
+        ! a full team that does not.
+        if (n < hpx_parallel_min_elements(2)) then
+            ! Not even a second thread is justified. This is the direct successor of the single
+            ! constant this rule replaced, and the only difference is that the number it compares
+            ! against is now derived from the team rather than fixed.
+            nt = 1
+        else
+            nt_work = n / hpx_min_elements_per_thread
+            nt = n_req
+            if (nt_work < int(nt, int64)) nt = int(nt_work)
+        end if
     end procedure hpx_threads
 
     module procedure hpx_check_bulk_sizes

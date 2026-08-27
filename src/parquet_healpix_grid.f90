@@ -2,10 +2,10 @@
 !!
 !! **Almost every procedure here is one call to a free procedure declared in the parent module.**
 !! That is the design rather than an accident: the object and the free API then agree by
-!! construction rather than by test. The delegation is inlined, though what the inlining then costs
-!! is a property of the compiler rather than of this file -- see the type's own doc-comment in the
-!! parent module for the measured figures, which under ifx run from 0.67x to 1.12x of the free
-!! procedure and under gfortran stay within 5%.
+!! construction rather than by test. The delegation costs a call and nothing else: see the type's
+!! own doc-comment in the parent module for the measurement, including why the ifx spread from
+!! 0.66x to 1.09x is the benchmark's free column changing shape under that compiler rather than
+!! anything this file does.
 !!
 !! **Only two things are computed here rather than delegated.** The degree/radian scaling, and the
 !! declination reflection `theta = pi/2 -/+ dec` that `PF_HP_DEC_NORTH` and `PF_HP_DEC_SOUTH`

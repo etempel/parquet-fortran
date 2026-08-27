@@ -150,13 +150,20 @@ than by dividing by a zero `nside`.
 **The free procedures remain the primary API.** The object is sugar over them: every binding
 delegates to one, so the answers are identical by construction.
 
-**Pick by what reads better, not by speed.** The delegation is inlined, but what that costs depends
-on the compiler, and the measured spread is wider than "free": under gfortran every operation is
-within 5% of the free procedure, while under ifx `%ang2pix` costs about 12% *more* and `%pix2ang`
-about a third *less*. A binding cannot be faster than the procedure it calls unless it was inlined,
-so this is the optimiser making different choices at the two call sites rather than any dispatch
-overhead — and it means a genuinely hot loop is worth measuring both ways rather than assuming.
-`bench/benchmark_healpix.sh --mode=grid` is that measurement.
+**Pick by what reads better.** The delegation costs a call and nothing more. Measured with
+`bench/benchmark_healpix.sh --mode=grid` — each binding against the free procedure it calls, best
+of five passes over two million elements at `nside` 1024 — every operation is within 5% of the free
+form under gfortran.
+
+Under ifx the same table spreads from 0.66x to 1.09x, and that is worth one paragraph because it
+looks like a dispatch cost and is not. ifx collapses a hand-written loop of *elemental* calls into
+a single array-wide call through a temporary; it does that to the benchmark's free column and not
+to its bound column, because a type-bound call carrying a passed object is not collapsed. So under
+ifx the two columns of an elemental row are not the same computation. The absolute figures say so
+plainly: on `%pix2ang`, which deviates most, the bound column is 18.58 ns under ifx against 18.54
+under gfortran, while the free column is 28.08 against 17.70 — the free column is what moved. And
+`%query_disc`, the one operation whose free form is not elemental and so cannot be collapsed,
+measures 0.998 under ifx and 1.002 under gfortran.
 
 ## The two schemes
 
@@ -470,6 +477,19 @@ which a loop of a total procedure would turn into millions of silently wrong pix
 
 **The result is identical at every thread count**, bit for bit: each element is a function of its
 own inputs alone and there is no accumulation anywhere. A zero-sized array is a defined no-op.
+
+**What `threads=` costs you if you omit it.** Leave it out and the team is chosen for you, from the
+work available rather than from the machine: one thread per thousand elements, up to whatever your
+CPU affinity mask allows and never more than 64. So an array of 500 runs serial, 10 000 gets ten
+threads, and anything from 64 000 upward gets the full team. Two things drove that shape. Threading
+a short array is a loss, and a single element count cannot mark where that stops on both a laptop
+and a 384-processor node -- but the work *one* thread needs to be worth waking is much the same on
+both, so that is what the rule is written in terms of. And the ceiling is real rather than
+defensive: on the 384-processor machine these forms were measured on, a 192-thread team costs
+**1118 ns per element** on 10 000 elements against 16 ns for a plain serial loop -- a 69x
+regression, entirely in libgomp's fork and join -- while 64 threads is at or within noise of the
+best figure at every size measured. An explicit `threads=` overrides all of it, including the
+ceiling, on the rule that an explicit argument always wins.
 
 Note the spelling: this module's array-with-threads forms end in `_bulk`, where `parquet_random`'s
 array forms are spelled `pf_random_fill_*`. Two tiers, two conventions, and neither is going to

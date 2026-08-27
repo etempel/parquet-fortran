@@ -921,8 +921,12 @@ contains
                 test_list_adopt_not_allocated_aborts), &
             new_unittest("parquet_column paste into a container column aborts", &
                 test_list_column_paste_refused_aborts), &
-            new_unittest("parquet_column append of a container column aborts", &
-                test_list_column_append_refused_aborts), &
+            new_unittest("appending a map onto a list aborts", &
+                test_container_append_wrong_container_kind_aborts), &
+            new_unittest("appending across list element kinds aborts", &
+                test_container_append_wrong_element_kind_aborts), &
+            new_unittest("appending a transposed struct aborts", &
+                test_container_append_struct_field_mismatch_aborts), &
             new_unittest("parquet_column init with a width on a scalar kind aborts", &
                 test_columns_init_width_on_scalar_kind_aborts), &
             new_unittest("parquet_column adopt of an unallocated array aborts, on every kind", &
@@ -3973,12 +3977,32 @@ contains
             required_stderr="parquet_columns: paste: a container column cannot be overwritten in place")
     end subroutine test_list_column_paste_refused_aborts
 
-    subroutine test_list_column_append_refused_aborts(error)
+    !> The three `append_from` layout refusals. Each is a SILENT WRONG ANSWER if it does not
+    !! fire: a map read as a list, a payload read at the wrong kind, or two struct field columns
+    !! transposed -- none of which changes a row count, so nothing downstream would notice.
+    subroutine test_container_append_wrong_container_kind_aborts(error)
         type(error_type), allocatable, intent(out) :: error
-        call check_scenario_exit_status_and_stderr(error, "list_column_append_refused", expect_abort=.true., &
-            failure_message="appending one container column onto another was expected to be refused", &
-            required_stderr="parquet_columns: append_storage: appending a container column is not implemented yet")
-    end subroutine test_list_column_append_refused_aborts
+        call check_scenario_exit_status_and_stderr(error, "container_append_wrong_container_kind", &
+            expect_abort=.true., &
+            failure_message="appending a map column onto a list column was expected to abort", &
+            required_stderr="append_from: cannot append a map<string,int32> onto a list<int32>")
+    end subroutine test_container_append_wrong_container_kind_aborts
+
+    subroutine test_container_append_wrong_element_kind_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "container_append_wrong_element_kind", &
+            expect_abort=.true., &
+            failure_message="appending list<int64> onto list<int32> was expected to abort", &
+            required_stderr="append_from: cannot append a list<int64> onto a list<int32>")
+    end subroutine test_container_append_wrong_element_kind_aborts
+
+    subroutine test_container_append_struct_field_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "container_append_struct_field_mismatch", &
+            expect_abort=.true., &
+            failure_message="appending struct<b,a> onto struct<a,b> was expected to abort", &
+            required_stderr="append_from: field 1 is 'b' in the source and 'a' here")
+    end subroutine test_container_append_struct_field_mismatch_aborts
 
     subroutine test_columns_init_width_on_scalar_kind_aborts(error)
         type(error_type), allocatable, intent(out) :: error

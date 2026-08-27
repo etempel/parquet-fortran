@@ -144,6 +144,7 @@ module parquet_map
         procedure :: nrows => mc_nrows                   !! Rows stored.
         procedure :: clone_into => mc_clone_into         !! Allocate an independent copy.
         procedure :: gather_rows => mc_gather_rows       !! Rebuild so row k becomes old row idx(k).
+        procedure :: append_from => mc_append_from       !! Append every row of another map column.
         procedure :: grow_rows => mc_grow_rows           !! Append n null rows.
         procedure :: reserve_rows => mc_reserve_rows     !! Reserve row capacity.
         procedure :: ensure_validity => mc_ensure_validity !! Materialize the row bitmap eagerly.
@@ -400,6 +401,57 @@ contains
             call self%append_null_row()
         end do
     end subroutine mc_grow_rows
+    !
+    !> Appends every row of `src`; see `parquet_container_column%append_from`.
+    !!
+    !! The list column's own `append_from` explains the three rules (dynamic type, rebased
+    !! offsets, merged validity); the only difference here is that TWO payload columns are
+    !! concatenated instead of one, and they must stay index-aligned -- a key without its value,
+    !! or the two appended in different orders, is a map that reads back with the wrong values
+    !! against the right keys, which no length or row-count check would catch.
+    subroutine mc_append_from(self, src)
+        class(parquet_map_column), intent(inout) :: self  !! the destination column.
+        class(parquet_container_column), intent(in) :: src !! rows to append, left unchanged.
+        integer(int64) :: k, m, base, first, n0
+        character(len=:), allocatable :: mine, theirs
+        select type (src)
+        type is (parquet_map_column)
+            m = src%nrows_
+            if (m == 0_int64) return
+            call require_init(self, "append_from")
+            if (src%value_kind /= self%value_kind) then
+                call value_kind_text(self%value_kind, mine)
+                call value_kind_text(src%value_kind, theirs)
+                error stop EP//"append_from: cannot append a map<string,"//theirs// &
+                    "> onto a map<string,"//mine//">"
+            end if
+            n0 = self%nrows_
+            call ensure_offsets_cap(self, n0 + m)
+            ! Both payloads, in the same order, so entry j of the appended block is the same
+            ! entry in each.
+            call self%keys%append(src%keys)
+            call self%values%append(src%values)
+            base = self%offsets(n0 + 1_int64)
+            first = src%offsets(1)
+            do k = 1_int64, m
+                self%offsets(n0 + k + 1_int64) = base + (src%offsets(k + 1_int64) - first)
+            end do
+            self%nrows_ = n0 + m
+            if (src%has_nulls_) then
+                do k = 1_int64, m
+                    if (row_is_null(src, k)) then
+                        call ensure_validity_cap(self, self%nrows_)
+                        self%has_nulls_ = .true.
+                        call bit_set(self%validity, n0 + k)
+                    end if
+                end do
+            end if
+        class default
+            call src%kind_text(theirs)
+            call self%kind_text(mine)
+            error stop EP//"append_from: cannot append a "//theirs//" onto a "//mine
+        end select
+    end subroutine mc_append_from
     !
     !> Reserves capacity for at least `n` rows; see `parquet_container_column%reserve_rows`.
     subroutine mc_reserve_rows(self, n)

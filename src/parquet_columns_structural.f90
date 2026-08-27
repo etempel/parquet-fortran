@@ -293,6 +293,11 @@ contains
         w = int(self%width, int64)
         call append_storage(self, other)
         if (is_string_kind(self%kind)) return
+        ! Row nullness travelled inside the container, which append_from has already merged. This
+        ! column's own bitmap is never allocated for a container kind, so falling through would
+        ! ask `other%has_nulls` -- permanently .false. here -- and answer "nothing to carry" for
+        ! the right reason by accident. Saying so explicitly keeps that from becoming load-bearing.
+        if (parquet_kind_is_container(self%kind)) return
         if (is_temporal_kind(self%kind)) then
             self%nulls_dirty = .true.
             return

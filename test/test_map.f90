@@ -40,6 +40,8 @@ contains
             new_unittest("map soft-fail lookups report found=", test_soft_fail_found), &
             new_unittest("map soft-fail lookups warn without aborting", test_soft_fail_warn), &
             new_unittest("map gather_rows rebuilds keys and values together", test_gather_rows), &
+            new_unittest("map append_from concatenates and keeps keys paired with values", &
+                test_append_from), &
             new_unittest("map deep_copy is independent", test_deep_copy), &
             new_unittest("map move_from empties the source", test_move_from), &
             new_unittest("map clear_null restores the entries", test_clear_null_restores), &
@@ -607,5 +609,56 @@ contains
         if (allocated(error)) return
         call check(error, mc%size() == 1_int64, "and keeps the row")
     end subroutine test_capacity
+
+    !> `append_from` concatenates one map column onto another.
+    !>
+    !> A map has TWO payload columns, so it has a failure mode a list does not: appending the keys
+    !> and the values in different orders, or one without the other, gives every row the right
+    !> entry COUNT while pairing the wrong value with each key. So the assertions look up values
+    !> BY KEY in the appended rows rather than counting entries.
+    subroutine test_append_from(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_map_column), target :: dst, src
+        type(parquet_map_row) :: row
+        integer(int32) :: v
+
+        call dst%init(PK_INT32)
+        call dst%append_row(["a"], [1_int32])
+        call dst%append_null_row()
+
+        call src%init(PK_INT32)
+        call src%append_row(["b", "c"], [2_int32, 3_int32])
+        call src%append_null_row()
+        call src%append_row(["d"], [4_int32])
+
+        call dst%append_from(src)
+        call check(error, dst%size() == 5_int64, "every row of both columns survives")
+        if (allocated(error)) return
+        call check(error, dst%total_entries() == 4_int64, "and every entry of both")
+        if (allocated(error)) return
+        call check(error, dst%length(3_int64) == 2_int64, "the appended two-entry row kept its length")
+        if (allocated(error)) return
+        call check(error, dst%is_null(4_int64), "the appended null row arrived null, not empty")
+        if (allocated(error)) return
+        ! By key, which is what a keys/values misalignment breaks and an entry count does not.
+        row = dst%view(3_int64)
+        call row%get("b", v)
+        call check(error, v == 2_int32, "key 'b' still pairs with 2 after the append")
+        if (allocated(error)) return
+        call row%get("c", v)
+        call check(error, v == 3_int32, "key 'c' still pairs with 3 after the append")
+        if (allocated(error)) return
+        row = dst%view(5_int64)
+        call row%get("d", v)
+        call check(error, v == 4_int32, "and the last appended row's own pairing survives")
+        if (allocated(error)) return
+        row = dst%view(1_int64)
+        call row%get("a", v)
+        call check(error, v == 1_int32, "the destination's own row is untouched")
+        if (allocated(error)) return
+        call check(error, dst%validate(), "the concatenated column satisfies its own invariants")
+        if (allocated(error)) return
+        call check(error, src%size() == 3_int64, "the source column is unchanged")
+    end subroutine test_append_from
 
 end module test_map

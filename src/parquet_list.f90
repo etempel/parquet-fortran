@@ -124,6 +124,7 @@ module parquet_list
         procedure :: nrows => lc_nrows                   !! Rows stored.
         procedure :: clone_into => lc_clone_into         !! Allocate an independent copy.
         procedure :: gather_rows => lc_gather_rows       !! Rebuild so row k becomes old row idx(k).
+        procedure :: append_from => lc_append_from       !! Append every row of another list column.
         procedure :: grow_rows => lc_grow_rows           !! Append n null rows.
         procedure :: reserve_rows => lc_reserve_rows     !! Reserve row capacity.
         procedure :: ensure_validity => lc_ensure_validity !! Materialize the row bitmap eagerly.
@@ -361,6 +362,61 @@ contains
             call self%append_null_row()
         end do
     end subroutine lc_grow_rows
+    !
+    !> Appends every row of `src`; see `parquet_container_column%append_from`.
+    !!
+    !! The three things that make this more than a copy, in the order they can go wrong:
+    !!
+    !!  1. **`src` must be a list column with the same element kind.** A map's offsets index
+    !!     key/value ENTRIES rather than payload elements, so reading one as the other produces a
+    !!     column that validates and is wrong.
+    !!  2. **Offsets are REBASED.** `src`'s run from 0; the destination's continue from whatever
+    !!     it already holds. `src%offsets(1)` is subtracted rather than assumed zero, so a source
+    !!     whose offsets were ever rebased for some other reason still appends correctly.
+    !!  3. **Validity MERGES.** Only `src`'s null rows are marked; the destination's existing rows
+    !!     are untouched, which is `%append`'s rule (`%paste` is the one that replaces).
+    subroutine lc_append_from(self, src)
+        class(parquet_list_column), intent(inout) :: self !! the destination column.
+        class(parquet_container_column), intent(in) :: src !! rows to append, left unchanged.
+        integer(int64) :: k, m, base, first, n0
+        character(len=:), allocatable :: mine, theirs
+        select type (src)
+        type is (parquet_list_column)
+            m = src%nrows_
+            if (m == 0_int64) return
+            call require_init(self, "append_from")
+            if (src%elem_kind /= self%elem_kind) then
+                call payload_kind_text(self%elem_kind, mine)
+                call payload_kind_text(src%elem_kind, theirs)
+                error stop EP//"append_from: cannot append a list<"//theirs//"> onto a list<"// &
+                    mine//">"
+            end if
+            n0 = self%nrows_
+            call ensure_offsets_cap(self, n0 + m)
+            ! The payload concatenates as an ordinary column; only the offsets know about rows.
+            call self%payload%append(src%payload)
+            base = self%offsets(n0 + 1_int64)
+            first = src%offsets(1)
+            do k = 1_int64, m
+                self%offsets(n0 + k + 1_int64) = base + (src%offsets(k + 1_int64) - first)
+            end do
+            self%nrows_ = n0 + m
+            ! Only now: marking a null row needs the row to exist, and set_null bounds-checks.
+            if (src%has_nulls_) then
+                do k = 1_int64, m
+                    if (row_is_null(src, k)) then
+                        call ensure_validity_cap(self, self%nrows_)
+                        self%has_nulls_ = .true.
+                        call bit_set(self%validity, n0 + k)
+                    end if
+                end do
+            end if
+        class default
+            call src%kind_text(theirs)
+            call self%kind_text(mine)
+            error stop EP//"append_from: cannot append a "//theirs//" onto a "//mine
+        end select
+    end subroutine lc_append_from
     !
     !> Reserves capacity for at least `n` rows; see `parquet_container_column%reserve_rows`.
     subroutine lc_reserve_rows(self, n)

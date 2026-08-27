@@ -649,11 +649,18 @@ contains
             call parquet_string_column_append_column(self%str, other%str)
             self%nrows = old + n
         case (PK_LIST, PK_MAP, PK_STRUCT)
-            ! Deferred, not forgotten: appending one container column onto another needs the
-            ! payload columns concatenated and the offsets rebased, which is the concrete type's
-            ! business and has no caller until the reader lands. Named explicitly so the failure
-            ! says what is missing rather than "column has no active storage", which is false.
-            error stop EP//"append_storage: appending a container column is not implemented yet"
+            ! Delegated whole, exactly as gather_storage delegates: only the concrete type knows
+            ! how a row is laid out, and the offsets have to be rebased onto this column's own
+            ! element count rather than copied. `other`'s container is guaranteed allocated by
+            ! the kind check the caller has already made -- a PK_LIST column without one cannot
+            ! exist, since adopt_container is the only writer of a container kind.
+            call self%container%append_from(other%container)
+            ! As for the string kinds: this column's own row count is not advanced by
+            ! grow_storage here, so it is set from the container that has just grown. `cap` has
+            ! to follow, or the cap >= nrows invariant that %capacity and ensure_capacity both
+            ! read is broken by an append.
+            self%nrows = self%container%nrows()
+            self%cap = max(self%cap, self%nrows)
         case default
             error stop EP//"append_storage: column has no active storage"
         end select

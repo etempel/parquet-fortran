@@ -28,6 +28,7 @@ contains
         testsuite = [ &
             new_unittest("struct init fixes the field set", test_init_fixes_fields), &
             new_unittest("struct append_row is present with null fields", test_append_row), &
+            new_unittest("struct append_from concatenates field by field", test_append_from), &
             new_unittest("struct null row differs from all-fields-null", test_null_row_vs_all_null), &
             new_unittest("struct set_field by name and by index agree", test_name_and_index_agree), &
             new_unittest("struct every field kind round-trips in memory", test_all_kinds), &
@@ -404,5 +405,61 @@ contains
         if (allocated(error)) return
         call check(error, sc%validate(), "the column is still valid after %grow_rows")
     end subroutine test_grow_rows
+
+    !> `append_from` concatenates one struct column onto another, field column by field column.
+    !>
+    !> A struct has no offsets to rebase, so the arithmetic a list and a map can get wrong does
+    !> not exist here. What it has instead is a LAYOUT that two columns can appear to share while
+    !> differing: same field count, different names or different kinds. `struct<a,b>` and
+    !> `struct<b,a>` are the sharp case -- identical field sets, and appending one onto the other
+    !> would transpose two columns silently, so the check is on field name IN ORDER, not on the
+    !> set of names.
+    subroutine test_append_from(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_struct_column), target :: dst, src
+        type(parquet_struct_row) :: h
+        integer(int32) :: v
+        logical :: ok
+
+        call dst%init(["id  ", "size"], [PK_INT32, PK_INT32])
+        call dst%append_row()
+        call dst%set_field(1, "id", 10_int32)
+        call dst%set_field(1, "size", 100_int32)
+        call dst%append_null_row()
+
+        call src%init(["id  ", "size"], [PK_INT32, PK_INT32])
+        call src%append_row()
+        call src%set_field(1, "id", 20_int32)
+        call src%set_field(1, "size", 200_int32)
+        call src%append_null_row()
+
+        call dst%append_from(src)
+        call check(error, dst%size() == 4_int64, "every row of both columns survives")
+        if (allocated(error)) return
+        call check(error, .not. dst%is_null(1), "the destination's own present row is still present")
+        if (allocated(error)) return
+        call check(error, dst%is_null(2), "and its null row is still null")
+        if (allocated(error)) return
+        call check(error, .not. dst%is_null(3), "the appended present row arrived present")
+        if (allocated(error)) return
+        call check(error, dst%is_null(4), "and the appended NULL row arrived null, not present")
+        if (allocated(error)) return
+        ! Both fields of an appended row, because appending one field column and not the other
+        ! gives the right row count with a field silently left behind.
+        h = dst%view(3)
+        call h%get_field("id", v, is_valid=ok)
+        call check(error, ok .and. v == 20, "the appended row's 'id' came across")
+        if (allocated(error)) return
+        call h%get_field("size", v, is_valid=ok)
+        call check(error, ok .and. v == 200, "and so did its 'size' -- both field columns grew")
+        if (allocated(error)) return
+        h = dst%view(1)
+        call h%get_field("size", v, is_valid=ok)
+        call check(error, ok .and. v == 100, "the destination's own values are untouched")
+        if (allocated(error)) return
+        call check(error, dst%validate(), "the concatenated column satisfies its own invariants")
+        if (allocated(error)) return
+        call check(error, src%size() == 2_int64, "the source column is unchanged")
+    end subroutine test_append_from
 
 end module test_struct

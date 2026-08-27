@@ -13,8 +13,18 @@
 !!   and their *_VEC forms       one bit per ELEMENT            (nrows*width bits)
 !! string (+ PK_STRING_VEC)      the embedded string column     its own null_count() > 0
 !! date/time/timestamp (+ _VEC)  inside each element            cached flag, rescanned when dirty
-!! list/map/struct (reserved)    the container column           delegated (not yet implemented)
+!! list/map/struct               the container column           per-row is_null_row, early exit
 !! ```
+!!
+!! **Every one of the five queries below has to carry all four rows of that table, and the
+!! container row was once carried by only two of them.** `is_null_row`, `set_null_row` and
+!! `clear_null_row` delegated from the day container columns landed, while `any_null`,
+!! `row_validity`, `element_validity` and the element form of `is_null` fell through to a bitmap
+!! that is deliberately never allocated for a container kind -- so `%is_null(i)` answered `.true.`
+!! for a null row while `%any_null()` answered `.false.` about the same column, with nothing to
+!! announce the disagreement. The writers were delegated and the readers were not, and nothing in
+!! the language connects the two sets: **a query added here must be checked against all four rows,
+!! not against the bitmap it happens to be written around** (feature_risks.md Risk-159).
 !!
 !! Hoisting everything into the column bitmap was rejected: it would mean two sources of truth
 !! kept in sync by every mutation path, and for the temporal kinds it would fight
@@ -34,6 +44,13 @@ contains
     !! Temporal kinds would need an O(n) element scan, so the answer is cached and only
     !! recomputed after a mutation has marked it dirty -- otherwise `any_null` would be an O(n)
     !! query on types whose whole point is cheap access.
+    !!
+    !! **This is NOT a one-line forwarder onto `parquet_column_any_null`, and the duplication is
+    !! forced rather than chosen**: this form is `intent(inout)` and so may refresh a temporal
+    !! column's null cache, while the typed form is `intent(in)` and must scan instead (its own
+    !! doc-comment explains why that matters under concurrency). The two ladders therefore have to
+    !! be kept in step BY HAND, and they were not -- both were missing the container arm below at
+    !! the same time. A dispatch class added to either one belongs in both.
     module procedure any_null
         integer(int64) :: k, nbits, nblk
         res = .false.
@@ -47,6 +64,19 @@ contains
                 call rescan_temporal_nulls(self)
             end if
             res = self%nulls_cached
+            return
+        end if
+        ! The container class: row nullness lives inside the container, so `has_nulls` stays
+        ! .false. and the test below would answer "no nulls" for a column that has them. See the
+        ! twin arm in parquet_column_any_null, and the file header's dispatch table.
+        if (parquet_kind_is_container(self%kind)) then
+            if (.not. allocated(self%container)) return
+            do k = 1_int64, self%nrows
+                if (self%container%is_null_row(k)) then
+                    res = .true.
+                    return
+                end if
+            end do
             return
         end if
         if (.not. self%has_nulls) return
@@ -177,6 +207,19 @@ contains
             res = col%tmv(e, i)%is_null()
         case (PK_TIMESTAMP_VEC)
             res = col%tsv(e, i)%is_null()
+        case (PK_LIST, PK_MAP, PK_STRUCT)
+            ! A container column's `width` is 1 (adopt_container fixes it there and says why), so
+            ! check_element above has already restricted `e` to 1 and there is exactly one element
+            ! per row -- which makes this the same question the row form answers, and answering it
+            ! keeps the width-1 shape this procedure's own doc-comment promises for every other
+            ! width-1 kind. Falling through to the default arm instead read an unallocated bitmap
+            ! and answered .false. for a genuinely null row.
+            !
+            ! The TABLE layer refuses %is_null(i, e) on a container column rather than forwarding
+            ! here, and the asymmetry is deliberate: there `e` is the caller asking about the e-th
+            ! element INSIDE the list, which is a question about the container's contents that the
+            ! table cannot answer and must not guess at. See feature_container_phase6.md, Q3.
+            res = col%container%is_null_row(i)
         case (PK_NONE)
             ! Unreachable through the public API, exactly as in is_null_row above.
             error stop EP//"is_null: column has no kind assigned" ! GCOVR_EXCL_LINE
@@ -267,6 +310,16 @@ contains
                 end do
             end do
             return
+        case (PK_LIST, PK_MAP, PK_STRUCT)
+            ! Row nullness lives inside the container, so there is no bitmap here to walk and the
+            ! block loop below would read an unallocated one. A per-row call is the only shape
+            ! available -- the containers expose no bulk validity view -- and it is bounded by
+            ! nrows rather than by width*nrows, since a container column's width is 1.
+            if (.not. allocated(self%container)) return
+            do i = 1_int64, n
+                valid(i) = .not. self%container%is_null_row(i)
+            end do
+            return
         end select
         ! Case 2. any_null already established there is a bitmap; the guard keeps a future caller
         ! from turning a missing one into an out-of-bounds read.
@@ -349,6 +402,15 @@ contains
                 do e = 1_int64, w
                     valid(e, i) = .not. parquet_string_column_is_null(self%str, base + e)
                 end do
+            end do
+            return
+        case (PK_LIST, PK_MAP, PK_STRUCT)
+            ! width is 1 for a container column, so the mask is (1, nrows) and this is the row
+            ! arm reshaped -- which is the same answer parquet_column_is_null_elem gives for the
+            ! only element index that exists here. See row_validity's own container arm.
+            if (.not. allocated(self%container)) return
+            do i = 1_int64, n
+                valid(1, i) = .not. self%container%is_null_row(i)
             end do
             return
         end select
@@ -769,6 +831,23 @@ contains
             end if
             do k = 1_int64, col%nrows
                 if (parquet_column_is_null(col, k)) then
+                    res = .true.
+                    return
+                end if
+            end do
+            return
+        end if
+        ! The FOURTH dispatch class, and the one this procedure was missing. Row nullness lives
+        ! inside the container, so `has_nulls` is deliberately .false. for a container column
+        ! (adopt_container says why) -- and falling through to the test below therefore answered
+        ! "no nulls" for a column whose own %is_null(i) answers .true., which is two public
+        ! queries disagreeing about the same row with nothing to announce it. Scanned rather than
+        ! cached because there is no bitmap to skip whole words in, exactly as the temporal arm
+        ! above scans; the early exit is what keeps the common case cheap.
+        if (parquet_kind_is_container(col%kind)) then
+            if (.not. allocated(col%container)) return
+            do k = 1_int64, col%nrows
+                if (col%container%is_null_row(k)) then
                     res = .true.
                     return
                 end if

@@ -43,6 +43,8 @@ contains
             new_unittest("deep_copy is independent of its source", test_deep_copy_is_independent), &
             new_unittest("move_from leaves the source empty", test_move_from), &
             new_unittest("gather_rows reorders, repeats and drops rows", test_gather_rows), &
+            new_unittest("append_from concatenates two list columns and rebases the offsets", &
+                test_append_from), &
             new_unittest("gather_rows compacts a nulled row's elements away", test_gather_drops_nulled), &
             new_unittest("growth is geometric and shrink_to_fit gives it back", test_capacity_policy), &
             new_unittest("reserve does not add rows", test_reserve_adds_no_rows), &
@@ -743,5 +745,63 @@ contains
         call lc%clear()
         call check(error, lc%validate(why), "a cleared column is well-formed: "//why)
     end subroutine test_validate
+
+    !> `append_from` concatenates one list column onto another -- the primitive a table's slice
+    !> materialization assembles a column from its row groups with.
+    !>
+    !> **The assertion that matters is the one on row LENGTHS after the append**, not the row
+    !> count: offsets are stored relative to the source's own element run, so an implementation
+    !> that copied them instead of rebasing them onto the destination's element count produces a
+    !> column with the right number of rows whose contents are shifted, overlapping or negative.
+    !> A row-count check passes against all of that.
+    subroutine test_append_from(error)
+        type(error_type), allocatable, intent(out) :: error !! set on failure.
+        type(parquet_list_column), target :: dst, src, empty
+        type(parquet_list_row) :: row
+        integer(int32), allocatable :: v(:)
+
+        call dst%init(PK_INT32)
+        call dst%append_row([11_int32])
+        call dst%append_null_row()
+
+        call src%init(PK_INT32)
+        call src%append_row([21_int32, 22_int32])
+        call src%append_row([31_int32, 32_int32, 33_int32])
+        call src%append_null_row()
+
+        call dst%append_from(src)
+        call check(error, dst%size() == 5_int64, "every row of both columns survives")
+        if (allocated(error)) return
+        call check(error, dst%total_elements() == 6_int64, "and every element of both")
+        if (allocated(error)) return
+        ! Row by row, because this is what a copied-rather-than-rebased offsets array breaks.
+        call check(error, dst%length(1_int64) == 1_int64, "the destination's own first row is intact")
+        if (allocated(error)) return
+        call check(error, dst%is_null(2_int64), "and its null row is still null")
+        if (allocated(error)) return
+        call check(error, dst%length(3_int64) == 2_int64, "the appended row 1 has its own length")
+        if (allocated(error)) return
+        call check(error, dst%length(4_int64) == 3_int64, "the appended row 2 has its own length")
+        if (allocated(error)) return
+        call check(error, dst%is_null(5_int64), "and the appended NULL row arrived null, not empty")
+        if (allocated(error)) return
+        row = dst%view(4_int64)
+        call row%get(v)
+        call check(error, all(v == [31_int32, 32_int32, 33_int32]), &
+            "an appended row's values are its own, at the rebased offset")
+        if (allocated(error)) return
+        call check(error, dst%validate(), "the concatenated column satisfies its own invariants")
+        if (allocated(error)) return
+        ! The source is left alone -- it is intent(in), and a caller appending the same chunk
+        ! onto two destinations must get the same result twice.
+        call check(error, src%size() == 3_int64, "the source column is unchanged")
+        if (allocated(error)) return
+
+        ! Appending nothing is a no-op rather than an error: a row group can legitimately be
+        ! empty, and materialize_slice would otherwise have to special-case it.
+        call empty%init(PK_INT32)
+        call dst%append_from(empty)
+        call check(error, dst%size() == 5_int64, "appending an empty column changes nothing")
+    end subroutine test_append_from
 
 end module test_list

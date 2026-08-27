@@ -139,6 +139,7 @@ module parquet_struct
         procedure :: nrows => sc_nrows                   !! Rows stored.
         procedure :: clone_into => sc_clone_into         !! Allocate an independent copy.
         procedure :: gather_rows => sc_gather_rows       !! Rebuild so row k becomes old row idx(k).
+        procedure :: append_from => sc_append_from       !! Append every row of another struct column.
         procedure :: grow_rows => sc_grow_rows           !! Append n null rows.
         procedure :: reserve_rows => sc_reserve_rows     !! Reserve row capacity.
         procedure :: ensure_validity => sc_ensure_validity !! Materialize the row bitmap eagerly.
@@ -423,6 +424,77 @@ contains
             call self%append_null_row()
         end do
     end subroutine sc_grow_rows
+    !
+    !> Appends every row of `src`; see `parquet_container_column%append_from`.
+    !!
+    !! **A struct has no offsets, so there is nothing to rebase** -- every field column is exactly
+    !! `nrows_` long and concatenation is one `%append` per field. What it has instead is the
+    !! strictest layout check of the three, because two structs can agree on field COUNT and
+    !! disagree on everything else:
+    !!
+    !! * the field count must match;
+    !! * field `j`'s NAME must match, in order -- `struct<a,b>` and `struct<b,a>` hold the same
+    !!   fields and would silently transpose their columns;
+    !! * field `j`'s KIND must match.
+    !!
+    !! The message names the first field that differs, because "these structs are incompatible"
+    !! on a twenty-field type sends the reader looking through all twenty.
+    subroutine sc_append_from(self, src)
+        class(parquet_struct_column), intent(inout) :: self !! the destination column.
+        class(parquet_container_column), intent(in) :: src  !! rows to append, left unchanged.
+        integer(int64) :: k, m, n0
+        integer :: j
+        character(len=:), allocatable :: mine, theirs, nm_a, nm_b, kt_a, kt_b
+        character(len=32) :: got, want
+        select type (src)
+        type is (parquet_struct_column)
+            m = src%nrows_
+            if (m == 0_int64) return
+            call require_init(self, "append_from")
+            if (.not. allocated(src%fields)) return
+            if (size(self%fields) /= size(src%fields)) then
+                write(got, "(I0)") size(src%fields)
+                write(want, "(I0)") size(self%fields)
+                error stop EP//"append_from: cannot append a struct with "//trim(got)// &
+                    " fields onto one with "//trim(want)
+            end if
+            call name_slot(self, nm_a)
+            call name_slot(src, nm_b)
+            do j = 1, size(self%fields)
+                call self%field_names%copy_to(j, nm_a)
+                call src%field_names%copy_to(j, nm_b)
+                if (trim(nm_a) /= trim(nm_b)) then
+                    write(got, "(I0)") j
+                    error stop EP//"append_from: field "//trim(got)//" is '"//trim(nm_b)// &
+                        "' in the source and '"//trim(nm_a)//"' here"
+                end if
+                if (self%fields(j)%kindof() /= src%fields(j)%kindof()) then
+                    call field_kind_text(self%fields(j)%kindof(), kt_a)
+                    call field_kind_text(src%fields(j)%kindof(), kt_b)
+                    error stop EP//"append_from: field '"//trim(nm_a)//"' is "//kt_b// &
+                        " in the source and "//kt_a//" here"
+                end if
+            end do
+            n0 = self%nrows_
+            do j = 1, size(self%fields)
+                call self%fields(j)%append(src%fields(j))
+            end do
+            self%nrows_ = n0 + m
+            if (src%has_nulls_) then
+                do k = 1_int64, m
+                    if (row_is_null(src, k)) then
+                        call ensure_validity_cap(self, self%nrows_)
+                        self%has_nulls_ = .true.
+                        call bit_set(self%validity, n0 + k)
+                    end if
+                end do
+            end if
+        class default
+            call src%kind_text(theirs)
+            call self%kind_text(mine)
+            error stop EP//"append_from: cannot append a "//theirs//" onto a "//mine
+        end select
+    end subroutine sc_append_from
     !
     !> Reserves capacity for at least `n` rows; see `parquet_container_column%reserve_rows`.
     subroutine sc_reserve_rows(self, n)

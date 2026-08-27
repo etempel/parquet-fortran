@@ -100,6 +100,7 @@ module parquet_columns
     public :: parquet_column_set_null
     public :: parquet_column_clear_null
     public :: parquet_column_string_column
+    public :: parquet_column_container
     !
     ! INTERNAL API, for the same reason and on the same terms as the tier above: a NON-MUTATING
     ! `any_null`, so that a table read accessor holding its table by `intent(in)` can ask the
@@ -181,6 +182,7 @@ module parquet_columns
         procedure(container_clone_into_i), deferred :: clone_into    !! Allocate `out` as an independent copy.
         procedure(container_gather_rows_i), deferred :: gather_rows  !! Rebuild so row k becomes old row idx(k).
         procedure(container_grow_rows_i), deferred :: grow_rows      !! Append n null rows.
+        procedure(container_append_from_i), deferred :: append_from  !! Append every row of another container.
         procedure(container_reserve_rows_i), deferred :: reserve_rows !! Reserve capacity for n rows.
         procedure(container_ensure_validity_i), deferred :: ensure_validity !! Materialize validity storage.
         procedure(container_kind_text_i), deferred :: kind_text      !! Human-readable kind, e.g. "list<int32>".
@@ -247,6 +249,29 @@ module parquet_columns
             class(parquet_container_column), intent(inout) :: self !! the container column.
             integer(int64), intent(in) :: n                        !! rows to append.
         end subroutine container_grow_rows_i
+        !
+        !> Appends every row of `src` onto this container.
+        !!
+        !! What `parquet_column%append` (and therefore a table's slice materialization and
+        !! `%append`) reaches for a container kind. It is a deferred binding rather than anything
+        !! `parquet_columns` could do itself because concatenation is entirely the concrete type's
+        !! business: only it knows how a row is laid out, and the offsets have to be **rebased**
+        !! onto the destination's own element count rather than copied.
+        !!
+        !! Four obligations on every implementation, each of which fails silently if skipped:
+        !!
+        !! * **Check the dynamic type**, and abort naming both kinds. Appending a map onto a list
+        !!   must not reinterpret one offsets array as the other.
+        !! * **Check the payload layout** -- a list's element kind, a map's value kind, a struct's
+        !!   whole field list. A struct must name the first field that differs.
+        !! * **Rebase, do not copy, the offsets.** `dst(n+k) = dst_end + (src(k) - src(1))`.
+        !! * **MERGE validity, do not replace it.** The destination rows are fresh, so this is
+        !!   `%append`'s rule and not `%paste`'s.
+        subroutine container_append_from_i(self, src)
+            import :: parquet_container_column
+            class(parquet_container_column), intent(inout) :: self !! the destination container.
+            class(parquet_container_column), intent(in) :: src     !! rows to append, unchanged.
+        end subroutine container_append_from_i
         !
         !> Reserves capacity for at least `n` rows without changing the row count.
         subroutine container_reserve_rows_i(self, n)
@@ -416,6 +441,8 @@ module parquet_columns
         generic :: gather => gather_i32, gather_i64
         ! --- string-kind storage access (PK_STRING / PK_STRING_VEC) ---
         procedure :: string_column                     !! Pointer to the embedded string store.
+        ! --- container-kind storage access (PK_LIST / PK_MAP / PK_STRUCT) ---
+        procedure :: container_ptr                     !! Pointer to the embedded container column.
         ! --- get_at ---
         procedure, private :: get_at_i32   !! get_at specific for the i32 kind.
         procedure, private :: get_at_i64   !! get_at specific for the i64 kind.
@@ -976,6 +1003,15 @@ module parquet_columns
             class(parquet_column), intent(in), target :: self       !! the column.
             type(parquet_string_column), pointer, intent(out) :: p  !! alias to the string store.
         end subroutine string_column
+        !> Aliases the embedded container column (PK_LIST/PK_MAP/PK_STRUCT).
+        !!
+        !! A one-line forwarder onto `parquet_column_container`, which holds the implementation --
+        !! never the other way round. See that procedure's own note for why the result is the
+        !! abstract face and why this pair is outside the per-cell typed-accessor rule.
+        module subroutine container_ptr(self, p)
+            class(parquet_column), intent(in), target :: self           !! the column.
+            class(parquet_container_column), pointer, intent(out) :: p  !! alias to the container.
+        end subroutine container_ptr
         !> Reads string element `i` into an allocatable string (PK_STRING).
         module subroutine get_at_str(self, i, value)
             class(parquet_column), intent(in) :: self             !! the column.
@@ -2336,6 +2372,28 @@ module parquet_columns
             type(parquet_column), intent(in), target :: col         !! the column.
             type(parquet_string_column), pointer, intent(out) :: p  !! alias to the string store.
         end subroutine parquet_column_string_column
+        !> Typed `container`: pointer to the embedded container column (PK_LIST/PK_MAP/PK_STRUCT).
+        !!
+        !! The read counterpart of `adopt_container`, and the only way out of a `parquet_column`
+        !! for the thing it holds. `parquet_tables` needs it for `%col`, `%get` and a row handle's
+        !! `%ref`, and cannot reach `col%container` itself -- the component is private to this
+        !! module.
+        !!
+        !! **The result is the ABSTRACT face, so a caller wanting a concrete type must
+        !! `select type` on it.** That is deliberate rather than an omission: `parquet_columns`
+        !! must never name `parquet_list_column`, `parquet_map_column` or `parquet_struct_column`,
+        !! or it acquires the very dependency the tier split exists to prevent (and its own
+        !! footprint grows by three modules for every consumer, `check_module_footprints.sh` being
+        !! what would notice).
+        !!
+        !! **Per-COLUMN, not per-cell**, so it is outside `check_no_type_bound_column_access`'s
+        !! scope and must NOT be added to that check's twinned-binding list: a `class` dummy on a
+        !! per-cell path is what that rule bans, and this is called once when a column is reached,
+        !! not once per row.
+        module subroutine parquet_column_container(col, p)
+            type(parquet_column), intent(in), target :: col                !! the column.
+            class(parquet_container_column), pointer, intent(out) :: p     !! alias to the container.
+        end subroutine parquet_column_container
         !> Typed `get_at` for PK_STRING: reads element `i` into an allocatable string.
         module subroutine parquet_column_get_at_str(col, i, value)
             type(parquet_column), intent(in) :: col             !! the column.

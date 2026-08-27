@@ -290,6 +290,30 @@ contains
     !!
     !! This is the lazy allocation R2 requires: a column that never sees a null never calls this
     !! and never pays for a map.
+    !> Aliases the embedded container column, so `parquet_tables` can reach it.
+    !!
+    !! Refuses a non-container kind by name rather than handing back a null pointer: every caller
+    !! is about to dereference this, and a null pointer would fault somewhere else entirely.
+    module procedure parquet_column_container
+        if (.not. parquet_kind_is_container(col%kind)) then
+            error stop EP//"container: column kind is "//trim(kind_text(col%kind))// &
+                ", but this call requires a container kind"
+        end if
+        ! Not reachable through the public API -- adopt_container is the only writer of a
+        ! container kind and it refuses an unallocated argument, so a PK_LIST column without a
+        ! container cannot be constructed. Kept because the alternative to a guard here is a null
+        ! pointer returned to a caller that will dereference it.
+        if (.not. allocated(col%container)) then ! GCOVR_EXCL_START
+            error stop EP//"container: container storage is not allocated"
+        end if ! GCOVR_EXCL_STOP
+        p => col%container
+    end procedure parquet_column_container
+    !
+    !> Aliases the embedded container column (polymorphic form).
+    module procedure container_ptr
+        call parquet_column_container(self, p)
+    end procedure container_ptr
+    !
     module procedure has_validity_storage
         ! The three validity mechanisms, in the order feature_table.md's "three dispatch classes"
         ! lists them. Only the first two allocate anything, so only they can be raced on.

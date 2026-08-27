@@ -19,6 +19,7 @@
 !> scenarios, driven from test_errors.f90.
 module test_columns
     use parquet_columns
+    use parquet_list, only : parquet_list_column
     use parquet_strings, only : parquet_string_column
     use parquet_temporal, only : parquet_date, parquet_time, parquet_timestamp, parquet_unit_millis
     use iso_fortran_env, only : int32, int64, real32, real64
@@ -133,7 +134,9 @@ contains
             new_unittest("a temporal column's null cache is read, not rescanned, while clean", &
                 test_temporal_null_cache_is_read_when_clean), &
             new_unittest("an all-zero bitmap reports no nulls without dropping it", &
-                test_all_zero_bitmap_reports_no_nulls) &
+                test_all_zero_bitmap_reports_no_nulls), &
+            new_unittest("every validity query agrees with is_null on a container column", &
+                test_container_validity_queries_agree) &
             ]
     end subroutine collect_tests_parquet_columns
     !
@@ -4065,5 +4068,105 @@ contains
         call c%get_at(2_int64, got)
         call check(error, got == 8_int32, "none of this may disturb the values")
     end subroutine test_all_zero_bitmap_reports_no_nulls
+
+    !> The FOURTH validity dispatch class: a container column's row nullness lives inside the
+    !> container, and every query here has to ask it rather than the bitmap.
+    !>
+    !> This is a REGRESSION test for a shipped disagreement, not a feature test. `is_null_row`,
+    !> `set_null_row` and `clear_null_row` delegated from the day container columns landed, while
+    !> `any_null`, `row_validity`, `element_validity` and the element form of `is_null` fell
+    !> through to a bitmap that is deliberately never allocated for a container kind -- so
+    !> `%is_null(2)` answered `.true.` for the null row below while `%any_null()` answered
+    !> `.false.` about the same column. Two public queries, one column, opposite answers, nothing
+    !> announcing it (feature_risks.md Risk-159).
+    !>
+    !> **The assertions are written as AGREEMENT rather than as literals on purpose.** A test
+    !> that merely checked `%any_null()` is `.true.` would pass against a query hard-wired to say
+    !> so; tying each answer to the row form is what makes the four move together, and is what a
+    !> fifth query added later should be held to as well.
+    subroutine test_container_validity_queries_agree(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_column) :: col, clean
+        type(parquet_list_column), allocatable :: lc
+        class(parquet_container_column), allocatable :: cc
+        logical, allocatable :: rmask(:), emask(:,:)
+        integer(int64) :: i
+        logical :: ok
+        !
+        ! Rows 1 and 3 hold values; row 2 is an ABSENT list, not an empty one.
+        allocate(lc)
+        call lc%init(PK_INT32)
+        call lc%append_row([1_int32, 2_int32, 3_int32])
+        call lc%append_null_row()
+        call lc%append_row([7_int32])
+        call move_alloc(lc, cc)
+        call col%adopt_container(cc)
+        !
+        call check(error, col%is_null(2_int64), "the row form sees the null container")
+        if (allocated(error)) return
+        call check(error, col%any_null(), "%any_null must agree that the column has a null")
+        if (allocated(error)) return
+        !
+        ! The element form: a container column's width is 1, so element 1 is the only element
+        ! there is and its answer must equal the row's (feature_container_phase6.md, Q3).
+        ok = .true.
+        do i = 1_int64, 3_int64
+            if (col%is_null(i, 1_int64) .neqv. col%is_null(i)) ok = .false.
+        end do
+        call check(error, ok, "%is_null(i, 1) must equal %is_null(i) on a width-1 container column")
+        if (allocated(error)) return
+        !
+        call col%row_validity(rmask)
+        call check(error, allocated(rmask), "%row_validity must not report a null-free column")
+        if (allocated(error)) return
+        call check(error, size(rmask) == 3, "%row_validity covers every row")
+        if (allocated(error)) return
+        ok = .true.
+        do i = 1_int64, 3_int64
+            if (rmask(i) .eqv. col%is_null(i)) ok = .false.
+        end do
+        call check(error, ok, "%row_validity must be the negation of %is_null, row by row")
+        if (allocated(error)) return
+        !
+        call col%element_validity(emask)
+        call check(error, allocated(emask), "%element_validity must not report a null-free column")
+        if (allocated(error)) return
+        call check(error, size(emask, 1) == 1 .and. size(emask, 2) == 3, &
+            "%element_validity is shaped (1, nrows) for a width-1 container column")
+        if (allocated(error)) return
+        ok = .true.
+        do i = 1_int64, 3_int64
+            if (emask(1, i) .eqv. col%is_null(i)) ok = .false.
+        end do
+        call check(error, ok, "%element_validity must agree with %is_null too")
+        if (allocated(error)) return
+        !
+        ! The NEGATIVE CONTROL. Without it every assertion above passes against a query that
+        ! answers "null" unconditionally for a container kind, which is the opposite defect and
+        ! just as silent.
+        deallocate(rmask)
+        call build_null_free_list(clean)
+        call check(error, .not. clean%is_null(1_int64), "the control column has no null row")
+        if (allocated(error)) return
+        call check(error, .not. clean%any_null(), "%any_null must still answer .false. with no nulls")
+        if (allocated(error)) return
+        call clean%row_validity(rmask)
+        call check(error, .not. allocated(rmask), &
+            "and %row_validity must leave the mask UNALLOCATED, which is its 'no nulls' contract")
+    end subroutine test_container_validity_queries_agree
+
+    !> A two-row list column with no null rows, for the negative control above.
+    subroutine build_null_free_list(col)
+        type(parquet_column), intent(out) :: col !! receives the container column.
+        type(parquet_list_column), allocatable :: lc
+        class(parquet_container_column), allocatable :: cc
+        !
+        allocate(lc)
+        call lc%init(PK_INT32)
+        call lc%append_row([4_int32, 5_int32])
+        call lc%append_row([6_int32])
+        call move_alloc(lc, cc)
+        call col%adopt_container(cc)
+    end subroutine build_null_free_list
 
 end module test_columns

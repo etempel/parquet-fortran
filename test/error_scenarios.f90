@@ -1225,8 +1225,12 @@ program error_scenarios
         call scenario_list_adopt_not_allocated()
     case ("list_column_paste_refused")
         call scenario_list_column_paste_refused()
-    case ("list_column_append_refused")
-        call scenario_list_column_append_refused()
+    case ("container_append_wrong_container_kind")
+        call scenario_container_append_wrong_container_kind()
+    case ("container_append_wrong_element_kind")
+        call scenario_container_append_wrong_element_kind()
+    case ("container_append_struct_field_mismatch")
+        call scenario_container_append_struct_field_mismatch()
     case ("columns_init_width_on_scalar_kind")
         call scenario_columns_init_width_on_scalar_kind()
     case ("columns_adopt_not_allocated_i32")
@@ -13025,22 +13029,57 @@ contains
         print '(a,i0)', "unexpectedly pasted into a container column, rows=", col%length()
     end subroutine scenario_list_column_paste_refused
 
-    !> Appending one container column onto another needs the payload concatenated and the offsets
-    !! rebased; it is deferred until the reader is its first caller, and says so rather than
-    !! reporting "column has no active storage", which would not be true.
-    subroutine scenario_list_column_append_refused()
-        type(parquet_column) :: col, src
+    !> `append_from` checks the DYNAMIC TYPE of what it is being handed. A map's offsets index
+    !! key/value entries while a list's index payload elements, so reading one as the other would
+    !! produce a column that passes %validate and holds the wrong rows -- which is why this is an
+    !! abort and not a best-effort conversion.
+    !!
+    !! Reached through parquet_column%append rather than the binding directly, because that is the
+    !! route the table layer takes and the kind check there fires first for two columns of
+    !! different PK_* kinds; a list column and a map column both reach append_from only when the
+    !! caller has built them by hand, as here.
+    subroutine scenario_container_append_wrong_container_kind()
         type(parquet_list_column) :: lc
+        type(parquet_map_column) :: mc
         class(parquet_container_column), allocatable :: cc
         call lc%init(PK_INT32)
         call lc%append_row([1_int32])
-        call lc%clone_into(cc)
-        call col%adopt_container(cc)
-        call lc%clone_into(cc)
-        call src%adopt_container(cc)
-        call col%append(src)   ! not implemented yet -> aborts
-        print '(a,i0)', "unexpectedly appended a container column, rows=", col%length()
-    end subroutine scenario_list_column_append_refused
+        call mc%init(PK_INT32)
+        call mc%append_row(["a"], [1_int32])
+        call mc%clone_into(cc)
+        call lc%append_from(cc)   ! a map onto a list -> aborts
+        print '(a,i0)', "unexpectedly appended a map onto a list, rows=", lc%size()
+    end subroutine scenario_container_append_wrong_container_kind
+
+    !> Two list columns can agree on everything except their payload's kind, and appending across
+    !! that difference would hand parquet_column%append two columns of different kinds one level
+    !! down -- so the check belongs here, where the message can name both element types.
+    subroutine scenario_container_append_wrong_element_kind()
+        type(parquet_list_column) :: dst, src
+        class(parquet_container_column), allocatable :: cc
+        call dst%init(PK_INT32)
+        call dst%append_row([1_int32])
+        call src%init(PK_INT64)
+        call src%append_row([1_int64])
+        call src%clone_into(cc)
+        call dst%append_from(cc)   ! list<int64> onto list<int32> -> aborts
+        print '(a,i0)', "unexpectedly appended across element kinds, rows=", dst%size()
+    end subroutine scenario_container_append_wrong_element_kind
+
+    !> The sharp struct case: two columns with the SAME field count and the same field kinds, in a
+    !! different ORDER. Appending them would transpose the two field columns silently, so the
+    !! check is on field name at each position rather than on the set of names.
+    subroutine scenario_container_append_struct_field_mismatch()
+        type(parquet_struct_column) :: dst, src
+        class(parquet_container_column), allocatable :: cc
+        call dst%init(["a", "b"], [PK_INT32, PK_INT32])
+        call dst%append_row()
+        call src%init(["b", "a"], [PK_INT32, PK_INT32])
+        call src%append_row()
+        call src%clone_into(cc)
+        call dst%append_from(cc)   ! struct<b,a> onto struct<a,b> -> aborts
+        print '(a,i0)', "unexpectedly appended a transposed struct, rows=", dst%size()
+    end subroutine scenario_container_append_struct_field_mismatch
 
     !> width > 1 only means something for a *_VEC kind; silently ignoring it on a scalar kind
     !! would give the caller a column shaped differently from the one they asked for.

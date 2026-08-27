@@ -1566,8 +1566,8 @@ contains
             ]
         p8 = [ &
             new_unittest("reading a non-list column into a list column aborts", test_list_read_not_a_list_aborts), &
-            new_unittest("a nested list payload aborts", test_list_read_nested_payload_aborts), &
-            new_unittest("a struct list payload aborts", test_list_read_struct_payload_aborts), &
+            new_unittest("a nested list payload reads", test_list_read_nested_payload_aborts), &
+            new_unittest("a struct list payload reads", test_list_read_struct_payload_aborts), &
             new_unittest("a chunked list read refuses an active sort", test_list_chunk_refuses_sort_aborts), &
             new_unittest("a chunked list read checks its row group", test_list_chunk_row_group_out_of_range_aborts), &
             new_unittest("a partially chunk-read list column fails the completeness check", &
@@ -1592,6 +1592,22 @@ contains
             new_unittest("a protected list column with a null element aborts", &
                 test_list_write_protected_element_null_aborts), &
             new_unittest("a map column of an unsupported value kind aborts", test_map_init_bad_kind_aborts), &
+            new_unittest("a map %init with a container value names the adopt route", &
+                test_map_init_nested_value_aborts), &
+            new_unittest("writing a nested list is refused, naming the payload kind", &
+                test_write_nested_list_aborts), &
+            new_unittest("writing a NON-nested list still works", test_write_nested_list_control), &
+            new_unittest("writing a struct with a container field names the field", &
+                test_write_nested_struct_field_aborts), &
+            new_unittest("a filter on a descent path is refused", test_filter_descent_path_aborts), &
+            new_unittest("a filter on an ordinary leaf still works", test_filter_descent_path_control), &
+            new_unittest("a sort key on a descent path is refused", test_sort_key_descent_path_aborts), &
+            new_unittest("a list %init with a container payload names the adopt route", &
+                test_list_init_nested_payload_aborts), &
+            new_unittest("a struct %init with a container field names the field and the route", &
+                test_struct_init_nested_field_aborts), &
+            new_unittest("a struct field that is itself a struct names the dotted-path route", &
+                test_struct_read_nested_struct_field_aborts), &
             new_unittest("appending the wrong value type to a map aborts", test_map_append_wrong_kind_aborts), &
             new_unittest("appending mismatched key/value arrays to a map aborts", &
                 test_map_append_length_mismatch_aborts), &
@@ -1603,7 +1619,7 @@ contains
             new_unittest("%view past the last map row aborts", test_map_view_out_of_range_aborts), &
             new_unittest("reading a non-map column into a map column aborts", test_map_read_not_a_map_aborts), &
             new_unittest("reading a map with non-string keys aborts", test_map_read_int_key_aborts), &
-            new_unittest("reading a map with a container value aborts", test_map_read_nested_value_aborts), &
+            new_unittest("reading a map with a container value works", test_map_read_nested_value_aborts), &
             new_unittest("writing an uninitialized map column aborts", test_map_write_uninitialized_aborts), &
             new_unittest("writing a map column into a differently-typed slot aborts", &
                 test_map_write_type_mismatch_aborts), &
@@ -1639,7 +1655,7 @@ contains
             new_unittest("a protected struct column with a null field aborts", &
                 test_struct_protected_field_null_aborts), &
             new_unittest("a protected null-free struct column writes normally", test_struct_protected_ok), &
-            new_unittest("reading a struct with a nested container field aborts", &
+            new_unittest("reading a struct whose field is a list works", &
                 test_struct_read_nested_field_aborts), &
             new_unittest("%view past the last struct row aborts", test_struct_view_out_of_range_aborts), &
             new_unittest("%set_field naming an undeclared field aborts", test_struct_set_field_unknown_aborts), &
@@ -1672,22 +1688,23 @@ contains
             required_stderr="expected a list column, got int32")
     end subroutine test_list_read_not_a_list_aborts
 
-    !> A list whose elements are themselves a list. Nested payloads are a later phase's subject;
-    !! until then the refusal is clean and names the element type.
+    !> A list whose elements are themselves a list: Phase 7 READS it, so this asserts the read.
+    !!
+    !! It was an abort test until then. The scenario checks the row LENGTHS rather than the row
+    !! count, because the likeliest assembly defect -- using the outer offsets for the inner
+    !! container -- leaves the count right. See feature_container_phase7.md's D4.
     subroutine test_list_read_nested_payload_aborts(error)
         type(error_type), allocatable, intent(out) :: error
-        call check_scenario_exit_status_and_stderr(error, "list_read_nested_payload", expect_abort=.true., &
-            failure_message="reading a list<list<...>> column was expected to abort", &
-            required_stderr="unsupported list element type for column: list_of_list")
+        call check_scenario_exit_status(error, "list_read_nested_payload", expect_abort=.false., &
+            failure_message="reading a list<list<...>> column was expected to succeed")
     end subroutine test_list_read_nested_payload_aborts
 
-    !> The same refusal reached through a different unsupported element type, so the guard is not
-    !! keyed on one Arrow type id.
+    !> The same assembly reached through a different element type, so it is not keyed on one
+    !! Arrow type id.
     subroutine test_list_read_struct_payload_aborts(error)
         type(error_type), allocatable, intent(out) :: error
-        call check_scenario_exit_status_and_stderr(error, "list_read_struct_payload", expect_abort=.true., &
-            failure_message="reading a list<struct<...>> column was expected to abort", &
-            required_stderr="unsupported list element type for column: list_of_struct")
+        call check_scenario_exit_status(error, "list_read_struct_payload", expect_abort=.false., &
+            failure_message="reading a list<struct<...>> column was expected to succeed")
     end subroutine test_list_read_struct_payload_aborts
 
     !> The chunked list specific inherits the sort refusal every row-group-scoped operation makes,
@@ -1876,6 +1893,102 @@ contains
             required_stderr="not a supported map value kind")
     end subroutine test_map_init_bad_kind_aborts
 
+    !> Nesting is READ-ONLY (feature_container_phase7.md's Q2), and these pin the write half.
+    !!
+    !! **Each refusal has a NEGATIVE CONTROL beside it**, which is the whole reason there are six
+    !! tests here rather than three: D2 deliberately widened the in-memory gate so a nested column
+    !! can be BUILT, so a write-side guard that fired on every container column would satisfy every
+    !! abort test ever written for it while breaking the ordinary non-nested write this library
+    !! ships. The controls are what distinguish the two.
+    subroutine test_write_nested_list_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "write_nested_list", expect_abort=.true., &
+            failure_message="writing a list whose payload is a container was expected to abort", &
+            required_stderr="has a nested payload")
+    end subroutine test_write_nested_list_aborts
+
+    subroutine test_write_nested_list_control(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status(error, "write_nested_list_control", expect_abort=.false., &
+            failure_message="writing an ordinary non-nested list column was expected to succeed")
+    end subroutine test_write_nested_list_control
+
+    !> The struct form names the FIELD as well as the column: a struct can carry one offending
+    !> field among several, and "this struct is nested" is not enough for a caller to act on.
+    subroutine test_write_nested_struct_field_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "write_nested_struct_field", &
+            expect_abort=.true., &
+            failure_message="writing a struct with a container field was expected to abort", &
+            required_stderr="field 'values' of struct column")
+    end subroutine test_write_nested_struct_field_aborts
+
+    !> `qc:` and `parquet_filter` are scalar-leaf-only PERMANENTLY, so the descent grammar must not
+    !> leak into them. A descent path RESOLVES, so without an explicit refusal the clause would be
+    !> evaluated against a container's flattened child -- one answer per ELEMENT, silently
+    !> misaligned with every other column. That is a wrong answer, not an error, which is why the
+    !> refusal is asserted rather than assumed.
+    subroutine test_filter_descent_path_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "filter_descent_path", expect_abort=.true., &
+            failure_message="a filter naming a descent path was expected to abort", &
+            required_stderr="is not filterable")
+    end subroutine test_filter_descent_path_aborts
+
+    subroutine test_filter_descent_path_control(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status(error, "filter_descent_path_control", expect_abort=.false., &
+            failure_message="a filter on an ordinary dotted struct leaf was expected to work")
+    end subroutine test_filter_descent_path_control
+
+    !> A read-time sort orders ROWS; a descent path has one entry per element, so there is no row
+    !> for its values to order.
+    subroutine test_sort_key_descent_path_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sort_key_descent_path", expect_abort=.true., &
+            failure_message="a sort key naming a descent path was expected to abort", &
+            required_stderr="cannot be a sort key")
+    end subroutine test_sort_key_descent_path_aborts
+
+    !> The three `%init`-refuses-a-container tests, and what makes them worth having separately
+    !> from `map_init_bad_kind` above: since Phase 7 the same gate refuses a `*_VEC` kind and a
+    !> CONTAINER kind with different messages, because only one of them has a route that works.
+    !> Asserting the message -- not merely the abort -- is what pins that the caller is told about
+    !> `%adopt_*` rather than simply told no. See feature_container_phase7.md's D1.
+    subroutine test_map_init_nested_value_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_init_nested_value", expect_abort=.true., &
+            failure_message="a map %init with a container value was expected to abort", &
+            required_stderr="is a nested value and cannot be declared here")
+    end subroutine test_map_init_nested_value_aborts
+
+    subroutine test_list_init_nested_payload_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_init_nested_payload", expect_abort=.true., &
+            failure_message="a list %init with a container payload was expected to abort", &
+            required_stderr="is a nested payload and cannot be declared here")
+    end subroutine test_list_init_nested_payload_aborts
+
+    !> The struct form additionally names the offending FIELD, which the other two have no
+    !> equivalent of -- a struct's `kinds(:)` array can carry one bad entry among several.
+    subroutine test_struct_init_nested_field_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_init_nested_field", expect_abort=.true., &
+            failure_message="a struct %init with a container field was expected to abort", &
+            required_stderr="field 'w' is a nested")
+    end subroutine test_struct_init_nested_field_aborts
+
+    !> A struct field that is itself a struct: out of Phase 7's scope (c), and the refusal must
+    !> point at the dotted-path mechanism that reads its leaves at any depth rather than merely
+    !> decline. A message that only said "unsupported" would leave the caller with no next step.
+    subroutine test_struct_read_nested_struct_field_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_read_nested_struct_field", &
+            expect_abort=.true., &
+            failure_message="reading a struct whose field is itself a struct was expected to abort", &
+            required_stderr="read its leaves by their own dotted paths")
+    end subroutine test_struct_read_nested_struct_field_aborts
+
     subroutine test_map_append_wrong_kind_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "map_append_wrong_kind", expect_abort=.true., &
@@ -1955,11 +2068,12 @@ contains
             required_stderr="only string keys are supported")
     end subroutine test_map_read_int_key_aborts
 
+    !> A map whose value is a container: Phase 7 reads it. The scenario asserts the KEYS as well,
+    !! since only the values path changed and a keys regression would otherwise hide here.
     subroutine test_map_read_nested_value_aborts(error)
         type(error_type), allocatable, intent(out) :: error
-        call check_scenario_exit_status_and_stderr(error, "map_read_nested_value", expect_abort=.true., &
-            failure_message="reading a map with a container value was expected to abort", &
-            required_stderr="unsupported map value type")
+        call check_scenario_exit_status(error, "map_read_nested_value", expect_abort=.false., &
+            failure_message="reading a map with a container value was expected to succeed")
     end subroutine test_map_read_nested_value_aborts
 
     subroutine test_map_write_uninitialized_aborts(error)
@@ -2152,13 +2266,16 @@ contains
             failure_message="a protected struct column with no Null anywhere was expected to write cleanly")
     end subroutine test_struct_protected_ok
 
-    !> Nesting is Phase 7. Refusing it cleanly, NAMING THE FIELD rather than only the column, is
-    !! this phase's whole obligation towards it -- so the field name is what is asserted.
+    !> Phase 7 reads a struct whose field is a LIST, so this asserts the READ rather than a refusal.
+    !!
+    !! It was an abort test until then, and inverting it rather than deleting it is deliberate: it
+    !! is the negative control for `struct_read_nested_struct_field`, which still aborts. The two
+    !! differ only in the field's type, so the pair shows what the surviving refusal is actually
+    !! about. See feature_container_phase7.md's D4.
     subroutine test_struct_read_nested_field_aborts(error)
         type(error_type), allocatable, intent(out) :: error
-        call check_scenario_exit_status_and_stderr(error, "struct_read_nested_field", expect_abort=.true., &
-            failure_message="reading a struct with a nested container field was expected to abort", &
-            required_stderr="field 'values' of struct column 'struct_of_list'")
+        call check_scenario_exit_status(error, "struct_read_nested_field", expect_abort=.false., &
+            failure_message="reading a struct whose field is a list was expected to succeed")
     end subroutine test_struct_read_nested_field_aborts
 
     subroutine test_struct_view_out_of_range_aborts(error)

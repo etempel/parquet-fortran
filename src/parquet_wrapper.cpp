@@ -1138,10 +1138,162 @@ extern "C"
 	// top-level field match (child_path empty), or a walk through nested STRUCT fields down to a
 	// leaf. Schema-only -- never reads any column data, so this is cheap enough to call from
 	// existence checks (parquet_reader_has_column) as well as before an actual read.
+	// ---- The descent path grammar (feature_container_phase7.md's D6) ----------------------
+	//
+	// A column path is dot-separated field names, each optionally followed by DESCENT suffixes:
+	//
+	//     struct_of_list.values      a struct field, as it always was
+	//     list_of_struct[].x         the x field of the STRUCT ELEMENTS of a list
+	//     map_of_struct{value}.x     the same through a map's values; {key} reaches the keys
+	//     list_of_list[][]           composes to any depth
+	//
+	// The suffixes name a ROLE rather than Arrow's own child field name, deliberately: Arrow
+	// writes a list's child as `element` or `item` depending on the producer, and a map's as
+	// `key`/`value` or `keys`/`values`, so keying on those names would make a path file-dependent.
+	// `[]` and `{...}` cannot collide with an ordinary field name at the same position because a
+	// suffix is only recognised as a whole trailing token; a field genuinely called `[]` is
+	// unreachable by path and says so rather than silently yielding the container's child.
+	//
+	// A descent path RESOLVES but is not LISTED -- collect_column_leaf_paths still recurses
+	// through STRUCT alone, so parquet_get_column_names returns exactly what it always did. That
+	// is a discoverability gap and not the "listing that lies" defect M4 describes, which is the
+	// opposite: a name advertised and then refused.
+	enum class PathStep
+	{
+		Field,       // .name  -- a struct field
+		ListElement, // []     -- a list's/large list's/fixed-size list's element array
+		MapKey,      // {key}  -- a map's keys
+		MapValue     // {value}-- a map's values
+	};
+
+	struct PathSegment
+	{
+		PathStep step;
+		std::string name; // Field only
+	};
+
+	struct ParsedColumnPath
+	{
+		std::string top_level_name;        // the first dot-separated piece, suffixes stripped
+		std::vector<PathSegment> segments; // everything after it, in order
+		bool ok = true;                    // false => malformed (an unclosed or unknown suffix)
+	};
+
+	// Peels the trailing descent suffixes off one dot-separated piece, appending them in the order
+	// they are written. `piece` is left holding the bare name.
+	static bool peel_descent_suffixes(std::string &piece, std::vector<PathSegment> &out)
+	{
+		std::vector<PathSegment> suffixes;
+		while (!piece.empty())
+		{
+			if (piece.size() >= 2 && piece.compare(piece.size() - 2, 2, "[]") == 0)
+			{
+				suffixes.push_back(PathSegment{PathStep::ListElement, {}});
+				piece.resize(piece.size() - 2);
+				continue;
+			}
+			if (!piece.empty() && piece.back() == '}')
+			{
+				auto open = piece.rfind('{');
+				if (open == std::string::npos) return false;
+				auto token = piece.substr(open + 1, piece.size() - open - 2);
+				if (token == "key") suffixes.push_back(PathSegment{PathStep::MapKey, {}});
+				else if (token == "value") suffixes.push_back(PathSegment{PathStep::MapValue, {}});
+				else return false;
+				piece.resize(open);
+				continue;
+			}
+			break;
+		}
+		// Peeled right-to-left; the path reads left-to-right.
+		for (size_t i = suffixes.size(); i > 0; --i) out.push_back(suffixes[i - 1]);
+		return true;
+	}
+
+	// Splits a (possibly dotted, possibly descending) column path into its top-level field name
+	// and the ordered steps below it. Never throws; a malformed suffix sets `ok` false so the
+	// caller can report "not found" rather than guessing.
+	static ParsedColumnPath parse_column_path(const std::string &name)
+	{
+		ParsedColumnPath out;
+		std::vector<std::string> pieces;
+		size_t start = 0;
+		while (true)
+		{
+			auto dot = name.find('.', start);
+			pieces.push_back(name.substr(start, dot == std::string::npos ? std::string::npos : dot - start));
+			if (dot == std::string::npos) break;
+			start = dot + 1;
+		}
+		std::vector<PathSegment> first_suffixes;
+		std::string top = pieces[0];
+		if (!peel_descent_suffixes(top, first_suffixes)) { out.ok = false; return out; }
+		out.top_level_name = top;
+		out.segments = first_suffixes;
+		for (size_t i = 1; i < pieces.size(); ++i)
+		{
+			std::string piece = pieces[i];
+			std::vector<PathSegment> suffixes;
+			if (!peel_descent_suffixes(piece, suffixes)) { out.ok = false; return out; }
+			if (piece.empty()) { out.ok = false; return out; }
+			out.segments.push_back(PathSegment{PathStep::Field, piece});
+			for (const auto &sfx : suffixes) out.segments.push_back(sfx);
+		}
+		return out;
+	}
+
+	// Walks ONE step down `field` in the SCHEMA. Returns null when the step does not apply to this
+	// type -- which is how every "not found" below is reported, without a throw.
+	static std::shared_ptr<arrow::Field> schema_step(const std::shared_ptr<arrow::Field> &field, const PathSegment &seg)
+	{
+		auto type = field->type();
+		switch (seg.step)
+		{
+		case PathStep::Field:
+			if (type->id() != arrow::Type::STRUCT) return nullptr;
+			return std::static_pointer_cast<arrow::StructType>(type)->GetFieldByName(seg.name);
+		case PathStep::ListElement:
+			if (type->id() != arrow::Type::LIST && type->id() != arrow::Type::LARGE_LIST &&
+				type->id() != arrow::Type::FIXED_SIZE_LIST) return nullptr;
+			return type->field(0);
+		case PathStep::MapKey:
+			if (type->id() != arrow::Type::MAP) return nullptr;
+			return std::static_pointer_cast<arrow::MapType>(type)->key_field();
+		case PathStep::MapValue:
+			if (type->id() != arrow::Type::MAP) return nullptr;
+			return std::static_pointer_cast<arrow::MapType>(type)->item_field();
+		}
+		return nullptr; // GCOVR_EXCL_LINE -- every enumerator is covered above.
+	}
+
+	// Whether a path ending in `segments` may resolve to a STRUCT leaf.
+	//
+	// A DOTTED path may not: this library's long-standing rule is that a path names a leaf, and
+	// naming an intermediate struct would change what a column-iterating caller can address --
+	// deliberately out of scope (feature_container_phase7.md's Q5). A DESCENT path may, because
+	// that is exactly how `list<struct<...>>` is read: `list_of_struct[]` IS a struct column.
+	static bool struct_leaf_allowed(const std::vector<PathSegment> &segments)
+	{
+		if (segments.empty()) return true; // a top-level struct has always been readable
+		return segments.back().step != PathStep::Field;
+	}
+
+	// Whether any step in `segments` descends through a container, i.e. is not a plain field.
+	// qc: and parquet_filter are scalar-leaf-only PERMANENTLY, so both refuse such a path rather
+	// than letting the new grammar leak into a surface the campaign closed.
+	static bool path_has_descent(const std::vector<PathSegment> &segments)
+	{
+		for (const auto &seg : segments)
+		{
+			if (seg.step != PathStep::Field) return true;
+		}
+		return false;
+	}
+
 	struct StructPathInfo
 	{
 		std::string top_level_name;
-		std::vector<std::string> child_path; // empty => `top_level_name` is the whole story
+		std::vector<PathSegment> child_path; // empty => `top_level_name` is the whole story
 		std::shared_ptr<arrow::Field> leaf_field; // the resolved leaf's schema-level field
 	};
 
@@ -1162,26 +1314,18 @@ extern "C"
 			return StructPathInfo{name, {}, schema->field(direct_idx)};
 		}
 
-		std::vector<std::string> segments;
-		size_t start = 0;
-		while (true)
-		{
-			auto dot = name.find('.', start);
-			segments.push_back(name.substr(start, dot == std::string::npos ? std::string::npos : dot - start));
-			if (dot == std::string::npos) break;
-			start = dot + 1;
-		}
 		// The four throws below are all dead, same proof as get_column_index's own: parquet_read.f90's
 		// check_column_exists (built on the non-throwing parquet_reader_has_column/struct_path_exists
 		// probe, which mirrors this function's own walk) gates every read entry point on the exact
 		// same (possibly dotted) `name` before this can ever be reached.
-		if (segments.size() < 2)
+		auto parsed = parse_column_path(name);
+		if (!parsed.ok || parsed.segments.empty())
 		{ // GCOVR_EXCL_START -- dead, see comment above.
 			throw std::runtime_error(std::string("Column not found: ") + name);
 		}
 		// GCOVR_EXCL_STOP
 
-		auto top_idx = schema->GetFieldIndex(segments[0]);
+		auto top_idx = schema->GetFieldIndex(parsed.top_level_name);
 		if (top_idx < 0)
 		{ // GCOVR_EXCL_START -- dead, see comment above.
 			throw std::runtime_error(std::string("Column not found: ") + name);
@@ -1189,37 +1333,35 @@ extern "C"
 		// GCOVR_EXCL_STOP
 
 		std::shared_ptr<arrow::Field> field = schema->field(top_idx);
-		std::string walked_so_far = segments[0];
-		for (size_t i = 1; i < segments.size(); ++i)
+		for (const auto &seg : parsed.segments)
 		{
-			if (field->type()->id() != arrow::Type::STRUCT)
+			auto child = schema_step(field, seg);
+			if (!child)
 			{ // GCOVR_EXCL_START -- dead, see comment above.
-				throw std::runtime_error(std::string("Column not found: ") + name + " (path segment '" + walked_so_far +
-					"' is not a struct, found type: " + field->type()->ToString() + ")");
+				throw std::runtime_error(std::string("Column not found: ") + name +
+					" (a path step does not apply to type " + field->type()->ToString() + ")");
 			}
 			// GCOVR_EXCL_STOP
-			auto struct_type = std::static_pointer_cast<arrow::StructType>(field->type());
-			auto child_field = struct_type->GetFieldByName(segments[i]);
-			if (!child_field)
-			{ // GCOVR_EXCL_START -- dead, see comment above.
-				throw std::runtime_error(std::string("Column not found: ") + name + " (no field '" + segments[i] +
-					"' under '" + walked_so_far + "')");
-			}
-			// GCOVR_EXCL_STOP
-			field = child_field;
-			walked_so_far += "." + segments[i];
+			field = child;
 		}
 
-		auto leaf_id = field->type()->id();
-		if (leaf_id == arrow::Type::STRUCT || leaf_id == arrow::Type::MAP)
+		// MAP is ACCEPTED as a leaf since Phase 7: a map under a struct reads into a
+		// parquet_map_column exactly as a top-level one does. Before that it was refused, and the
+		// refusal was a defect rather than a limitation -- collect_column_leaf_paths LISTS such a
+		// path, so `struct_of_map.attrs` was advertised by parquet_get_column_names and then failed
+		// to resolve. That is the same "listing that lies" T6 had Phase 2 fix for lists; this closes
+		// the half it left open for maps. See feature_container_phase7.md's D5 and M4.
+		//
+		// STRUCT is accepted only at the end of a DESCENT path -- see struct_leaf_allowed.
+		if (field->type()->id() == arrow::Type::STRUCT && !struct_leaf_allowed(parsed.segments))
 		{ // GCOVR_EXCL_START -- dead, see comment above.
 			throw std::runtime_error(std::string("Column not found: ") + name +
 				" (resolves to a " + field->type()->ToString() +
-				" column; struct paths must resolve to a leaf scalar/vector/list column, and MAP is not supported)");
+				" column; a dotted path must resolve to a leaf scalar/vector/list/map column)");
 		}
 		// GCOVR_EXCL_STOP
 
-		return StructPathInfo{segments[0], std::vector<std::string>(segments.begin() + 1, segments.end()), field};
+		return StructPathInfo{parsed.top_level_name, parsed.segments, field};
 	}
 
 	// Non-throwing existence probe for a (possibly dotted) column path -- used by
@@ -1237,31 +1379,20 @@ extern "C"
 	{
 		if (schema->GetFieldIndex(name) >= 0) return true;
 
-		std::vector<std::string> segments;
-		size_t start = 0;
-		while (true)
-		{
-			auto dot = name.find('.', start);
-			segments.push_back(name.substr(start, dot == std::string::npos ? std::string::npos : dot - start));
-			if (dot == std::string::npos) break;
-			start = dot + 1;
-		}
-		if (segments.size() < 2) return false;
+		auto parsed = parse_column_path(name);
+		if (!parsed.ok || parsed.segments.empty()) return false;
 
-		auto top_idx = schema->GetFieldIndex(segments[0]);
+		auto top_idx = schema->GetFieldIndex(parsed.top_level_name);
 		if (top_idx < 0) return false;
 
 		std::shared_ptr<arrow::Field> field = schema->field(top_idx);
-		for (size_t i = 1; i < segments.size(); ++i)
+		for (const auto &seg : parsed.segments)
 		{
-			if (field->type()->id() != arrow::Type::STRUCT) return false;
-			auto struct_type = std::static_pointer_cast<arrow::StructType>(field->type());
-			auto child_field = struct_type->GetFieldByName(segments[i]);
-			if (!child_field) return false;
-			field = child_field;
+			auto child = schema_step(field, seg);
+			if (!child) return false;
+			field = child;
 		}
 
-		auto leaf_id = field->type()->id();
 		// LIST/LARGE_LIST are ACCEPTED as a leaf: a variable-length list column is readable (into
 		// a parquet_list_column, and into a 2-D array when its data happens to be uniform),
 		// whether it sits at the top level or under a struct, so refusing it here would have made
@@ -1272,26 +1403,18 @@ extern "C"
 		// had just listed -- the last of those a defect against that query's own contract, which
 		// is that an unreadable type is an ANSWER ("unknown") and not an error.
 		//
-		// MAP stays refused: nothing can read one yet, so answering .true. would move the failure
-		// from a truthful "not found" to an abort further down the read.
-		return leaf_id != arrow::Type::STRUCT && leaf_id != arrow::Type::MAP;
+		// MAP joined them in Phase 7, for exactly that reason one level along: a map under a
+		// struct reads into a parquet_map_column, and while it was refused here the same three
+		// wrong answers were live for `struct_of_map.attrs`. See feature_container_phase7.md's D5.
+		//
+		// THIS FUNCTION AND resolve_struct_path MUST AGREE. They are deliberately independent
+		// walks (see this function's own header for why a try/catch around the other one is not
+		// available), so a leaf rule changed in one and not the other makes a name probe as
+		// present and then abort on read -- strictly worse than the honest refusal it replaced.
+		if (field->type()->id() == arrow::Type::STRUCT) return struct_leaf_allowed(parsed.segments);
+		return true;
 	}
 
-	// Appends `field`'s addressable column name(s) to `out`, as the dotted leaf paths
-	// resolve_struct_path/struct_path_exists accept: a STRUCT field contributes one entry per
-	// leaf beneath it (recursively, to any depth) and no entry for itself, since a bare struct
-	// name is not readable; every other field -- scalar, FIXED_SIZE_LIST (vector), and also
-	// LIST/LARGE_LIST/MAP -- contributes exactly one entry under its own name.
-	//
-	// LIST/LARGE_LIST is a readable leaf (into a parquet_list_column, or into a 2-D array when its
-	// data happens to be uniform) whether it is top-level or nested inside a struct, so it is
-	// listed and every lookup on it answers about a name that really does resolve.
-	//
-	// MAP is deliberately INCLUDED too, even though nothing can read one: this powers
-	// parquet_get_column_names, whose job is to report what the file actually contains, and a
-	// caller that goes on to ask parquet_column_exists/parquet_get_column_type about such a name
-	// gets a truthful "not a supported type" answer. Silently omitting it would instead make a
-	// column simply vanish from a file listing, which is a much harder thing to diagnose.
 	static void collect_column_leaf_paths(
 		const std::shared_ptr<arrow::Field> &field, const std::string &prefix, std::vector<std::string> &out)
 	{
@@ -1308,39 +1431,89 @@ extern "C"
 		out.push_back(path);
 	}
 
-	// ==== Struct-path resolution ====
+	// Walks `child_path` down from `root` (the already-read top-level array) to the array the path
+	// names, and gives it one combined validity mask.
 	//
-	// Walks `child_path` through nested STRUCT fields of `root` (the already-read top-level
-	// struct array), combining every hop's own validity bit -- root's own, each intermediate
-	// struct's, and the final leaf's -- into one mask: a row is null in the result if the
-	// top-level struct was null there, any intermediate struct field was null there, or the leaf
-	// itself was null there (see CLAUDE.md's nested-struct-field design notes -- the same
-	// "combine independently" principle already used for FixedSizeList's outer/inner nulls,
-	// generalized from one level of list-nesting to N levels of struct-nesting). Returns a
-	// freshly materialized Array sharing the leaf's own value buffers but with that combined mask
-	// as its validity bitmap, so every existing column-consuming function (convert_values_to_*,
-	// qc, filter, array row/element mode, print_stat's stat computation) sees an ordinary Array
-	// and needs no struct-specific handling of its own. `root`/`child_path` are assumed already
-	// validated against the schema by resolve_struct_path -- this does no error-checking itself.
+	// TWO KINDS OF STEP, and the difference is the whole of what Phase 7 added here:
+	//
+	//   * A FIELD step stays at the SAME LENGTH, so every hop's own validity bit is combined into
+	//     one mask -- root's, each intermediate struct's, and the final leaf's. A row is null in
+	//     the result if the top-level struct was null there, any intermediate struct field was
+	//     null there, or the leaf itself was null there (CLAUDE.md's nested-struct-field notes;
+	//     the same "combine independently" principle already used for FixedSizeList's outer/inner
+	//     nulls, generalized from one level of list-nesting to N levels of struct-nesting).
+	//
+	//   * A DESCENT step CHANGES the length -- a list's child holds one entry per ELEMENT, not per
+	//     row -- so the accumulated mask does not carry across it and is RESET to the child's own.
+	//     That is not a shortcut: a null outer row holds no elements at all (its offsets are
+	//     equal), so no child entry corresponds to it and there is nothing for the parent's bit to
+	//     say about any of them. Carrying the mask across would be a length mismatch as well as a
+	//     wrong answer.
+	//
+	// Returns a freshly materialized Array sharing the leaf's own value buffers but with that
+	// combined mask as its validity bitmap, so every existing column-consuming function
+	// (convert_values_to_*, qc, filter, array row/element mode, print_stat's stat computation)
+	// sees an ordinary Array and needs no path-specific handling of its own. `root`/`child_path`
+	// are assumed already validated against the schema by resolve_struct_path -- this does no
+	// error-checking itself.
 	static std::shared_ptr<arrow::Array> unwrap_struct_path(
-		const std::shared_ptr<arrow::Array> &root, const std::vector<std::string> &child_path)
+		const std::shared_ptr<arrow::Array> &root, const std::vector<PathSegment> &child_path)
 	{
-		int64_t n = root->length();
-		std::vector<bool> combined_valid(static_cast<size_t>(n));
-		for (int64_t i = 0; i < n; ++i) combined_valid[static_cast<size_t>(i)] = root->IsValid(i);
-
 		std::shared_ptr<arrow::Array> current = root;
-		for (const auto &segment : child_path)
+		int64_t n = current->length();
+		std::vector<bool> combined_valid(static_cast<size_t>(n));
+		for (int64_t i = 0; i < n; ++i) combined_valid[static_cast<size_t>(i)] = current->IsValid(i);
+
+		for (const auto &seg : child_path)
 		{
-			auto struct_arr = std::static_pointer_cast<arrow::StructArray>(current);
-			current = struct_arr->GetFieldByName(segment);
-			for (int64_t i = 0; i < n; ++i)
+			if (seg.step == PathStep::Field)
 			{
-				if (combined_valid[static_cast<size_t>(i)] && !current->IsValid(i))
+				auto struct_arr = std::static_pointer_cast<arrow::StructArray>(current);
+				current = struct_arr->GetFieldByName(seg.name);
+				for (int64_t i = 0; i < n; ++i)
 				{
-					combined_valid[static_cast<size_t>(i)] = false;
+					if (combined_valid[static_cast<size_t>(i)] && !current->IsValid(i))
+					{
+						combined_valid[static_cast<size_t>(i)] = false;
+					}
+				}
+				continue;
+			}
+			// A descent step. The child is SLICED to the range this (possibly already sliced)
+			// parent actually covers, so the result describes these rows' elements and no others;
+			// values() alone would hand back the whole column's child buffer.
+			if (seg.step == PathStep::ListElement)
+			{
+				if (current->type_id() == arrow::Type::LARGE_LIST)
+				{
+					auto la = std::static_pointer_cast<arrow::LargeListArray>(current);
+					int64_t lo = la->value_offset(0);
+					current = la->values()->Slice(lo, la->value_offset(la->length()) - lo);
+				}
+				else if (current->type_id() == arrow::Type::FIXED_SIZE_LIST)
+				{
+					auto fa = std::static_pointer_cast<arrow::FixedSizeListArray>(current);
+					int64_t w = fa->value_length();
+					current = fa->values()->Slice(fa->offset() * w, fa->length() * w);
+				}
+				else
+				{
+					auto la = std::static_pointer_cast<arrow::ListArray>(current);
+					int64_t lo = la->value_offset(0);
+					current = la->values()->Slice(lo, la->value_offset(la->length()) - lo);
 				}
 			}
+			else
+			{
+				auto ma = std::static_pointer_cast<arrow::MapArray>(current);
+				int64_t lo = ma->value_offset(0);
+				int64_t len = ma->value_offset(ma->length()) - lo;
+				auto child = (seg.step == PathStep::MapKey) ? ma->keys() : ma->items();
+				current = child->Slice(lo, len);
+			}
+			n = current->length();
+			combined_valid.assign(static_cast<size_t>(n), false);
+			for (int64_t i = 0; i < n; ++i) combined_valid[static_cast<size_t>(i)] = current->IsValid(i);
 		}
 
 		int64_t base_offset = current->data()->offset;
@@ -1361,13 +1534,6 @@ extern "C"
 		return arrow::MakeArray(new_data);
 	}
 
-	// Appends every leaf Parquet column index found under `field` (depth-first, left to right) --
-	// for a plain scalar/FIXED_SIZE_LIST arrow field this is exactly one index; for a struct this
-	// recurses through every descendant. A FIXED_SIZE_LIST/LIST field is itself never a leaf in
-	// parquet::arrow::SchemaManifest's tree (Parquet's own 2/3-level list encoding always wraps
-	// the actual value in at least one synthetic child node, e.g. "spectrum" -> "element") --
-	// recursing through `.children` handles that uniformly alongside genuine STRUCT nesting,
-	// with no special-casing needed here for list-typed fields.
 	static void collect_leaf_indices(const parquet::arrow::SchemaField &field, std::vector<int> &out)
 	{
 		if (field.is_leaf())
@@ -1401,28 +1567,56 @@ extern "C"
 	// entries struct has ONE field instead of two, so nothing fails until something asks for the
 	// values. Both leaves are collected here rather than at the call site so that a future
 	// multi-leaf shape has one place to join.
-	static void resolve_chunk_leaf_indices(const ParquetReaderHandle *reader_handle, int top_level_idx,
-		const std::vector<std::string> &child_path, std::vector<int> &out)
+	// Walks ONE step down `current` in the MANIFEST -- the Parquet-side twin of schema_step.
+	//
+	// The manifest's shape for a container was measured rather than assumed (Arrow 25.0.0, and the
+	// probe is trivial to repeat): a LIST node has exactly one child, the element; a MAP node has
+	// one child, the `entries` struct, whose two children are the key and the value. So a descent
+	// is one or two `children[]` hops and needs no name matching at all -- which is just as well,
+	// since the element child is named `element` or `item` depending on the producer.
+	static const parquet::arrow::SchemaField *manifest_step(
+		const parquet::arrow::SchemaField *current, const PathSegment &seg)
 	{
-		const parquet::arrow::SchemaField *current = &reader_handle->manifest.schema_fields[top_level_idx];
-		for (const auto &segment : child_path)
+		if (current == nullptr) return nullptr; // GCOVR_EXCL_LINE -- paths are pre-validated.
+		switch (seg.step)
 		{
-			const parquet::arrow::SchemaField *next = nullptr;
+		case PathStep::Field:
 			for (const auto &child : current->children)
 			{
-				if (child.field->name() == segment)
-				{
-					next = &child;
-					break;
-				}
+				if (child.field->name() == seg.name) return &child;
 			}
-			current = next;
-		}
-		out.clear();
-		if (current->field->type()->id() == arrow::Type::MAP)
+			return nullptr; // GCOVR_EXCL_LINE -- paths are pre-validated.
+		case PathStep::ListElement:
+			if (current->children.empty()) return nullptr; // GCOVR_EXCL_LINE
+			return &current->children[0];
+		case PathStep::MapKey:
+		case PathStep::MapValue:
 		{
-			// Every leaf beneath the map -- its key and its value, and for a nested value more
-			// than two, which Phase 7 will need. Children are pushed in reverse so that popping
+			if (current->children.empty()) return nullptr; // GCOVR_EXCL_LINE
+			const auto *entries = &current->children[0];
+			size_t want = (seg.step == PathStep::MapKey) ? 0 : 1;
+			if (entries->children.size() <= want) return nullptr; // GCOVR_EXCL_LINE
+			return &entries->children[want];
+		}
+		}
+		return nullptr; // GCOVR_EXCL_LINE -- every enumerator is covered above.
+	}
+
+	static void resolve_chunk_leaf_indices(const ParquetReaderHandle *reader_handle, int top_level_idx,
+		const std::vector<PathSegment> &child_path, std::vector<int> &out)
+	{
+		const parquet::arrow::SchemaField *current = &reader_handle->manifest.schema_fields[top_level_idx];
+		for (const auto &segment : child_path) current = manifest_step(current, segment);
+		out.clear();
+		// A STRUCT joins MAP in needing EVERY leaf beneath it since Phase 7, and only through a
+		// descent path: `list_of_struct[]` is read as a struct column, so a single-leaf read would
+		// hand back a struct array with one field instead of all of them -- the same silent
+		// well-formed-but-wrong shape the map comment below describes.
+		if (current->field->type()->id() == arrow::Type::MAP ||
+			current->field->type()->id() == arrow::Type::STRUCT)
+		{
+			// Every leaf beneath the map -- its key and its value, and more than two for a nested
+			// value, which a `map<string,struct<...>>` read genuinely reaches. Children are pushed in reverse so that popping
 			// yields schema order, which is already ascending by column index.
 			std::vector<const parquet::arrow::SchemaField *> stack{current};
 			while (!stack.empty())
@@ -1449,22 +1643,10 @@ extern "C"
 	}
 
 	static int64_t resolve_single_leaf_index(
-		const ParquetReaderHandle *reader_handle, int top_level_idx, const std::vector<std::string> &child_path)
+		const ParquetReaderHandle *reader_handle, int top_level_idx, const std::vector<PathSegment> &child_path)
 	{
 		const parquet::arrow::SchemaField *current = &reader_handle->manifest.schema_fields[top_level_idx];
-		for (const auto &segment : child_path)
-		{
-			const parquet::arrow::SchemaField *next = nullptr;
-			for (const auto &child : current->children)
-			{
-				if (child.field->name() == segment)
-				{
-					next = &child;
-					break;
-				}
-			}
-			current = next;
-		}
+		for (const auto &segment : child_path) current = manifest_step(current, segment);
 		while (!current->is_leaf())
 		{
 			current = &current->children[0];
@@ -5353,7 +5535,7 @@ extern "C"
 		{
 			std::string name;
 			int idx;
-			std::vector<std::string> child_path;
+			std::vector<PathSegment> child_path;
 		};
 		std::vector<Requested> requested;
 		requested.reserve(static_cast<size_t>(n));
@@ -5611,6 +5793,15 @@ extern "C"
 			// qc-maml may declare columns (plain or dotted struct-leaf paths) not present in
 			// this file -- fine, just ignore them, same tolerance as the plain-column case.
 			if (!struct_path_exists(reader_handle->schema, name)) continue;
+			// qc: is scalar-leaf-only PERMANENTLY, so a descent path is refused rather than
+			// tolerated -- see the identical guard in the filter path for why. A hard error and
+			// not a skip: an ignored qc rule is a check the caller believes is running.
+			if (path_has_descent(parse_column_path(name).segments))
+			{
+				report_fatal_error("parquet_reader_set_qc",
+					std::string("a descent path is not a qc target: ") + name +
+					" (qc: and parquet_filter apply to scalar leaves only)"); // GCOVR_EXCL_LINE
+			}
 
 			QcRule rule;
 			rule.has_min = has_min_flags[i] != 0;
@@ -6858,6 +7049,19 @@ extern "C"
 				std::snprintf(err_out, static_cast<size_t>(err_cap), "unknown column in filter: %s", name.c_str());
 				return 1;
 			}
+			// parquet_filter is scalar-leaf-only PERMANENTLY (feature_map_list_struct.md's
+			// "qc: / parquet_filter integration"), so the descent grammar Phase 7 added must not
+			// leak into it. Refused explicitly rather than left to fail further down: a descent
+			// path resolves perfectly well, so without this it would reach the clause evaluator
+			// and filter on a container's flattened child -- one row of the filter's answer per
+			// ELEMENT, silently misaligned with every other column. See that phase's D6.
+			if (path_has_descent(parse_column_path(name).segments))
+			{
+				std::snprintf(err_out, static_cast<size_t>(err_cap),
+					"a descent path is not filterable: %s (qc: and parquet_filter apply to scalar leaves only)",
+					name.c_str());
+				return 1;
+			}
 
 			// No column data is read anywhere in this loop, on either path -- validation has to
 			// complete before the statistics screen runs, and the screen has to run before
@@ -7338,6 +7542,16 @@ extern "C"
 		if (!struct_path_exists(reader_handle->schema, name.c_str()))
 		{
 			std::snprintf(err_out, static_cast<size_t>(err_cap), "unknown column in sort key: %s", name.c_str());
+			return false;
+		}
+		// A read-time sort orders ROWS, and a descent path has one entry per ELEMENT -- there is
+		// no row for its values to order. Same permanent scalar-leaf restriction as qc: and
+		// parquet_filter; see feature_container_phase7.md's D6.
+		if (path_has_descent(parse_column_path(name).segments))
+		{
+			std::snprintf(err_out, static_cast<size_t>(err_cap),
+				"a descent path cannot be a sort key: %s (it has one entry per element, not per row)",
+				name.c_str());
 			return false;
 		}
 		// A vector column has no single value per row to order by. Answered from the schema so
@@ -8251,6 +8465,14 @@ extern "C"
 	static constexpr int32_t kElemFamilyDate = 7;
 	static constexpr int32_t kElemFamilyTime = 8;
 	static constexpr int32_t kElemFamilyTimestamp = 9;
+	// The three CONTAINER families, reported by arrow_nested_family rather than by
+	// arrow_leaf_family. They are deliberately NOT added to arrow_leaf_family, which feeds
+	// parquet_reader_get_column_type_name: parquet_get_column_type must keep answering "unknown"
+	// for a container at every depth (feature_container_phase7.md's D12.1, frozen by Phase 6's
+	// D15.1), and widening the leaf helper would change that query's answer as a side effect.
+	static constexpr int32_t kElemFamilyList = 10;
+	static constexpr int32_t kElemFamilyMap = 11;
+	static constexpr int32_t kElemFamilyStruct = 12;
 
 	// The element family `type` reads into, or kElemFamilyNone if this library cannot read it.
 	// `type` is a LEAF type -- a list/vector wrapper must already have been unwrapped by the
@@ -8299,6 +8521,44 @@ extern "C"
 		case arrow::Type::TIMESTAMP: return kElemFamilyTimestamp;
 		default:
 			return kElemFamilyNone;
+		}
+	}
+
+	// The CONTAINER family `type` is, or kElemFamilyNone when it is not a container at all.
+	//
+	// Deliberately separate from arrow_leaf_family rather than folded into it. The two answer
+	// different questions and have different callers: a LEAF family says "what Fortran kind does
+	// this read into", and is what parquet_get_column_type is built on, so it must keep saying
+	// kElemFamilyNone for a container; a NESTED family says "which container is this", and only
+	// the three container read paths ask. Folding them would have made parquet_get_column_type
+	// start answering for a list of structs as a side effect of a change about nesting.
+	//
+	// LARGE_LIST reports kElemFamilyList: the distinction is an offset width, which the read path
+	// handles below this point and which no caller of this function needs.
+	static int32_t arrow_nested_family(const std::shared_ptr<arrow::DataType> &type)
+	{
+		switch (type->id())
+		{
+		case arrow::Type::LIST: return kElemFamilyList;
+		case arrow::Type::LARGE_LIST: return kElemFamilyList;
+		case arrow::Type::MAP: return kElemFamilyMap;
+		case arrow::Type::STRUCT: return kElemFamilyStruct;
+		default: return kElemFamilyNone;
+		}
+	}
+
+	// The data-type token for a CONTAINER family, kept apart from elem_family_token for the same
+	// reason arrow_nested_family is kept apart from arrow_leaf_family: elem_family_token feeds
+	// parquet_get_column_type, whose answer for a container is frozen at "unknown"
+	// (feature_container_phase7.md's D12.1). Only the map value-type query asks for these.
+	static const char *nested_family_token(int32_t family)
+	{
+		switch (family)
+		{
+		case kElemFamilyList: return "list";
+		case kElemFamilyMap: return "map";
+		case kElemFamilyStruct: return "struct";
+		default: return "unknown"; // GCOVR_EXCL_LINE -- callers test for kElemFamilyNone first.
 		}
 	}
 
@@ -9443,8 +9703,28 @@ extern "C"
 		return get_row_group_chunk_array(reader_handle, name, row_group, context);
 	}
 
+
 extern "C"
 {
+	// The number of entries the array at `name` holds -- which is the file's row count for an
+	// ordinary column and is NOT for a DESCENT path (feature_container_phase7.md's D6).
+	//
+	// `list_of_struct[]` names the flattened element array of a 3-row list holding 0+1+2 elements,
+	// so it has FOUR entries, not three. Every read of such a path is sized from this rather than
+	// from parquet_get_nrows, and the row-count guard in src/parquet_read.f90 asks here instead of
+	// comparing against the file. Without it a perfectly correct descent read is rejected by a
+	// guard comparing two different quantities.
+	//
+	// row_group <= 0 means the whole column. A path with no descent step answers exactly what
+	// parquet_get_nrows would, so the caller does not have to know which kind it has.
+	int64_t parquet_reader_path_nrows(void *handle, const char *name, int64_t row_group)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto array = (row_group <= 0)
+			? get_single_chunk_array(reader_handle, name)
+			: get_row_group_chunk_array(reader_handle, name, row_group, "parquet_read_column");
+		return array->length();
+	}
 
 	// ==== Numeric/string/temporal column reads: scalar, array, row mode, element mode ====
 	//
@@ -11696,6 +11976,10 @@ extern "C"
 				" (expected a list column, got " + resolved.leaf_field->type()->ToString() + ")"); // GCOVR_EXCL_LINE
 		}
 		int32_t family = arrow_leaf_family(elem_type);
+		// A CONTAINER element is not a leaf, so arrow_leaf_family declines it by design. Ask the
+		// nested helper second, never instead -- a scalar must keep the family it had. Phase 7
+		// reads such a payload by descending to `<name>[]`; see that document's D4 (7b).
+		if (family == kElemFamilyNone) family = arrow_nested_family(elem_type);
 		if (family == kElemFamilyNone)
 		{
 			report_fatal_error(context, std::string("unsupported list element type for column: ") + name +
@@ -11723,6 +12007,28 @@ extern "C"
 	// row group's) offsets, both null levels and its values into the caller's own buffers -- see
 	// fill_list_common for the shape check that makes each independently safe rather than
 	// dependent on a matching shape call having just happened.
+	// Offsets and per-ROW validity only, for a list whose payload is itself a CONTAINER.
+	//
+	// The nine typed fills below each hand back the payload VALUES as well, which a container
+	// payload has no array shape for: `list<struct<...>>` is assembled by reading its child
+	// through the descent path `<name>[]` as a column in its own right and adopting it. Only the
+	// offsets and the row validity still have to cross here, and this is the one entry point that
+	// brings them without a values buffer. `elem_valid` is deliberately absent too: a container
+	// payload carries its own per-row nullness inside itself.
+	//
+	// Shares fill_list_common with every typed fill, so the shape check, the offset rebase and
+	// the mark_list_read bookkeeping are the same code and cannot drift.
+	void parquet_read_list_offsets_fill(void *handle, const char *name, int64_t row_group,
+		int64_t nrows, int64_t nelems, int64_t *offsets, int8_t *row_valid)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		const char *context = row_group > 0 ? "parquet_read_column_chunk" : "parquet_read_column";
+		std::vector<int8_t> ignored(static_cast<size_t>(nelems > 0 ? nelems : 1));
+		auto child = fill_list_common(reader_handle, name, row_group, nrows, nelems, offsets,
+			row_valid, ignored.data(), context);
+		mark_list_read(reader_handle, name, row_group, arrow_nested_family(child->type()), child);
+	}
+
 	void parquet_read_list_int32_fill(void *handle, const char *name, int64_t row_group,
 		int64_t nrows, int64_t nelems, int64_t *offsets, int8_t *row_valid,
 		int32_t *values, int8_t *elem_valid)
@@ -11953,10 +12259,12 @@ extern "C"
 	// The SECOND crossing for the field set: the declared field names, blank-padded into one
 	// `nfields * name_width` block, plus each field's element family and temporal unit/utc flag.
 	//
-	// A field whose own type is STRUCT, LIST or MAP reports kElemFamilyNone rather than aborting
-	// here, so that src/parquet_read_struct.f90 can name the offending FIELD in its message
-	// instead of this function naming only the column. Nesting is Phase 7; refusing it cleanly,
-	// with the field named, is Phase 4's whole obligation towards it.
+	// A field whose own type is STRUCT, LIST or MAP reports its CONTAINER family (kElemFamilyList
+	// /Map/Struct) since Phase 7, and src/parquet_read_struct.f90 reads it recursively through the
+	// field's own dotted path. Before that it reported kElemFamilyNone and the Fortran side aborted
+	// naming the field; that abort is still there, in struct_field_kind's `case default`, for a
+	// family neither helper claims -- so a genuinely unreadable field type still fails cleanly with
+	// the field named. See feature_container_phase7.md's D4 (7a).
 	void parquet_read_struct_column_fields(void *handle, const char *name, int32_t nfields,
 		int32_t name_width, char *names_out, int32_t *families_out, int32_t *units_out, int8_t *utc_out)
 	{
@@ -11973,6 +12281,13 @@ extern "C"
 			auto field = struct_type->field(i);
 			copy_string_with_padding(names_out + static_cast<int64_t>(i) * name_width, name_width, field->name());
 			families_out[i] = arrow_leaf_family(field->type());
+			// A container field is not a LEAF, so arrow_leaf_family declines it by design (it is
+			// what parquet_get_column_type is built on -- see kElemFamilyList's own comment). Ask
+			// the nested helper second, never instead: a scalar must keep the family it had.
+			if (families_out[i] == kElemFamilyNone)
+			{
+				families_out[i] = arrow_nested_family(field->type());
+			}
 			units_out[i] = 0;
 			utc_out[i] = 0;
 			if (families_out[i] == kElemFamilyTimestamp)
@@ -12068,11 +12383,23 @@ extern "C"
 		if (key_type && value_type && is_string_like_type(key_type->id()))
 		{
 			family = arrow_leaf_family(value_type);
+			// A container value is readable since Phase 7, so this must claim it -- it is what
+			// parquet_table's classification asks before deciding a map column is supported, and
+			// answering "unknown" would keep map_of_struct silently skipped. See D9.
+			if (family == kElemFamilyNone) family = arrow_nested_family(value_type);
 		}
 		if (family == kElemFamilyNone)
 		{
 			copy_string_with_padding(buf, buf_len, std::string("unknown"));
 			return 0;
+		}
+		// A container value reports its container word ("list"/"map"/"struct") rather than a leaf
+		// token, so parquet_table's classification can tell a readable nested map from one this
+		// library still cannot read. See D9.
+		if (family == kElemFamilyList || family == kElemFamilyMap || family == kElemFamilyStruct)
+		{
+			copy_string_with_padding(buf, buf_len, std::string(nested_family_token(family)));
+			return 1;
 		}
 		copy_string_with_padding(buf, buf_len, std::string(elem_family_token(family)));
 		return 1;
@@ -12111,6 +12438,8 @@ extern "C"
 		}
 		auto value_type = map_value_type(resolved.leaf_field);
 		int32_t family = arrow_leaf_family(value_type);
+		// Same rule as the list shape above: a container value is answered by the nested helper.
+		if (family == kElemFamilyNone) family = arrow_nested_family(value_type);
 		if (family == kElemFamilyNone)
 		{
 			report_fatal_error(context, std::string("unsupported map value type for column: ") + name +
@@ -13051,9 +13380,16 @@ static void append_list_column_chunk_common(void *handle, const char *name, int6
 // THERE IS NO REPETITION-LEVEL CEILING HERE, and that was measured rather than assumed: a written
 // struct<id:int32, nm:string> has leaf paths `s.id`/`s.nm` with max_repetition_level 0 and
 // max_definition_level 2, so apache/arrow#33188 -- which cost the list write three guards and a
-// debug hook -- cannot bite for a non-nested struct. **Phase 7 reopens this**: the moment a struct
-// field is a list or a map, maxrep becomes 1 and the list write's guard is back in play, reached
-// THROUGH the struct. See feature_container_phase4.md's F7 and D9.
+// debug hook -- cannot bite for a non-nested struct. See feature_container_phase4.md's F7 and D9.
+//
+// **AND IT STAYS THAT WAY, because a nested struct write is REFUSED.** A struct field that is a
+// list would make maxrep 1 and put that ceiling back in play, reached through the struct -- which
+// is why Phase 4 addressed the question to Phase 7. Phase 7 answered it by making nesting
+// READ-ONLY (feature_container_phase7.md's Q2/D10): write_struct_common
+// (src/parquet_write_struct.f90) refuses a container field by kind, naming the field, before any
+// of this is reached. So the guard was never built, and the reason it was not is this refusal --
+// not an oversight. If a later phase ships a nested write, the ceiling comes back with it and the
+// list write's existing guard and debug hook are what it needs.
 
 // The field a struct column is written with. Deliberately NOT build_field: see this section's
 // banner for why a struct needs 1 + M independent nullability flags where every other column here

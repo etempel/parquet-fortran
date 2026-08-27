@@ -201,8 +201,10 @@ caller discovers what it is dealing with.
 **V1 keys must be strings.** A file whose map is keyed by anything else is refused, naming the
 actual key type, rather than having its keys rendered as text — that would silently change the
 data, since `1`, `01` and `1.0` are three different keys. A map whose *value* is itself a list, map
-or struct is refused for the same reason a list of lists is: that is nesting, and it is not
-supported yet.
+or struct **reads**, and is reached with `parquet_map_row%nested` in the same shape a list's nested
+payload uses — see
+[Nested containers](list-columns.html#nested-containers). `parquet_get_map_value_type` reports
+`list`, `map` or `struct` for such a column. Writing one is refused.
 
 ## Writing a map column to a file
 

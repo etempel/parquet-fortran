@@ -59,8 +59,9 @@ module parquet_map
     use parquet_columns, only : parquet_column, parquet_container_column, parquet_kind_name, &
         parquet_column_data_ptr, parquet_column_get_at, parquet_column_is_null, &
         parquet_column_set_null, parquet_column_string_column, &
+        parquet_column_container, parquet_kind_is_container, &
         PK_NONE, PK_INT32, PK_INT64, PK_FLOAT32, PK_FLOAT64, PK_LOGICAL, PK_STRING, &
-        PK_DATE, PK_TIME, PK_TIMESTAMP, PK_MAP
+        PK_DATE, PK_TIME, PK_TIMESTAMP, PK_MAP, PK_LIST, PK_STRUCT
     use parquet_temporal, only : parquet_date, parquet_time, parquet_timestamp
     ! The keys are compared through parquet_strings' own TYPED tier, for the same reason and with
     ! the same rule: a key scan is per ENTRY, so it must not allocate per entry and must not reach
@@ -248,6 +249,7 @@ module parquet_map
         procedure :: is_empty => pmr_is_empty       !! Whether the referenced row holds no entries.
         procedure :: element_kind => pmr_element_kind !! The values' PK_* kind.
         procedure :: row_index => pmr_row_index     !! The 1-based row this handle refers to.
+        procedure :: nested => pmr_nested           !! The inner container, when the value is one.
         procedure :: key_count => pmr_key_count     !! How many entries of this row carry `key`.
         procedure :: contains_key => pmr_contains_key !! Whether this row carries `key` at all.
         procedure :: key_at => pmr_key_at           !! The key at 1-based position `pos` in this row.
@@ -486,7 +488,7 @@ contains
         class(parquet_map_column), intent(in) :: self      !! the column.
         character(len=:), allocatable, intent(out) :: out  !! the description.
         character(len=:), allocatable :: vk
-        call value_kind_text(self%value_kind, vk)
+        call nested_value_text(self%values, self%value_kind, vk)
         out = "map<string,"//vk//">"
     end subroutine mc_kind_text
     !
@@ -541,6 +543,15 @@ contains
         call self%clear()
         if (.not. is_supported_value(value_kind)) then
             call parquet_kind_name(value_kind, kname)
+            if (parquet_kind_is_container(value_kind)) then
+                ! A container value is nesting, and %init cannot express it: it is handed one PK_*
+                ! discriminator, while a nested value is a kind PLUS an inner schema. Build the inner
+                ! container, hand it to a parquet_column with %adopt_container, and pass that column
+                ! to %adopt_rows. See feature_container_phase7.md's D1.
+                error stop EP//"init: "//kname//" is a nested value and cannot be declared here; "// &
+                    "build the inner container, hand it to a parquet_column with %adopt_container, "// &
+                    "and pass that column to %adopt_rows"
+            end if
             error stop EP//"init: "//kname//" is not a supported map value kind"
         end if
         n = 0_int64
@@ -634,7 +645,7 @@ contains
             call parquet_kind_name(keys%kindof(), kname)
             error stop EP//"adopt_rows: map keys must be a string column, got "//kname
         end if
-        if (.not. is_supported_value(values%kindof())) then
+        if (.not. is_adoptable_value(values%kindof())) then
             call parquet_kind_name(values%kindof(), kname)
             error stop EP//"adopt_rows: "//kname//" is not a supported map value kind"
         end if
@@ -1213,6 +1224,33 @@ contains
         call row_range(self%col, self%idx, lo, cnt)
         n = int(cnt, int32)
     end function pmr_size
+    !
+    !> Hands back the inner container behind a NESTED value, plus the entry rows this row owns.
+    !!
+    !! The map twin of `parquet_list_row%nested`, and it exists for the same reason: `%get`'s
+    !! specifics cover the scalar and temporal value kinds and nothing else, so a
+    !! `map<string, struct<...>>` row has no array shape to be copied into. The keys are unaffected
+    !! and are still read with `%key_at(pos)`, whose `pos` is 1-based WITHIN the row while `lo`/`hi`
+    !! index the flattened value column -- entry `pos` of this row is value row `lo + pos - 1`.
+    !!
+    !! `inner` comes back NULL, and `lo > hi`, when the value kind is not a container, so a caller
+    !! that has not checked `%element_kind()` gets an empty loop rather than a wrong answer. The
+    !! pointer is BORROWED and is invalidated by anything that rebuilds the value column.
+    subroutine pmr_nested(self, inner, lo, hi)
+        class(parquet_map_row), intent(in) :: self                     !! the handle.
+        class(parquet_container_column), pointer, intent(out) :: inner !! the inner container, or null.
+        integer(int64), intent(out) :: lo                              !! first value row of this row.
+        integer(int64), intent(out) :: hi                              !! last value row; hi < lo when empty.
+        call check_handle(self, "nested")
+        inner => null()
+        lo = 1_int64
+        hi = 0_int64
+        if (.not. parquet_kind_is_container(self%col%value_kind)) return
+        call parquet_column_container(self%col%values, inner)
+        if (self%col%is_null_row(self%idx)) return
+        lo = self%col%offsets(self%idx) + 1_int64
+        hi = self%col%offsets(self%idx + 1_int64)
+    end subroutine pmr_nested
     !
     !> Whether the referenced row is a null (absent) map.
     function pmr_is_null(self) result(res)
@@ -2029,7 +2067,8 @@ contains
     !> Whether a PK_* kind may be a map column's value.
     !!
     !! The nine SCALAR value kinds. A `*_VEC` kind is excluded because a fixed-width vector as a
-    !! map value is `map<string,fixed_size_list<...>>`, which is Phase 7's nesting question and not
+    !! map value is `map<string,fixed_size_list<...>>`, which is a shape this library does not read or
+    !! write at any depth, and is not
     !! expressible by giving the values column a width. `PK_LIST`/`PK_MAP`/`PK_STRUCT` are excluded
     !! for the same reason -- a container value is nesting, and `%init` would have no way to be
     !! told what the inner container holds.
@@ -2044,6 +2083,19 @@ contains
             res = .false.
         end select
     end function is_supported_value
+    !
+    !> Whether a PK_* kind may be ADOPTED as a map column's value.
+    !!
+    !! Wider than `is_supported_value` by exactly the three container kinds. `%init` fixes a value
+    !! KIND; a nested value is a kind plus a whole inner schema, which `%init` has no argument shape
+    !! for -- so nesting is reachable only by building the inner container and handing it over with
+    !! `%adopt_container` + `%adopt_values`. The `*_VEC` kinds stay refused on both paths. See
+    !! feature_container_phase7.md's D1 and D2.
+    pure function is_adoptable_value(kind) result(res)
+        integer, intent(in) :: kind !! a PK_* discriminator.
+        logical :: res              !! whether it may be adopted as a map value.
+        res = is_supported_value(kind) .or. parquet_kind_is_container(kind)
+    end function is_adoptable_value
     !
     !> Writes the short lowercase name of a value kind, for `kind_text` and error messages.
     !!
@@ -2071,6 +2123,32 @@ contains
         case default;        out = "unsupported"
         end select
     end subroutine value_kind_text
+    !
+    !> Writes a map value's type spelling, recursing when the value is itself a container.
+    !!
+    !! `value_kind_text` is `pure` and answers from the discriminator alone, which is all an error message
+    !! needs. A NESTED a map value's spelling additionally needs the inner container to describe itself --
+    !! so it cannot be pure, and it cannot be derived from the kind at all. Keeping the two apart is
+    !! what lets every error message stay pure while `%kind_text` reports the nested form. See
+    !! feature_container_phase7.md's D3.
+    !!
+    !! `%kind_text` is the ONLY name in this library that recurses: `%kindof()` stays `PK_MAP` at every
+    !! depth and `parquet_kind_name` stays `"PK_MAP"`. A caller that needs the inner shape descends and
+    !! asks the inner object.
+    subroutine nested_value_text(col, kind, out)
+        type(parquet_column), intent(in), target :: col   !! the a map value column.
+        integer, intent(in) :: kind                       !! its PK_* kind.
+        character(len=:), allocatable, intent(out) :: out !! the type spelling.
+        class(parquet_container_column), pointer :: inner
+        if (parquet_kind_is_container(kind)) then
+            call parquet_column_container(col, inner)
+            if (associated(inner)) then
+                call inner%kind_text(out)
+                return
+            end if
+        end if
+        call value_kind_text(kind, out)
+    end subroutine nested_value_text
     !
     !> Caps caller-supplied text for an error message, appending `"..."` when it was truncated.
     !!

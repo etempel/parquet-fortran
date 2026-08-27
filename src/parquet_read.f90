@@ -1444,7 +1444,18 @@ contains
         character(len=32) :: expected_str, got_str
         character(len=:), allocatable :: name_suffix !! scratch (reader_filename_suffix).
 
-        file_nrows = parquet_reader_get_nrows(reader%handle)
+        ! A DESCENT path names a container's CHILD array, whose length is the flattened element
+        ! count rather than the file's row count -- `list_of_struct[]` over a 3-row list holding
+        ! 0+1+2 elements has four entries. Comparing such a read against parquet_get_nrows would
+        ! compare two different quantities and reject a correct read, so the length is asked for
+        ! at the path itself. An ordinary name answers identically either way; the branch exists
+        ! only to keep the common case free of a C++ crossing it never needed.
+        ! See feature_container_phase7.md's D6.
+        if (index(name, "[]") > 0 .or. index(name, "{value}") > 0 .or. index(name, "{key}") > 0) then
+            file_nrows = parquet_reader_path_nrows(reader%handle, trim(name)//char(0), 0_c_long_long)
+        else
+            file_nrows = parquet_reader_get_nrows(reader%handle)
+        end if
         if (given_nrows /= file_nrows) then
             write(expected_str, '(i0)') file_nrows
             write(got_str, '(i0)') given_nrows

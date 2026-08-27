@@ -269,6 +269,31 @@ contains
         type(parquet_column), pointer :: fcol
         type(parquet_struct_column), target :: values_c !! row-masked rebuild; unused on the fast path.
         type(parquet_struct_column), pointer :: v !! the column actually written.
+        character(len=:), allocatable :: nested_kname, nested_fname !! scratch for the nested-write refusal.
+
+        ! WRITING A NESTED CONTAINER IS REFUSED, and this guard is why D2 could open the in-memory
+        ! gate without opening a write path nobody built. Phase 7 made nesting READABLE only
+        ! (feature_container_phase7.md's Q2), while D2 widened `%adopt_fields` so a caller can now
+        ! BUILD a struct one of whose fields is a container -- from a file, or by hand. Without an
+        ! explicit refusal here that column reaches the Arrow builders, which have no shape for it.
+        !
+        ! Names the FIELD as well as the column, which the list and map twins have no equivalent
+        ! of: a struct can carry one offending field among several, and "this struct is nested" is
+        ! not enough to act on.
+        !
+        ! It also closes the repetition-level question src/parquet_wrapper.cpp's struct-write
+        ! banner addresses to this phase: a struct field that is a list would put apache/arrow#33188
+        ! back in play, reached THROUGH the struct. It cannot, because such a column never reaches
+        ! the writer at all -- see D10.
+        do j = 1, values%field_count()
+            if (parquet_kind_is_container(values%field_kind(j))) then
+                call parquet_kind_name(values%field_kind(j), nested_kname)
+                call values%field_name(j, nested_fname)
+                error stop "parquet_write_column: field '"//trim(nested_fname)//"' of struct column '"// &
+                    trim(name)//"' is a nested "//nested_kname// &
+                    "; writing a container inside a container is not supported (reading one is)"
+            end if
+        end do
 
         context = "parquet_write_column"
         if (chunked) context = "parquet_write_column_chunk"

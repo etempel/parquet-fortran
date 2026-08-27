@@ -1205,7 +1205,9 @@ contains
         ! The bare `struct` token. Deliberately NOT an entry in valid_maml_data_types: that array
         ! is also what parse_container_token validates a LIST's element and a MAP's value token
         ! against, so adding "struct" there would silently make `list[struct]` AND `map[struct]`
-        ! valid declarations -- which is Phase 7's nesting and not this. A struct declares no field
+        ! valid declarations -- and nesting is READ-ONLY (feature_container_phase7.md's Q2/D8), so a
+        ! token for a shape no writer can emit would invert the symmetry principle it appears to
+        ! serve. A struct declares no field
         ! layout in MAML at all; its fields come entirely from the parquet_struct_column the caller
         ! passes at write time. Note there is deliberately no bare `map` token to match it: a map's
         ! value type IS expressible in MAML, so leaving it out would be an omission rather than a

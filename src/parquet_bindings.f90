@@ -67,6 +67,7 @@ module parquet_bindings
     public :: parquet_reader_get_column_count, parquet_reader_get_column_name_length
     public :: parquet_reader_get_column_name, parquet_reader_release_column
     public :: parquet_reader_prefetch_columns, parquet_reader_prefetch_all_columns, parquet_reader_has_column
+    public :: parquet_reader_path_nrows
     public :: parquet_reader_get_column_type_name, parquet_reader_get_column_nullable
     public :: parquet_reader_get_column_shape_name, parquet_reader_get_map_value_type_name
     public :: parquet_writer_set_protected_column
@@ -98,6 +99,8 @@ module parquet_bindings
     public :: parquet_read_list_column_shape
     public :: PF_ELEM_NONE, PF_ELEM_INT32, PF_ELEM_INT64, PF_ELEM_FLOAT32, PF_ELEM_FLOAT64
     public :: PF_ELEM_BOOL, PF_ELEM_STRING, PF_ELEM_DATE, PF_ELEM_TIME, PF_ELEM_TIMESTAMP
+    public :: PF_ELEM_LIST, PF_ELEM_MAP, PF_ELEM_STRUCT
+    public :: parquet_read_list_offsets_fill
     public :: parquet_read_list_int32_fill, parquet_read_list_int64_fill
     public :: parquet_read_list_float32_fill, parquet_read_list_float64_fill
     public :: parquet_read_list_bool8_fill, parquet_read_list_string_fill
@@ -165,6 +168,13 @@ module parquet_bindings
     integer(c_int32_t), parameter :: PF_ELEM_DATE = 7      !! date32/date64.
     integer(c_int32_t), parameter :: PF_ELEM_TIME = 8      !! time32/time64.
     integer(c_int32_t), parameter :: PF_ELEM_TIMESTAMP = 9 !! timestamp.
+    ! The three CONTAINER families, reported where a nested payload is possible. They come from
+    ! arrow_nested_family rather than arrow_leaf_family on the C++ side, because
+    ! parquet_get_column_type must keep answering "unknown" for a container at every depth --
+    ! see feature_container_phase7.md's D12.1.
+    integer(c_int32_t), parameter :: PF_ELEM_LIST = 10     !! list/large_list.
+    integer(c_int32_t), parameter :: PF_ELEM_MAP = 11      !! map.
+    integer(c_int32_t), parameter :: PF_ELEM_STRUCT = 12   !! struct.
 
     interface
         !> Creates a new parquet writer for `filename` and returns its opaque handle.
@@ -943,6 +953,18 @@ module parquet_bindings
             import
             type(c_ptr), value :: reader
         end subroutine
+
+        !> The number of entries the array at `name` holds -- the file's row count for an ordinary
+        !! column, and the flattened ELEMENT count for a descent path such as `list_of_struct[]`.
+        !! `row_group` <= 0 means the whole column.
+        function parquet_reader_path_nrows(reader, name, row_group) &
+                bind(C, name="parquet_reader_path_nrows") result(n)
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_long_long) :: n
+        end function
 
         !> Returns non-zero if `name` is a column of `reader` (non-throwing existence check).
         function parquet_reader_has_column(reader, name) &
@@ -2138,6 +2160,21 @@ module parquet_bindings
         end subroutine
 
         !> Fills an int32-payload list column's offsets, row validity, values and element validity.
+        !> Offsets and per-ROW validity only, for a list whose payload is itself a container.
+        !! The payload is read separately through the descent path `<name>[]`; see
+        !! feature_container_phase7.md's D4 (7b).
+        subroutine parquet_read_list_offsets_fill(reader, name, row_group, nrows, nelems, offsets, &
+                row_valid) bind(C, name="parquet_read_list_offsets_fill")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nelems
+            integer(c_int64_t) :: offsets(*)
+            integer(c_int8_t) :: row_valid(*)
+        end subroutine
+
         subroutine parquet_read_list_int32_fill(reader, name, row_group, nrows, nelems, offsets, &
                 row_valid, values, elem_valid) bind(C, name="parquet_read_list_int32_fill")
             import

@@ -37,8 +37,10 @@ module parquet_core
     use parquet_map, only: parquet_map_column, parquet_map_column_offsets, parquet_map_column_keys, &
         parquet_map_column_values, parquet_map_column_row_validity
     use parquet_columns, only: parquet_column, parquet_column_set_null, parquet_column_string_column, &
-        parquet_column_data_ptr, parquet_column_is_null, parquet_kind_name, &
-        PK_INT32, PK_INT64, PK_FLOAT32, PK_FLOAT64, PK_LOGICAL, PK_STRING, PK_DATE, PK_TIME, PK_TIMESTAMP
+        parquet_column_data_ptr, parquet_column_is_null, parquet_kind_name, parquet_container_column, &
+        parquet_kind_is_container, &
+        PK_INT32, PK_INT64, PK_FLOAT32, PK_FLOAT64, PK_LOGICAL, PK_STRING, PK_DATE, PK_TIME, PK_TIMESTAMP, &
+        PK_LIST, PK_MAP, PK_STRUCT
     use parquet_temporal, only: parquet_date, parquet_time, parquet_timestamp, &
         parquet_unit_seconds, parquet_unit_millis, parquet_unit_micros, parquet_unit_nanos, &
         parquet_ns_per_sec, parquet_ns_per_day, parquet_ns_to_sec, parquet_ns_to_day
@@ -2668,6 +2670,23 @@ module parquet_core
         !> the schema-declared unit/utc when the column comes from a MAML/schema, else the fixed
         !> default (microseconds, timezone-naive).
         !>
+        !> Reads a CONTAINER column at `path` and hands it to `col` as a container `parquet_column`.
+        !>
+        !> Declared here, and implemented in parquet_read_list, so that parquet_read_map can reuse
+        !> it for a nested map VALUE -- the two need the identical three lines. It cannot live in
+        !> the shared parquet_read parent: it references `PK_LIST` and friends, which parquet_core
+        !> use-associates from parquet_columns, and an intermediate submodule referencing such a
+        !> name makes nagfor 7.2 unable to compile ANY of its descendants ("Bad module file format
+        !> for PARQUET_READ, could not ref PK_LIST"). Same constraint, same shape, and the same
+        !> reason as `resolve_temporal_write_unit` and `struct_field_validity` below.
+        module subroutine read_nested_payload(reader, path, rg, kind, col, context)
+            type(parquet_reader), intent(in) :: reader  !! open reader.
+            character(len=*), intent(in) :: path        !! the descent path of the child.
+            integer(c_long_long), intent(in) :: rg      !! 1-based row group, or <= 0 for the whole column.
+            integer, intent(in) :: kind                 !! PK_LIST, PK_MAP or PK_STRUCT.
+            type(parquet_column), intent(inout) :: col  !! receives the container.
+            character(len=*), intent(in) :: context     !! calling entry point, for error messages.
+        end subroutine read_nested_payload
         !> Declared here, and implemented in parquet_write_temporal, so that parquet_write_list can
         !> apply the same rule to a temporal PAYLOAD. It cannot live in the shared parquet_write
         !> parent -- see the implementation's own comment for the nagfor constraint that rules that

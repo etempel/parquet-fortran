@@ -40,6 +40,7 @@ contains
         testsuite = [ &
             new_unittest("struct read reports the declared field set", test_field_set), &
             new_unittest("struct read separates row nullness from field nullness", test_two_null_levels), &
+            new_unittest("a null struct row's fields are null in their OWN bitmaps", test_field_mask_is_face_value), &
             new_unittest("struct read returns every payload family's values", test_all_families), &
             new_unittest("struct read of the nine-field column keeps field order", test_mixed_order), &
             new_unittest("struct read per row group agrees with the whole column", test_chunked_agrees), &
@@ -117,6 +118,63 @@ contains
             "row 3's null field and present field are reported independently")
         call parquet_close_reader(r)
     end subroutine test_two_null_levels
+
+    !> A null struct row's fields must be null in their OWN bitmaps, not merely masked by the row.
+    !!
+    !! **This is the field-level half of `feature_risks.md` Risk-155, and it needs a trick to
+    !! observe at all.** `unwrap_struct_path` returns each leaf's COMBINED mask
+    !! (`struct_valid AND field_valid`) and `read_struct_field` stores it unchanged. That is
+    !! correct -- Parquet's definition levels cannot encode "the struct is absent but its field is
+    !! present", so for a file the combined mask IS the field's own stored validity -- and it looks
+    !! wrong, so the tempting "fix" is to divide the struct's contribution back out. Doing that
+    !! makes every field of every null struct row report `is_valid = .true.` over a value the file
+    !! does not contain.
+    !!
+    !! **`%get_field` alone cannot see the difference**, which is why `test_two_null_levels` above
+    !! does not catch it: `begin_get` tests the ROW level first and short-circuits, so a null row's
+    !! fields answer null whatever their own bitmaps hold. Confirmed by mutation -- the division
+    !! was applied to `read_struct_field` and all eight tests in this suite still passed.
+    !!
+    !! **`%clear_null_row` is the exposure.** Clearing the row level makes `begin_get` fall through
+    !! to the field bitmap, which is then the only thing answering. Row 3 is the negative control:
+    !! it is untouched, and its one null and one present field must still be reported apart --
+    !! without it this test would also pass against a reader that nulled every field of every row.
+    subroutine test_field_mask_is_face_value(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_reader) :: r
+        type(parquet_struct_column), target :: sc
+        type(parquet_struct_row) :: h
+        integer(int32) :: v
+        character(len=:), allocatable :: tag
+        logical :: okv, okt
+        call parquet_open_reader(r, PAYLOADS)
+        call parquet_read_column(r, "s_int32", sc)
+        call check(error, sc%is_null(2), "precondition: row 2 is a null struct instance")
+        if (allocated(error)) return
+        call sc%clear_null_row(2_int64)
+        call check(error, .not. sc%is_null(2), "precondition: the ROW level is now clear")
+        if (allocated(error)) return
+        ! With the row level cleared, only the fields' own bitmaps can answer.
+        h = sc%view(2)
+        call h%get_field("v", v, is_valid=okv)
+        call h%get_field("tag", tag, is_valid=okt)
+        call check(error, .not. okv, &
+            "field 'v' of a null struct row must be null in its OWN bitmap, not only via the row")
+        if (allocated(error)) return
+        call check(error, .not. okt, &
+            "field 'tag' of a null struct row must be null in its OWN bitmap too")
+        if (allocated(error)) return
+        call check(error, v == 0_int32, &
+            "and the value is the type's default rather than whatever the buffer held")
+        if (allocated(error)) return
+        ! NEGATIVE CONTROL: row 3 was never cleared, and its two fields differ.
+        h = sc%view(3)
+        call h%get_field("v", v, is_valid=okv)
+        call h%get_field("tag", tag, is_valid=okt)
+        call check(error, (.not. okv) .and. okt .and. tag == "r2", &
+            "control: row 3's null and present fields must still be reported apart")
+        call parquet_close_reader(r)
+    end subroutine test_field_mask_is_face_value
 
     !> One column per payload family, each read back with row 1's value intact.
     subroutine test_all_families(error)

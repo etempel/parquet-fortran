@@ -406,14 +406,12 @@ directly (`"main.inner"`) is not readable this way and fails like any other unkn
 (`error stop "...: column not found in parquet file: ..."`). Reading it as a struct would mean
 changing what `parquet_get_column_names` enumerates, which every caller that iterates a file's
 columns would see, so it is declined on purpose. Note a **top-level** struct is different and does
-read, through [`parquet_map_column`](struct-columns.html)'s sibling
-[`parquet_struct_column`](struct-columns.html) — it is simply not *listed*, so an opened
-`parquet_table` never holds one.
+read, through [`parquet_struct_column`](struct-columns.html) — it is simply not *listed*, so an
+opened `parquet_table` never holds one.
 
 A **`MAP`** terminal leaf, by contrast, does resolve (`"main.attrs"`) and reads through
-[`parquet_map_column`](map-columns.html). It did not until recently, and the old refusal was a
-defect rather than a limitation: the path was listed by `parquet_get_column_names` and then failed
-to resolve, which is a listing that lies.
+[`parquet_map_column`](map-columns.html), on the same terms as a `LIST` leaf. Every dotted path
+`parquet_get_column_names` lists therefore resolves; the listing and the reader agree.
 
 ### Descent paths: addressing a container's child
 

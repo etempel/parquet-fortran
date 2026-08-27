@@ -1063,12 +1063,16 @@ parquet_core                    (module — core API + cross-subtree private-hel
 │   ├─ parquet_read_temporal    (date/time/timestamp)
 │   ├─ parquet_read_filter      (filter/sort-key lexing and parsing)
 │   ├─ parquet_read_sort        (read-time sort key installation)
-│   └─ parquet_read_list        (variable-length LIST -> parquet_list_column)
+│   ├─ parquet_read_list        (variable-length LIST -> parquet_list_column)
+│   ├─ parquet_read_map         (MAP -> parquet_map_column)
+│   └─ parquet_read_struct      (STRUCT -> parquet_struct_column)
 ├─ parquet_write                (submodule — writer lifecycle, shared write helpers)
 │   ├─ parquet_write_numeric
 │   ├─ parquet_write_string
 │   ├─ parquet_write_temporal
-│   └─ parquet_write_list       (parquet_list_column -> variable-length LIST)
+│   ├─ parquet_write_list       (parquet_list_column -> variable-length LIST)
+│   ├─ parquet_write_map        (parquet_map_column -> MAP)
+│   └─ parquet_write_struct     (parquet_struct_column -> STRUCT)
 └─ parquet_metadata             (submodule — parse/build orchestration + shared metadata helpers)
     ├─ parquet_metadata_base    (format-agnostic column_info/table_metadata plumbing)
     ├─ parquet_metadata_get     (parquet_get_metadata queries)
@@ -1084,6 +1088,15 @@ parquet_version                 (module — LEAF: cversion and parquet_get_versi
                                  parquet_settings_base only, for the emit channel.)
 parquet_strings                 (module — independent element domain; + settings_base)
 parquet_temporal                (module — independent element domain)
+parquet_columns                 (module — parquet_column, the type-erased value store, AND the
+                                 abstract base parquet_container_column every container extends.
+                                 Arrow-free; largely GENERATED, plus submodules)
+parquet_list                    (module — CONTAINER: parquet_list_column / parquet_list_row.
+                                 Reaches parquet_columns + parquet_temporal only)
+parquet_struct                  (module — CONTAINER: parquet_struct_column / parquet_struct_row;
+                                 + parquet_strings and settings_base, the latter for its warn= path)
+parquet_map                     (module — CONTAINER: parquet_map_column / parquet_map_row;
+                                 same imports as parquet_struct. Layered on the list's helpers)
 parquet_random                  (module — the generator AND the four distributions; reaches only
                                  parquet_expkey and parquet_ziggurat, both leaves — enforced)
 parquet_expkey                  (module — LEAF: the frozen -log(u) transform)
@@ -1100,10 +1113,20 @@ parquet_sorting_oracle          (module — TEST-ONLY: the C++ sort engine behin
                                  pointers. Never re-exported by any facade.)
 parquet_sampling                (module — permutations/subsets/resampling/weighted draws;
                                  uses parquet_random + parquet_argsort + parquet_expkey)
+parquet_spatial                 (module — pf_spatial_index over plain coordinate arrays; Arrow-free,
+                                 + four submodules: _build, _bulk, _query, _tune)
+parquet_healpix                 (module — the HEALPix sphere pixelisation; Arrow-free, + five
+                                 submodules: _core, _arith, _bulk, _grid, _query)
+parquet_tables                  (module — parquet_table and its whole surface; GENERATED spec,
+                                 + a dozen submodules incl. parquet_tables_container)
 parquet_maml_base               (module — generated)
 └─ parquet_maml_base_add_col_qc (submodule)
 parquet_wrapper.cpp             (C++ TU)
 ```
+
+**This tree is a map of the SHAPE, and `ls src/` is the authority for membership.** It went stale
+twice by omission — a whole campaign's modules can land without anyone editing it, and nothing
+checks it. Read it for how the tiers relate; re-derive the file list from the directory.
 
 **The ADVERTISED ENTRY MODULES are the rows of the table in
 `doc/pages/operating/choosing-a-module.md`, which is the authority — do not re-derive the list from
@@ -1113,13 +1136,15 @@ facade imports with an `only:` list, and it read as though the list lived here r
 page. The same list is `ENTRY_MODULES` in `tools/check_module_footprints.sh`, which had drifted from
 the page in the direction that measures nothing — `parquet_tables` and `parquet_settings` were both
 absent, so the number the page printed for `parquet_tables` had never been measured by anything.
-Every one of the twelve is covered by the semantic-versioning promise **in its own right**. That is wider than it sounds: a change to
-`parquet_column`'s bindings is a breaking change even when nothing reachable through `use parquet`
-moves. Two properties follow, and both are enforced rather than intended:
+Every one of them is covered by the semantic-versioning promise **in its own right** — count the
+rows on the page rather than trusting a number written here, which has already gone stale once.
+That is wider than it sounds: a change to `parquet_column`'s bindings is a breaking change even
+when nothing reachable through `use parquet` moves. Two properties follow, and both are enforced rather than intended:
 
-- **Eight tiers keep their FORTRAN graph clear of `parquet_bindings`** — `parquet_version`,
-  `parquet_temporal`, `parquet_strings`, `parquet_random`, `parquet_argsort`, `parquet_sampling`,
-  `parquet_columns` and `parquet_sorting`. **There is now one check per tier**
+- **Every Arrow-free tier keeps its FORTRAN graph clear of `parquet_bindings`** — re-derive the set
+  with `grep -oE "def check_parquet_[a-z_]*stays_(arrow_free|leaf)" tools/check_source_conventions.py`
+  rather than reading a list here, which has gone stale twice as campaigns added tiers.
+  **There is now one check per tier**
   (`tools/check_source_conventions.py`), each walking that tier's closure **including submodules**
   and failing if it ever reaches `parquet_bindings`. One check per tier rather than a few for the
   group is deliberate and was arrived at the hard way: three of these tiers used to be covered only
@@ -1202,10 +1227,12 @@ Two regression tests, and each catches what the other cannot. `test/test_example
 round-trips a file through it. Both break the *build* rather than an assertion when a re-export is
 dropped, which is how they earn their keep.
 
-Reserved for future element-domain work (not yet implemented): `parquet_map`/`parquet_list`/
-`parquet_struct` (independent modules, like `parquet_temporal`) plus their own
-`parquet_read_*`/`parquet_write_*` type-family children — see CONTRIBUTING.md's "Features
-considered but not implemented" for scope/status.
+`parquet_list`/`parquet_map`/`parquet_struct` follow that same element-domain pattern and are
+shipped: three independent modules, like `parquet_temporal`, each with its own
+`parquet_read_*`/`parquet_write_*` type-family child under `parquet_read`/`parquet_write`. What
+remains unimplemented is **writing a nested container**, which is refused rather than missing —
+see CONTRIBUTING.md's "Features considered but not implemented" for why the write path is the
+harder half.
 
 **Placement rule for a new read/write specific or shared helper:** type-generic code (used by
 more than one of numeric/string/temporal) belongs in the parent (`parquet_read`/`parquet_write`)
@@ -1381,8 +1408,8 @@ Follow these when adding new public API, types, or internal helpers:
 - **A new module holding several related element/handle types** (as opposed to one module per
   type) should be named after the *domain* those types belong to, not any single type inside
   it — e.g. `parquet_temporal` for `parquet_date`/`parquet_time`/`parquet_timestamp`. See "The
-  `parquet_temporal` module" below for the reasoning and the sibling modules (`parquet_map`,
-  `parquet_list`) this leaves room for.
+  `parquet_temporal` module" below for the reasoning, and `parquet_list`/`parquet_map`/
+  `parquet_struct` for the sibling modules that followed it.
 
 - **A module cannot share its name with a type (or a procedure) it declares** — gfortran rejects
   it outright. This has bitten twice: it is why the `parquet_strings` module is plural while its
@@ -2354,21 +2381,22 @@ counterpart. User guide: `doc/pages/types/date-time.md`.
 
 - **Domain-grouped module naming, not one-module-per-type — `parquet_temporal` is the precedent
   for future sibling modules.** The name groups `parquet_date`/`parquet_time`/`parquet_timestamp`
-  under their shared *domain* rather than any single type, leaving an obviously-parallel name for a
-  future `parquet_map`/`parquet_list` module (Parquet `MAP`/variable-length `LIST` support — see
-  CONTRIBUTING.md's "Features considered but not implemented") to grow into, so this one module
-  never accumulates every future element type. Follow the same pattern: one module per *domain* of
-  related types, named after the domain (`temporal`, `map`, `list`), not after any single type
-  inside it.
+  under their shared *domain* rather than any single type, which left an obviously-parallel name
+  for `parquet_list`/`parquet_map`/`parquet_struct` to occupy, so this one module never accumulates
+  every element type. Follow the same pattern: one module per *domain* of
+  related types, named after the domain (`temporal`, `list`, `map`, `struct`), not after any single
+  type inside it.
 - **These three types carry their own null state — no `is_valid=`/`null_value=` argument
   anywhere on their read/write path, unlike every other supported type.** A default-initialized
   element is null; write gathers validity from the elements themselves; a null-containing column
   reads without the error-on-Null the numeric/string readers apply by default. This is a
   deliberate, documented deviation (see `doc/pages/types/date-time.md`'s "Null values are part of the
   element" section and `supported-data-types.md`'s callout in its own "Null values" section) —
-  not an oversight to bring in line with the rest of the library. A future `parquet_map`/
-  `parquet_list` module should make its own considered choice here rather than assuming either
-  convention by default.
+  not an oversight to bring in line with the rest of the library. **The three container modules
+  made the opposite choice, deliberately**: `parquet_list`/`parquet_map`/`parquet_struct` carry an
+  explicit `is_valid=` argument on their append/get surface, because a container has TWO null
+  levels (the row itself, and each element within it) and only an argument can address the second.
+  A future element-domain module should likewise choose rather than inherit either convention.
 - **Parquet's physical format has no seconds-resolution `TIME`/`TIMESTAMP` encoding at all**
   (only milliseconds/microseconds/nanoseconds) **and no `DATE64` physical representation**
   (`DATE` requires an `int32` day count) — confirmed empirically, not just from the spec: even

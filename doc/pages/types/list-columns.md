@@ -202,11 +202,13 @@ caller already owns the object, so moving it in is both cheaper and unambiguous.
 be used again.
 
 Once adopted, the column's ordinary operations reach the container: `%length()`, `%is_null(i)`,
-`%set_null(i)`, `%clear_null(i)`, `%append_nulls(n)`, `%deep_copy`, `%ensure_validity()` and the
-row-structural rebuilds all work. Two do not, and say so rather than doing something surprising:
-`%paste` is refused (a container row's element count is data, so overwriting one in place would
-move every following row), and `%append` of one container column onto another is not implemented
-yet.
+`%set_null(i)`, `%clear_null(i)`, `%append_nulls(n)`, `%append`, `%deep_copy`, `%ensure_validity()`
+and the row-structural rebuilds all work. `%append` concatenates two container columns of the same
+kind — the source's offsets are rebased onto the destination's element count, so the joined rows
+keep their own lengths — and refuses a mismatched container kind, element kind or field set, naming
+both sides. One operation does not work, and says so rather than doing something surprising:
+`%paste` is refused, because a container row's element count is data, so overwriting one in place
+would move every following row.
 
 ## Threading
 
@@ -448,4 +450,5 @@ scalar leaves only.
 - **No `list<fixed_size_list<...>>`.** A `*_VEC` payload is refused on every path, `%init` and
   `%adopt_rows` alike. That is a different shape from a container payload — a fixed-width vector
   inside a variable-length list — and this library neither reads nor writes it at any depth.
-- **No `%append` between container columns**, and no `%paste` at all — see above.
+- **No `%paste`** at all — see [Putting a list column into a `parquet_column`](#putting-a-list-column-into-a-parquet_column)
+  for why a container row cannot be overwritten in place.

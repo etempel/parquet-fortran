@@ -564,11 +564,13 @@ needs them, rather than adding speculatively.
   filter is post-decode: it narrows the rows your code sees but still reads and decodes every
   referenced column in full. Skipping non-matching row groups off disk entirely is the unimplemented
   part, and README's "No predicate pushdown" limitation treats it as an intentional non-goal for now.
-- **`MAP` columns, and variable-length `LIST` nested inside a `STRUCT` path** — Arrow supports these
-  natively, but they would break the library's core "flat columns + fixed `col_size` vectors" data
-  model that the whole Fortran-side API is built around; this is a redesign, not an addition.
-  (Top-level list-encoded vector columns and `STRUCT` columns are both already supported for
-  reading, the latter at any nesting depth down to a scalar or `FIXED_SIZE_LIST` leaf.)
+- **Writing a nested container** — a list of structs, a map of structs, or a struct with a list or
+  map field all *read* (through `parquet_list`/`parquet_map`/`parquet_struct`, reached one level at
+  a time with `%nested`), and writing one is refused with a message naming the column and the
+  offending field or element kind. The read path needed no new data model because a container's
+  payload is an ordinary `parquet_column` carrying a `class(parquet_container_column)` slot; the
+  write path is a genuine lift, because a nested field has to cross the `bind(C)` boundary as a
+  staged tree rather than as one buffer per column.
 - **Additional scalar types on the *write* side** (`int8`/`int16`/unsigned integers/`decimal` as a
   MAML-declarable, `parquet_write_column`-writable `data_type`) — straightforward from Arrow's side,
   but each new type multiplies the `parquet_write_*` interface surface, since a dedicated subroutine

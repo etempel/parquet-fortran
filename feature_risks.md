@@ -218,11 +218,11 @@ something a reader is expected to have.
 | [Risk-150](#risk-150--a-nearest-that-stopped-at-k-candidates-rather-than-at-a-radius-would-be-plausibly-wrong) | A `%nearest` that stopped at k CANDIDATES rather than at a radius would be plausibly wrong | 4 — covered |
 | [Risk-151](#risk-151--axis_point-taken-as-the-infinite-line-projection-disagrees-with-dist-and-both-look-right) | `axis_point` taken as the infinite-line projection disagrees with `dist`, and both look right | 4 — covered |
 | [Risk-152](#risk-152--two-tables-over-one-file-disagree-about-a-plain-list-columns-kind-and-both-answer-quietly) | Two tables over one file disagree about a plain `LIST` column's KIND, and both answer quietly | 4 — covered |
-| [Risk-153](#risk-153--a-container-columns-row-nullness-has-two-possible-homes-and-writing-to-the-wrong-one-is-silent) | A container column's row nullness has TWO possible homes, and writing to the wrong one is silent | 1 — new |
-| [Risk-154](#risk-154--a-sliced-list-array-carries-three-independent-offsets-and-dropping-any-one-is-a-plausible-wrong-answer) | A sliced list array carries THREE independent offsets, and dropping any one is a plausible wrong answer | 1 — new |
-| [Risk-155](#risk-155--a-structs-field-mask-is-taken-at-face-value-and-the-arithmetic-that-looks-necessary-is-not) | A struct's field mask is taken at face value, and the arithmetic that looks necessary is not | 1 — new |
+| [Risk-153](#risk-153--a-container-columns-row-nullness-has-two-possible-homes-and-writing-to-the-wrong-one-is-silent) | A container column's row nullness has TWO possible homes, and writing to the wrong one is silent | 4 — covered |
+| [Risk-154](#risk-154--a-sliced-list-array-carries-three-independent-offsets-and-dropping-any-one-is-a-plausible-wrong-answer) | A sliced list array carries THREE independent offsets, and dropping any one is a plausible wrong answer | 3 — not testable |
+| [Risk-155](#risk-155--a-structs-field-mask-is-taken-at-face-value-and-the-arithmetic-that-looks-necessary-is-not) | A struct's field mask is taken at face value, and the arithmetic that looks necessary is not | 4 — covered |
 | [Risk-156](#risk-156--a-struct-write-loses-a-field-because-a-push-was-forgotten) | A struct write loses a field because a push was forgotten | 3 — not testable |
-| [Risk-157](#risk-157--a-map-columns-entry-ceiling-has-no-widening-fallback-and-the-narrowing-cast-is-one-line-away) | A map column's entry ceiling has NO widening fallback, and the narrowing cast is one line away | 1 — new |
+| [Risk-157](#risk-157--a-map-columns-entry-ceiling-has-no-widening-fallback-and-the-narrowing-cast-is-one-line-away) | A map column's entry ceiling has NO widening fallback, and the narrowing cast is one line away | 4 — covered |
 | [Risk-158](#risk-158--a-skipped-column-is-safe-only-because-it-is-res_empty-and-res_partial-would-make-the-same-skip-a-silent-misalignment) | A skipped column is safe only because it is `RES_EMPTY`, and `RES_PARTIAL` would make the same skip a silent misalignment | 3 — not testable |
 | [Risk-159](#risk-159--a-columns-validity-readers-and-writers-delegate-to-its-container-asymmetrically-and-two-public-queries-then-disagree-about-the-same-row) | A column's validity READERS and WRITERS delegate to its container asymmetrically, and two public queries then disagree about the same row | 4 — covered |
 | [Risk-160](#risk-160--append_from-rebases-a-containers-offsets-and-dropping-the-rebase-is-a-plausible-wrong-answer) | `append_from` rebases a container's offsets, and dropping the rebase is a plausible wrong answer | 4 — covered |
@@ -239,182 +239,6 @@ decided whether it is testable, and before any test is written. Give it the next
 **one above the highest in the [Index](#index)**, read from there rather than from any number
 written in prose — state what breaks and why the failure is quiet, and leave the **Test** half to
 whoever triages it into one of the three sections below.
-
-### Risk-153 — A container column's row nullness has TWO possible homes, and writing to the wrong one is silent
-
-A `parquet_column` whose kind is `PK_LIST`/`PK_MAP`/`PK_STRUCT` has a `validity` component like
-every other column, and **it must never be used.** Row nullness for a container kind lives inside
-the container object, and `parquet_column`'s three row-validity procedures
-(`parquet_column_is_null_row`, `_set_null_row`, `_clear_null_row`, all in
-`src/parquet_columns_validity.f90`) delegate to it through the deferred `is_null_row`/`set_null_row`/
-`clear_null_row` bindings on `parquet_container_column`.
-
-**Both halves of the split fail quietly, in opposite directions:**
-
-- A path that **writes** the column's own bitmap for a container kind — `ensure_bitmap` plus
-  `bit_set`, which is what every non-container arm does — appears to succeed and changes nothing a
-  reader can see: `%is_null(i)` asks the container, which was never told. A mutation that silently
-  does nothing.
-- A path that **reads** the column's own bitmap answers `.false.` for a row that genuinely is null.
-  A wrong answer, and the more dangerous half, because a null row's payload elements are
-  meaningless — a caller that believes the row is present will read whatever the offsets describe.
-
-**This was live, not hypothetical.** `%append_nulls(n)` on an adopted list column appended the rows
-correctly through the container and then fell through to `ensure_bitmap` + `bits_set_range`, so the
-rows were null in the container *and* marked null in a bitmap nothing read; `%is_null` meanwhile had
-no container arm at all and answered `.false.` for every one of them. Nothing failed to build,
-`%length()` was right, and only an assertion on `%is_null` after `%append_nulls` found it
-(`test_column_append_nulls`, `test/test_list.f90`).
-
-**What this forbids.** Every future `parquet_column` path that touches validity must dispatch on
-`parquet_kind_is_container(self%kind)` before reaching `self%validity`, and must delegate rather
-than duplicate. There are five such paths today (`is_null`, `set_null`, `clear_null`,
-`ensure_validity`, `has_validity_storage`) plus `append_nulls`, which returns early for a container
-kind rather than writing bits after `grow_rows`. The element forms
-(`parquet_column_is_null_elem` and siblings) are a separate question and are **not** delegated: a
-container row's elements are the container's business and `width` is 1, so `e` can only be 1 —
-whether those should mean "the row" or abort is open until a table can hold a container column.
-
-**Test.** Covered for the row forms by `test_column_append_nulls` and `test_ensure_validity`
-(`test/test_list.f90`), which assert through `parquet_column` rather than through
-`parquet_list_column` — that is the point, since asking the container directly cannot see the
-disagreement. The element forms are untested because nothing can reach them yet.
-
-### Risk-155 — A struct's field mask is taken at face value, and the arithmetic that looks necessary is not
-
-**What breaks.** `unwrap_struct_path` (`src/parquet_wrapper.cpp`) returns a struct leaf's
-**combined** mask — `struct_valid AND field_valid` — and `src/parquet_read_struct.f90` stores it as
-the field's own validity, unchanged. That is correct, and it looks wrong: the obvious reading is
-that the struct's contribution has to be divided back out
-(`own_null = combined_null .and. .not. struct_null`), and a future reader who "fixes" it that way
-introduces a silent wrong answer — every field of every null struct row would come back reporting
-`is_valid = .true.` over an undefined value.
-
-**Why it is quiet.** Both spellings agree on every row of every struct whose rows are all present,
-which is most fixtures and every casual check. They differ only on a **null struct row**, where the
-"corrected" version reports a value the file does not contain. Nothing aborts; the column validates;
-`%is_null(i)` still answers correctly, so the row-level story looks right while the field-level one
-is wrong.
-
-**Why the face-value reading is the correct one.** Parquet's definition levels cannot encode "the
-struct is absent but its field is present", so **Parquet forces every child null under a null struct
-row on write**. Measured against Arrow 25.0.0: a struct array built in memory with row 4 null and
-its `id` child VALID at row 4 reads back with that child INVALID. So for a file, `combined` IS the
-field's own stored validity at every row — the identity for a present row, and the file's own answer
-for an absent one.
-
-**What must NOT be inferred from this.** The struct's OWN row validity is genuinely not derivable
-and must keep coming from `parquet_read_struct_row_validity`: a present struct whose every field is
-null gives the same combined mask, for every field, as an absent one. That is what
-`test_two_null_levels` (`test/test_struct_read.f90`) pins, using the fixture's row 4, which exists
-for exactly this.
-
-**Test.** Proposed. `test_two_null_levels` covers the row-level half and would catch a reader that
-lost the separate row-validity call. The FIELD-level half — a reader that *adds* the division —
-is not covered: every current assertion holds under both spellings except on a null struct row's
-fields, which `test_two_null_levels` asserts are null. So the coverage is real but incidental, and
-a dedicated assertion that a null row's field reports `is_valid = .false.` **and** yields the type's
-default would pin it deliberately.
-
-### Risk-154 — A sliced list array carries THREE independent offsets, and dropping any one is a plausible wrong answer
-
-Reading a `LIST` column hands `describe_list_array` (`src/parquet_wrapper.cpp`) an Arrow array that
-may be a **slice** of a larger one, and a list array carries three offsets that a slice moves
-independently. Arrow rebases none of them:
-
-| offset | what it aligns | consequence of ignoring it |
-|---|---|---|
-| the list array's own `data()->offset` | the **row** validity bitmap | the wrong rows read as null |
-| `raw_value_offsets()[0]` | where this slice's elements start in the child | every row's values shifted by a constant |
-| the **child** array's `data()->offset` | the **element** validity bitmap | the wrong elements read as null |
-
-**Every one of the three failures is a plausible wrong answer, not a crash.** The row count is
-right, every row's length is right, the values are in range, the offsets stay monotonic, and
-`%validate()` passes. Nothing raises.
-
-**Only ONE of the three is handled explicitly, and that is the design rather than an omission.**
-`base = value_offset(0)` is written out; the other two are absorbed by Arrow's own accessors, since
-`array->IsValid(i)` accounts for the parent's offset and slicing the child gives it an offset that
-`child->IsValid(k)` accounts for in turn. So an edit to `describe_list_array` cannot drop the row or
-element alignment at all — **only replacing an accessor with a raw buffer walk can**, which is
-therefore the change to refuse. The string read path is the cautionary case: it hands Arrow's own
-buffers across the `bind(C)` boundary and had to grow a `validity_offset` argument for exactly this,
-which is one more thing a future caller can drop.
-
-**The explicit rebase is DEFENSIVE on today's read paths, measured rather than assumed.** A probe
-against Arrow 25 found that `arrow::compute::Filter` and `Take` — what a filtered, sampled or sorted
-read goes through — return **compact** arrays with all three offsets 0, *not* slices; and nothing on
-the read side calls `Slice()` on a column array (the only such call in `src/parquet_wrapper.cpp` is
-on the writer side). The single route by which a sliced list array could arrive is
-`unwrap_struct_path`'s `StructArray::field()` on an already-sliced struct, which
-`extract_string_buffers`' own comment records as never observed in any fixture.
-
-**Consequence, and it is the reason this entry exists: a mutation setting `base` to 0 SURVIVES the
-whole suite.** That was run and confirmed. It is a fact about what is reachable, not a coverage gap
-to close with an unbuildable fixture — so do not read a green suite as evidence that this
-arithmetic is right.
-
-**How it was verified instead.** Out of process, by replicating `describe_list_array`'s logic
-exactly against a genuinely sliced array (`Slice(4, 4)` of an 8-row ragged list carrying a null row
-and a null element): `base` came out 10, and all four rows' lengths, values, row nullness and
-element nullness were correct. **Re-run a check of that shape rather than the suite** if this
-arithmetic is ever changed.
-
-A fourth offset is not currently possible but would be if a payload ever became a container
-(`list<list<...>>`, Phase 7): the inner list's own two offsets would join these three.
-
-**Test.** What the suite *does* cover is everything downstream of the rebase, and those mutations
-are all caught: shifting the offsets by one, having the chunked form ignore its row group, and
-collapsing either null level were each run and each failed the `list_read` suite (1, 1, 3 and 3
-tests respectively). `test_filtered_read`, `test_sorted_read` and `test_sampled_read`
-(`test/test_list_read.f90`) assert per-row lengths *and* per-element values against an untransformed
-control, which is what makes a constant shift visible; `test_sampled_read` additionally checks that
-every element of a row shares that row's own value prefix, catching a row assembled from two source
-rows' elements.
-
-
-### Risk-157 — A map column's entry ceiling has NO widening fallback, and the narrowing cast is one line away
-
-**What breaks.** `assemble_map_array` (`src/parquet_wrapper.cpp`) narrows a map column's int64
-offsets into the int32 buffer Arrow requires:
-
-```cpp
-auto op = reinterpret_cast<int32_t *>(offsets_buf->mutable_data());
-for (int64_t i = 0; i <= nrows; ++i) op[i] = static_cast<int32_t>(offsets[i]);
-```
-
-Past 2³¹−1 entries that cast **wraps**. The written file's offsets then describe rows that overlap,
-run backwards, or point outside the entries array, and every reader — this library's included — is
-entitled to return whatever it finds there.
-
-**Why this is not the same risk the string and list ceilings carry.** Those two have a **fork**: a
-string column that will not fit an int32 offsets buffer is written as `large_utf8`, a list column as
-`large_list`, and the guard is a branch rather than a refusal. **Arrow provides no `large_map`** —
-verified against `arrow/type.h` and `arrow/array/array_nested.h`, and against `MapArray::FromArrays`'
-own contract, which requires int32 offsets. So this is the one variable-length ceiling in the library
-whose only correct outcomes are "it fits" and "this cannot be written", and the natural instinct —
-*widen it like the others* — has nothing to reach for.
-
-**Why it would be quiet.** Nothing in Arrow objects: the offsets buffer is the right size and the
-right type, and `Table::Validate()` does not check that offsets are monotonic. A test would need a
-genuine two-billion-entry column to reach it, which no fixture can hold.
-
-**Test.** Covered, and the shape of the cover is the point.
-`check_map_entries_fit_arrow_limit` runs **before** the loop above, never after — a guard placed
-after the cast would be reading the wrapped values. `g_debug_map_offset_limit` plus
-`parquet_debug_set_map_offset_limit` let `map_entry_limit` (`test/error_scenarios.f90`) reach the
-refusal with a three-entry column, and `test_map_entry_limit_aborts` (`test/test_errors.f90`)
-asserts the message, not merely the exit status.
-
-**What this entry still forbids.** Three things, and each is a plausible future edit:
-
-- **Do not move the check after the narrowing loop**, or into `parquet_append_map_column`'s callers.
-  It belongs immediately before the cast it protects.
-- **Do not add a "large map" arm.** There is no such Arrow type; an arm that looked like one would
-  have to invent a private encoding no other tool could read.
-- **Do not reuse `g_debug_list_offset_limit` for it.** The list override exercises a WIDENING and
-  this one exercises a REFUSAL, so a shared global would make one scenario silently change the
-  other's meaning — the same reason the list and string overrides were kept separate.
 
 ## 2. Risks with a proposed testing scenario
 
@@ -1145,6 +969,69 @@ mutation. Reading the one-line predicate and concluding "a skipped column was al
 mistake this entry exists to prevent. The behaviour it protects is pinned from the other side by
 `container_skipped_by_mutation` (`test/error_scenarios.f90`), which asserts that a skipped
 `RES_EMPTY` column aborts on read rather than answering.
+
+### Risk-154 — A sliced list array carries THREE independent offsets, and dropping any one is a plausible wrong answer
+
+Reading a `LIST` column hands `describe_list_array` (`src/parquet_wrapper.cpp`) an Arrow array that
+may be a **slice** of a larger one, and a list array carries three offsets that a slice moves
+independently. Arrow rebases none of them:
+
+| offset | what it aligns | consequence of ignoring it |
+|---|---|---|
+| the list array's own `data()->offset` | the **row** validity bitmap | the wrong rows read as null |
+| `raw_value_offsets()[0]` | where this slice's elements start in the child | every row's values shifted by a constant |
+| the **child** array's `data()->offset` | the **element** validity bitmap | the wrong elements read as null |
+
+**Every one of the three failures is a plausible wrong answer, not a crash.** The row count is
+right, every row's length is right, the values are in range, the offsets stay monotonic, and
+`%validate()` passes. Nothing raises.
+
+**Only ONE of the three is handled explicitly, and that is the design rather than an omission.**
+`base = value_offset(0)` is written out; the other two are absorbed by Arrow's own accessors, since
+`array->IsValid(i)` accounts for the parent's offset and slicing the child gives it an offset that
+`child->IsValid(k)` accounts for in turn. So an edit to `describe_list_array` cannot drop the row or
+element alignment at all — **only replacing an accessor with a raw buffer walk can**, which is
+therefore the change to refuse. The string read path is the cautionary case: it hands Arrow's own
+buffers across the `bind(C)` boundary and had to grow a `validity_offset` argument for exactly this,
+which is one more thing a future caller can drop.
+
+**The explicit rebase is DEFENSIVE on today's read paths, measured rather than assumed.** A probe
+against Arrow 25 found that `arrow::compute::Filter` and `Take` — what a filtered, sampled or sorted
+read goes through — return **compact** arrays with all three offsets 0, *not* slices; and nothing on
+the read side calls `Slice()` on a column array (the only such call in `src/parquet_wrapper.cpp` is
+on the writer side). The single route by which a sliced list array could arrive is
+`unwrap_struct_path`'s `StructArray::field()` on an already-sliced struct, which
+`extract_string_buffers`' own comment records as never observed in any fixture.
+
+**Consequence, and it is the reason this entry exists: a mutation setting `base` to 0 SURVIVES the
+whole suite.** That was run and confirmed. It is a fact about what is reachable, not a coverage gap
+to close with an unbuildable fixture — so do not read a green suite as evidence that this
+arithmetic is right.
+
+**How it was verified instead.** Out of process, by replicating `describe_list_array`'s logic
+exactly against a genuinely sliced array (`Slice(4, 4)` of an 8-row ragged list carrying a null row
+and a null element): `base` came out 10, and all four rows' lengths, values, row nullness and
+element nullness were correct. **Re-run a check of that shape rather than the suite** if this
+arithmetic is ever changed.
+
+**A nested payload adds a fourth and fifth offset, and they are read by the same code.** Now that a
+payload can itself be a container (`list<list<...>>`, `list<struct<...>>`), the inner container's
+own offsets and validity join these three — and they arrive through a *separate* whole-column read
+at the descent path (`"col[]"`), not by walking into the outer array. That is what keeps this entry
+about one level: each level's read is an ordinary top-level read of its own array and rebases its
+own offsets. What would reintroduce the risk is a change that assembled the inner container by
+indexing into the outer one's child buffers instead.
+
+**Test.** What the suite *does* cover is everything downstream of the rebase, and those mutations
+are all caught: shifting the offsets by one, having the chunked form ignore its row group, and
+collapsing either null level were each run and each failed the `list_read` suite (1, 1, 3 and 3
+tests respectively). `test_filtered_read`, `test_sorted_read` and `test_sampled_read`
+(`test/test_list_read.f90`) assert per-row lengths *and* per-element values against an untransformed
+control, which is what makes a constant shift visible; `test_sampled_read` additionally checks that
+every element of a row shares that row's own value prefix, catching a row assembled from two source
+rows' elements.
+
+
 
 ## 4. Risks already covered, kept for what they still forbid
 
@@ -6626,6 +6513,16 @@ concatenate at a row-group boundary where an off-by-one is invisible in the row 
 caller needs a fixture whose rows have DISTINCT lengths across the join — `list_widths.parquet`'s
 `ragged` column cycles 1,2,3,4, which is why the assertions above can name specific rows.
 
+**A NESTED column appends correctly by construction, and it is worth knowing why rather than
+assuming it.** `lc_append_from` concatenates the payload with `self%payload%append(src%payload)`,
+and `append_storage` (`src/parquet_columns_mutate.f90`) dispatches a container payload straight back
+to `%append_from` on the inner container — so each level rebases its own offsets and nothing walks
+two levels of arithmetic at once. **The rule that keeps that true**: a nested `%append` must stay a
+recursion through `append_storage`, never a flattening that rebases an inner container's offsets
+against an outer element count. The kind guard is what stands between the two, and it compares
+`elem_kind` only — two `list<struct<...>>` columns whose structs declare *different field sets* are
+caught one level down by the struct's own guard, not by the list's.
+
 
 ### Risk-161 — A nested read that sizes the inner container from the OUTER row count
 
@@ -6685,3 +6582,147 @@ error**, and it would look like a filter that simply selected oddly.
 `filter_descent_path_control` filters on an ordinary dotted struct leaf of the same file and must
 still work, so a guard that refused every dotted path would fail. The `qc:` arm shares the same
 predicate (`path_has_descent`) and is refused at `parquet_reader_set_qc`.
+
+### Risk-153 — A container column's row nullness has TWO possible homes, and writing to the wrong one is silent
+
+A `parquet_column` whose kind is `PK_LIST`/`PK_MAP`/`PK_STRUCT` has a `validity` component like
+every other column, and **it must never be used.** Row nullness for a container kind lives inside
+the container object, and `parquet_column`'s three row-validity procedures
+(`parquet_column_is_null_row`, `_set_null_row`, `_clear_null_row`, all in
+`src/parquet_columns_validity.f90`) delegate to it through the deferred `is_null_row`/`set_null_row`/
+`clear_null_row` bindings on `parquet_container_column`.
+
+**Both halves of the split fail quietly, in opposite directions:**
+
+- A path that **writes** the column's own bitmap for a container kind — `ensure_bitmap` plus
+  `bit_set`, which is what every non-container arm does — appears to succeed and changes nothing a
+  reader can see: `%is_null(i)` asks the container, which was never told. A mutation that silently
+  does nothing.
+- A path that **reads** the column's own bitmap answers `.false.` for a row that genuinely is null.
+  A wrong answer, and the more dangerous half, because a null row's payload elements are
+  meaningless — a caller that believes the row is present will read whatever the offsets describe.
+
+**This was live, not hypothetical.** `%append_nulls(n)` on an adopted list column appended the rows
+correctly through the container and then fell through to `ensure_bitmap` + `bits_set_range`, so the
+rows were null in the container *and* marked null in a bitmap nothing read; `%is_null` meanwhile had
+no container arm at all and answered `.false.` for every one of them. Nothing failed to build,
+`%length()` was right, and only an assertion on `%is_null` after `%append_nulls` found it
+(`test_column_append_nulls`, `test/test_list.f90`).
+
+**What this forbids.** Every future `parquet_column` path that touches validity must dispatch on
+`parquet_kind_is_container(self%kind)` before reaching `self%validity`, and must delegate rather
+than duplicate. There are five such paths today (`is_null`, `set_null`, `clear_null`,
+`ensure_validity`, `has_validity_storage`) plus `append_nulls`, which returns early for a container
+kind rather than writing bits after `grow_rows`.
+
+**The ELEMENT forms were the open half, and they are settled.** A container column's `width` is 1
+(`adopt_container` fixes it there), so `check_element` restricts `e` to 1 and the element form asks
+exactly the question the row form answers. They therefore have their own container arm and give the
+same answer — before it, they fell through to the default arm, read an unallocated bitmap and
+answered `.false.` for a genuinely null row.
+
+**Test.** Covered. The row forms by `test_column_append_nulls` and `test_ensure_validity`
+(`test/test_list.f90`), which assert through `parquet_column` rather than through
+`parquet_list_column` — that is the point, since asking the container directly cannot see the
+disagreement. The element forms by `test/test_columns.f90`'s assertion that `%is_null(i, 1)` equals
+`%is_null(i)` on a width-1 container column.
+
+**What this still forbids.** Any NEW `parquet_column` path that touches validity — row form or
+element form — must dispatch on `parquet_kind_is_container(self%kind)` before reaching
+`self%validity`, and must delegate rather than duplicate. A path that writes the column's own
+bitmap for a container kind compiles, appears to succeed and changes nothing a reader can see.
+
+
+### Risk-155 — A struct's field mask is taken at face value, and the arithmetic that looks necessary is not
+
+**What breaks.** `unwrap_struct_path` (`src/parquet_wrapper.cpp`) returns a struct leaf's
+**combined** mask — `struct_valid AND field_valid` — and `src/parquet_read_struct.f90` stores it as
+the field's own validity, unchanged. That is correct, and it looks wrong: the obvious reading is
+that the struct's contribution has to be divided back out
+(`own_null = combined_null .and. .not. struct_null`), and a future reader who "fixes" it that way
+introduces a silent wrong answer — every field of every null struct row would come back reporting
+`is_valid = .true.` over an undefined value.
+
+**Why it is quiet.** Both spellings agree on every row of every struct whose rows are all present,
+which is most fixtures and every casual check. They differ only on a **null struct row**, where the
+"corrected" version reports a value the file does not contain. Nothing aborts; the column validates;
+`%is_null(i)` still answers correctly, so the row-level story looks right while the field-level one
+is wrong.
+
+**Why the face-value reading is the correct one.** Parquet's definition levels cannot encode "the
+struct is absent but its field is present", so **Parquet forces every child null under a null struct
+row on write**. Measured against Arrow 25.0.0: a struct array built in memory with row 4 null and
+its `id` child VALID at row 4 reads back with that child INVALID. So for a file, `combined` IS the
+field's own stored validity at every row — the identity for a present row, and the file's own answer
+for an absent one.
+
+**What must NOT be inferred from this.** The struct's OWN row validity is genuinely not derivable
+and must keep coming from `parquet_read_struct_row_validity`: a present struct whose every field is
+null gives the same combined mask, for every field, as an absent one. That is what
+`test_two_null_levels` (`test/test_struct_read.f90`) pins, using the fixture's row 4, which exists
+for exactly this.
+
+**Test.** Covered, by two tests, and the SECOND one needs a trick that is the interesting part.
+`test_two_null_levels` (`test/test_struct_read.f90`) covers the row-level half and catches a reader
+that lost the separate row-validity call. It does **not** catch the division, and neither did
+anything else: the mutation was applied to `read_struct_field` and all eight tests of that suite
+still passed.
+
+**Why the obvious assertion cannot see it**: `begin_get` (`src/parquet_struct.f90`) tests the ROW
+level first and short-circuits, so a null struct row's fields answer `is_valid = .false.` through
+`%get_field` whatever their own bitmaps hold. **`%clear_null_row` is the exposure** — clearing the
+row level makes `begin_get` fall through to the field bitmap, which is then the only thing
+answering. `test_field_mask_is_face_value` does that, asserts both fields of the cleared row still
+report null and that the value is the type's default, and keeps row 3 untouched as a negative
+control so it cannot also pass against a reader that nulled every field of every row. Verified by
+mutation in both directions.
+
+**What this still forbids.** Do not "correct" the combined mask by dividing the struct's
+contribution back out, and do not add an accessor that reads a field's bitmap without consulting
+the row level first — the short-circuit in `begin_get` is what makes the in-memory and read-back
+columns agree.
+
+
+### Risk-157 — A map column's entry ceiling has NO widening fallback, and the narrowing cast is one line away
+
+**What breaks.** `assemble_map_array` (`src/parquet_wrapper.cpp`) narrows a map column's int64
+offsets into the int32 buffer Arrow requires:
+
+```cpp
+auto op = reinterpret_cast<int32_t *>(offsets_buf->mutable_data());
+for (int64_t i = 0; i <= nrows; ++i) op[i] = static_cast<int32_t>(offsets[i]);
+```
+
+Past 2³¹−1 entries that cast **wraps**. The written file's offsets then describe rows that overlap,
+run backwards, or point outside the entries array, and every reader — this library's included — is
+entitled to return whatever it finds there.
+
+**Why this is not the same risk the string and list ceilings carry.** Those two have a **fork**: a
+string column that will not fit an int32 offsets buffer is written as `large_utf8`, a list column as
+`large_list`, and the guard is a branch rather than a refusal. **Arrow provides no `large_map`** —
+verified against `arrow/type.h` and `arrow/array/array_nested.h`, and against `MapArray::FromArrays`'
+own contract, which requires int32 offsets. So this is the one variable-length ceiling in the library
+whose only correct outcomes are "it fits" and "this cannot be written", and the natural instinct —
+*widen it like the others* — has nothing to reach for.
+
+**Why it would be quiet.** Nothing in Arrow objects: the offsets buffer is the right size and the
+right type, and `Table::Validate()` does not check that offsets are monotonic. A test would need a
+genuine two-billion-entry column to reach it, which no fixture can hold.
+
+**Test.** Covered, and the shape of the cover is the point.
+`check_map_entries_fit_arrow_limit` runs **before** the loop above, never after — a guard placed
+after the cast would be reading the wrapped values. `g_debug_map_offset_limit` plus
+`parquet_debug_set_map_offset_limit` let `map_entry_limit` (`test/error_scenarios.f90`) reach the
+refusal with a three-entry column, and `test_map_entry_limit_aborts` (`test/test_errors.f90`)
+asserts the message, not merely the exit status.
+
+**What this entry still forbids.** Three things, and each is a plausible future edit:
+
+- **Do not move the check after the narrowing loop**, or into `parquet_append_map_column`'s callers.
+  It belongs immediately before the cast it protects.
+- **Do not add a "large map" arm.** There is no such Arrow type; an arm that looked like one would
+  have to invent a private encoding no other tool could read.
+- **Do not reuse `g_debug_list_offset_limit` for it.** The list override exercises a WIDENING and
+  this one exercises a REFUSAL, so a shared global would make one scenario silently change the
+  other's meaning — the same reason the list and string overrides were kept separate.
+

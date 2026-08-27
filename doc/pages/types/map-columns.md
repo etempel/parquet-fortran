@@ -198,6 +198,11 @@ with a whole-column map read exactly as with any other.
 container has no single element type a scalar read could target, and the shape query is how a
 caller discovers what it is dealing with.
 
+**A map nested inside a `STRUCT` is read by its dotted path**, exactly as a list leaf is:
+`parquet_read_column(reader, "profile.attrs", mc)` reads the map at that path into a
+`parquet_map_column`, and `parquet_get_column_shape` answers `"map"` for it. Such a path is one of
+the names `parquet_get_column_names` lists, so a caller iterating a file's columns meets it.
+
 **V1 keys must be strings.** A file whose map is keyed by anything else is refused, naming the
 actual key type, rather than having its keys rendered as text — that would silently change the
 data, since `1`, `01` and `1.0` are three different keys. A map whose *value* is itself a list, map
@@ -248,9 +253,11 @@ automatically whenever its keys are strings and its values are one of the nine e
 
 ## What this module does not do yet
 
-- **A value cannot itself be a container.** `map<string, list<int32>>`,
-  `map<string, struct<...>>` and `map<string, map<...>>` are all refused, naming the value type.
+- **A container value cannot be WRITTEN.** `map<string, list<int32>>`, `map<string, struct<...>>`
+  and `map<string, map<...>>` all read (see
+  [Reading a map column from a file](#reading-a-map-column-from-a-file)); `parquet_write_column`
+  refuses such a column, naming the value type. A nested map read from a file can therefore be
+  inspected but not round-tripped.
 - **Keys must be strings.** Reading a map keyed by anything else is a clean refusal.
-- **A map reached through a dotted struct path** (`profile.attrs`) is not addressable.
 - **`qc:` bounds and `parquet_filter` rules** stay scalar-leaf-only, permanently. `qc: miss:` does
   apply, to row nullness.

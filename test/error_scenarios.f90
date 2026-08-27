@@ -141,6 +141,56 @@ program error_scenarios
         call scenario_struct_set_field_unknown()
     case ("struct_set_field_wrong_kind")
         call scenario_struct_set_field_wrong_kind()
+    case ("map_init_bad_kind")
+        call scenario_map_init_bad_kind()
+    case ("map_append_wrong_kind")
+        call scenario_map_append_wrong_kind()
+    case ("map_append_length_mismatch")
+        call scenario_map_append_length_mismatch()
+    case ("map_get_wrong_kind")
+        call scenario_map_get_wrong_kind()
+    case ("map_get_missing_key")
+        call scenario_map_get_missing_key()
+    case ("map_get_missing_key_warn_ok")
+        call scenario_map_get_missing_key_warn_ok()
+    case ("map_get_occurrence_zero")
+        call scenario_map_get_occurrence_zero()
+    case ("map_get_at_out_of_range")
+        call scenario_map_get_at_out_of_range()
+    case ("map_view_out_of_range")
+        call scenario_map_view_out_of_range()
+    case ("map_read_not_a_map")
+        call scenario_map_read_not_a_map()
+    case ("map_read_int_key")
+        call scenario_map_read_int_key()
+    case ("map_read_nested_value")
+        call scenario_map_read_nested_value()
+    case ("map_write_uninitialized")
+        call scenario_map_write_uninitialized()
+    case ("map_write_type_mismatch")
+        call scenario_map_write_type_mismatch()
+    case ("map_col_size_rejected")
+        call scenario_map_col_size_rejected()
+    case ("map_qc_rejected")
+        call scenario_map_qc_rejected()
+    case ("map_protected_row_null")
+        call scenario_map_protected_row_null()
+    case ("map_protected_value_null")
+        call scenario_map_protected_value_null()
+    case ("map_protected_ok")
+        call scenario_map_protected_ok()
+    case ("map_entry_limit")
+        call scenario_map_entry_limit()
+    case ("map_adopt_rows_offset_mismatch")
+        call scenario_map_adopt_rows_offset_mismatch()
+    case ("map_adopt_rows_bad_key_kind")
+        call scenario_map_adopt_rows_bad_key_kind()
+    case ("map_chunk_refuses_sort")
+        call scenario_map_chunk_refuses_sort()
+    case ("maml_map_bare_token")
+        call scenario_maml_map_bare_token()
+    case ("maml_map_nested_value")
+        call scenario_maml_map_nested_value()
     case ("list_write_type_mismatch")
         call scenario_list_write_type_mismatch()
     case ("list_write_uninitialized")
@@ -17521,6 +17571,342 @@ contains
         call parquet_write_column(writer, "s", sc)
         call parquet_close_writer(writer)
     end subroutine scenario_struct_protected_ok
+
+    ! ==================================================================================
+    ! MAP column scenarios
+    ! ==================================================================================
+    !
+    ! A map has TWO null levels (the row, and each value) where a struct has 1 + M, and a key is
+    ! never null -- so the protected trio below checks the row and the value and nothing else.
+    ! Every soft-fail guard has BOTH arms here: the hard abort, and a `_warn_ok` negative control
+    ! proving the same call returns when asked to.
+
+    !> `%init` with a value kind a map cannot hold. A container value is Phase 7's nesting, and
+    !> `%init` has no way to be told what the inner container holds.
+    subroutine scenario_map_init_bad_kind()
+        type(parquet_map_column) :: mc
+        call mc%init(PK_LIST)
+    end subroutine scenario_map_init_bad_kind
+
+    !> `%append_row` with values of a kind the column was not initialized to. A wrong VALUE KIND is
+    !> a type mismatch rather than a lookup failure, so it is always hard.
+    subroutine scenario_map_append_wrong_kind()
+        type(parquet_map_column) :: mc
+        call mc%init(PK_INT32)
+        call mc%append_row(["a"], [1.5_real64])
+    end subroutine scenario_map_append_wrong_kind
+
+    !> `%append_row` with more keys than values. The two arrays are index-aligned by contract, and
+    !> a mismatch would otherwise show up later as a wrong answer rather than as an error here.
+    subroutine scenario_map_append_length_mismatch()
+        type(parquet_map_column) :: mc
+        call mc%init(PK_INT32)
+        call mc%append_row(["a", "b"], [1_int32])
+    end subroutine scenario_map_append_length_mismatch
+
+    !> `%get` with a variable of the wrong type. Always hard, with no `warn=`/`found=` escape:
+    !> softening it would let a caller read an int32 map with a real64 accessor and be told only
+    !> that the key was "not found".
+    subroutine scenario_map_get_wrong_kind()
+        type(parquet_map_column), target :: mc
+        type(parquet_map_row) :: row
+        real(real64) :: v
+        logical :: got
+        call mc%init(PK_INT32)
+        call mc%append_row(["a"], [1_int32])
+        row = mc%view(1_int64)
+        ! found= is supplied deliberately: it must NOT soften a kind mismatch.
+        call row%get("a", v, found=got)
+    end subroutine scenario_map_get_wrong_kind
+
+    !> A missing key with NEITHER `warn=` nor `found=`. Aborting is the only truthful outcome --
+    !> returning silently would leave the caller with no way to learn the lookup failed at all.
+    subroutine scenario_map_get_missing_key()
+        type(parquet_map_column), target :: mc
+        type(parquet_map_row) :: row
+        integer(int32) :: v
+        call mc%init(PK_INT32)
+        call mc%append_row(["a"], [1_int32])
+        row = mc%view(1_int64)
+        call row%get("nope", v)
+    end subroutine scenario_map_get_missing_key
+
+    !> The NEGATIVE CONTROL for every soft-fail guard in this module: the same three lookups that
+    !> abort above must RETURN when `warn=`/`found=` is given. Without it a guard that fired
+    !> unconditionally would pass every abort scenario while breaking every legitimate lookup.
+    subroutine scenario_map_get_missing_key_warn_ok()
+        type(parquet_map_column), target :: mc
+        type(parquet_map_row) :: row
+        integer(int32) :: v
+        character(len=:), allocatable :: k
+        logical :: got
+        call mc%init(PK_INT32)
+        call mc%append_row(["a"], [1_int32])
+        row = mc%view(1_int64)
+        call row%get("nope", v, warn=.true.)
+        call row%get("nope", v, found=got)
+        call row%get_at(9, v, warn=.true.)
+        call row%key_at(9, k, found=got)
+        ! And the permitted cases still work, which is the other half of the control.
+        call row%get("a", v, found=got)
+        if (.not. got .or. v /= 1_int32) error stop "map_get_missing_key_warn_ok: a present key stopped working"
+    end subroutine scenario_map_get_missing_key_warn_ok
+
+    !> `occurrence=0` is a caller mistake rather than a failed lookup, so it is hard whatever
+    !> `warn=`/`found=` say -- the same split the wrong-value-kind guard makes.
+    subroutine scenario_map_get_occurrence_zero()
+        type(parquet_map_column), target :: mc
+        type(parquet_map_row) :: row
+        integer(int32) :: v
+        logical :: got
+        call mc%init(PK_INT32)
+        call mc%append_row(["a"], [1_int32])
+        row = mc%view(1_int64)
+        call row%get("a", v, occurrence=0, found=got)
+    end subroutine scenario_map_get_occurrence_zero
+
+    !> `%get_at` past the end of the row, with neither soft-fail argument.
+    subroutine scenario_map_get_at_out_of_range()
+        type(parquet_map_column), target :: mc
+        type(parquet_map_row) :: row
+        integer(int32) :: v
+        call mc%init(PK_INT32)
+        call mc%append_row(["a"], [1_int32])
+        row = mc%view(1_int64)
+        call row%get_at(5, v)
+    end subroutine scenario_map_get_at_out_of_range
+
+    !> `%view` on a row index the column does not have.
+    subroutine scenario_map_view_out_of_range()
+        type(parquet_map_column), target :: mc
+        type(parquet_map_row) :: row
+        call mc%init(PK_INT32)
+        call mc%append_row(["a"], [1_int32])
+        row = mc%view(7_int64)
+    end subroutine scenario_map_view_out_of_range
+
+    !> Reading a column that is not a map at all into a `parquet_map_column`.
+    subroutine scenario_map_read_not_a_map()
+        type(parquet_reader) :: reader
+        type(parquet_map_column) :: mc
+        call parquet_open_reader(reader, "test/fixtures/map_payloads.parquet")
+        call parquet_read_column(reader, "rowid", mc)
+        call parquet_close_reader(reader)
+    end subroutine scenario_map_read_not_a_map
+
+    !> A map keyed by something other than a string. V1 keys are strings, and rendering an int32
+    !> key as text would silently change the data -- `1`, `01` and `1.0` are three different keys
+    !> -- so this is a clean refusal NAMING THE KEY TYPE rather than a coercion.
+    !>
+    !> **When non-string keys are ever supported, this becomes a positive read test** asserting
+    !> that `m_intkey`'s two entries come back with their integer keys, not a deleted scenario;
+    !> the fixture column exists for exactly that succession.
+    subroutine scenario_map_read_int_key()
+        type(parquet_reader) :: reader
+        type(parquet_map_column) :: mc
+        call parquet_open_reader(reader, "test/fixtures/map_payloads.parquet")
+        call parquet_read_column(reader, "m_intkey", mc)
+        call parquet_close_reader(reader)
+    end subroutine scenario_map_read_int_key
+
+    !> A map whose VALUE is itself a container (`map<string, list<int32>>`). Nested values are
+    !> Phase 7's subject; until then this is a clean refusal naming the value type, rather than a
+    !> half-built column -- there is no "unknown" value kind for a map to hold.
+    subroutine scenario_map_read_nested_value()
+        type(parquet_reader) :: reader
+        type(parquet_map_column) :: mc
+        call parquet_open_reader(reader, "test/fixtures/map_list_types.parquet")
+        call parquet_read_column(reader, "map_of_list", mc)
+        call parquet_close_reader(reader)
+    end subroutine scenario_map_read_nested_value
+
+    !> Writing a map column that `%init` has never been called on: there is no value kind to
+    !> declare, so the file's schema cannot be built.
+    subroutine scenario_map_write_uninitialized()
+        type(parquet_writer) :: writer
+        type(parquet_map_column) :: mc
+        call parquet_open_writer(writer, "test_run/error_scenario_map_uninit.parquet")
+        call parquet_write_column(writer, "m", mc)
+        call parquet_close_writer(writer)
+    end subroutine scenario_map_write_uninitialized
+
+    !> A schema declaring `map[int32]` handed a `map<string,string>` column. A map's value type
+    !> must match exactly; there is no widening between map value kinds.
+    subroutine scenario_map_write_type_mismatch()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_map_column) :: mc
+        call schema%init(table="map_mismatch")
+        call schema%add_field("m", "map[int32]")
+        call parquet_parse_maml(schema)
+        call mc%init(PK_STRING)
+        call mc%append_row(["a"], ["x"])
+        call parquet_open_writer(writer, "test_run/error_scenario_map_mismatch.parquet", schema)
+        call parquet_write_column(writer, "m", mc)
+        call parquet_close_writer(writer)
+    end subroutine scenario_map_write_type_mismatch
+
+    !> `col_size:` on a map column. A map row's entry count comes from the DATA, so there is
+    !> nothing for col_size to declare and nothing for it to be resolved from -- the same rule a
+    !> list column's declaration follows.
+    subroutine scenario_map_col_size_rejected()
+        type(parquet_schema) :: schema
+        call schema%init(table="map_colsize")
+        call schema%add_field("m", "map[int32]", col_size=3)
+        call parquet_parse_maml(schema)
+    end subroutine scenario_map_col_size_rejected
+
+    !> `qc: min:`/`max:` on a map column. qc stays scalar-leaf-only by design; `qc: miss:` IS
+    !> supported and applies to ROW nullness, which is the same concept at the same granularity.
+    subroutine scenario_map_qc_rejected()
+        type(parquet_schema) :: schema
+        call schema%init(table="map_qc")
+        call schema%add_field("m", "map[int32]", qc_min="0")
+        call parquet_parse_maml(schema)
+    end subroutine scenario_map_qc_rejected
+
+    !> A protected map column holding a null ROW.
+    subroutine scenario_map_protected_row_null()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_map_column) :: mc
+        call schema%init(table="map_prot_row")
+        call schema%add_field("m", "map[int32]")
+        call parquet_parse_maml(schema)
+        call schema%set_protected("m")
+        call mc%init(PK_INT32)
+        call mc%append_row(["a"], [1_int32])
+        call mc%append_null_row()
+        call parquet_open_writer(writer, "test_run/error_scenario_map_prot_row.parquet", schema)
+        call parquet_write_column(writer, "m", mc)
+        call parquet_close_writer(writer)
+    end subroutine scenario_map_protected_row_null
+
+    !> A protected map column holding a null VALUE. At the Parquet level that IS a Null in this
+    !> map's value leaf column, so the weaker reading would declare a non-nullable field for a
+    !> column that can contain nulls -- the invariant build_field's safety comment forbids.
+    subroutine scenario_map_protected_value_null()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_map_column) :: mc
+        call schema%init(table="map_prot_val")
+        call schema%add_field("m", "map[int32]")
+        call parquet_parse_maml(schema)
+        call schema%set_protected("m")
+        call mc%init(PK_INT32)
+        call mc%append_row(["a"], [0_int32], is_valid=[.false.])
+        call parquet_open_writer(writer, "test_run/error_scenario_map_prot_val.parquet", schema)
+        call parquet_write_column(writer, "m", mc)
+        call parquet_close_writer(writer)
+    end subroutine scenario_map_protected_value_null
+
+    !> The NEGATIVE CONTROL for both protected guards: a protected map column with no Null at
+    !> EITHER level must write cleanly. A present-but-EMPTY row is deliberately included -- it is
+    !> not a null row, and a guard that treated "no entries" as "absent" would refuse it.
+    subroutine scenario_map_protected_ok()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_map_column) :: mc
+        call schema%init(table="map_prot_ok")
+        call schema%add_field("m", "map[int32]")
+        call parquet_parse_maml(schema)
+        call schema%set_protected("m")
+        call mc%init(PK_INT32)
+        call mc%append_row(["a"], [1_int32])
+        call mc%append_empty_row()
+        call parquet_open_writer(writer, "test_run/error_scenario_map_prot_ok.parquet", schema)
+        call parquet_write_column(writer, "m", mc)
+        call parquet_close_writer(writer)
+    end subroutine scenario_map_protected_ok
+
+    !> The int32 entry ceiling, reached with a tiny fixture through the test-only override.
+    !>
+    !> **Unlike the list and string ceilings this one is a dead end rather than a fork**: Arrow
+    !> addresses a map's entries with an int32 offsets buffer and provides NO large_map, so the
+    !> only truthful outcomes are "it fits" and "this cannot be written". The list equivalent of
+    !> this scenario asserts a WIDENING; this one asserts a refusal.
+    subroutine scenario_map_entry_limit()
+        interface
+            subroutine parquet_debug_set_map_offset_limit(n) bind(C, name="parquet_debug_set_map_offset_limit")
+                use iso_c_binding, only : c_int64_t
+                integer(c_int64_t), value :: n
+            end subroutine parquet_debug_set_map_offset_limit
+        end interface
+        type(parquet_writer) :: writer
+        type(parquet_map_column) :: mc
+        call mc%init(PK_INT32)
+        call mc%append_row(["a", "b", "c"], [1_int32, 2_int32, 3_int32])
+        ! Two entries allowed, three present: the guard must fire before the narrowing cast, since
+        ! a silent wrap there would write a file whose offsets are garbage.
+        call parquet_debug_set_map_offset_limit(2_int64)
+        call parquet_open_writer(writer, "test_run/error_scenario_map_limit.parquet")
+        call parquet_write_column(writer, "m", mc)
+        call parquet_close_writer(writer)
+    end subroutine scenario_map_entry_limit
+
+    !> `%adopt_rows` whose final offset does not account for the entries handed over. Every
+    !> precondition there is fatal because each would otherwise show up later as a wrong answer.
+    subroutine scenario_map_adopt_rows_offset_mismatch()
+        type(parquet_map_column) :: mc
+        integer(int64), allocatable :: offs(:)
+        type(parquet_column) :: keys, vals
+        allocate(offs(2))
+        offs = [0_int64, 5_int64]     ! claims five entries
+        call keys%init(PK_STRING, 0_int64)
+        call keys%append_values(["a"])
+        call vals%init(PK_INT32, 0_int64)
+        call vals%append_values([1_int32])   ! but only one was supplied
+        call mc%adopt_rows(offs, keys, vals)
+    end subroutine scenario_map_adopt_rows_offset_mismatch
+
+    !> `%adopt_rows` handed a non-string keys column. V1 keys are strings, and the check is here
+    !> rather than at the first lookup so the message names the kind that was actually passed.
+    subroutine scenario_map_adopt_rows_bad_key_kind()
+        type(parquet_map_column) :: mc
+        integer(int64), allocatable :: offs(:)
+        type(parquet_column) :: keys, vals
+        allocate(offs(2))
+        offs = [0_int64, 1_int64]
+        call keys%init(PK_INT32, 0_int64)
+        call keys%append_values([1_int32])
+        call vals%init(PK_INT32, 0_int64)
+        call vals%append_values([2_int32])
+        call mc%adopt_rows(offs, keys, vals)
+    end subroutine scenario_map_adopt_rows_bad_key_kind
+
+    !> A chunked map read while a read-time sort is installed. Every row-group-scoped operation
+    !> refuses, because a permutation destroys row-group locality -- the map specific inherits
+    !> that and must not weaken it.
+    subroutine scenario_map_chunk_refuses_sort()
+        type(parquet_reader) :: reader
+        type(parquet_sortkey) :: srt
+        type(parquet_map_column) :: mc
+        call srt%add("rowid desc")
+        call parquet_open_reader(reader, "test/fixtures/map_payloads.parquet", sort_by=srt)
+        call parquet_read_column_chunk(reader, "m_int32", 1_int64, mc)
+        call parquet_close_reader(reader)
+    end subroutine scenario_map_chunk_refuses_sort
+
+    !> The bare `map` token, with no value type. Unlike the bare `struct` token it is INVALID: a
+    !> struct's field layout genuinely cannot be expressed in MAML, whereas a map's value type is
+    !> a single token the schema can perfectly well carry -- and a declared-but-unwritten map
+    !> column has to be written with zero rows at close, which cannot invent a value kind.
+    subroutine scenario_maml_map_bare_token()
+        type(parquet_schema) :: schema
+        call schema%init(table="map_bare")
+        call schema%add_field("m", "map")
+        call parquet_parse_maml(schema)
+    end subroutine scenario_maml_map_bare_token
+
+    !> A map token whose value is itself a container. `valid_maml_data_types` deliberately holds
+    !> no container token, which is what rejects this for free -- and is the same mechanism that
+    !> keeps `list[struct]` out.
+    subroutine scenario_maml_map_nested_value()
+        type(parquet_schema) :: schema
+        call schema%init(table="map_nested")
+        call schema%add_field("m", "map[list[int32]]")
+        call parquet_parse_maml(schema)
+    end subroutine scenario_maml_map_nested_value
 
     !> Reading a struct column whose field is itself a nested container. Phase 4 does not support
     !> nesting; refusing it cleanly, NAMING THE FIELD rather than only the column, is its whole

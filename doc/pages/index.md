@@ -18,7 +18,7 @@ type/function/subroutine under `use parquet`), see the [modules](../lists/module
 string columns, the date/time/timestamp types, sorting, random numbers and sampling, spatial
 neighbour search, and the process-global settings. Every page below assumes that single import. The
 individual modules (`parquet_io`, `parquet_tables`, `parquet_columns`, `parquet_list`,
-`parquet_struct`, `parquet_strings`, `parquet_temporal`, `parquet_sorting`, `parquet_argsort`, `parquet_sampling`,
+`parquet_struct`, `parquet_map`, `parquet_strings`, `parquet_temporal`, `parquet_sorting`, `parquet_argsort`, `parquet_sampling`,
 `parquet_spatial`, `parquet_random`, `parquet_settings`, `parquet_version`, `parquet_maml_base`)
 are still there and
 can be named directly when you want a narrower import — see [Choosing a module](operating/choosing-a-module.html) for what each one costs
@@ -57,7 +57,7 @@ point in the library.
 
 ### Every page at a glance
 
-All 27 pages, in reading order. (This list, each group's own page list and the
+All 28 pages, in reading order. (This list, each group's own page list and the
 `ordered_subpage:` frontmatter are kept consistent by
 `tools/check_source_conventions.py`, which fails the CI lint stage when they drift.)
 
@@ -74,6 +74,7 @@ All 27 pages, in reading order. (This list, each group's own page list and the
 - [Compact string columns with `parquet_string_column`](types/string-columns.html)
 - [Variable-length list columns with `parquet_list_column`](types/list-columns.html)
 - [Struct columns with `parquet_struct_column`](types/struct-columns.html)
+- [Map columns with `parquet_map_column`](types/map-columns.html)
 
 **Schemas, metadata and quality control**
 

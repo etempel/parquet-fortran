@@ -5,10 +5,11 @@ ordered_subpage: date-time.md
 ordered_subpage: string-columns.md
 ordered_subpage: list-columns.md
 ordered_subpage: struct-columns.md
+ordered_subpage: map-columns.md
 ---
 
 What a column can hold: the supported Parquet/Arrow types and their Fortran counterparts, the
-three temporal element types, the compact variable-length string container, and the two
+three temporal element types, the compact variable-length string container, and the three
 container columns.
 
 - [Supported data types](supported-data-types.html) — the Fortran-kind-to-MAML type table, how
@@ -30,3 +31,8 @@ container columns.
   field per row, the field set fixed at `%init`, the difference between an absent struct instance
   and a present one whose fields are null, the `parquet_struct_row` handle and its two read forms,
   and how a struct column relates to the unchanged dotted-path leaf reader.
+- [Map columns with `parquet_map_column`](map-columns.html) — string-keyed `key -> value` entries
+  per row, duplicate keys and their order preserved as stored, the three-way distinction between a
+  null row, an empty one and a null value, the `parquet_map_row` handle with its by-key and
+  positional lookups, the soft-fail arguments on every lookup, and the int32 entry ceiling a map
+  has no way to widen past.

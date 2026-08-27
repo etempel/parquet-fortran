@@ -350,6 +350,22 @@ contains
                     "supported for a list column (qc: miss: is); "
             end if
         end if
+        ! A `map[<valuetype>]` column is subject to exactly the same two rules and for exactly the
+        ! same reasons: a map row's entry count comes from the data, and qc: min:/max: is
+        ! scalar-leaf-only. qc: miss: applies to ROW nullness (a null map), as it does for a list.
+        if (parquet_is_map_data_type(col%data_type)) then
+            if (col%col_size == parquet_size_auto) then
+                errors = errors // "field '" // cur_name // "' declares col_size: auto, which does not " // &
+                    "apply to a map column (a map row's entry count comes from the data); "
+            else if (col%col_size > 1) then
+                errors = errors // "field '" // cur_name // "' declares col_size > 1, which does not " // &
+                    "apply to a map column (a map row's entry count comes from the data); "
+            end if
+            if (col%has_qc_min .or. col%has_qc_max) then
+                errors = errors // "field '" // cur_name // "' declares qc: min:/max:, which is not " // &
+                    "supported for a map column (qc: miss: is); "
+            end if
+        end if
 
         ! A struct column's own three rules, all refusals, and all for the same reasons the list
         ! column's are: a struct row is ONE struct instance, so there is no width for col_size or
@@ -1077,37 +1093,66 @@ contains
         call parquet_parse_list_type(token, base, unit_sel, is_utc, res, valid)
     end function parquet_is_list_data_type
     !
-    module procedure parquet_parse_list_type
+    !> Whether `token` is a map data_type token at all; the map counterpart of
+    !! `parquet_is_list_data_type` above, and used the same way.
+    logical function parquet_is_map_data_type(token) result(res)
+        character(len=*), intent(in) :: token !! a field's declared data_type.
+        character(len=:), allocatable :: base
+        integer :: unit_sel
+        logical :: is_utc, valid
+        call parquet_parse_map_type(token, base, unit_sel, is_utc, res, valid)
+    end function parquet_is_map_data_type
+    !
+    !> The shared body of `parquet_parse_list_type` and `parquet_parse_map_type`: both tokens have
+    !! the identical `<prefix>[<inner>]` shape and differ only in the prefix, so one parser serves
+    !! both and the two vocabularies cannot drift apart.
+    !!
+    !! A map token carries NO key type -- v1 keys are always strings -- so `map[int32]` means
+    !! `map<string,int32>`. A future version supporting other key types would spell that
+    !! `map[<keytype>,<valuetype>]`, which is unambiguous against this form because it has a comma.
+    subroutine parse_container_token(token, prefix, inner_base, unit_sel, is_utc, is_container, valid)
+        character(len=*), intent(in) :: token                   !! the data_type token.
+        character(len=*), intent(in) :: prefix                  !! "list" or "map".
+        character(len=:), allocatable, intent(out) :: inner_base !! the inner base type token.
+        integer, intent(out) :: unit_sel                        !! temporal unit selector, else 0.
+        logical, intent(out) :: is_utc                          !! UTC flag for a temporal inner type.
+        logical, intent(out) :: is_container                    !! .true. if the token uses this prefix.
+        logical, intent(out) :: valid                           !! .true. if it is well-formed.
         character(len=:), allocatable :: lo, inner, tbase
-        integer :: lb, rb, j
+        integer :: lb, rb, j, np
         logical :: t_is_temporal, t_valid
         logical :: t_utc
 
-        is_list = .false.
+        is_container = .false.
         valid = .false.
         is_utc = .false.
         unit_sel = 0
-        elem_base = ""
+        inner_base = ""
+        np = len(prefix)
         call parquet_to_lower(trim(adjustl(token)), lo)
 
-        ! A list token is exactly `list[...]`. The closing bracket is matched from the END so that
-        ! a temporal element carrying its own suffix -- list[timestamp[ms,utc]] -- splits correctly;
-        ! that is the same rule parquet_parse_temporal_type uses one level down, which is what lets
-        ! the two compose instead of needing a bracket-nesting parser.
+        ! The closing bracket is matched from the END so that a temporal inner type carrying its
+        ! own suffix -- list[timestamp[ms,utc]], map[timestamp[ms,utc]] -- splits correctly; that
+        ! is the same rule parquet_parse_temporal_type uses one level down, which is what lets the
+        ! two compose instead of needing a bracket-nesting parser.
         lb = index(lo, "[")
-        if (lb /= 5) return
-        if (lo(1:4) /= "list") return
-        is_list = .true.
+        if (lb /= np + 1) return
+        if (lo(1:np) /= prefix) return
+        is_container = .true.
         rb = index(lo, "]", back=.true.)
         if (rb /= len(lo) .or. rb <= lb + 1) return
         inner = trim(adjustl(lo(lb+1:rb-1)))
         if (len(inner) == 0) return
 
-        ! A non-temporal element is an exact match against the same base tokens a scalar column
-        ! accepts, so the two vocabularies cannot drift.
+        ! A non-temporal inner type is an exact match against the same base tokens a scalar column
+        ! accepts, so the two vocabularies cannot drift. That is also what keeps a CONTAINER inner
+        ! type out: `list[struct]`, `map[list[int32]]` and their kin are rejected for free, because
+        ! valid_maml_data_types deliberately holds no container token -- see
+        ! parquet_data_type_token_valid, which special-cases the bare `struct` outside that array
+        ! for exactly this reason.
         do j = 1, size(valid_maml_data_types)
             if (inner == trim(valid_maml_data_types(j))) then
-                elem_base = inner
+                inner_base = inner
                 valid = .true.
                 return
             end if
@@ -1115,23 +1160,39 @@ contains
 
         call parquet_parse_temporal_type(inner, tbase, unit_sel, t_utc, t_is_temporal, t_valid)
         if (t_is_temporal .and. t_valid) then
-            elem_base = tbase
+            inner_base = tbase
             is_utc = t_utc
             valid = .true.
             return
         end if
         unit_sel = 0
+    end subroutine parse_container_token
+    !
+    module procedure parquet_parse_map_type
+        call parse_container_token(token, "map", value_base, unit_sel, is_utc, is_map, valid)
+    end procedure parquet_parse_map_type
+    !
+    module procedure parquet_parse_list_type
+        call parse_container_token(token, "list", elem_base, unit_sel, is_utc, is_list, valid)
     end procedure parquet_parse_list_type
 
     module procedure parquet_data_type_token_valid
         character(len=:), allocatable :: base, lo
         integer :: unit_sel, j
-        logical :: is_utc, is_temporal, valid, is_list
+        logical :: is_utc, is_temporal, valid, is_list, is_map
 
         ! A list token first: `list[int32]` is not temporal and is not in valid_maml_data_types
         ! either, so without this it would fall through to the exact-match loop and be rejected.
         call parquet_parse_list_type(token, base, unit_sel, is_utc, is_list, valid)
         if (is_list) then
+            parquet_data_type_token_valid = valid
+            return
+        end if
+
+        ! Then a map token, on exactly the same terms: `map[int32]` is a container token with a
+        ! bracketed inner type, and the same worker parses both.
+        call parquet_parse_map_type(token, base, unit_sel, is_utc, is_map, valid)
+        if (is_map) then
             parquet_data_type_token_valid = valid
             return
         end if
@@ -1142,10 +1203,13 @@ contains
             return
         end if
         ! The bare `struct` token. Deliberately NOT an entry in valid_maml_data_types: that array
-        ! is also what parquet_parse_list_type validates a LIST's element token against, so adding
-        ! "struct" there would silently make `list[struct]` a valid declaration -- which is Phase
-        ! 7's nesting and not this. A struct declares no field layout in MAML at all; its fields
-        ! come entirely from the parquet_struct_column the caller passes at write time.
+        ! is also what parse_container_token validates a LIST's element and a MAP's value token
+        ! against, so adding "struct" there would silently make `list[struct]` AND `map[struct]`
+        ! valid declarations -- which is Phase 7's nesting and not this. A struct declares no field
+        ! layout in MAML at all; its fields come entirely from the parquet_struct_column the caller
+        ! passes at write time. Note there is deliberately no bare `map` token to match it: a map's
+        ! value type IS expressible in MAML, so leaving it out would be an omission rather than a
+        ! statement.
         call parquet_to_lower(trim(adjustl(token)), lo)
         if (trim(lo) == "struct") then
             parquet_data_type_token_valid = .true.
@@ -1558,6 +1622,7 @@ contains
         integer :: dt_unit !! temporal unit selector scratch.
         logical :: dt_utc, dt_is_temporal, dt_valid !! temporal utc/is-temporal/well-formed scratch.
         logical :: dt_is_list !! whether the data_type token names a list column (parquet_parse_list_type).
+        logical :: dt_is_map !! whether the data_type token names a map column (parquet_parse_map_type).
 
         ! See g_maml_mutex in parquet_wrapper.cpp: this function's repeated
         ! "grow tmp(:), whole-array-assign the old contents in, move_alloc"
@@ -1919,6 +1984,11 @@ contains
                     ! look for a unit. A malformed one is stored verbatim, exactly as a malformed
                     ! temporal token is, so parquet_validate_maml rejects it.
                     call parquet_parse_list_type(cvalue, dt_base, dt_unit, dt_utc, dt_is_list, dt_valid)
+                    if (.not. dt_is_list) then
+                        call parquet_parse_map_type(cvalue, dt_base, dt_unit, dt_utc, dt_is_map, dt_valid)
+                    else
+                        dt_is_map = .false.
+                    end if
                     if (trim(adjustl(cvalue)) == "struct") then
                         ! The bare struct token, stored canonically. No unit, no element type and
                         ! no field layout: a struct's fields come from the column object at write
@@ -1927,6 +1997,17 @@ contains
                     else if (dt_is_list) then
                         if (dt_valid) then
                             tmp(n)%data_type = "list[" // dt_base // "]"
+                            tmp(n)%time_unit = dt_unit
+                            tmp(n)%is_utc = dt_utc
+                        else
+                            tmp(n)%data_type = cvalue
+                        end if
+                    else if (dt_is_map) then
+                        ! Identical treatment to a list token, one level of container up: the
+                        ! canonical BASE form in data_type, and a temporal value's unit/UTC in the
+                        ! same two fields a scalar temporal column uses.
+                        if (dt_valid) then
+                            tmp(n)%data_type = "map[" // dt_base // "]"
                             tmp(n)%time_unit = dt_unit
                             tmp(n)%is_utc = dt_utc
                         else

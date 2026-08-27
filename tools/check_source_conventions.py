@@ -1513,6 +1513,25 @@ def check_parquet_struct_stays_arrow_free():
         "A struct column is in-memory storage and is advertised as an Arrow-free import.")
 
 
+def check_parquet_map_stays_arrow_free():
+    """`use parquet_map` must not reach parquet_bindings.
+
+    A map column is pure in-memory storage: offsets, a flattened keys column, a flattened values
+    column and a row bitmap. Nothing in it needs Arrow, and a program that builds map-shaped data
+    without ever touching a file should pay for none. Pinned in its own right rather than through
+    `parquet_columns` or `parquet_strings` (both of which it imports and both of which are
+    themselves checked) for the reason recorded on those checks: coverage inherited from a
+    neighbour's import evaporates the day that import moves, and does so silently.
+
+    The one dependency beyond those two is `parquet_settings_base`, a leaf, for the warnings its
+    soft-fail lookups can emit -- so the Arrow-free property is unaffected, and the re-export rule
+    that forces the import is what lets a narrow consumer silence those warnings.
+    """
+    return _check_stays_arrow_free(
+        "parquet_map",
+        "A map column is in-memory storage and is advertised as an Arrow-free import.")
+
+
 def check_parquet_temporal_stays_arrow_free():
     """`use parquet_temporal` must not reach parquet_bindings.
 

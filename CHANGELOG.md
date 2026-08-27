@@ -63,6 +63,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a struct's leaves by their dotted paths (`"person.age"`) is unchanged and still reaches any
   depth of nesting. **Not yet**: a struct column cannot be held by a `parquet_table`, and a field
   cannot itself be a struct, list or map.
+- **`parquet_map`: `parquet_map_column`, a `MAP` column, plus `parquet_map_row`, a lightweight
+  handle to one of its rows.** Every row holds zero or more `key -> value` entries; keys are
+  strings and the value kind is fixed by `%init(value_kind)` and covers the nine scalar kinds.
+  Duplicate keys are preserved in the order given, so `%get(key, value)` returns the first match,
+  `occurrence=` selects a later one, and `%key_count`/`%contains_key` answer about them;
+  `%get_at`/`%key_at` walk a row positionally. A row may be a null (absent) map, a present but
+  empty one, or hold an entry whose value is null — three states, all tracked separately, and a
+  key is never null. Every lookup can warn or report `found=` instead of aborting. Deep copy,
+  move, and a `%gather_rows` rebuild that serves reordering, filtering and duplication. A
+  `parquet_column` can take ownership of one through `%adopt_container`. A new Arrow-free entry
+  module (`use parquet_map` compiles eleven Fortran files). `parquet_read_column`/
+  `parquet_read_column_chunk` read a `MAP` column from a Parquet file straight into one, whole or
+  one row group at a time; `parquet_write_column`/`parquet_write_column_chunk` write one back out,
+  declared in a schema as `map[<valuetype>]`. **Not yet**: a map column cannot be held by a
+  `parquet_table`, its keys must be strings, and its values cannot themselves be containers. A
+  map's total entry count is capped at 2,147,483,647 — Arrow has no `large_map` to widen into, so
+  a column past it is refused rather than written in a wider form.
 
 ### Changed
 

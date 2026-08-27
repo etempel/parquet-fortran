@@ -34,6 +34,8 @@ module parquet_core
         parquet_list_column_row_validity
     use parquet_struct, only: parquet_struct_column, parquet_struct_column_field, parquet_struct_column_names, &
         parquet_struct_column_row_validity, parquet_struct_column_build
+    use parquet_map, only: parquet_map_column, parquet_map_column_offsets, parquet_map_column_keys, &
+        parquet_map_column_values, parquet_map_column_row_validity
     use parquet_columns, only: parquet_column, parquet_column_set_null, parquet_column_string_column, &
         parquet_column_data_ptr, parquet_column_is_null, parquet_kind_name, &
         PK_INT32, PK_INT64, PK_FLOAT32, PK_FLOAT64, PK_LOGICAL, PK_STRING, PK_DATE, PK_TIME, PK_TIMESTAMP
@@ -718,6 +720,7 @@ module parquet_core
         module procedure parquet_write_string_column_compact
         module procedure parquet_write_list_column
         module procedure parquet_write_struct_column
+        module procedure parquet_write_map_column
         module procedure parquet_write_date_column
         module procedure parquet_write_date_matrix_column
         module procedure parquet_write_time_column
@@ -773,6 +776,7 @@ module parquet_core
         module procedure parquet_write_string_column_chunk_compact
         module procedure parquet_write_list_column_chunk
         module procedure parquet_write_struct_column_chunk
+        module procedure parquet_write_map_column_chunk
         module procedure parquet_write_date_column_chunk
         module procedure parquet_write_date_matrix_column_chunk
         module procedure parquet_write_time_column_chunk
@@ -960,6 +964,7 @@ module parquet_core
         module procedure parquet_read_timestamp_array_full
         module procedure parquet_read_list_column
         module procedure parquet_read_struct_column
+        module procedure parquet_read_map_column
     end interface parquet_read_column
 
     !> Reads one row of a vector (array) column named `name` from an open
@@ -1096,6 +1101,8 @@ module parquet_core
         module procedure parquet_read_list_column_chunk_rg32
         module procedure parquet_read_struct_column_chunk_rg32
         module procedure parquet_read_struct_column_chunk_rg64
+        module procedure parquet_read_map_column_chunk_rg32
+        module procedure parquet_read_map_column_chunk_rg64
         module procedure parquet_read_list_column_chunk_rg64
     end interface parquet_read_column_chunk
 
@@ -1577,6 +1584,31 @@ module parquet_core
             logical, intent(out) :: is_list !! .true. if the token names a list column at all.
             logical, intent(out) :: valid !! .true. if the token is well-formed.
         end subroutine parquet_parse_list_type
+        !> Splits a `map[<valuetype>]` data_type token into its value base type plus, for a
+        !> temporal value, that value's unit/UTC flag. The map counterpart of
+        !> parquet_parse_list_type above, with the identical contract: `is_map` reports whether
+        !> the token is a map token at all (so a caller can fall through to the scalar rules), and
+        !> `valid` whether it is a WELL-FORMED one.
+        !>
+        !> **The token carries no KEY type**, because v1 map keys are always strings -- `map[int32]`
+        !> means `map<string,int32>`. A future version supporting other key types would spell that
+        !> `map[<keytype>,<valuetype>]`, which is unambiguous against this form because it has a
+        !> comma.
+        !>
+        !> The value type is REQUIRED: a bare `map` is malformed, for the same reason a bare `list`
+        !> is -- a declared-but-unwritten map column has to be written with zero rows at close, and
+        !> that cannot invent a value kind. (The bare `struct` token IS valid, and the difference is
+        !> real: a struct's field layout comes from the column object at write time and cannot be
+        !> expressed in MAML at all, whereas a map's value type is a single token the schema can
+        !> perfectly well carry.)
+        module subroutine parquet_parse_map_type(token, value_base, unit_sel, is_utc, is_map, valid)
+            character(len=*), intent(in) :: token !! the data_type token, e.g. "map[timestamp[ms,utc]]".
+            character(len=:), allocatable, intent(out) :: value_base !! the value base type token.
+            integer, intent(out) :: unit_sel !! temporal unit selector, else 0.
+            logical, intent(out) :: is_utc !! UTC flag for a temporal value type.
+            logical, intent(out) :: is_map !! .true. if the token names a map column at all.
+            logical, intent(out) :: valid !! .true. if it is a well-formed map token.
+        end subroutine parquet_parse_map_type
         module subroutine parquet_parse_temporal_type(token, base, unit_sel, is_utc, is_temporal, valid)
             character(len=*), intent(in) :: token !! lowercased data_type token.
             character(len=:), allocatable, intent(out) :: base !! base type, or the token itself if non-temporal.
@@ -2393,6 +2425,22 @@ module parquet_core
             character(len=*), intent(in) :: name !! column name.
             type(parquet_struct_column), intent(in), target :: values !! the struct column to write.
         end subroutine parquet_write_struct_column
+        !> Map (parquet_map_column) specific of parquet_write_column.
+        !>
+        !> Writes a genuine Parquet `MAP` column -- entries in the order they were appended,
+        !> duplicate keys preserved as given, and both null levels (a null ROW, and a null VALUE)
+        !> carried across. On a schema-enforced writer the column must be declared
+        !> `map[<valuetype>]` and the value type must match exactly; there is no widening.
+        !>
+        !> **A map column's entry count is bounded by `huge(int32)` and there is no way around it.**
+        !> Arrow addresses a map's entries with an int32 offsets buffer and provides no `large_map`
+        !> to widen into, unlike a string column (`large_utf8`) or a list column (`large_list`), so
+        !> a column that does not fit is refused rather than written in a wider form.
+        module subroutine parquet_write_map_column(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_map_column), intent(in) :: values !! the map column to write.
+        end subroutine parquet_write_map_column
         !> Scalar date specific of parquet_write_column. Null elements (see parquet_date%is_null)
         !> are written as genuine Parquet Nulls; there is no is_valid argument -- validity lives
         !> in the elements themselves.
@@ -2584,6 +2632,14 @@ module parquet_core
             character(len=*), intent(in) :: name !! column name.
             type(parquet_struct_column), intent(in), target :: values !! this row group's rows.
         end subroutine parquet_write_struct_column_chunk
+        !> Map (parquet_map_column) specific of parquet_write_column_chunk: writes `values` as one
+        !> row group of an already-declared map column. See parquet_write_map_column, and
+        !> src/parquet_wrapper.cpp's "MAP column writes" section banner.
+        module subroutine parquet_write_map_column_chunk(writer, name, values)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            character(len=*), intent(in) :: name !! column name.
+            type(parquet_map_column), intent(in) :: values !! this row group's rows.
+        end subroutine parquet_write_map_column_chunk
         !> Writes a declared-but-never-written `list[<elemtype>]` column with ZERO rows, at close.
         !>
         !> Takes the element BASE token (`"int32"`, `"timestamp"`, ...) rather than a `PK_*` kind,
@@ -2597,6 +2653,16 @@ module parquet_core
             character(len=*), intent(in) :: name !! column name.
             character(len=*), intent(in) :: elem_base !! element base token from parquet_parse_list_type.
         end subroutine parquet_write_empty_list_column
+        !> Writes a declared-but-never-written `map[<valuetype>]` column with ZERO rows, at close.
+        !>
+        !> The map counterpart of parquet_write_empty_list_column above, and delegated to
+        !> parquet_write_map for the same nagfor reason: parquet_write.f90 is an intermediate
+        !> submodule and cannot reference a PK_* constant use-associated into parquet_core.
+        module subroutine parquet_write_empty_map_column(writer, name, value_base)
+            type(parquet_writer), intent(inout) :: writer !! open writer being closed.
+            character(len=*), intent(in) :: name !! column name.
+            character(len=*), intent(in) :: value_base !! value base token from parquet_parse_map_type.
+        end subroutine parquet_write_empty_map_column
         !> Resolves the file unit (a parquet_unit_* selector) and UTC flag a temporal write uses:
         !> the schema-declared unit/utc when the column comes from a MAML/schema, else the fixed
         !> default (microseconds, timezone-naive).
@@ -2611,6 +2677,45 @@ module parquet_core
             integer, intent(out) :: unit !! resolved unit selector.
             integer(c_int32_t), intent(out) :: is_utc !! 1 if UTC-adjusted, else 0.
         end subroutine resolve_temporal_write_unit
+        !> Builds one staged field's per-ROW validity mask, from the two places a null can live:
+        !> the three temporal kinds carry it INSIDE the element (a default-initialized
+        !> parquet_date IS null), every other kind keeps it in the column's own bitmap.
+        !>
+        !> Declared here, and implemented in parquet_write_struct, so that parquet_write_map can
+        !> apply the same rule to a map's VALUES -- a map's entries are a two-field struct, so the
+        !> two writes stage through the same registry and need the same mask. It cannot live in
+        !> the shared parquet_write parent: it references `PK_DATE` and friends, which
+        !> parquet_core use-associates from parquet_columns, and an intermediate submodule
+        !> referencing such a name makes nagfor 7.2 unable to compile ANY of its descendants
+        !> ("Bad module file format for PARQUET_WRITE, could not ref PK_INT32").
+        module subroutine struct_field_validity(fcol, nrows, kind, is_valid, any_null)
+            type(parquet_column), intent(in) :: fcol !! the field's (or the map's values') column.
+            integer(int64), intent(in) :: nrows !! rows it holds.
+            integer, intent(in) :: kind !! its PK_* kind.
+            logical, allocatable, intent(out) :: is_valid(:) !! .true. where the value is present.
+            logical, intent(out) :: any_null !! .true. if at least one value is null.
+        end subroutine struct_field_validity
+        !> Stages ONE field of a struct-shaped write, dispatched on its kind: nine families, each
+        !> handing over that field's values and its per-row validity through the shared
+        !> parquet_struct_field_* push entry points.
+        !>
+        !> Declared here for the same reason as struct_field_validity above: a map column's write
+        !> stages its keys and its values through this same registry, so it calls this with
+        !> `fname` "key" and "value" rather than carrying a second copy of the nine-way dispatch.
+        !> `unit`/`is_utc` are absent for a STRUCT field, whose temporal values are always written
+        !> as timezone-naive microseconds -- a struct declares no per-field layout in MAML, so
+        !> there is nothing for a declared unit to come from. A MAP's `map[timestamp[ms,utc]]`
+        !> token does carry one, so parquet_write_map supplies both.
+        module subroutine push_struct_field(writer, fname, fcol, kind, nrows, val_ptr, unit, is_utc)
+            type(parquet_writer), intent(inout) :: writer !! open writer.
+            character(len=*), intent(in) :: fname !! the field's name, as written into the file.
+            type(parquet_column), intent(in) :: fcol !! the field's column.
+            integer, intent(in) :: kind !! the field's PK_* kind.
+            integer(int64), intent(in) :: nrows !! rows in this write.
+            type(c_ptr), intent(in) :: val_ptr !! per-row validity buffer, or c_null_ptr.
+            integer, intent(in), optional :: unit !! temporal unit selector; default microseconds.
+            integer(c_int32_t), intent(in), optional :: is_utc !! 1 if UTC-adjusted; default 0.
+        end subroutine push_struct_field
     end interface
 
     ! ---- Reader lifecycle & queries ----
@@ -3370,6 +3475,24 @@ module parquet_core
             character(len=*), intent(in) :: name !! struct column name.
             type(parquet_struct_column), intent(inout) :: values !! cleared, then filled with the whole column.
         end subroutine parquet_read_struct_column
+        !> Map (parquet_map_column) specific of parquet_read_column.
+        !>
+        !> Reads a `MAP` column as ONE object: `values` comes back with every row's `key -> value`
+        !> entries in stored order, duplicate keys included, plus the two null levels a map has --
+        !> the row (this map is absent, which is different from a present but empty one) and each
+        !> value. A KEY is never null: Arrow's MapType declares its key field non-nullable.
+        !>
+        !> V1 keys must be strings. A file whose map is keyed by anything else is refused, naming
+        !> the actual key type, rather than having its keys rendered as text -- that would silently
+        !> change the data, since `1`, `01` and `1.0` are different keys. A value whose own type is
+        !> a nested list, map or struct is refused for the same reason a list's is.
+        !>
+        !> Filtering, sampling and sorting compose with this read exactly as with any other.
+        module subroutine parquet_read_map_column(reader, name, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! map column name.
+            type(parquet_map_column), intent(inout) :: values !! cleared, then filled with the whole column.
+        end subroutine parquet_read_map_column
         !> Scalar date specific of parquet_read_column. A Parquet Null in the column becomes a
         !> null `values` element (parquet_date%is_null); there is no null_value/is_valid argument
         !> -- validity lives in the elements themselves, so a null-containing date column reads
@@ -3855,6 +3978,24 @@ module parquet_core
             integer(int64), intent(in) :: row_group !! 1-based row group to read.
             type(parquet_struct_column), intent(inout) :: values !! cleared, then filled with this row group's rows.
         end subroutine parquet_read_struct_column_chunk_rg64
+        !> Map (parquet_map_column), int32 row_group specific of parquet_read_column_chunk; see
+        !> parquet_read_map_column for what a map read yields. Reads exactly row group
+        !> `row_group`'s rows, and -- like every other row-group-scoped operation -- refuses while
+        !> a sort is installed, since a permutation destroys row-group locality.
+        module subroutine parquet_read_map_column_chunk_rg32(reader, name, row_group, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! map column name.
+            integer(int32), intent(in) :: row_group !! 1-based row group to read.
+            type(parquet_map_column), intent(inout) :: values !! cleared, then filled with this row group's rows.
+        end subroutine parquet_read_map_column_chunk_rg32
+        !> Map (parquet_map_column), int64 row_group specific of parquet_read_column_chunk; see
+        !> parquet_read_map_column_chunk_rg32.
+        module subroutine parquet_read_map_column_chunk_rg64(reader, name, row_group, values)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! map column name.
+            integer(int64), intent(in) :: row_group !! 1-based row group to read.
+            type(parquet_map_column), intent(inout) :: values !! cleared, then filled with this row group's rows.
+        end subroutine parquet_read_map_column_chunk_rg64
         !> Variable-length list, int64 row_group specific of parquet_read_column_chunk; see
         !> parquet_read_list_column_chunk_rg32.
         module subroutine parquet_read_list_column_chunk_rg64(reader, name, row_group, values)

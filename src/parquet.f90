@@ -47,6 +47,7 @@ module parquet
     use parquet_columns
     use parquet_list
     use parquet_struct
+    use parquet_map
     use parquet_strings
     use parquet_temporal
     use parquet_sorting
@@ -144,6 +145,12 @@ module parquet
     ! (%field_count/%field_name/%view/%get_field already answer all of it one row at a time).
     private :: parquet_struct_column_field, parquet_struct_column_names
     private :: parquet_struct_column_row_validity, parquet_struct_column_build
+    ! parquet_map's own four internal accessors, hidden for the same reason a third time: they are
+    ! how src/parquet_write_map.f90 reaches a map column's offsets, its two flattened entry columns
+    ! and its per-row validity without a per-row allocation, and they are of no use to a program
+    ! that has the column object itself.
+    private :: parquet_map_column_offsets, parquet_map_column_keys
+    private :: parquet_map_column_values, parquet_map_column_row_validity
     !
     ! ---- The sorting tiers' internals need NO `private ::` here, and that is worth stating ----
     !

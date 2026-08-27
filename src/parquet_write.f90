@@ -1356,9 +1356,9 @@ contains
         type(parquet_date) :: empty_date(0)
         type(parquet_time) :: empty_time(0)
         type(parquet_timestamp) :: empty_ts(0)
-        character(len=:), allocatable :: elem_base !! parquet_parse_list_type scratch.
+        character(len=:), allocatable :: elem_base !! parquet_parse_list_type/_map_type scratch.
         integer :: elem_unit
-        logical :: elem_utc, is_list, list_ok
+        logical :: elem_utc, is_list, list_ok, is_map, map_ok
 
         if (.not. writer%is_schema_enforced) return
         if (writer%write_started) return
@@ -1406,6 +1406,20 @@ contains
                 ! for PARQUET_WRITE, could not ref PK_INT32"). Keeping every PK_* reference in the
                 ! leaf that needs it is what the read side already does.
                 call parquet_write_empty_list_column(writer, cname, elem_base)
+                cycle
+            end if
+            ! A map column is handled the same way and for the same two reasons: its token carries
+            ! a value type so no fixed case list can match it, and the zero-row column has to be
+            ! %init'd to that value kind before it can be written.
+            call parquet_parse_map_type(dtype, elem_base, elem_unit, elem_utc, is_map, map_ok)
+            if (is_map) then
+                if (.not. map_ok) then
+                    ! Unreachable: parquet_validate_maml rejects a malformed map token before a
+                    ! schema can reach a writer. GCOVR_EXCL_LINE
+                    error stop "parquet_close_writer: cannot write an empty column of data_type '" // &
+                        dtype // "' for column " // cname // ctx ! GCOVR_EXCL_LINE
+                end if
+                call parquet_write_empty_map_column(writer, cname, elem_base)
                 cycle
             end if
             select case (dtype)

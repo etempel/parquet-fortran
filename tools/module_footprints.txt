@@ -115,6 +115,20 @@ parquet_struct.f90
 parquet_temporal.f90
 parquet_wrapper.cpp
 
+[parquet_map]
+parquet_columns.f90
+parquet_columns_access.f90
+parquet_columns_mutate.f90
+parquet_columns_string.f90
+parquet_columns_structural.f90
+parquet_columns_util.f90
+parquet_columns_validity.f90
+parquet_map.f90
+parquet_settings_base.f90
+parquet_strings.f90
+parquet_temporal.f90
+parquet_wrapper.cpp
+
 [parquet_sorting]
 parquet_argsort.f90
 parquet_argsort_engine.f90
@@ -163,6 +177,7 @@ parquet_io.f90
 parquet_list.f90
 parquet_maml_base.f90
 parquet_maml_base_add_col_qc.f90
+parquet_map.f90
 parquet_metadata.f90
 parquet_metadata_base.f90
 parquet_metadata_get.f90
@@ -171,6 +186,7 @@ parquet_random.f90
 parquet_read.f90
 parquet_read_filter.f90
 parquet_read_list.f90
+parquet_read_map.f90
 parquet_read_numeric.f90
 parquet_read_sort.f90
 parquet_read_string.f90
@@ -192,6 +208,7 @@ parquet_temporal.f90
 parquet_wrapper.cpp
 parquet_write.f90
 parquet_write_list.f90
+parquet_write_map.f90
 parquet_write_numeric.f90
 parquet_write_string.f90
 parquet_write_struct.f90
@@ -215,6 +232,7 @@ parquet_expkey.f90
 parquet_list.f90
 parquet_maml_base.f90
 parquet_maml_base_add_col_qc.f90
+parquet_map.f90
 parquet_metadata.f90
 parquet_metadata_base.f90
 parquet_metadata_get.f90
@@ -223,6 +241,7 @@ parquet_random.f90
 parquet_read.f90
 parquet_read_filter.f90
 parquet_read_list.f90
+parquet_read_map.f90
 parquet_read_numeric.f90
 parquet_read_sort.f90
 parquet_read_string.f90
@@ -263,6 +282,7 @@ parquet_temporal.f90
 parquet_wrapper.cpp
 parquet_write.f90
 parquet_write_list.f90
+parquet_write_map.f90
 parquet_write_numeric.f90
 parquet_write_string.f90
 parquet_write_struct.f90
@@ -288,6 +308,7 @@ parquet_io.f90
 parquet_list.f90
 parquet_maml_base.f90
 parquet_maml_base_add_col_qc.f90
+parquet_map.f90
 parquet_metadata.f90
 parquet_metadata_base.f90
 parquet_metadata_get.f90
@@ -296,6 +317,7 @@ parquet_random.f90
 parquet_read.f90
 parquet_read_filter.f90
 parquet_read_list.f90
+parquet_read_map.f90
 parquet_read_numeric.f90
 parquet_read_sort.f90
 parquet_read_string.f90
@@ -343,6 +365,7 @@ parquet_version.f90
 parquet_wrapper.cpp
 parquet_write.f90
 parquet_write_list.f90
+parquet_write_map.f90
 parquet_write_numeric.f90
 parquet_write_string.f90
 parquet_write_struct.f90

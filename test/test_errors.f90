@@ -1533,6 +1533,34 @@ contains
                 test_list_write_protected_row_null_aborts), &
             new_unittest("a protected list column with a null element aborts", &
                 test_list_write_protected_element_null_aborts), &
+            new_unittest("a map column of an unsupported value kind aborts", test_map_init_bad_kind_aborts), &
+            new_unittest("appending the wrong value type to a map aborts", test_map_append_wrong_kind_aborts), &
+            new_unittest("appending mismatched key/value arrays to a map aborts", &
+                test_map_append_length_mismatch_aborts), &
+            new_unittest("reading a map value through the wrong specific aborts", test_map_get_wrong_kind_aborts), &
+            new_unittest("a missing map key with no warn=/found= aborts", test_map_get_missing_key_aborts), &
+            new_unittest("a missing map key with warn=/found= returns instead", test_map_get_missing_key_warn_ok), &
+            new_unittest("occurrence below 1 on a map lookup aborts", test_map_get_occurrence_zero_aborts), &
+            new_unittest("%get_at past the end of a map row aborts", test_map_get_at_out_of_range_aborts), &
+            new_unittest("%view past the last map row aborts", test_map_view_out_of_range_aborts), &
+            new_unittest("reading a non-map column into a map column aborts", test_map_read_not_a_map_aborts), &
+            new_unittest("reading a map with non-string keys aborts", test_map_read_int_key_aborts), &
+            new_unittest("reading a map with a container value aborts", test_map_read_nested_value_aborts), &
+            new_unittest("writing an uninitialized map column aborts", test_map_write_uninitialized_aborts), &
+            new_unittest("writing a map column into a differently-typed slot aborts", &
+                test_map_write_type_mismatch_aborts), &
+            new_unittest("col_size on a map column is rejected", test_map_col_size_rejected), &
+            new_unittest("qc min/max on a map column is rejected", test_map_qc_rejected), &
+            new_unittest("a protected map column with a null row aborts", test_map_protected_row_null_aborts), &
+            new_unittest("a protected map column with a null value aborts", test_map_protected_value_null_aborts), &
+            new_unittest("a protected null-free map column writes normally", test_map_protected_ok), &
+            new_unittest("a map column past the int32 entry ceiling is refused", test_map_entry_limit_aborts), &
+            new_unittest("map %adopt_rows with a wrong final offset aborts", &
+                test_map_adopt_rows_offset_mismatch_aborts), &
+            new_unittest("map %adopt_rows with non-string keys aborts", test_map_adopt_rows_bad_key_kind_aborts), &
+            new_unittest("a chunked map read under an active sort aborts", test_map_chunk_refuses_sort_aborts), &
+            new_unittest("the bare map token is rejected", test_maml_map_bare_token_aborts), &
+            new_unittest("a map token with a container value is rejected", test_maml_map_nested_value_aborts), &
             new_unittest("a struct column with no fields aborts", test_struct_init_no_fields_aborts), &
             new_unittest("a struct column with duplicate field names aborts", &
                 test_struct_init_duplicate_name_aborts), &
@@ -1776,6 +1804,204 @@ contains
             failure_message="a struct field name containing '.' was expected to abort", &
             required_stderr="would collide with the dotted path")
     end subroutine test_struct_init_dotted_name_aborts
+
+    ! ---- MAP column error scenarios ----
+    !
+    ! Every one asserts the MESSAGE, not just the exit status. Arrow catches several of the same
+    ! defects with the same status, so an exit-status-only assertion cannot distinguish this
+    ! library's guard from Arrow's after-the-fact catch -- the lesson Phase 4's mutation F left.
+
+    subroutine test_map_init_bad_kind_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_init_bad_kind", expect_abort=.true., &
+            failure_message="a map column of an unsupported value kind was expected to abort", &
+            required_stderr="not a supported map value kind")
+    end subroutine test_map_init_bad_kind_aborts
+
+    subroutine test_map_append_wrong_kind_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_append_wrong_kind", expect_abort=.true., &
+            failure_message="appending the wrong value type to a map was expected to abort", &
+            required_stderr="values cannot be appended to it")
+    end subroutine test_map_append_wrong_kind_aborts
+
+    subroutine test_map_append_length_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_append_length_mismatch", expect_abort=.true., &
+            failure_message="mismatched key/value arrays were expected to abort", &
+            required_stderr="keys and values have different lengths")
+    end subroutine test_map_append_length_mismatch_aborts
+
+    !> A wrong VALUE KIND is a type mismatch rather than a lookup failure, so it aborts even
+    !! though the scenario supplies `found=` -- which is exactly what this asserts.
+    subroutine test_map_get_wrong_kind_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_get_wrong_kind", expect_abort=.true., &
+            failure_message="reading a map value through the wrong specific was expected to abort", &
+            required_stderr="its values cannot be read into")
+    end subroutine test_map_get_wrong_kind_aborts
+
+    subroutine test_map_get_missing_key_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_get_missing_key", expect_abort=.true., &
+            failure_message="a missing map key with neither warn= nor found= was expected to abort", &
+            required_stderr="no entry with key")
+    end subroutine test_map_get_missing_key_aborts
+
+    !> The NEGATIVE CONTROL for every soft-fail guard: a guard that fired unconditionally would
+    !! pass every abort test above while breaking every legitimate lookup.
+    subroutine test_map_get_missing_key_warn_ok(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status(error, "map_get_missing_key_warn_ok", expect_abort=.false., &
+            failure_message="a soft-fail map lookup was expected to return rather than abort")
+    end subroutine test_map_get_missing_key_warn_ok
+
+    subroutine test_map_get_occurrence_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_get_occurrence_zero", expect_abort=.true., &
+            failure_message="occurrence below 1 was expected to abort even with found=", &
+            required_stderr="occurrence must be 1 or greater")
+    end subroutine test_map_get_occurrence_zero_aborts
+
+    subroutine test_map_get_at_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_get_at_out_of_range", expect_abort=.true., &
+            failure_message="%get_at past the end of a map row was expected to abort", &
+            required_stderr="is out of range; this map row holds")
+    end subroutine test_map_get_at_out_of_range_aborts
+
+    subroutine test_map_view_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_view_out_of_range", expect_abort=.true., &
+            failure_message="%view past the last map row was expected to abort", &
+            required_stderr="row index is out of range")
+    end subroutine test_map_view_out_of_range_aborts
+
+    subroutine test_map_read_not_a_map_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_read_not_a_map", expect_abort=.true., &
+            failure_message="reading a non-map column into a map column was expected to abort", &
+            required_stderr="expected a map column")
+    end subroutine test_map_read_not_a_map_aborts
+
+    !> V1 keys are strings, and the message must NAME THE KEY TYPE -- a caller whose file is
+    !! keyed by an integer needs to know that is why, not merely that something failed.
+    !!
+    !! **When non-string keys are ever supported this test does not disappear**: the scenario
+    !! becomes a positive read of `m_intkey`'s two entries, and this wrapper becomes the assertion
+    !! that they came back with their integer keys.
+    subroutine test_map_read_int_key_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_read_int_key", expect_abort=.true., &
+            failure_message="reading a map with non-string keys was expected to abort", &
+            required_stderr="only string keys are supported")
+    end subroutine test_map_read_int_key_aborts
+
+    subroutine test_map_read_nested_value_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_read_nested_value", expect_abort=.true., &
+            failure_message="reading a map with a container value was expected to abort", &
+            required_stderr="unsupported map value type")
+    end subroutine test_map_read_nested_value_aborts
+
+    subroutine test_map_write_uninitialized_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_write_uninitialized", expect_abort=.true., &
+            failure_message="writing an uninitialized map column was expected to abort", &
+            required_stderr="has not been initialized")
+    end subroutine test_map_write_uninitialized_aborts
+
+    subroutine test_map_write_type_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_write_type_mismatch", expect_abort=.true., &
+            failure_message="writing a map column into a differently-typed slot was expected to abort", &
+            required_stderr="a map column's value type must match exactly")
+    end subroutine test_map_write_type_mismatch_aborts
+
+    subroutine test_map_col_size_rejected(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_col_size_rejected", expect_abort=.true., &
+            failure_message="col_size on a map column was expected to be rejected", &
+            required_stderr="a map row's entry count comes from the data")
+    end subroutine test_map_col_size_rejected
+
+    subroutine test_map_qc_rejected(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_qc_rejected", expect_abort=.true., &
+            failure_message="qc min/max on a map column was expected to be rejected", &
+            required_stderr="not supported for a map column")
+    end subroutine test_map_qc_rejected
+
+    subroutine test_map_protected_row_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_protected_row_null", expect_abort=.true., &
+            failure_message="a protected map column with a null row was expected to abort", &
+            required_stderr="cannot contain Null values")
+    end subroutine test_map_protected_row_null_aborts
+
+    !> The VALUE level gets its own message, so the abort says which of a map's two null levels
+    !! failed rather than only that one did.
+    subroutine test_map_protected_value_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_protected_value_null", expect_abort=.true., &
+            failure_message="a protected map column with a null value was expected to abort", &
+            required_stderr="one of its map values is a Null")
+    end subroutine test_map_protected_value_null_aborts
+
+    subroutine test_map_protected_ok(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status(error, "map_protected_ok", expect_abort=.false., &
+            failure_message="a protected map column with no Null anywhere was expected to write cleanly")
+    end subroutine test_map_protected_ok
+
+    !> The int32 entry ceiling. The message must say there is NO large_map to widen into: that is
+    !! the whole difference from the string and list ceilings, which widen instead of refusing,
+    !! and a caller who does not know it will go looking for the option that does not exist.
+    subroutine test_map_entry_limit_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_entry_limit", expect_abort=.true., &
+            failure_message="a map column past the int32 entry ceiling was expected to be refused", &
+            required_stderr="Arrow has no large_map to widen into")
+    end subroutine test_map_entry_limit_aborts
+
+    subroutine test_map_adopt_rows_offset_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_adopt_rows_offset_mismatch", expect_abort=.true., &
+            failure_message="%adopt_rows with a wrong final offset was expected to abort", &
+            required_stderr="final offset does not match the entry count")
+    end subroutine test_map_adopt_rows_offset_mismatch_aborts
+
+    subroutine test_map_adopt_rows_bad_key_kind_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_adopt_rows_bad_key_kind", expect_abort=.true., &
+            failure_message="%adopt_rows with non-string keys was expected to abort", &
+            required_stderr="map keys must be a string column")
+    end subroutine test_map_adopt_rows_bad_key_kind_aborts
+
+    subroutine test_map_chunk_refuses_sort_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_chunk_refuses_sort", expect_abort=.true., &
+            failure_message="a chunked map read under an active sort was expected to abort", &
+            required_stderr="not supported on a reader with an active sort")
+    end subroutine test_map_chunk_refuses_sort_aborts
+
+    !> The bare `map` token is INVALID where the bare `struct` token is valid, and the asymmetry
+    !! is deliberate: a struct's field layout cannot be expressed in MAML at all, while a map's
+    !! value type is a single token the schema can carry -- and must, since a declared-but-
+    !! unwritten map column is written with zero rows at close and cannot invent a value kind.
+    subroutine test_maml_map_bare_token_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "maml_map_bare_token", expect_abort=.true., &
+            failure_message="the bare map token was expected to be rejected", &
+            required_stderr="has invalid data_type 'map'")
+    end subroutine test_maml_map_bare_token_aborts
+
+    subroutine test_maml_map_nested_value_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "maml_map_nested_value", expect_abort=.true., &
+            failure_message="a map token with a container value was expected to be rejected", &
+            required_stderr="has invalid data_type 'map[list[int32]]'")
+    end subroutine test_maml_map_nested_value_aborts
 
     subroutine test_struct_init_bad_kind_aborts(error)
         type(error_type), allocatable, intent(out) :: error

@@ -29,6 +29,9 @@ program tester
     use test_struct, only : collect_tests_parquet_struct
     use test_struct_read, only : collect_tests_parquet_struct_read
     use test_struct_write, only : collect_tests_parquet_struct_write
+    use test_map, only : collect_tests_parquet_map
+    use test_map_read, only : collect_tests_parquet_map_read
+    use test_map_write, only : collect_tests_parquet_map_write
     use test_filter, only : collect_tests_filter
     use test_filter_screen, only : collect_tests_filter_screen
     use test_sort, only : collect_tests_sort
@@ -95,6 +98,9 @@ program tester
         new_testsuite("struct", collect_tests_parquet_struct), &
         new_testsuite("struct_read", collect_tests_parquet_struct_read), &
         new_testsuite("struct_write", collect_tests_parquet_struct_write), &
+        new_testsuite("map", collect_tests_parquet_map), &
+        new_testsuite("map_read", collect_tests_parquet_map_read), &
+        new_testsuite("map_write", collect_tests_parquet_map_write), &
         new_testsuite("filter", collect_tests_filter), &
         new_testsuite("filter_screen", collect_tests_filter_screen), &
         new_testsuite("sort", collect_tests_sort), &

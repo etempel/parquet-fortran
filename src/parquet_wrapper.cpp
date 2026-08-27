@@ -1389,6 +1389,65 @@ extern "C"
 	// ReadRowGroup/ReadTable's `column_indices`, which (unlike ReadColumn's plain top-level field
 	// index) is indexed against Parquet's flat leaf schema -- see ParquetReaderHandle::manifest's
 	// own comment for why this coincides with `top_level_idx` alone only for a childless field.
+	// The parquet leaf column indices a ROW-GROUP read of `child_path` under `top_level_idx` has to
+	// ask for.
+	//
+	// Almost always exactly one, and that is deliberate: reading a single leaf is what makes a
+	// chunked read of a scalar, vector or LIST column cheap, and a bare STRUCT name only ever
+	// reaches here for its own row validity, which any one of its leaves carries.
+	//
+	// A MAP is the one shape that needs MORE THAN ONE, and getting it wrong is silent in the worst
+	// way: ReadRowGroup with only the key leaf returns a perfectly well-formed map column whose
+	// entries struct has ONE field instead of two, so nothing fails until something asks for the
+	// values. Both leaves are collected here rather than at the call site so that a future
+	// multi-leaf shape has one place to join.
+	static void resolve_chunk_leaf_indices(const ParquetReaderHandle *reader_handle, int top_level_idx,
+		const std::vector<std::string> &child_path, std::vector<int> &out)
+	{
+		const parquet::arrow::SchemaField *current = &reader_handle->manifest.schema_fields[top_level_idx];
+		for (const auto &segment : child_path)
+		{
+			const parquet::arrow::SchemaField *next = nullptr;
+			for (const auto &child : current->children)
+			{
+				if (child.field->name() == segment)
+				{
+					next = &child;
+					break;
+				}
+			}
+			current = next;
+		}
+		out.clear();
+		if (current->field->type()->id() == arrow::Type::MAP)
+		{
+			// Every leaf beneath the map -- its key and its value, and for a nested value more
+			// than two, which Phase 7 will need. Children are pushed in reverse so that popping
+			// yields schema order, which is already ascending by column index.
+			std::vector<const parquet::arrow::SchemaField *> stack{current};
+			while (!stack.empty())
+			{
+				const parquet::arrow::SchemaField *node = stack.back();
+				stack.pop_back();
+				if (node->is_leaf())
+				{
+					out.push_back(static_cast<int>(node->column_index));
+					continue;
+				}
+				for (size_t i = node->children.size(); i > 0; --i)
+				{
+					stack.push_back(&node->children[i - 1]);
+				}
+			}
+			return;
+		}
+		while (!current->is_leaf())
+		{
+			current = &current->children[0];
+		}
+		out.push_back(static_cast<int>(current->column_index));
+	}
+
 	static int64_t resolve_single_leaf_index(
 		const ParquetReaderHandle *reader_handle, int top_level_idx, const std::vector<std::string> &child_path)
 	{
@@ -1950,6 +2009,17 @@ extern "C"
 	// process onto large_utf8, or it would be testing two things and reporting one. <= 0 (the
 	// default) means "use the real production limit". See effective_list_offset_limit.
 	static int64_t g_debug_list_offset_limit = -1;
+
+	// Test-only override of kArrowInt32OffsetLimit for a MAP column's own offsets buffer -- the map
+	// counterpart of g_debug_list_offset_limit above, and a process-global for the same reason.
+	//
+	// It exists for a HARDER limit than either of those two, and the difference is the whole point:
+	// a string column that will not fit an int32 offsets buffer is written as large_utf8 and a list
+	// column as large_list, but ARROW HAS NO large_map -- MapArray::FromArrays' own contract
+	// requires int32 offsets and no wider map type exists. So for a map the ceiling is a refusal
+	// rather than a representation choice, and this override is what lets an error scenario reach
+	// that refusal with a tiny fixture. <= 0 (the default) means "use the real production limit".
+	static int64_t g_debug_map_offset_limit = -1;
 
 	// True if `n_values` string entries of up to `item_len` bytes each might overflow `limit`
 	// once built as a flat STRING/LARGE_STRING array. Uses item_len (the declared max length)
@@ -11053,8 +11123,9 @@ extern "C"
 	{
 		auto resolved = resolve_struct_path(reader_handle->schema, name);
 		auto idx = get_column_index(reader_handle, resolved.top_level_name.c_str());
-		auto leaf_idx = resolve_single_leaf_index(reader_handle, static_cast<int>(idx), resolved.child_path);
-		auto result = reader_handle->reader->ReadRowGroup(static_cast<int>(row_group - 1), {static_cast<int>(leaf_idx)});
+		std::vector<int> leaf_indices;
+		resolve_chunk_leaf_indices(reader_handle, static_cast<int>(idx), resolved.child_path, leaf_indices);
+		auto result = reader_handle->reader->ReadRowGroup(static_cast<int>(row_group - 1), leaf_indices);
 		if (!result.ok())
 		{ // GCOVR_EXCL_START -- I/O backstop: row_group is already validated by
 		  // resolve_row_group_for_row before this is ever called.
@@ -11187,7 +11258,13 @@ extern "C"
 		ListShape shape;
 		shape.nrows = array->length();
 		shape.offsets.resize(static_cast<size_t>(shape.nrows) + 1, 0);
-		if (array->type_id() == arrow::Type::LIST)
+		// MAP joins LIST here rather than getting an arm of its own: arrow::MapArray DERIVES from
+		// arrow::ListArray (arrow/array/array_nested.h), so the cast below is valid for one, its
+		// value_offsets are the map's own, and `values()` is the ENTRIES struct array
+		// (struct<key, value>) that map_entry_children splits. Sharing the arm is deliberate: this
+		// is where the rebase arithmetic above lives, it was expensive to get right, and no
+		// Fortran-side test can reach a nonzero `base` to catch a second copy drifting from it.
+		if (array->type_id() == arrow::Type::LIST || array->type_id() == arrow::Type::MAP)
 		{
 			auto list_arr = std::static_pointer_cast<arrow::ListArray>(array);
 			int64_t base = shape.nrows > 0 ? list_arr->value_offset(0) : 0;
@@ -11324,6 +11401,97 @@ extern "C"
 		mark_read(reader_handle, name, elem_family_token(family), array);
 	}
 
+
+
+// ==== MAP column read helpers (see the entry points further down) ====
+//
+// A map is physically a LIST of struct<key, value>, and Arrow models that literally --
+// arrow::MapArray derives from arrow::ListArray and arrow::MapType from arrow::ListType. So the
+// shape half of a map read is describe_list_array's job (it grew one type id, nothing else), and
+// what is left is splitting the entries struct into its two children and answering what the
+// SCHEMA says the key and value types are.
+
+// The key and value types a map column's entries hold, taken from the SCHEMA rather than from any
+// decoded array, so a shape query never has to read data it does not need. Both return nullptr
+// when `field` is not a map-typed field at all.
+static std::shared_ptr<arrow::DataType> map_key_type(const std::shared_ptr<arrow::Field> &field)
+{
+	if (field->type()->id() != arrow::Type::MAP) return nullptr;
+	return std::static_pointer_cast<arrow::MapType>(field->type())->key_type();
+}
+
+static std::shared_ptr<arrow::DataType> map_value_type(const std::shared_ptr<arrow::Field> &field)
+{
+	if (field->type()->id() != arrow::Type::MAP) return nullptr;
+	return std::static_pointer_cast<arrow::MapType>(field->type())->item_type();
+}
+
+// Splits a map's entries array into its keys and its values.
+//
+// `entries` is what describe_list_array put in ListShape::child, already Sliced to exactly the
+// entries these rows use -- and StructArray::field() applies the struct's own offset and length to
+// each child in turn, so both come back correctly sliced with no offset arithmetic here. That is
+// the same property unwrap_struct_path relies on.
+static void map_entry_children(const std::shared_ptr<arrow::Array> &entries,
+	std::shared_ptr<arrow::Array> &keys_out, std::shared_ptr<arrow::Array> &values_out,
+	const std::string &name, const char *context)
+{
+	if (entries->type_id() != arrow::Type::STRUCT)
+	{ // GCOVR_EXCL_START -- Arrow guarantees a map's child is its entries struct.
+		report_fatal_error(context, std::string("malformed map column: ") + name +
+			" (its entries are " + entries->type()->ToString() + ", not a key/value struct)");
+	}
+	// GCOVR_EXCL_STOP
+	auto sa = std::static_pointer_cast<arrow::StructArray>(entries);
+	if (sa->num_fields() != 2)
+	{ // GCOVR_EXCL_START -- likewise: a MapType always has exactly two child fields.
+		report_fatal_error(context, std::string("malformed map column: ") + name +
+			" (its entries struct has " + std::to_string(sa->num_fields()) + " fields, not 2)");
+	}
+	// GCOVR_EXCL_STOP
+	keys_out = sa->field(0);
+	values_out = sa->field(1);
+}
+
+// The shape half every map fill shares: fetches the column (or one row group of it), checks it
+// really is a map, checks the counts against what the caller was told by
+// parquet_read_map_column_shape, writes the offsets and the per-ROW validity, and hands back the
+// two entry children.
+//
+// Each fill calls this independently rather than trusting that a matching shape call has just
+// happened -- the same rule fill_list_common states, and the reason a caller may interleave the
+// keys fill and a value fill in either order.
+static void fill_map_common(ParquetReaderHandle *reader_handle, const char *name, int64_t row_group,
+	int64_t nrows, int64_t nentries, int64_t *offsets_out, int8_t *row_valid_out,
+	std::shared_ptr<arrow::Array> &keys_out, std::shared_ptr<arrow::Array> &values_out,
+	const char *context)
+{
+	auto array = get_list_source_array(reader_handle, name, row_group, context);
+	if (array->type_id() != arrow::Type::MAP)
+	{
+		report_fatal_error(context, std::string("type mismatch for column: ") + name +
+			" (expected a map column, got " + array->type()->ToString() + ")"); // GCOVR_EXCL_LINE
+	}
+	auto shape = describe_list_array(array, name, context);
+	if (shape.nrows != nrows)
+	{
+		report_fatal_error(context, std::string("nrows mismatch for column: ") + name);
+	}
+	if (shape.nelems != nentries)
+	{
+		report_fatal_error(context, std::string("entry count mismatch for column: ") + name +
+			" (the column changed between the shape and fill calls)"); // GCOVR_EXCL_LINE
+	}
+	if (offsets_out)
+	{
+		for (int64_t i = 0; i <= nrows; ++i)
+		{
+			offsets_out[i] = shape.offsets[static_cast<size_t>(i)];
+		}
+	}
+	if (row_valid_out) write_list_row_validity(array, nrows, row_valid_out);
+	map_entry_children(shape.child, keys_out, values_out, name, context);
+}
 
 extern "C"
 {
@@ -11833,6 +12001,289 @@ extern "C"
 			row_valid[i] = array->IsValid(i) ? 1 : 0;
 		}
 	}
+
+	// ==== MAP column reads ====
+	//
+	// Eleven entry points in the same two-crossing shape the LIST reads use: one SHAPE call that
+	// reports the counts and the value family and writes no data, then one KEYS fill and one VALUE
+	// fill. Each fill re-derives the shape itself (fill_map_common), so the three may be issued in
+	// any order and none depends on another having just run.
+	//
+	// The keys get their own call rather than being folded into each of the nine value fills. They
+	// are always strings, so folding would repeat four key-buffer arguments across nine signatures
+	// that are otherwise identical to their list counterparts -- and it is the SAMENESS with the
+	// list fills that makes the two reviewable side by side.
+	//
+	// V1 KEYS ARE STRINGS, and a map keyed by anything else is refused by the shape call rather
+	// than coerced. Rendering an int32 key as text would silently change the data (1, 01 and 1.0
+	// are different keys) and would make a round trip through this library lossy with nothing to
+	// report it. There is no "unknown" key kind for a map to hold, so a clean refusal naming the
+	// actual key type is the only truthful answer -- the same one an unsupported LIST element type
+	// gets.
+
+	// The FIRST crossing: everything Fortran needs in order to allocate its buffers and %init a
+	// parquet_map_column to the right value kind. Writes no data.
+	//
+	//   nrows_out         rows in this column (or in this row group)
+	//   nentries_out      key/value pairs those rows hold between them
+	//   nkeychars_out     total key bytes (keys are always strings, so this is always meaningful)
+	//   value_family_out  the value family (see arrow_leaf_family / the PF_ELEM_* parameters)
+	//   unit_out          the temporal unit selector, for a timestamp value family only
+	//   nvalchars_out     total value bytes, for a string value family only; 0 otherwise
+	//
+	// The families and the unit are resolved from the SCHEMA, so a zero-row column still reports
+	// the kind its values would have had; the counts need the array. `row_group <= 0` means the
+	// whole column.
+	void parquet_read_map_column_shape(void *handle, const char *name, int64_t row_group,
+		int64_t *nrows_out, int64_t *nentries_out, int64_t *nkeychars_out,
+		int32_t *value_family_out, int32_t *unit_out, int64_t *nvalchars_out)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		const char *context = row_group > 0 ? "parquet_read_column_chunk" : "parquet_read_column";
+		auto resolved = resolve_struct_path(reader_handle->schema, name);
+		auto key_type = map_key_type(resolved.leaf_field);
+		if (!key_type)
+		{
+			report_fatal_error(context, std::string("type mismatch for column: ") + name +
+				" (expected a map column, got " + resolved.leaf_field->type()->ToString() + ")"); // GCOVR_EXCL_LINE
+		}
+		if (!is_string_like_type(key_type->id()))
+		{
+			report_fatal_error(context, std::string("unsupported map key type for column: ") + name +
+				" (" + key_type->ToString() + "); only string keys are supported");
+		}
+		auto value_type = map_value_type(resolved.leaf_field);
+		int32_t family = arrow_leaf_family(value_type);
+		if (family == kElemFamilyNone)
+		{
+			report_fatal_error(context, std::string("unsupported map value type for column: ") + name +
+				" (" + value_type->ToString() + ")");
+		}
+		*value_family_out = family;
+		*unit_out = 0;
+		if (family == kElemFamilyTimestamp)
+		{
+			*unit_out = arrow_unit_to_temporal_selector(
+				std::static_pointer_cast<arrow::TimestampType>(value_type)->unit());
+		}
+		std::shared_ptr<arrow::Array> keys, values;
+		auto array = get_list_source_array(reader_handle, name, row_group, context);
+		auto shape = describe_list_array(array, name, context);
+		map_entry_children(shape.child, keys, values, name, context);
+		*nrows_out = shape.nrows;
+		*nentries_out = shape.nelems;
+		*nkeychars_out = string_child_total_bytes(keys, name, context);
+		*nvalchars_out = 0;
+		if (family == kElemFamilyString)
+		{
+			*nvalchars_out = string_child_total_bytes(values, name, context);
+		}
+	}
+
+	// The SECOND crossing, part one: the offsets, the per-ROW validity and the KEYS.
+	//
+	// Copies the key bytes rather than handing back Arrow's own buffers, exactly as
+	// parquet_read_list_string_fill does and for the same reason: nothing Arrow-owned crosses the
+	// boundary, so there is nothing to pin and no lifetime to reason about.
+	//
+	// There is no key VALIDITY argument, and that is not an omission -- Arrow's MapType declares
+	// its key field non-nullable and offers no way to change it, so a map has exactly two null
+	// levels (the row, and each value) and a key is never one of them.
+	void parquet_read_map_keys_fill(void *handle, const char *name, int64_t row_group,
+		int64_t nrows, int64_t nentries, int64_t nkeychars, int64_t *offsets, int8_t *row_valid,
+		int64_t *key_offsets, char *key_data)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		const char *context = row_group > 0 ? "parquet_read_column_chunk" : "parquet_read_column";
+		std::shared_ptr<arrow::Array> keys, values;
+		fill_map_common(reader_handle, name, row_group, nrows, nentries, offsets, row_valid,
+			keys, values, context);
+		if (string_child_total_bytes(keys, name, context) != nkeychars)
+		{
+			report_fatal_error(context, std::string("key byte count mismatch for column: ") + name +
+				" (the column changed between the shape and fill calls)"); // GCOVR_EXCL_LINE
+		}
+		auto acc = make_string_like_accessor(keys);
+		int64_t at = 0;
+		key_offsets[0] = 0;
+		for (int64_t i = 0; i < nentries; ++i)
+		{
+			auto view = acc.get_view(i);
+			if (!view.empty())
+			{
+				std::memcpy(key_data + at, view.data(), view.size());
+			}
+			at += static_cast<int64_t>(view.size());
+			key_offsets[i + 1] = at;
+		}
+	}
+
+	// The SECOND crossing, part two: one entry point per VALUE family. Each copies this column's
+	// (or this row group's) values and their validity into the caller's own buffers.
+	void parquet_read_map_int32_fill(void *handle, const char *name, int64_t row_group,
+		int64_t nrows, int64_t nentries, int32_t *values_out, int8_t *value_valid)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		const char *context = row_group > 0 ? "parquet_read_column_chunk" : "parquet_read_column";
+		std::shared_ptr<arrow::Array> keys, values;
+		fill_map_common(reader_handle, name, row_group, nrows, nentries, nullptr, nullptr,
+			keys, values, context);
+		write_list_element_validity(values, nentries, value_valid);
+		convert_values_to_int32(values, values_out, nentries, name, context);
+		fill_null_default(values_out, value_valid, nentries);
+		mark_list_read(reader_handle, name, row_group, kElemFamilyInt32, values);
+	}
+
+	// Same as parquet_read_map_int32_fill, but for int64 values.
+	void parquet_read_map_int64_fill(void *handle, const char *name, int64_t row_group,
+		int64_t nrows, int64_t nentries, int64_t *values_out, int8_t *value_valid)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		const char *context = row_group > 0 ? "parquet_read_column_chunk" : "parquet_read_column";
+		std::shared_ptr<arrow::Array> keys, values;
+		fill_map_common(reader_handle, name, row_group, nrows, nentries, nullptr, nullptr,
+			keys, values, context);
+		write_list_element_validity(values, nentries, value_valid);
+		convert_values_to_int64(values, values_out, nentries, name, context);
+		fill_null_default(values_out, value_valid, nentries);
+		mark_list_read(reader_handle, name, row_group, kElemFamilyInt64, values);
+	}
+
+	// Same as parquet_read_map_int32_fill, but for float32 values.
+	void parquet_read_map_float32_fill(void *handle, const char *name, int64_t row_group,
+		int64_t nrows, int64_t nentries, float *values_out, int8_t *value_valid)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		const char *context = row_group > 0 ? "parquet_read_column_chunk" : "parquet_read_column";
+		std::shared_ptr<arrow::Array> keys, values;
+		fill_map_common(reader_handle, name, row_group, nrows, nentries, nullptr, nullptr,
+			keys, values, context);
+		write_list_element_validity(values, nentries, value_valid);
+		convert_values_to_float32(values, values_out, nentries, name, context);
+		fill_null_default(values_out, value_valid, nentries);
+		mark_list_read(reader_handle, name, row_group, kElemFamilyFloat32, values);
+	}
+
+	// Same as parquet_read_map_int32_fill, but for float64 values.
+	void parquet_read_map_float64_fill(void *handle, const char *name, int64_t row_group,
+		int64_t nrows, int64_t nentries, double *values_out, int8_t *value_valid)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		const char *context = row_group > 0 ? "parquet_read_column_chunk" : "parquet_read_column";
+		std::shared_ptr<arrow::Array> keys, values;
+		fill_map_common(reader_handle, name, row_group, nrows, nentries, nullptr, nullptr,
+			keys, values, context);
+		write_list_element_validity(values, nentries, value_valid);
+		convert_values_to_float64(values, values_out, nentries, name, context);
+		fill_null_default(values_out, value_valid, nentries);
+		mark_list_read(reader_handle, name, row_group, kElemFamilyFloat64, values);
+	}
+
+	// Same as parquet_read_map_int32_fill, but for boolean values (one int8 per entry).
+	void parquet_read_map_bool8_fill(void *handle, const char *name, int64_t row_group,
+		int64_t nrows, int64_t nentries, int8_t *values_out, int8_t *value_valid)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		const char *context = row_group > 0 ? "parquet_read_column_chunk" : "parquet_read_column";
+		std::shared_ptr<arrow::Array> keys, values;
+		fill_map_common(reader_handle, name, row_group, nrows, nentries, nullptr, nullptr,
+			keys, values, context);
+		write_list_element_validity(values, nentries, value_valid);
+		if (values->type_id() != arrow::Type::BOOL)
+		{
+			report_fatal_error(context, std::string("type mismatch for map values in column: ") + name +
+				" (expected bool, got " + values->type()->ToString() + ")"); // GCOVR_EXCL_LINE
+		}
+		auto arr = std::static_pointer_cast<arrow::BooleanArray>(values);
+		for (int64_t i = 0; i < nentries; ++i)
+		{
+			values_out[i] = arr->Value(i) ? 1 : 0;
+		}
+		fill_null_default(values_out, value_valid, nentries);
+		mark_list_read(reader_handle, name, row_group, kElemFamilyBool, values);
+	}
+
+	// Same as parquet_read_map_int32_fill, but for date values (int32 days since the epoch).
+	void parquet_read_map_date_fill(void *handle, const char *name, int64_t row_group,
+		int64_t nrows, int64_t nentries, int32_t *values_out, int8_t *value_valid)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		const char *context = row_group > 0 ? "parquet_read_column_chunk" : "parquet_read_column";
+		std::shared_ptr<arrow::Array> keys, values;
+		fill_map_common(reader_handle, name, row_group, nrows, nentries, nullptr, nullptr,
+			keys, values, context);
+		write_list_element_validity(values, nentries, value_valid);
+		convert_date_values(values, values_out, nentries, name, context);
+		fill_null_default(values_out, value_valid, nentries);
+		mark_list_read(reader_handle, name, row_group, kElemFamilyDate, values);
+	}
+
+	// Same as parquet_read_map_int32_fill, but for time values (canonical int64 ns-of-day).
+	void parquet_read_map_time_fill(void *handle, const char *name, int64_t row_group,
+		int64_t nrows, int64_t nentries, int64_t *values_out, int8_t *value_valid)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		const char *context = row_group > 0 ? "parquet_read_column_chunk" : "parquet_read_column";
+		std::shared_ptr<arrow::Array> keys, values;
+		fill_map_common(reader_handle, name, row_group, nrows, nentries, nullptr, nullptr,
+			keys, values, context);
+		write_list_element_validity(values, nentries, value_valid);
+		convert_time_values(values, values_out, nentries, name, context);
+		fill_null_default(values_out, value_valid, nentries);
+		mark_list_read(reader_handle, name, row_group, kElemFamilyTime, values);
+	}
+
+	// Same as parquet_read_map_int32_fill, but for timestamp values (int64 in the column's own
+	// unit -- the unit itself comes from parquet_read_map_column_shape's unit_out).
+	void parquet_read_map_timestamp_fill(void *handle, const char *name, int64_t row_group,
+		int64_t nrows, int64_t nentries, int64_t *values_out, int8_t *value_valid)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		const char *context = row_group > 0 ? "parquet_read_column_chunk" : "parquet_read_column";
+		std::shared_ptr<arrow::Array> keys, values;
+		fill_map_common(reader_handle, name, row_group, nrows, nentries, nullptr, nullptr,
+			keys, values, context);
+		write_list_element_validity(values, nentries, value_valid);
+		convert_timestamp_values(values, values_out, nentries, name, context);
+		fill_null_default(values_out, value_valid, nentries);
+		mark_list_read(reader_handle, name, row_group, kElemFamilyTimestamp, values);
+	}
+
+	// Same as parquet_read_map_int32_fill, but for string values, which need their own
+	// offsets-and-bytes pair rather than one value per entry: `val_offsets` gets nentries+1 entries
+	// starting at 0, and `val_data` gets nvalchars payload bytes. Copies, for the same reason the
+	// keys fill does.
+	void parquet_read_map_string_fill(void *handle, const char *name, int64_t row_group,
+		int64_t nrows, int64_t nentries, int64_t nvalchars, int64_t *val_offsets, char *val_data,
+		int8_t *value_valid)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		const char *context = row_group > 0 ? "parquet_read_column_chunk" : "parquet_read_column";
+		std::shared_ptr<arrow::Array> keys, values;
+		fill_map_common(reader_handle, name, row_group, nrows, nentries, nullptr, nullptr,
+			keys, values, context);
+		write_list_element_validity(values, nentries, value_valid);
+		if (string_child_total_bytes(values, name, context) != nvalchars)
+		{
+			report_fatal_error(context, std::string("value byte count mismatch for column: ") + name +
+				" (the column changed between the shape and fill calls)"); // GCOVR_EXCL_LINE
+		}
+		auto acc = make_string_like_accessor(values);
+		int64_t at = 0;
+		val_offsets[0] = 0;
+		for (int64_t i = 0; i < nentries; ++i)
+		{
+			auto view = acc.get_view(i);
+			if (!view.empty())
+			{
+				std::memcpy(val_data + at, view.data(), view.size());
+			}
+			at += static_cast<int64_t>(view.size());
+			val_offsets[i + 1] = at;
+		}
+		mark_list_read(reader_handle, name, row_group, kElemFamilyString, values);
+	}
+
 
 	// Reads row group `row_group`'s full vector int32 column `name` into `data`.
 	void parquet_read_int32_array_column_chunk(void *handle, const char *name, int64_t row_group, int32_t *data, int64_t nrows, int64_t col_size, int8_t *valid_out)
@@ -12700,6 +13151,115 @@ static void clear_struct_staging(ParquetWriterHandle *writer_handle)
 	writer_handle->struct_staging_children.clear();
 }
 
+// ==== MAP column write helpers (see the entry points inside the extern "C" block below) ====
+// The int32 offsets ceiling for a map column, with the test-only override applied.
+// See g_debug_map_offset_limit for why a map has no `large` escape hatch to widen into.
+static int64_t effective_map_offset_limit()
+{
+	return g_debug_map_offset_limit > 0 ? g_debug_map_offset_limit : kArrowInt32OffsetLimit;
+}
+
+// Refuses a map column whose entries do not fit an int32 offsets buffer, BEFORE the narrowing
+// cast in assemble_map_array rather than after it -- a silent wrap there would produce a file
+// whose offsets are garbage and whose reader sees plausible, wrong rows.
+//
+// Unlike the list and string equivalents this is a dead end rather than a fork: there is no
+// large_map to switch to, so the only truthful outcomes are "it fits" and "this cannot be
+// written". See CLAUDE.md's "Guarding a hard Arrow int32-only ceiling".
+static void check_map_entries_fit_arrow_limit(int64_t nentries, const std::string &name, const char *context)
+{
+	int64_t limit = effective_map_offset_limit();
+	if (nentries <= limit) return;
+	report_fatal_error(context, "column '" + name + "': " + std::to_string(nentries) +
+		" map entries exceed " + std::to_string(kArrowInt32OffsetLimit) +
+		", the maximum an int32 map offsets buffer can address; Arrow has no large_map to widen"
+		" into, so this column cannot be written (split it across more row groups)");
+}
+
+// The map field: `map<key_type, value_type>`, with the ROW and the VALUE nullability decided by
+// the caller and the KEY always non-nullable -- arrow::MapType constructs its own key field that
+// way and offers no way to change it, which is why parquet_map_column has only two null levels.
+//
+// The entries struct and its two children are named by MapType itself ("entries"/"key"/"value").
+// Those names never reach the written file -- measured: Arrow normalises a map's Parquet leaf
+// paths to `<col>.key_value.key` and `<col>.key_value.value` whatever the Arrow fields are
+// called, exactly as it normalises a list's child to `element`. What they DO govern is
+// arrow::DataType::Equals, and the array assembled below is stamped with THIS type, so the two
+// agree by construction and align_array_to_field is the no-op it is designed to be.
+static std::shared_ptr<arrow::Field> build_map_field(const std::string &name,
+	const std::shared_ptr<arrow::DataType> &key_type,
+	const std::shared_ptr<arrow::DataType> &value_type,
+	bool row_nullable, bool value_nullable)
+{
+	auto item = arrow::field("value", value_type, value_nullable);
+	auto type = std::make_shared<arrow::MapType>(key_type, item);
+	return arrow::field(name, type, row_nullable);
+}
+
+// Assembles the map array from Fortran's offsets, its per-ROW validity and the already-staged
+// key and value children. Structurally identical to assemble_list_array -- a MapArray's
+// ArrayData is {validity, offsets} plus one child -- with the child being the entries struct
+// rather than the values directly.
+//
+// The entries struct is built with NO validity of its own: a map entry is always present. Its
+// key may not be null (MapType forbids it) and its value's nullness lives in the value child.
+static std::shared_ptr<arrow::Array> assemble_map_array(const std::shared_ptr<arrow::DataType> &map_type,
+	int64_t nrows, int64_t nentries, const int64_t *offsets, const int8_t *row_valid,
+	const std::vector<std::shared_ptr<arrow::Array>> &children, const std::string &name,
+	const char *context)
+{
+	check_map_entries_fit_arrow_limit(nentries, name, context);
+	auto entries_type = std::static_pointer_cast<arrow::MapType>(map_type)->value_type();
+	auto entries = assemble_struct_array(entries_type, nentries, nullptr, children, name, context);
+
+	// Declared as a shared_ptr FIRST rather than with `auto`: AllocateBuffer yields a
+	// unique_ptr, which cannot enter ArrayData::Make's braced buffer list. Same shape as
+	// assemble_list_array.
+	std::shared_ptr<arrow::Buffer> offsets_buf;
+	offsets_buf = arrow::AllocateBuffer((nrows + 1) * static_cast<int64_t>(sizeof(int32_t))).ValueOrDie();
+	auto op = reinterpret_cast<int32_t *>(offsets_buf->mutable_data());
+	for (int64_t i = 0; i <= nrows; ++i) op[i] = static_cast<int32_t>(offsets[i]);
+
+	std::shared_ptr<arrow::Buffer> null_bitmap;
+	int64_t null_count = 0;
+	if (row_valid != nullptr)
+	{
+		for (int64_t i = 0; i < nrows; ++i)
+		{
+			if (row_valid[i] == 0) ++null_count;
+		}
+		if (null_count > 0)
+		{
+			null_bitmap = arrow::AllocateEmptyBitmap(nrows).ValueOrDie();
+			for (int64_t i = 0; i < nrows; ++i)
+			{
+				if (row_valid[i] != 0) arrow::bit_util::SetBit(null_bitmap->mutable_data(), i);
+			}
+		}
+	}
+
+	auto data = arrow::ArrayData::Make(map_type, nrows, {null_bitmap, offsets_buf}, {entries->data()}, null_count);
+	return arrow::MakeArray(data);
+}
+
+// Shared body of the two finishers: validates the staging, builds the field with the caller's
+// two nullability answers, assembles the array and clears the staging whatever happens.
+static std::shared_ptr<arrow::Array> finish_map_staging(ParquetWriterHandle *writer_handle,
+	const char *name, int64_t nrows, int64_t nentries, const int64_t *offsets, const int8_t *row_valid,
+	bool row_nullable, bool value_nullable, std::shared_ptr<arrow::Field> &field_out,
+	const char *context)
+{
+	check_struct_staging(writer_handle, name, nentries, context);
+	auto &children = writer_handle->struct_staging_children;
+	field_out = build_map_field(name, children[0]->type(), children[1]->type(),
+		row_nullable, value_nullable);
+	auto array = assemble_map_array(field_out->type(), nrows, nentries, offsets, row_valid,
+		children, name, context);
+	clear_struct_staging(writer_handle);
+	return array;
+}
+
+
 extern "C"
 {
 
@@ -12843,6 +13403,77 @@ extern "C"
 		writer_handle->pending_chunk_arrays[static_cast<int>(idx)] =
 			align_array_to_field(writer_handle->fields[idx], array);
 	}
+
+	// ==== MAP column writes ====
+	//
+	// A map's entries ARE a two-field struct, so this section reuses the struct staging registry
+	// above wholesale rather than building a second one: parquet_write_map.f90 calls
+	// parquet_struct_begin(name, NENTRIES, 2), pushes the keys through parquet_struct_field_string
+	// and the values through whichever parquet_struct_field_<family> matches, and then calls one of
+	// the two finishers below. The staged struct has `nentries` rows, which is exactly what
+	// check_struct_staging wants to be told, so no new staging state and no new validation exist
+	// here at all -- the finisher simply passes nentries where the struct finisher passes nrows.
+	//
+	// The cost of that reuse is that this path inherits feature_risks.md Risk-156: the
+	// "staging already open" / "no staging open" guards are not reachable from any test, because
+	// parquet_writer%handle is a private component and no public API can call these entry points
+	// out of order. Phase 5 neither improves nor worsens that, and must not claim otherwise.
+
+	// Finishes a WHOLE-COLUMN map write: decides both nullability flags from the values, assembles
+	// the array and stores it. Staging is cleared whether or not this succeeds.
+	void parquet_append_map_column(void *handle, const char *name, int64_t nrows, int64_t nentries,
+		const int64_t *offsets, const int8_t *row_valid)
+	{
+		auto writer_handle = as_handle(handle);
+		bool row_nullable = has_any_null(row_valid, nrows);
+		bool value_nullable = false;
+		if (writer_handle->struct_staging_children.size() == 2)
+		{
+			value_nullable = writer_handle->struct_staging_children[1]->null_count() > 0;
+		}
+		if (writer_handle->protected_columns.count(name) != 0)
+		{
+			// A protected column is non-nullable at EVERY level it has. Fortran has already refused
+			// a null row or a null value for such a column, so this cannot produce a field that
+			// receives nulls -- the invariant build_field's own comment states.
+			row_nullable = false;
+			value_nullable = false;
+		}
+		std::shared_ptr<arrow::Field> field;
+		auto array = finish_map_staging(writer_handle, name, nrows, nentries, offsets, row_valid,
+			row_nullable, value_nullable, field, "parquet_write_column");
+		append_column(writer_handle, name, field, array);
+	}
+
+	// Streaming counterpart: same array, stashed into pending_chunk_arrays instead of arrays, with
+	// the field built once on the column's first chunk.
+	//
+	// Both flags come from ONE resolve_chunk_nullability call with always_nullable set, exactly as
+	// the struct chunk write does: a parquet_map_column carries its null state inside itself, with
+	// no caller-supplied mask whose presence could stand in for "might this column contain a Null?",
+	// so a streamed map column is in the ALWAYS-NULLABLE class and is nullable at both levels
+	// unless the column is protected.
+	void parquet_append_map_column_chunk(void *handle, const char *name, int64_t nrows, int64_t nentries,
+		const int64_t *offsets, const int8_t *row_valid)
+	{
+		auto writer_handle = as_handle(handle);
+		bool first_chunk_ever;
+		size_t idx = check_column_chunk_write_preconditions(writer_handle, name, first_chunk_ever);
+		bool nullable = resolve_chunk_nullability(writer_handle, name, idx, first_chunk_ever,
+			/*mask_present=*/true, /*always_nullable=*/true);
+		std::shared_ptr<arrow::Field> field;
+		auto array = finish_map_staging(writer_handle, name, nrows, nentries, offsets, row_valid,
+			nullable, nullable, field, "parquet_write_column_chunk");
+		if (first_chunk_ever)
+		{
+			if (writer_handle->fields.size() <= idx) writer_handle->fields.resize(idx + 1);
+			writer_handle->fields[idx] = field;
+		}
+		if (writer_handle->arrays.size() <= idx) writer_handle->arrays.resize(idx + 1);
+		writer_handle->pending_chunk_arrays[static_cast<int>(idx)] =
+			align_array_to_field(writer_handle->fields[idx], array);
+	}
+
 
 }
 
@@ -13681,6 +14312,17 @@ extern "C"
 	void parquet_debug_set_list_offset_limit(int64_t n)
 	{
 		g_debug_list_offset_limit = n;
+	}
+
+	// Test-only: overrides g_debug_map_offset_limit (see its own comment) so an error scenario can
+	// reach check_map_entries_fit_arrow_limit's REFUSAL with a tiny fixture instead of a genuinely
+	// 2-billion-entry column. Note what makes the map case different from the list one above: there
+	// the override exercises a WIDENING (large_list), here it exercises an abort, because Arrow has
+	// no large_map to widen into. Safe as a process-global for the same reason: the scenario that
+	// sets it runs as its own isolated subprocess. <= 0 restores the real limit.
+	void parquet_debug_set_map_offset_limit(int64_t n)
+	{
+		g_debug_map_offset_limit = n;
 	}
 
 	// Test-only: overrides g_debug_col_size_limit (see its own comment) so

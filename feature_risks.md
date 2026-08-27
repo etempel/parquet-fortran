@@ -222,6 +222,7 @@ something a reader is expected to have.
 | [Risk-154](#risk-154--a-sliced-list-array-carries-three-independent-offsets-and-dropping-any-one-is-a-plausible-wrong-answer) | A sliced list array carries THREE independent offsets, and dropping any one is a plausible wrong answer | 1 — new |
 | [Risk-155](#risk-155--a-structs-field-mask-is-taken-at-face-value-and-the-arithmetic-that-looks-necessary-is-not) | A struct's field mask is taken at face value, and the arithmetic that looks necessary is not | 1 — new |
 | [Risk-156](#risk-156--a-struct-write-loses-a-field-because-a-push-was-forgotten) | A struct write loses a field because a push was forgotten | 3 — not testable |
+| [Risk-157](#risk-157--a-map-columns-entry-ceiling-has-no-widening-fallback-and-the-narrowing-cast-is-one-line-away) | A map column's entry ceiling has NO widening fallback, and the narrowing cast is one line away | 1 — new |
 
 ---
 
@@ -428,6 +429,49 @@ every element of a row shares that row's own value prefix, catching a row assemb
 rows' elements.
 
 
+### Risk-157 — A map column's entry ceiling has NO widening fallback, and the narrowing cast is one line away
+
+**What breaks.** `assemble_map_array` (`src/parquet_wrapper.cpp`) narrows a map column's int64
+offsets into the int32 buffer Arrow requires:
+
+```cpp
+auto op = reinterpret_cast<int32_t *>(offsets_buf->mutable_data());
+for (int64_t i = 0; i <= nrows; ++i) op[i] = static_cast<int32_t>(offsets[i]);
+```
+
+Past 2³¹−1 entries that cast **wraps**. The written file's offsets then describe rows that overlap,
+run backwards, or point outside the entries array, and every reader — this library's included — is
+entitled to return whatever it finds there.
+
+**Why this is not the same risk the string and list ceilings carry.** Those two have a **fork**: a
+string column that will not fit an int32 offsets buffer is written as `large_utf8`, a list column as
+`large_list`, and the guard is a branch rather than a refusal. **Arrow provides no `large_map`** —
+verified against `arrow/type.h` and `arrow/array/array_nested.h`, and against `MapArray::FromArrays`'
+own contract, which requires int32 offsets. So this is the one variable-length ceiling in the library
+whose only correct outcomes are "it fits" and "this cannot be written", and the natural instinct —
+*widen it like the others* — has nothing to reach for.
+
+**Why it would be quiet.** Nothing in Arrow objects: the offsets buffer is the right size and the
+right type, and `Table::Validate()` does not check that offsets are monotonic. A test would need a
+genuine two-billion-entry column to reach it, which no fixture can hold.
+
+**Test.** Covered, and the shape of the cover is the point.
+`check_map_entries_fit_arrow_limit` runs **before** the loop above, never after — a guard placed
+after the cast would be reading the wrapped values. `g_debug_map_offset_limit` plus
+`parquet_debug_set_map_offset_limit` let `map_entry_limit` (`test/error_scenarios.f90`) reach the
+refusal with a three-entry column, and `test_map_entry_limit_aborts` (`test/test_errors.f90`)
+asserts the message, not merely the exit status.
+
+**What this entry still forbids.** Three things, and each is a plausible future edit:
+
+- **Do not move the check after the narrowing loop**, or into `parquet_append_map_column`'s callers.
+  It belongs immediately before the cast it protects.
+- **Do not add a "large map" arm.** There is no such Arrow type; an arm that looked like one would
+  have to invent a private encoding no other tool could read.
+- **Do not reuse `g_debug_list_offset_limit` for it.** The list override exercises a WIDENING and
+  this one exercises a REFUSAL, so a shared global would make one scenario silently change the
+  other's meaning — the same reason the list and string overrides were kept separate.
+
 ## 2. Risks with a proposed testing scenario
 
 ### Risk-133 — A missing domain tag puts a generic back in another generic's word space, silently
@@ -559,6 +603,14 @@ test can arrange — and writing a test for them would freeze the wrong thing as
 one `parquet_struct_field_<kind>` per field, then a finisher. A path that pushes fewer fields than
 it declared, or pushes them in a different order from the names it declared, produces a
 `StructArray` whose children do not correspond to the field list.
+
+**This registry now has TWO callers, not one.** A MAP write stages its keys and its values through
+the same `parquet_struct_begin`/`parquet_struct_field_*` calls — a map's entries *are* a two-field
+struct — and finishes through `parquet_append_map_column` instead. So everything below applies to
+`src/parquet_write_map.f90` exactly as it does to `src/parquet_write_struct.f90`, and the two
+finishers are the only places that differ. The map path declares **two** fields and stages over the
+column's ENTRY count rather than its row count, which is what `check_struct_staging` is told; a
+future third caller must do the same.
 
 **Why it would be quiet without the guard.** Arrow does not object at push time. It objects at
 `parquet_close_writer`, through `arrow::Table::Validate()`, with a message naming a **field index**

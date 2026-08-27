@@ -102,6 +102,12 @@ module parquet_bindings
     public :: parquet_read_list_float32_fill, parquet_read_list_float64_fill
     public :: parquet_read_list_bool8_fill, parquet_read_list_string_fill
     public :: parquet_read_list_date_fill, parquet_read_list_time_fill, parquet_read_list_timestamp_fill
+    public :: parquet_read_map_column_shape, parquet_read_map_keys_fill
+    public :: parquet_read_map_int32_fill, parquet_read_map_int64_fill
+    public :: parquet_read_map_float32_fill, parquet_read_map_float64_fill
+    public :: parquet_read_map_bool8_fill, parquet_read_map_string_fill
+    public :: parquet_read_map_date_fill, parquet_read_map_time_fill, parquet_read_map_timestamp_fill
+    public :: parquet_append_map_column, parquet_append_map_column_chunk
     public :: parquet_read_struct_column_shape, parquet_read_struct_column_fields
     public :: parquet_read_struct_row_validity
     public :: parquet_struct_begin, parquet_append_struct_column, parquet_append_struct_column_chunk
@@ -2272,6 +2278,214 @@ module parquet_bindings
             character(kind=c_char) :: str_data(*)
             integer(c_int8_t) :: elem_valid(*)
         end subroutine
+
+        ! ---- MAP column reads (shape, then keys, then one value family) ----
+        !
+        ! A map is physically a LIST of struct<key, value>, so this mirrors the list read exactly:
+        ! one shape call, then fills. The KEYS get their own fill rather than being folded into
+        ! each of the nine value fills -- they are always strings, so folding would repeat four
+        ! key-buffer arguments across nine otherwise-identical signatures.
+        !
+        ! There is no key VALIDITY anywhere below, and that is not an omission: Arrow's MapType
+        ! declares its key field non-nullable and offers no way to change it, so a map has exactly
+        ! TWO null levels -- the row, and each value.
+
+        !> Reports the shape of map column `name` without writing any values: row count, total
+        !> entry count, key byte count, the value family (one of the PF_ELEM_* parameters), the
+        !> temporal unit selector (timestamp family only, 0 otherwise) and the value byte count
+        !> (string family only, 0 otherwise). `row_group` <= 0 means the whole column.
+        !> Aborts if `name` is not a map column, if its keys are not strings, or if its values are
+        !> a type this library cannot read.
+        subroutine parquet_read_map_column_shape(reader, name, row_group, nrows, nentries, nkeychars, &
+                value_family, unit_out, nvalchars) bind(C, name="parquet_read_map_column_shape")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_long_long), intent(out) :: nrows
+            integer(c_long_long), intent(out) :: nentries
+            integer(c_long_long), intent(out) :: nkeychars
+            integer(c_int32_t), intent(out) :: value_family
+            integer(c_int32_t), intent(out) :: unit_out
+            integer(c_long_long), intent(out) :: nvalchars
+        end subroutine
+
+        !> Copies map column `name`'s offsets, per-ROW validity and KEYS into the caller's buffers.
+        !> `offsets` gets nrows+1 entries starting at 0; `key_offsets` gets nentries+1 entries
+        !> starting at 0 and `key_data` gets `nkeychars` bytes.
+        subroutine parquet_read_map_keys_fill(reader, name, row_group, nrows, nentries, nkeychars, &
+                offsets, row_valid, key_offsets, key_data) bind(C, name="parquet_read_map_keys_fill")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nentries
+            integer(c_long_long), value :: nkeychars
+            integer(c_int64_t) :: offsets(*)
+            integer(c_int8_t) :: row_valid(*)
+            integer(c_int64_t) :: key_offsets(*)
+            character(kind=c_char) :: key_data(*)
+        end subroutine
+
+        !> Copies map column `name`'s int32 values and their per-VALUE validity into the caller's
+        !> buffers. Independent of the shape and keys calls: it re-derives the shape itself and
+        !> checks the counts it was given, so the three may be issued in any order.
+        subroutine parquet_read_map_int32_fill(reader, name, row_group, nrows, nentries, values, &
+                value_valid) bind(C, name="parquet_read_map_int32_fill")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nentries
+            integer(c_int32_t) :: values(*)
+            integer(c_int8_t) :: value_valid(*)
+        end subroutine
+
+        !> As parquet_read_map_int32_fill, for int64 values.
+        subroutine parquet_read_map_int64_fill(reader, name, row_group, nrows, nentries, values, &
+                value_valid) bind(C, name="parquet_read_map_int64_fill")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nentries
+            integer(c_int64_t) :: values(*)
+            integer(c_int8_t) :: value_valid(*)
+        end subroutine
+
+        !> As parquet_read_map_int32_fill, for float32 values.
+        subroutine parquet_read_map_float32_fill(reader, name, row_group, nrows, nentries, values, &
+                value_valid) bind(C, name="parquet_read_map_float32_fill")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nentries
+            real(c_float) :: values(*)
+            integer(c_int8_t) :: value_valid(*)
+        end subroutine
+
+        !> As parquet_read_map_int32_fill, for float64 values.
+        subroutine parquet_read_map_float64_fill(reader, name, row_group, nrows, nentries, values, &
+                value_valid) bind(C, name="parquet_read_map_float64_fill")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nentries
+            real(c_double) :: values(*)
+            integer(c_int8_t) :: value_valid(*)
+        end subroutine
+
+        !> As parquet_read_map_int32_fill, for boolean values (one int8 per entry).
+        subroutine parquet_read_map_bool8_fill(reader, name, row_group, nrows, nentries, values, &
+                value_valid) bind(C, name="parquet_read_map_bool8_fill")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nentries
+            integer(c_int8_t) :: values(*)
+            integer(c_int8_t) :: value_valid(*)
+        end subroutine
+
+        !> As parquet_read_map_int32_fill, for date values (int32 days since the epoch).
+        subroutine parquet_read_map_date_fill(reader, name, row_group, nrows, nentries, values, &
+                value_valid) bind(C, name="parquet_read_map_date_fill")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nentries
+            integer(c_int32_t) :: values(*)
+            integer(c_int8_t) :: value_valid(*)
+        end subroutine
+
+        !> As parquet_read_map_int32_fill, for time values (canonical int64 nanoseconds of day).
+        subroutine parquet_read_map_time_fill(reader, name, row_group, nrows, nentries, values, &
+                value_valid) bind(C, name="parquet_read_map_time_fill")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nentries
+            integer(c_int64_t) :: values(*)
+            integer(c_int8_t) :: value_valid(*)
+        end subroutine
+
+        !> As parquet_read_map_int32_fill, for timestamp values (int64 in the column's own unit,
+        !> which parquet_read_map_column_shape's `unit_out` reports).
+        subroutine parquet_read_map_timestamp_fill(reader, name, row_group, nrows, nentries, values, &
+                value_valid) bind(C, name="parquet_read_map_timestamp_fill")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nentries
+            integer(c_int64_t) :: values(*)
+            integer(c_int8_t) :: value_valid(*)
+        end subroutine
+
+        !> As parquet_read_map_int32_fill, for string values: they come back as their own
+        !> offsets/bytes pair (`val_offsets` gets nentries+1 entries starting at 0, `val_data`
+        !> gets `nvalchars` bytes) rather than one fixed-width value per entry.
+        subroutine parquet_read_map_string_fill(reader, name, row_group, nrows, nentries, nvalchars, &
+                val_offsets, val_data, value_valid) bind(C, name="parquet_read_map_string_fill")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: row_group
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nentries
+            integer(c_long_long), value :: nvalchars
+            integer(c_int64_t) :: val_offsets(*)
+            character(kind=c_char) :: val_data(*)
+            integer(c_int8_t) :: value_valid(*)
+        end subroutine
+
+        ! ---- MAP column writes (staged through the STRUCT registry; see parquet_write_map.f90) ----
+        !
+        ! Only TWO entry points, because a map's entries ARE a two-field struct: the write stages
+        ! them through parquet_struct_begin(name, NENTRIES, 2) plus parquet_struct_field_string for
+        ! the keys and one parquet_struct_field_<family> for the values, then finishes here. That
+        ! reuse is why the map write needs two entry points where the list write needed eighteen.
+
+        !> Finishes a WHOLE-COLUMN map write from the currently staged keys and values, wrapping
+        !> them in a MAP array with `offsets` (nrows+1 entries, starting at 0) and `row_valid`.
+        !> Both nullability flags are decided from the staged values. Clears the staging.
+        subroutine parquet_append_map_column(writer, name, nrows, nentries, offsets, row_valid) &
+                bind(C, name="parquet_append_map_column")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nentries
+            integer(c_int64_t) :: offsets(*)
+            type(c_ptr), value :: row_valid
+        end subroutine
+
+        !> Streaming counterpart of parquet_append_map_column: same array, stashed as this
+        !> column's pending row-group chunk, with the field built once on the first chunk.
+        subroutine parquet_append_map_column_chunk(writer, name, nrows, nentries, offsets, row_valid) &
+                bind(C, name="parquet_append_map_column_chunk")
+            import
+            type(c_ptr), value :: writer
+            character(kind=c_char) :: name(*)
+            integer(c_long_long), value :: nrows
+            integer(c_long_long), value :: nentries
+            integer(c_int64_t) :: offsets(*)
+            type(c_ptr), value :: row_valid
+        end subroutine
+
 
         !> Writes `name`'s container-shape token ("scalar"/"vector"/"list"/"map"/"struct"/
         !> "unknown") into `buf`, space-padded to buf_len. Schema-only: reads no column data.

@@ -68,18 +68,9 @@ contains
         do_write = .true.
     end subroutine struct_write_preamble
 
-    !> Builds one field's per-ROW validity mask.
-    !>
-    !> Two sources, and the split is the same one parquet_write_list.f90's element mask makes: the
-    !> three temporal kinds carry their null state INSIDE the element (a default-initialized
-    !> parquet_date IS null), so their mask comes from the elements; every other kind keeps it in
-    !> the field column's own bitmap.
-    subroutine struct_field_validity(fcol, nrows, kind, is_valid, any_null)
-        type(parquet_column), intent(in) :: fcol !! the field's column.
-        integer(int64), intent(in) :: nrows !! rows it holds.
-        integer, intent(in) :: kind !! the field's PK_* kind.
-        logical, allocatable, intent(out) :: is_valid(:) !! .true. where the value is present.
-        logical, intent(out) :: any_null !! .true. if at least one value is null.
+    ! Its interface, and its documentation, live in parquet_core.f90: parquet_write_map stages a
+    ! map's VALUES through this same rule, and a sibling submodule can only reach it that way.
+    module procedure struct_field_validity
         type(parquet_date), pointer :: p_date(:)
         type(parquet_time), pointer :: p_time(:)
         type(parquet_timestamp), pointer :: p_ts(:)
@@ -105,24 +96,18 @@ contains
             end do
         end select
         any_null = .not. all(is_valid(1_int64:nrows))
-    end subroutine struct_field_validity
+    end procedure struct_field_validity
 
-    !> Stages ONE field, dispatched on its kind: nine families, each handing over that field's
-    !> values and its per-row validity through the shared push entry points.
-    !>
-    !> Every buffer below is sized max(nrows, 1), and every `parquet_column_data_ptr` call is
-    !> guarded by `nrows > 0`, for the reason parquet_write_list.f90's own dispatch records: a
-    !> zero-row column never allocated its storage at all (grow_storage returns early at n == 0),
-    !> so reaching for a pointer into it references an unallocated allocatable. Only nagfor's
-    !> `-C=array` sees it -- gfortran, ifx and flang hand back a null-based pointer nothing then
-    !> dereferences, so the whole suite stays green.
-    subroutine push_struct_field(writer, fname, fcol, kind, nrows, val_ptr)
-        type(parquet_writer), intent(inout) :: writer !! open writer.
-        character(len=*), intent(in) :: fname !! the field's name, as written into the file.
-        type(parquet_column), intent(in) :: fcol !! the field's column.
-        integer, intent(in) :: kind !! the field's PK_* kind.
-        integer(int64), intent(in) :: nrows !! rows in this write.
-        type(c_ptr), intent(in) :: val_ptr !! per-row validity buffer, or c_null_ptr.
+    ! Its interface, and its documentation, live in parquet_core.f90, for the same reason as
+    ! struct_field_validity above -- parquet_write_map stages a map's keys and values through it.
+    !
+    ! Every buffer below is sized max(nrows, 1), and every `parquet_column_data_ptr` call is
+    ! guarded by `nrows > 0`, for the reason parquet_write_list.f90's own dispatch records: a
+    ! zero-row column never allocated its storage at all (grow_storage returns early at n == 0),
+    ! so reaching for a pointer into it references an unallocated allocatable. Only nagfor's
+    ! `-C=array` sees it -- gfortran, ifx and flang hand back a null-based pointer nothing then
+    ! dereferences, so the whole suite stays green.
+    module procedure push_struct_field
         integer(int32), pointer :: p_i32(:)
         integer(int64), pointer :: p_i64(:)
         real(real32), pointer :: p_f32(:)
@@ -145,7 +130,15 @@ contains
         integer(int64) :: k, nstr, nchars
         logical :: has_validity
         character(len=:), allocatable :: kname, ctx
+        integer :: wunit
+        integer(c_int32_t) :: wutc
 
+        ! Microseconds, timezone-naive, unless the caller declared otherwise -- which only a map
+        ! write does, since a struct field has no MAML declaration to carry a unit.
+        wunit = parquet_unit_micros
+        if (present(unit)) wunit = unit
+        wutc = 0_c_int32_t
+        if (present(is_utc)) wutc = is_utc
         select case (kind)
         case (PK_INT32)
             allocate(b_i32(max(nrows, 1_int64)))
@@ -205,7 +198,7 @@ contains
                 b_i64(1_int64:nrows) = p_time(1_int64:nrows)%raw()
             end if
             call parquet_struct_field_time(writer%handle, trim(fname)//char(0), b_i64, nrows, val_ptr, &
-                int(parquet_unit_micros, c_int32_t))
+                int(wunit, c_int32_t))
         case (PK_TIMESTAMP)
             allocate(b_i64(max(nrows, 1_int64)))
             b_i64 = 0_c_int64_t
@@ -214,11 +207,11 @@ contains
                 ! A null instant has no value to convert, and %to_unix would abort on one; the
                 ! validity buffer carries its nullness across, so 0 is never read.
                 do k = 1_int64, nrows
-                    if (.not. p_ts(k)%is_null()) b_i64(k) = p_ts(k)%to_unix(parquet_unit_micros)
+                    if (.not. p_ts(k)%is_null()) b_i64(k) = p_ts(k)%to_unix(wunit)
                 end do
             end if
             call parquet_struct_field_timestamp(writer%handle, trim(fname)//char(0), b_i64, nrows, val_ptr, &
-                int(parquet_unit_micros, c_int32_t), 0_c_int32_t)
+                int(wunit, c_int32_t), wutc)
         case (PK_STRING)
             ! The field's own packed offsets+bytes go over unchanged -- the same layout Arrow
             ! wants, so this is a copy rather than a translation. The bitmap raw_buffers also
@@ -250,7 +243,7 @@ contains
             error stop "parquet_write_column: unsupported struct field kind '" // kname // &
                 "' for field " // trim(fname) // ctx ! GCOVR_EXCL_LINE
         end select
-    end subroutine push_struct_field
+    end procedure push_struct_field
 
     !> The shared body of both struct write specifics. `chunked` selects the row-group-scoped
     !> counterpart of every step that differs: which mask helper supplies the row mask, which row

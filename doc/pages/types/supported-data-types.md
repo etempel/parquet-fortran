@@ -405,9 +405,11 @@ A path must resolve all the way down to a leaf column: naming an intermediate st
 (`"main.inner"`, or just `"main"` when `main` is itself a struct) is not readable by any type this
 library supports and fails the same way as any other unknown column
 (`error stop "...: column not found in parquet file: ..."`) — there is no struct/record output type
-to read it into. `MAP` columns are not supported anywhere along a struct path — neither as an
-intermediate hop nor as the terminal leaf — and are rejected with the same "column not found" class
-of error rather than a silent wrong answer or a crash.
+to read it into. A `MAP` column is not reachable along a struct path either — neither as an
+intermediate hop nor as the terminal leaf — and is rejected with the same "column not found" class
+of error rather than a silent wrong answer or a crash. That restriction is about the *dotted path*
+only: a **top-level** `MAP` column is read and written through
+[`parquet_map_column`](map-columns.html), like any other container.
 
 **Null handling** combines every level a path passes through: a leaf is reported/treated as Null
 (via `null_value=`/`is_valid=`, [above](#null-values)) if the top-level struct itself is missing for

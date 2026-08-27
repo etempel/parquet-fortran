@@ -45,6 +45,9 @@
 //     one eight of the nine element-type arms of the `LIST` read path would never be entered.
 //   * `extended_types.parquet` -- columns of the extended read-only source types
 //     (`int8`/`int16`/unsigned integers/`half_float`/`decimal`).
+//   * `map_payloads.parquet` -- one flat top-level `MAP` column per value family, plus one with
+//     duplicate keys and one keyed by int32 that exists only to be refused. Four rows covering a
+//     map's two null levels and the present-but-empty case, in two row groups.
 //   * `struct_payloads.parquet` -- one flat top-level `STRUCT` column per payload family, plus
 //     one carrying all nine at once, with the four null shapes that separate a struct's own
 //     row nullness from its fields'. Two row groups. See its own banner for why no existing
@@ -1025,6 +1028,173 @@ static bool generate_struct_payloads_fixture()
     return status.ok();
 }
 
+// test/fixtures/map_payloads.parquet: one flat top-level MAP column per value family, plus one
+// carrying duplicate keys and one keyed by int32 that exists only to be refused.
+//
+// **A new fixture was needed rather than reusing map_list_types.parquet**, and the reason is the
+// same shape as struct_payloads.parquet's: that file's `map_col` is one map<string,int32> with 3
+// rows in 1 row group, and its purpose is the NESTED type matrix -- every other map in it has a
+// container value and belongs to Phase 7. It covers one of nine value families, one row group,
+// and none of the four null shapes.
+//
+// Every column carries the same four rows, deliberately, so that a test can predict one column's
+// null pattern from another's:
+//
+//   row 0  two entries, both values present    -- the ordinary case
+//   row 1  the MAP ROW is null                 -- row-level nullness
+//   row 2  the map is PRESENT but EMPTY        -- NOT a null row, and the pair that a naive
+//                                                 implementation conflates: both report size 0,
+//                                                 and only %is_null separates them
+//   row 3  one entry whose VALUE is null       -- value-level nullness, with the key present
+//
+// Two row groups (kRowGroup = 2), so the chunked read path is exercised against a foreign file
+// rather than only against one this library wrote -- and the row-1/row-2 pair straddles the
+// boundary, so a row-group-scoped read has to get the null/empty distinction right in both halves.
+//
+// `m_dup` carries DUPLICATE KEYS in a deliberate order ("a", "b", "a"), which is what pins three
+// separate promises at once: that the format preserves duplicates, that %get returns the FIRST
+// match, and that occurrence= reaches the later one. Nothing else in the repository asserts the
+// ORDER a map's entries come back in.
+//
+// `m_intkey` is a map<int32,int32> and exists only to be REFUSED. V1 keys are strings; this is
+// the fixture the refusal is asserted against, and when non-string keys are ever supported the
+// test that names it becomes a positive read test rather than being deleted.
+static bool generate_map_payloads_fixture()
+{
+    constexpr int kRows = 4;
+    constexpr int kRowGroup = 2;
+
+    // Which rows are what. Row 1 is the absent map; row 2 is present but empty; row 3 holds one
+    // entry whose value is null.
+    auto null_row = [](int r) { return r == 1; };
+    auto empty_row = [](int r) { return r == 2; };
+    auto null_value_row = [](int r) { return r == 3; };
+
+    arrow::Status st;
+
+    // Builds map<string, T> with the null pattern above. `append(row, n)` appends the n-th value
+    // of row `row` to the item builder; rows 0 gets two entries, row 3 gets one (null) value.
+    auto build = [&](std::shared_ptr<arrow::ArrayBuilder> ib, const std::function<void(int, int)> &append) {
+        auto kb = std::make_shared<arrow::StringBuilder>();
+        arrow::MapBuilder builder(arrow::default_memory_pool(),
+            std::static_pointer_cast<arrow::ArrayBuilder>(kb), ib);
+        arrow::Status inner;
+        for (int row = 0; row < kRows; ++row)
+        {
+            if (null_row(row)) { inner = builder.AppendNull(); continue; }
+            inner = builder.Append();
+            if (empty_row(row)) continue;
+            if (null_value_row(row))
+            {
+                inner = kb->Append("solo");
+                inner = ib->AppendNull();
+                continue;
+            }
+            inner = kb->Append("alpha");
+            append(row, 0);
+            inner = kb->Append("beta");
+            append(row, 1);
+        }
+        std::shared_ptr<arrow::Array> out;
+        inner = builder.Finish(&out);
+        if (!inner.ok()) return std::shared_ptr<arrow::Array>();
+        return out;
+    };
+
+    auto i32b = std::make_shared<arrow::Int32Builder>();
+    auto m_int32 = build(i32b, [&](int r, int n) { st = i32b->Append(r * 10 + n); });
+    auto i64b = std::make_shared<arrow::Int64Builder>();
+    auto m_int64 = build(i64b, [&](int r, int n) {
+        st = i64b->Append(static_cast<int64_t>(r) * 1000000000LL + n); });
+    auto f32b = std::make_shared<arrow::FloatBuilder>();
+    auto m_float32 = build(f32b, [&](int r, int n) {
+        st = f32b->Append(static_cast<float>(r) + 0.5f * static_cast<float>(n + 1)); });
+    auto f64b = std::make_shared<arrow::DoubleBuilder>();
+    auto m_float64 = build(f64b, [&](int r, int n) {
+        st = f64b->Append(static_cast<double>(r) + 0.25 * static_cast<double>(n + 1)); });
+    auto bb = std::make_shared<arrow::BooleanBuilder>();
+    auto m_bool = build(bb, [&](int r, int n) { st = bb->Append((r + n) % 2 == 0); });
+    auto sb = std::make_shared<arrow::StringBuilder>();
+    auto m_string = build(sb, [&](int r, int n) {
+        st = sb->Append(std::string(static_cast<size_t>(r + n) + 1, 'x')); });
+    auto db = std::make_shared<arrow::Date32Builder>();
+    auto m_date = build(db, [&](int r, int n) { st = db->Append(19000 + r * 10 + n); });
+    auto tb = std::make_shared<arrow::Time64Builder>(arrow::time64(arrow::TimeUnit::MICRO),
+        arrow::default_memory_pool());
+    auto m_time = build(tb, [&](int r, int n) { st = tb->Append(3600000000LL * (r + 1) + n); });
+    auto tsb = std::make_shared<arrow::TimestampBuilder>(arrow::timestamp(arrow::TimeUnit::MICRO),
+        arrow::default_memory_pool());
+    auto m_timestamp = build(tsb, [&](int r, int n) {
+        st = tsb->Append(1700000000000000LL + r * 1000000LL + n); });
+
+    // m_dup: row 0 carries "a" -> 1, "b" -> 2, "a" -> 3, in that order. The other three rows keep
+    // this fixture's shared null pattern so that a test can compare against any other column.
+    auto dkb = std::make_shared<arrow::StringBuilder>();
+    auto dib = std::make_shared<arrow::Int32Builder>();
+    arrow::MapBuilder dup_builder(arrow::default_memory_pool(),
+        std::static_pointer_cast<arrow::ArrayBuilder>(dkb),
+        std::static_pointer_cast<arrow::ArrayBuilder>(dib));
+    for (int row = 0; row < kRows; ++row)
+    {
+        if (null_row(row)) { st = dup_builder.AppendNull(); continue; }
+        st = dup_builder.Append();
+        if (empty_row(row)) continue;
+        if (null_value_row(row)) { st = dkb->Append("solo"); st = dib->AppendNull(); continue; }
+        st = dkb->Append("a"); st = dib->Append(1);
+        st = dkb->Append("b"); st = dib->Append(2);
+        st = dkb->Append("a"); st = dib->Append(3);
+    }
+    std::shared_ptr<arrow::Array> m_dup;
+    st = dup_builder.Finish(&m_dup);
+
+    // m_intkey: a map keyed by int32, present only so that the string-keys-only refusal has
+    // something to refuse. Two entries in row 0, nothing exotic.
+    auto ikb = std::make_shared<arrow::Int32Builder>();
+    auto iib = std::make_shared<arrow::Int32Builder>();
+    arrow::MapBuilder intkey_builder(arrow::default_memory_pool(),
+        std::static_pointer_cast<arrow::ArrayBuilder>(ikb),
+        std::static_pointer_cast<arrow::ArrayBuilder>(iib));
+    for (int row = 0; row < kRows; ++row)
+    {
+        if (null_row(row)) { st = intkey_builder.AppendNull(); continue; }
+        st = intkey_builder.Append();
+        if (empty_row(row)) continue;
+        st = ikb->Append(row * 100); st = iib->Append(row);
+    }
+    std::shared_ptr<arrow::Array> m_intkey;
+    st = intkey_builder.Finish(&m_intkey);
+
+    // rowid: a plain scalar column beside the maps, so a test can tell which rows it is looking at
+    // without depending on any map read having worked.
+    arrow::Int32Builder ridb;
+    for (int row = 0; row < kRows; ++row) st = ridb.Append(row);
+    std::shared_ptr<arrow::Array> rowid_arr;
+    st = ridb.Finish(&rowid_arr);
+
+    auto schema = arrow::schema({
+        arrow::field("rowid", arrow::int32()),
+        arrow::field("m_int32", m_int32->type()),
+        arrow::field("m_int64", m_int64->type()),
+        arrow::field("m_float32", m_float32->type()),
+        arrow::field("m_float64", m_float64->type()),
+        arrow::field("m_bool", m_bool->type()),
+        arrow::field("m_string", m_string->type()),
+        arrow::field("m_date", m_date->type()),
+        arrow::field("m_time", m_time->type()),
+        arrow::field("m_timestamp", m_timestamp->type()),
+        arrow::field("m_dup", m_dup->type()),
+        arrow::field("m_intkey", m_intkey->type()),
+    });
+    auto table = arrow::Table::Make(schema, {rowid_arr, m_int32, m_int64, m_float32, m_float64,
+        m_bool, m_string, m_date, m_time, m_timestamp, m_dup, m_intkey});
+
+    auto maybe_outfile = arrow::io::FileOutputStream::Open("test/fixtures/map_payloads.parquet");
+    if (!maybe_outfile.ok()) return false;
+    auto outfile = *maybe_outfile;
+    auto status = parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), outfile, kRowGroup);
+    return status.ok();
+}
+
 // test/fixtures/nested_struct.parquet: exercises the arbitrary-depth nested-STRUCT-field read
 // support (dotted-path column names, e.g. "main.inner.age") -- this library's own writer cannot
 // produce STRUCT columns at all, so this fixture is hand-built directly against the Arrow API,
@@ -1707,6 +1877,7 @@ int main()
         {"test/fixtures/extended_types.parquet", generate_extended_types_fixture},
         {"test/fixtures/nested_struct.parquet", generate_nested_struct_fixture},
         {"test/fixtures/struct_payloads.parquet", generate_struct_payloads_fixture},
+        {"test/fixtures/map_payloads.parquet", generate_map_payloads_fixture},
         {"test/fixtures/map_list_types.parquet", generate_map_list_types_fixture},
         {"test/fixtures/element_nulls.parquet", generate_element_nulls_fixture},
         {"test/fixtures/screen_declined_nulls.parquet", generate_screen_declined_nulls_fixture},

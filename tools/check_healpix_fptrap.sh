@@ -12,7 +12,7 @@
 #     module's promise is actually about, and only a trapping build reproduces it.
 #   * it runs inside the whole test binary, where anything else in the process may have raised a
 #     flag first. This runs one program that does nothing else.
-#   * it links the whole library. This compiles six Fortran files with a bare compiler and no
+#   * it links the whole library. This compiles seven Fortran files with a bare compiler and no
 #     Arrow anywhere, so it also demonstrates -- rather than asserting -- that the tier really is
 #     free of the reader/writer stack. That is the same thing tools/check_argsort_standalone.sh
 #     proves one tier over, and for the same reason: nothing in `fpm test` can see it, because the
@@ -84,7 +84,10 @@ program healpix_fptrap
     integer(int64) :: bi(2048)
     integer(int32) :: ipix32
     real(real64) :: theta, phi, vec(3), other(3), dist
-    integer :: k, c
+    integer :: k, c, g
+    type(pf_healpix_grid) :: grid, unbuilt
+    integer(int64) :: gi
+    real(real64) :: gtheta, gphi, gra, gdec
 
     allocate (listpix(12_int64 * 64_int64 * 64_int64))
     sink = 0_int64
@@ -244,13 +247,69 @@ program healpix_fptrap
         sink = sink + nlist
     end do
 
+    ! ---- pf_healpix_grid: the object, and the RA/Dec layer that lives on it ----
+    !
+    ! The bindings delegate, so most of this re-walks ground already covered -- but the RA/Dec
+    ! conversion is new arithmetic (a multiply and a subtract per angle) and the unbuilt-grid
+    ! branches answer WITHOUT delegating, precisely so they cannot divide by nside = 0. Both
+    ! halves have to be seen by a trapping build to be worth the promise.
+    do c = 1, 2
+        if (c == 1) then
+            call grid%init(64_int64, PF_HP_RING, frame=PF_HP_DEC_NORTH)
+        else
+            call grid%init(64_int64, PF_HP_NEST, frame=PF_HP_DEC_SOUTH)
+        end if
+        do g = 1, size(bt)
+            call grid%ang2pix(bt(g), bp(g), gi)
+            sink = sink + gi
+            call grid%pix2ang(gi, gtheta, gphi)
+            call grid%radec2pix(real(g, real64) * 7.0_real64, 89.0_real64 - real(g, real64), gi)
+            sink = sink + gi
+            call grid%pix2radec(gi, gra, gdec)
+            call grid%radec2vec(gra, gdec, vec)
+            call grid%vec2radec(vec, gra, gdec)
+            call grid%vec2pix(vec, gi)
+            sink = sink + gi
+            call grid%pix2vec(gi, vec)
+        end do
+        call grid%radec2pix_bulk(bt, bp, bi, threads=2)
+        sink = sink + bi(1)
+        call grid%pix2radec_bulk(bi, bt, bp, threads=2)
+        call grid%ang2pix_bulk(bt, bp, bi)
+        sink = sink + bi(1)
+        call grid%query_disc([0.3_real64, 0.4_real64, 0.8660254037844386_real64], 0.2_real64, &
+                             listpix, nlist)
+        sink = sink + nlist
+        call grid%query_disc_radec(30.0_real64, -60.0_real64, 5.0_real64, listpix, nlist, &
+                                   inclusive=.true.)
+        sink = sink + nlist
+        call grid%query_disc_radec_count(30.0_real64, -60.0_real64, 5.0_real64, nlist)
+        sink = sink + nlist
+        call grid%query_disc_radec_alloc(30.0_real64, -60.0_real64, 5.0_real64, alloclist, nlist)
+        sink = sink + nlist
+        sink = sink + int(nint(grid%pixarea() + grid%resol() + grid%max_pixrad()), int64)
+    end do
+    ! The unbuilt grid: every total binding answers from its own branch rather than by delegating,
+    ! and none of them may divide by a zero nside on the way.
+    do g = 1, 4
+        call unbuilt%ang2pix(bt(g), bp(g), gi)
+        sink = sink + gi
+        call unbuilt%pix2ang(int(g, int64), gtheta, gphi)
+        call unbuilt%pix2vec(int(g, int64), vec)
+        call unbuilt%radec2pix(10.0_real64, 10.0_real64, gi)
+        sink = sink + gi
+        call unbuilt%pix2radec(int(g, int64), gra, gdec)
+        sink = sink + int(nint(unbuilt%pixarea() + unbuilt%resol() + unbuilt%max_pixrad()), int64)
+    end do
+
     if (sink == -1_int64) print *, sink
     print '(a)', "healpix_fptrap: no floating-point exception was raised"
 end program healpix_fptrap
 EOF
 
 SRC="src/parquet_settings_base.f90 src/parquet_healpix.f90 src/parquet_healpix_core.f90 \
-     src/parquet_healpix_grid.f90 src/parquet_healpix_query.f90 src/parquet_healpix_bulk.f90"
+     src/parquet_healpix_arith.f90 src/parquet_healpix_query.f90 src/parquet_healpix_bulk.f90 \
+     src/parquet_healpix_grid.f90"
 
 status=0
 for opt in -O0 -O2; do

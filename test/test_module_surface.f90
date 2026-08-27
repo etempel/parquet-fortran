@@ -210,10 +210,11 @@ contains
     subroutine check_healpix_surface(what)
         character(len=:), allocatable, intent(out) :: what !! the first knob that failed, or "".
         character(len=:), allocatable :: tok
-        integer(int64) :: ipix, nlist, listpix(64), npix
+        integer(int64) :: ipix, nlist, listpix(64), npix, other
         integer(int64), allocatable :: alloclist(:)
         real(real64) :: vec(3), th(4), ph(4)
         integer(int64) :: bulkpix(4)
+        type(pf_healpix_grid) :: grid, south
 
         what = ""
         ! The output pair. This tier reads no knob of its own; it carries these because its bulk
@@ -254,6 +255,26 @@ contains
         ph = [0.0_real64, 1.0_real64, 2.0_real64, 3.0_real64]
         call pf_ang2pix_ring_bulk(4_int64, th, ph, bulkpix, threads=2)
         if (what == "" .and. any(bulkpix < 0_int64)) what = "pf_ang2pix_ring_bulk"
+
+        ! Tier C: the type, one binding from each group, and both frame selectors. The type and
+        ! the two selectors are three separate `public ::` entries, so each is separately
+        ! droppable -- and a grid whose RA/Dec layer silently used the wrong convention would
+        ! still satisfy an assertion that only checked the index was in range, which is why the
+        ! two frames are compared against each other rather than against a bound.
+        call grid%init(4_int64, PF_HP_NEST)
+        if (what == "" .and. .not. grid%is_set()) what = "pf_healpix_grid%init"
+        call grid%get_npix(npix)
+        if (what == "" .and. npix /= 192_int64) what = "pf_healpix_grid%get_npix"
+        call grid%radec2pix(30.0_real64, 40.0_real64, ipix)
+        if (what == "" .and. (ipix < 0_int64 .or. ipix >= npix)) what = "pf_healpix_grid%radec2pix"
+        call grid%query_disc(vec, 0.5_real64, listpix, nlist)
+        if (what == "" .and. nlist <= 0_int64) what = "pf_healpix_grid%query_disc"
+        call south%init(4_int64, PF_HP_NEST, frame=PF_HP_DEC_SOUTH)
+        call south%radec2pix(30.0_real64, -40.0_real64, other)
+        if (what == "" .and. other /= ipix) what = "PF_HP_DEC_SOUTH"
+        call grid%init(4_int64, PF_HP_NEST, frame=PF_HP_DEC_NORTH)
+        call grid%radec2pix(30.0_real64, 40.0_real64, other)
+        if (what == "" .and. other /= ipix) what = "PF_HP_DEC_NORTH"
     end subroutine check_healpix_surface
 
 end module test_module_surface_healpix

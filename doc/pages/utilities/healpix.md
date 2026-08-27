@@ -24,7 +24,7 @@ call pf_pix2vec_nest(nside, ipix, vec)                         ! and where is th
 call pf_query_disc(nside, vec, 0.01_real64, listpix, nfound)   ! which pixels lie within 0.01 rad?
 ```
 
-`use parquet_healpix` compiles six of this library's Fortran files and reaches no reader, no
+`use parquet_healpix` compiles seven of this library's Fortran files and reaches no reader, no
 writer and no Arrow — see [Which module do I import?](../operating/choosing-a-module.html) for the
 whole table. Everything here is also available through `use parquet`.
 
@@ -35,8 +35,14 @@ the north pole. This module offers no RA/Dec entry point at all, and that is del
 an omission: a mirrored convention (`theta = pi/2 + dec`, which puts the *south* pole at `theta = 0`)
 is in live use in real projects, it is perfectly self-consistent — a reflection preserves angular
 distance, so every separation and every disc comes out the same size — and mixing the two silently
-searches the wrong hemisphere. Nothing in a signature taking a bare `dec` could tell you which one
-it meant, so the conversion stays at your call site, where it is visible.
+searches the wrong hemisphere. Nothing in a *signature* taking a bare `dec` could tell you which
+one it meant — so among the free procedures the conversion stays at your call site, where it is
+visible.
+
+An **object** can tell you, because it carries the answer rather than asking for it at each call.
+That is what [`pf_healpix_grid`](#carrying-the-grid-in-an-object) below is for: you name the
+convention once, when you build the grid, and every RA/Dec call on it reads that. If you work in
+RA/Dec at all, use the grid — it is the only place this module offers that layer.
 
 **A pixel index is 0-based; the array `pf_query_disc` fills is 1-based.** Those are two different
 things and they are the pair most easily conflated. Pixel indices run `0 .. 12*nside**2 - 1`,
@@ -44,6 +50,113 @@ because that is how the pixelisation itself defines them, and this library does 
 them. The `listpix` buffer is filled from element 1, like every other user-facing array here. So
 `listpix(1)` is the first pixel found and its *value* may well be `0`, and indexing your own
 per-pixel array by a pixel index means `mydata(listpix(k) + 1)`.
+
+## Carrying the grid in an object
+
+`pf_healpix_grid` holds a resolution, a numbering scheme and a declination convention together, so
+that no call has to restate them:
+
+```fortran
+use parquet_healpix
+type(pf_healpix_grid) :: sky
+integer(int64) :: ipix, npix
+
+call sky%init(1024_int64, PF_HP_NEST)          ! nside and scheme; frame defaults to north
+call sky%get_npix(npix)                        ! 12582912
+call sky%radec2pix(214.25_real64, 52.5_real64, ipix)
+```
+
+**`%init` is the only binding that validates, and the only one that can abort.** It refuses an
+`nside` that is not a positive power of two or is beyond the kind's ceiling, a `scheme` that is
+neither selector, and a `frame` that is neither. After that the object is known good, so the
+conversions on it are free to be total — they never abort, exactly as the free procedures never do.
+`scheme` is mandatory: it is written once, possibly far from every query, and a grid silently RING
+against NEST data would be wrong everywhere with nothing to notice it.
+
+**The scheme being state collapses the `_ring`/`_nest` pairs.** `%ang2pix`, `%pix2ang`, `%vec2pix`
+and `%pix2vec` are four bindings covering what takes eight free procedures, and `nside` disappears
+from every call. The conversions are elemental, so whole arrays work with no separate array form:
+
+```fortran
+call sky%ang2pix(theta(:), phi(:), ipix(:))    ! the same binding, over a million rows
+```
+
+`%ang2pix_bulk` and its siblings exist only to carry `threads=`, which an elemental procedure
+cannot take. Everything else about them is the free bulk forms' behaviour.
+
+### RA and Dec, in degrees, in a convention you named
+
+This is the layer the object exists for, and the only place this module offers it.
+
+**`PF_HP_DEC_NORTH` is the default**: `theta = pi/2 - dec`, positive declination towards the north
+pole, the standard astronomical convention. A grid built without `frame=` uses it, so ordinary
+catalogue declinations need nothing said. **If your data uses the mirrored `theta = pi/2 + dec`**,
+where positive declination points *south* — as `radec_to_vec_healpix` and the code downstream of it
+do — you must say so, once:
+
+```fortran
+call sky%init(1024_int64, PF_HP_NEST, frame=PF_HP_DEC_SOUTH)
+```
+
+Nothing can detect that for you: both conventions are self-consistent and every result comes out
+the right size, just reflected. If a program cares, `%frame()` reports what a grid was given, so one
+assertion at start-up settles it.
+
+Every angle in this layer is in **degrees** — right ascension, declination, and a disc radius:
+`%radec2pix`, `%pix2radec`, `%radec2vec`, `%vec2radec`, and `%query_disc_radec` with its `_count`
+and `_alloc` siblings. Right ascension comes back in `[0, 360)` and declination in `[-90, 90]`.
+The radian spellings (`%ang2pix`, `%query_disc`) are the same procedures without the conversion, so
+pick by the units you are holding, never by mixing them.
+
+### Resolutions, and comparing two grids
+
+`%at_nside` and `%at_order` derive a grid at another resolution, keeping the scheme and the frame —
+which is what running two grids side by side actually wants:
+
+```fortran
+tar = sky%at_nside(256_int64)            ! same scheme, same frame, four times coarser
+call sky%ud_pix(ipix, tar, ipix_coarse)  ! NEST resolution change, or -1 if either is not NEST
+```
+
+`==` and `/=` compare resolution, scheme **and** declination convention. Two grids describing the
+same pixelisation but disagreeing about declination are not interchangeable, and the question the
+operator is for — "does this file's grid match mine" — wants to know.
+
+### Sizes, in the kind you ask for
+
+`%get_nside` and `%get_npix` are subroutines rather than functions, and that is deliberate: the
+kind of the argument you pass selects the answer's kind, which a function could not do. Asking for
+a value in a kind too small to hold it **aborts** rather than wrapping — `npix` passes the int32
+range at `nside = 16384`.
+
+```fortran
+integer(int32) :: n32
+integer(int64) :: n64
+call sky%get_npix(n64)     ! always fine
+call sky%get_npix(n32)     ! aborts if this grid's npix exceeds huge(0_int32)
+```
+
+`%order`, `%scheme`, `%frame`, `%is_set`, `%pixarea`, `%resol` and `%max_pixrad` are ordinary
+functions — none of them has a kind question.
+
+### What an unbuilt grid does
+
+A `pf_healpix_grid` that `%init` has never run on is usable and reports so rather than crashing:
+`%is_set()` is `.false.`, a pixel-valued binding returns `-1`, an angle-valued one returns `-999`
+(outside the range of every angle here), and a disc or bulk query aborts naming the binding. **No
+floating-point exception is raised on that path either** — the sentinel is answered directly rather
+than by dividing by a zero `nside`.
+
+**The free procedures remain the primary API.** The object is sugar over them: every binding
+delegates to one, so the answers are identical by construction.
+
+**Pick by what reads better, not by speed.** The delegation is inlined, but what that costs depends
+on the compiler, and the measured spread is wider than "free": under gfortran every operation is
+within 5% of the free procedure, while under ifx `%ang2pix` costs about 12% *more* and `%pix2ang`
+about a third *less*. A binding cannot be faster than the procedure it calls unless it was inlined,
+so this is the optimiser making different choices at the two call sites rather than any dispatch
+overhead — and it means a genuinely hot loop is worth measuring both ways rather than assuming.
+`bench/benchmark_healpix.sh --mode=grid` is that measurement.
 
 ## The two schemes
 

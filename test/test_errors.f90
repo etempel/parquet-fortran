@@ -1498,6 +1498,12 @@ contains
             new_unittest("an nside that is not a power of two aborts a disc query", &
                          test_healpix_nside_not_power2_aborts), &
             new_unittest("an nside of zero aborts a disc query", test_healpix_nside_zero_aborts), &
+            new_unittest("pf_healpix_grid%init refuses an invalid nside, scheme or frame", &
+                         test_healpix_grid_init_aborts), &
+            new_unittest("a grid that has not been built refuses every query", &
+                         test_healpix_grid_unbuilt_aborts), &
+            new_unittest("a grid value too large for an int32 aborts rather than wrapping", &
+                         test_healpix_grid_int32_aborts), &
             new_unittest("an nside past the int32 pixel index aborts", &
                          test_healpix_nside_int32_aborts), &
             new_unittest("an nside past the module ceiling aborts", test_healpix_nside_int64_aborts), &
@@ -3024,6 +3030,72 @@ contains
             failure_message="an nside of 100 was expected to abort a disc query", &
             required_stderr="nside must be a positive power of two")
     end subroutine test_healpix_nside_not_power2_aborts
+
+    !> `%init` validates its three arguments, and each fault names itself.
+    subroutine test_healpix_grid_init_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "healpix_grid_init_nside_zero", &
+            expect_abort=.true., &
+            failure_message="pf_healpix_grid%init was expected to refuse nside= 0", &
+            required_stderr="nside must be a positive power of two")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "healpix_grid_init_nside_not_power", &
+            expect_abort=.true., &
+            failure_message="pf_healpix_grid%init was expected to refuse nside= 100", &
+            required_stderr="nside must be a positive power of two")
+        if (allocated(error)) return
+        ! The message must name the INT32 ceiling: 16384 is legal for the pixelisation and illegal
+        ! only for the caller's integer kind, so naming 2**29 would send someone looking in the
+        ! wrong place -- the same reasoning as the free procedures' own int32 message.
+        call check_scenario_exit_status_and_stderr(error, "healpix_grid_init_nside_int32_ceiling", &
+            expect_abort=.true., &
+            failure_message="pf_healpix_grid%init was expected to refuse nside= 16384 in int32", &
+            required_stderr="at most 8192")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "healpix_grid_init_bad_scheme", &
+            expect_abort=.true., &
+            failure_message="pf_healpix_grid%init was expected to refuse scheme= 7", &
+            required_stderr="scheme must be PF_HP_RING")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "healpix_grid_init_bad_frame", &
+            expect_abort=.true., &
+            failure_message="pf_healpix_grid%init was expected to refuse frame= 7", &
+            required_stderr="frame must be PF_HP_DEC_NORTH")
+    end subroutine test_healpix_grid_init_aborts
+
+    !> Every once-per-query binding refuses a grid `%init` has never run on.
+    !>
+    !> The elemental bindings cannot: they are `pure`, so they report -1 or -999 instead, which
+    !> `test_healpix_grid`'s own suite asserts in process. This covers the half that aborts.
+    subroutine test_healpix_grid_unbuilt_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "healpix_grid_disc_unset", &
+            expect_abort=.true., &
+            failure_message="a disc query on an unbuilt grid was expected to abort", &
+            required_stderr="this grid has not been built")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "healpix_grid_bulk_unset", &
+            expect_abort=.true., &
+            failure_message="a bulk conversion on an unbuilt grid was expected to abort", &
+            required_stderr="this grid has not been built")
+    end subroutine test_healpix_grid_unbuilt_aborts
+
+    !> Asking for a grid quantity in a kind that cannot hold it aborts rather than wrapping.
+    subroutine test_healpix_grid_int32_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        ! nside 16384 is legal in int64 and gives npix = 3221225472, above huge(0_int32). This is
+        ! the reachable half of the kind-matching rule; %get_nside's own guard is not reachable
+        ! through %init, since the nside ceiling 2**29 is itself below huge(0_int32).
+        call check_scenario_exit_status_and_stderr(error, "healpix_grid_npix_int32_overflow", &
+            expect_abort=.true., &
+            failure_message="narrowing npix into an int32 was expected to abort", &
+            required_stderr="exceeds the largest integer(int32)")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "healpix_grid_disc_int32_too_fine", &
+            expect_abort=.true., &
+            failure_message="an int32 disc query on an nside= 16384 grid was expected to abort", &
+            required_stderr="the largest an integer(int32) index can address")
+    end subroutine test_healpix_grid_int32_aborts
 
     subroutine test_healpix_nside_zero_aborts(error)
         type(error_type), allocatable, intent(out) :: error

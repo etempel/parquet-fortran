@@ -12,7 +12,7 @@
 #   ELEMENTS=1000000 ROUNDS=2 bench/benchmark_healpix.sh --mode=cross
 #
 # Config (env-overridable, matching this repo's other bench/*.sh scripts):
-#   MODE=all         conv | bulk | cross | disc | all
+#   MODE=all         conv | bulk | cross | disc | ovh | grid | all
 #   ELEMENTS=10000000  largest bulk array size. Memory is roughly 105 bytes per element
 #                      (two input angle arrays, two output angle arrays, two 3-vectors, four index
 #                      arrays), so 1e7 costs about 1.05 GB.
@@ -75,8 +75,8 @@ for arg in "$@"; do
 done
 
 case "$MODE" in
-    conv|bulk|cross|disc|ovh|all) ;;
-    *) echo "benchmark_healpix.sh: MODE must be conv, bulk, cross, disc, ovh or all (got '$MODE')" >&2; exit 2 ;;
+    conv|bulk|cross|disc|ovh|grid|all) ;;
+    *) echo "benchmark_healpix.sh: MODE must be conv, bulk, cross, disc, ovh, grid or all (got '$MODE')" >&2; exit 2 ;;
 esac
 
 # One build tree per compiler. Naming a tree for the benchmark alone lets a second toolchain's

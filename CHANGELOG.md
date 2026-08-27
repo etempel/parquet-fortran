@@ -23,8 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   form over whole arrays with an optional `threads=`. Every integer argument takes
   `integer(int32)` or `integer(int64)`; the scalar conversions are `pure elemental`, so they
   accept whole arrays. No floating-point exception is raised on valid input, so a program running
-  under `-ffpe-trap` needs no guard around a call. A new Arrow-free entry module (`use
-  parquet_healpix` compiles six Fortran files).
+  under `-ffpe-trap` needs no guard around a call. `pf_healpix_grid` carries an `nside`, a scheme
+  and a declination convention as one object, validated once by `%init`, so a conversion or a disc
+  query on it restates none of them and the `_ring`/`_nest` pairs collapse to one binding each; it
+  is also the only place this module offers an RA/Dec layer (`%radec2pix`, `%pix2radec`,
+  `%radec2vec`, `%vec2radec` and `%query_disc_radec`, in degrees, read in `PF_HP_DEC_NORTH` or
+  `PF_HP_DEC_SOUTH`). A new Arrow-free entry module (`use parquet_healpix` compiles seven Fortran
+  files).
 - **`parquet_spatial`: `pf_spatial_index`, a uniform-grid spatial index over plain coordinate
   arrays.** Ball search into a caller-owned buffer, the self-join as CSR, the pair list and
   count-only forms, all threaded; `k`-nearest search (`%nearest`) and every point's `k`-th

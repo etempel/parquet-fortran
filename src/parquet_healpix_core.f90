@@ -395,7 +395,7 @@ contains
     end procedure hpx_ringij2nest_run
 
     module procedure hpx_max_pixrad
-        real(real64) :: zc, sc, zv, sv, dz, ds, sh, chord2, rn
+        real(real64) :: zc, sc, zv, sv, dz, ds, sh, chord2, rn, omzv
 
         ! The most elongated pixels are those of the first equatorial ring, whose centres sit at
         ! z = 2/3; the farthest corner of one is its northern corner, on the quadrant meridian
@@ -424,7 +424,16 @@ contains
         ! dz = zv - zc, as the exact rational (2n-1)/(3n^2) rather than as a subtraction.
         dz = (2.0_real64 * rn - 1.0_real64) / (3.0_real64 * rn * rn)
         zv = zc + dz
-        sv = sqrt(max(0.0_real64, (1.0_real64 - zv) * (1.0_real64 + zv)))
+        ! omzv = 1 - zv, likewise as the exact rational (n-1)^2/(3n^2) rather than as a
+        ! subtraction. This one is not merely about precision: at nside = 1 the corner IS the
+        ! pole, so zv is exactly 1 and 1 - zv must be exactly 0 -- but written as a subtraction
+        ! that outcome depends on `zc + dz` having rounded to 1.0, and ifx's default
+        ! -fp-model=fast reassociates it into (1 - zc) - dz, which is 2**-54 instead. That fed a
+        ! spurious sv = 1.05e-08 into `ds` below and moved the answer by 8.9e-09 relative, on ifx
+        ! only. Formed directly, (rn - 1) is exact and the result is exactly zero on every
+        ! compiler. 1 + zv is 2 - omzv, which cannot cancel (omzv <= 1/3).
+        omzv = (rn - 1.0_real64) * (rn - 1.0_real64) / (3.0_real64 * rn * rn)
+        sv = sqrt(max(0.0_real64, omzv * (2.0_real64 - omzv)))
         ! ds = sv - sc, likewise: (sv^2 - sc^2)/(sv + sc) = -dz*(zv + zc)/(sv + sc), which is a
         ! quotient of well-separated quantities. sv + sc is never zero (sc = sqrt(5)/3 > 0).
         ds = -dz * (zv + zc) / (sv + sc)

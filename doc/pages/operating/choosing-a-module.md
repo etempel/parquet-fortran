@@ -3,7 +3,7 @@ title: Choosing a module: what each entry module costs to import
 ---
 
 `use parquet` brings the whole library into scope and is the right answer for most programs. It is
-also the largest: a project that imports it compiles **86** of this library's Fortran files.
+also the largest: a project that imports it compiles **87** of this library's Fortran files.
 
 Every layer underneath is importable on its own, and several of them cost a great deal less. This
 page says what each entry module gives you, what it costs, and — the part that is easy to get wrong
@@ -47,7 +47,7 @@ in every one of them.
 | `parquet_argsort` | 4 | no | `pf_argsort` over the six intrinsic types, plus `pf_sort_threads` |
 | `parquet_sampling` | 8 | no | permutations, subsets, resampling and weighted draws |
 | `parquet_spatial` | 9 | no | `pf_spatial_index`: neighbour and k-nearest search on a uniform grid, including on the sky |
-| `parquet_healpix` | 6 | no | `pf_query_disc` and friends: the HEALPix sphere pixelisation |
+| `parquet_healpix` | 7 | no | `pf_query_disc` and friends: the HEALPix sphere pixelisation |
 | `parquet_columns` | 10 | no | `parquet_column`: a typed, null-aware column container |
 | `parquet_list` | 11 | no | `parquet_list_column` / `parquet_list_row`: variable-length list storage |
 | `parquet_struct` | 11 | no | `parquet_struct_column` / `parquet_struct_row`: one value per declared field per row |
@@ -56,7 +56,7 @@ in every one of them.
 | `parquet_settings` | 3 | **yes** | the process-global knobs, and `parquet_get_arrow_version` |
 | `parquet_io` | 53 | **yes** | reading and writing Parquet files, and nothing else |
 | `parquet_tables` | 72 | **yes** | the `parquet_table` container |
-| `parquet` | 86 | **yes** | everything above, through one `use` |
+| `parquet` | 87 | **yes** | everything above, through one `use` |
 
 Four rows deserve a note.
 

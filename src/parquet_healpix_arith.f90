@@ -8,7 +8,7 @@
 !! `pf_ring2z`, whose valid results include -1), because a `pure` procedure may not contain an
 !! `error stop` -- that is an image control statement -- and the D4 rule keeps these total. The
 !! module's own doc-comments state the rule; this note records why there was no third option.
-submodule(parquet_healpix) parquet_healpix_grid
+submodule(parquet_healpix) parquet_healpix_arith
     implicit none
 
 contains
@@ -269,4 +269,4 @@ contains
         call hpx_ring_decompose(nside, ipix, iring, j, nr, shifted)
     end function hpx_pix2ring
 
-end submodule parquet_healpix_grid
+end submodule parquet_healpix_arith

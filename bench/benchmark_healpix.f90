@@ -101,12 +101,15 @@ program benchmark_healpix
         call mode_disc()
     case ("ovh")
         call mode_overhead()
+    case ("grid")
+        call mode_grid()
     case ("all")
         call mode_conv()
         call mode_bulk()
         call mode_overhead()
         call mode_cross()
         call mode_disc()
+        call mode_grid()
     case default
         write(error_unit, '(a)') "benchmark_healpix: unknown --mode '" // mode // "'"
         error stop 1
@@ -226,6 +229,7 @@ contains
     subroutine usage()
         write(output_unit, '(a)') "Usage: benchmark_healpix --mode=<mode> [options]"
         write(output_unit, '(a)') ""
+        write(output_unit, '(a)') "  --mode=grid    pf_healpix_grid bindings against the free procedures"
         write(output_unit, '(a)') "  --mode=conv    scalar entry-point cost, both kinds, swept over nside"
         write(output_unit, '(a)') "  --mode=bulk    the 18 bulk specifics vs a scalar loop (G2, T1)"
         write(output_unit, '(a)') "  --mode=cross   where threading first pays, per form and team size (T2, G3)"
@@ -355,6 +359,162 @@ contains
         write(output_unit, '(a)') ''
         call release_fixtures()
     end subroutine mode_conv
+
+    !> **The delegation bar**: every `pf_healpix_grid` binding against the free procedure it calls.
+    !>
+    !> The whole design rests on the object costing nothing measurable, so this is the measurement
+    !> that keeps it honest. The passed-object dummy of a type-bound procedure must be `class(...)`
+    !> (F2018 C760), so the question is whether the compiler devirtualises a binding whose body is
+    !> one call -- and it is a question about the compiler, not about the source, which is why it is
+    !> measured rather than asserted.
+    !>
+    !> **Bar: within 5 percent on every row.** A larger figure is a finding about that compiler, to
+    !> be written into the guide page, not a reason to widen the bar.
+    !>
+    !> **What it found, 2026-08-27, machine B, two million elements at nside 1024, best of five.**
+    !> gfortran 15.2.1 clears the bar everywhere, worst row 1.048. ifx 2026.1 does not: `ang2pix`
+    !> is 1.11-1.12 and `pix2ang` is 0.665-0.666 -- the bound form a third FASTER than the free one
+    !> -- both reproducing to three digits over four runs. The sub-unity figure is the useful one:
+    !> a delegation that had not been inlined could not beat what it delegates to, so this is the
+    !> optimiser choosing differently at two call sites, not dispatch. Recorded in the guide page
+    !> and in the type's doc-comment rather than smoothed away.
+    subroutine mode_grid()
+        integer(int64) :: nsg, nq, k, nlist, sink
+        integer :: rep, r
+        real(real64) :: t0, tf, tb, best_f, best_b, rad
+        integer(int64), allocatable :: disc(:)
+        type(pf_healpix_grid) :: gring, gnest
+
+        nsg = 1024_int64
+        nq = min(nel, 2000000_int64)
+        call make_fixtures(nq)
+        call gring%init(nsg, PF_HP_RING)
+        call gnest%init(nsg, PF_HP_NEST)
+        do k = 1_int64, nq
+            pin64(k) = int(modulo(real(k, real64) * gold, 1.0_real64) &
+                           * real(pf_nside2npix(nsg), real64), int64)
+        end do
+
+        write(output_unit, '(a)') '---- mode=grid: pf_healpix_grid against the free procedures ----'
+        write(output_unit, '(a)') ''
+        write(output_unit, '(a,i0,a,i0)') 'nside ', nsg, ', elements per pass ', nq
+        write(output_unit, '(a,i0,a)') 'Each figure is the fastest of ', rounds, ' passes, in nanoseconds per call.'
+        write(output_unit, '(a)') 'Bar: the bound column within 5 percent of the free column on every row.'
+        write(output_unit, '(a)') ''
+        write(output_unit, '(a16,3(a12))') 'operation', 'free ns', 'bound ns', 'ratio'
+        write(output_unit, '(a)') repeat('-', 52)
+        flush(output_unit)
+
+        sink = 0_int64
+        best_f = huge(0.0_real64); best_b = huge(0.0_real64)
+        do rep = 1, rounds
+            t0 = omp_get_wtime()
+            do k = 1_int64, nq
+                call pf_ang2pix_ring(nsg, th(k), ph(k), o64(k))
+            end do
+            tf = omp_get_wtime() - t0
+            best_f = min(best_f, tf)
+            sink = sink + o64(1)
+            t0 = omp_get_wtime()
+            do k = 1_int64, nq
+                call gring%ang2pix(th(k), ph(k), o64(k))
+            end do
+            tb = omp_get_wtime() - t0
+            best_b = min(best_b, tb)
+            sink = sink + o64(1)
+        end do
+        call grid_row('ang2pix RING', best_f, best_b, nq)
+
+        best_f = huge(0.0_real64); best_b = huge(0.0_real64)
+        do rep = 1, rounds
+            t0 = omp_get_wtime()
+            do k = 1_int64, nq
+                call pf_vec2pix_nest(nsg, vv(:, k), o64(k))
+            end do
+            best_f = min(best_f, omp_get_wtime() - t0)
+            sink = sink + o64(1)
+            t0 = omp_get_wtime()
+            do k = 1_int64, nq
+                call gnest%vec2pix(vv(:, k), o64(k))
+            end do
+            best_b = min(best_b, omp_get_wtime() - t0)
+            sink = sink + o64(1)
+        end do
+        call grid_row('vec2pix NEST', best_f, best_b, nq)
+
+        best_f = huge(0.0_real64); best_b = huge(0.0_real64)
+        do rep = 1, rounds
+            t0 = omp_get_wtime()
+            do k = 1_int64, nq
+                call pf_pix2ang_ring(nsg, pin64(k), oth(k), oph(k))
+            end do
+            best_f = min(best_f, omp_get_wtime() - t0)
+            t0 = omp_get_wtime()
+            do k = 1_int64, nq
+                call gring%pix2ang(pin64(k), oth(k), oph(k))
+            end do
+            best_b = min(best_b, omp_get_wtime() - t0)
+        end do
+        call grid_row('pix2ang RING', best_f, best_b, nq)
+
+        ! The RA/Dec layer has no free counterpart -- the free column is the theta/phi call it
+        ! reduces to, so the ratio prices the degree scaling and the reflection, and nothing else.
+        best_f = huge(0.0_real64); best_b = huge(0.0_real64)
+        do rep = 1, rounds
+            t0 = omp_get_wtime()
+            do k = 1_int64, nq
+                call gring%ang2pix(th(k), ph(k), o64(k))
+            end do
+            best_f = min(best_f, omp_get_wtime() - t0)
+            sink = sink + o64(1)
+            t0 = omp_get_wtime()
+            do k = 1_int64, nq
+                call gring%radec2pix(oph(k), oth(k), o64(k))
+            end do
+            best_b = min(best_b, omp_get_wtime() - t0)
+            sink = sink + o64(1)
+        end do
+        call grid_row('radec2pix/ang', best_f, best_b, nq)
+
+        ! One disc query is thousands of pixels, so this row is per DISC rather than per call.
+        allocate (disc(4000000))
+        rad = 1.0_real64 * 3.141592653589793_real64 / 180.0_real64
+        best_f = huge(0.0_real64); best_b = huge(0.0_real64)
+        do rep = 1, rounds
+            t0 = omp_get_wtime()
+            do r = 1, 2000
+                call pf_query_disc(nsg, vv(:, r), rad, disc, nlist, scheme=PF_HP_RING)
+                sink = sink + nlist
+            end do
+            best_f = min(best_f, omp_get_wtime() - t0)
+            t0 = omp_get_wtime()
+            do r = 1, 2000
+                call gring%query_disc(vv(:, r), rad, disc, nlist)
+                sink = sink + nlist
+            end do
+            best_b = min(best_b, omp_get_wtime() - t0)
+        end do
+        write(output_unit, '(a16,3(f12.3))') 'query_disc (us)', &
+            best_f * 1.0e6_real64 / 2000.0_real64, best_b * 1.0e6_real64 / 2000.0_real64, &
+            best_b / best_f
+        deallocate (disc)
+
+        if (sink == -1_int64) write(output_unit, '(i0)') sink
+        write(output_unit, '(a)') ''
+        call release_fixtures()
+    end subroutine mode_grid
+
+    !> Prints one `mode=grid` row as nanoseconds per call plus the bound/free ratio.
+    subroutine grid_row(what, best_f, best_b, nq)
+        character(len=*), intent(in) :: what !! the operation.
+        real(real64), intent(in) :: best_f !! fastest free pass, seconds.
+        real(real64), intent(in) :: best_b !! fastest bound pass, seconds.
+        integer(int64), intent(in) :: nq !! elements per pass.
+
+        write(output_unit, '(a16,3(f12.3))') what, best_f * 1.0e9_real64 / real(nq, real64), &
+            best_b * 1.0e9_real64 / real(nq, real64), best_b / best_f
+        flush(output_unit)
+    end subroutine grid_row
 
     !> Times one entry point across the `nside` sweep and prints its row.
     subroutine conv_row(n, sweep, what)

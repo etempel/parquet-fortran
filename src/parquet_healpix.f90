@@ -71,6 +71,11 @@ module parquet_healpix
     public :: pf_pix2vec_ring_bulk, pf_pix2vec_nest_bulk
     public :: pf_ang2vec_bulk, pf_vec2ang_bulk
     !
+    ! ---- Tier C ----
+    !
+    public :: PF_HP_DEC_NORTH, PF_HP_DEC_SOUTH
+    public :: pf_healpix_grid
+    !
     ! ---- Settings this module's own code reads, re-exported so a narrow import can configure it ----
     !
     !> The output pair, because `pf_query_disc`'s bulk siblings emit a thread-clamp warning through
@@ -93,6 +98,28 @@ module parquet_healpix
     !! A resolution change is a bit shift in this scheme, which is what makes it the right choice
     !! for hierarchical work. `pf_query_disc` does not promise any particular order for NEST output.
     integer, parameter :: PF_HP_NEST = 1
+
+    ! ---- Declination convention selectors ----
+    !
+    ! These exist for `pf_healpix_grid` and for nothing else: the free procedures take
+    ! HEALPix-native `theta` and offer no RA/Dec layer at all, precisely because a bare `dec` in a
+    ! signature cannot say which of the two mirrored conventions below it means. An object can,
+    ! because it carries the answer as state rather than asking for it at each call.
+
+    !> `theta = pi/2 - dec`: positive declination points at `theta = 0`, the north pole.
+    !!
+    !! **The standard astronomical convention, and `pf_healpix_grid`'s default** -- a grid built
+    !! without `frame=` uses it. Anything reading declinations from an ordinary catalogue wants
+    !! this one and needs to write nothing.
+    integer, parameter :: PF_HP_DEC_NORTH = 0
+    !> `theta = pi/2 + dec`: positive declination points at `theta = pi`, the south pole.
+    !!
+    !! A mirrored frame, self-consistent in itself -- a reflection preserves angular distance, so
+    !! every separation and every disc comes out the same size -- and in live use in several
+    !! projects that feed this module, `../qfeet`'s `radec_to_vec_healpix` among them. **Mixing the
+    !! two searches the wrong hemisphere and reports nothing**, which is why a grid whose data uses
+    !! this convention must say so once, at `%init`.
+    integer, parameter :: PF_HP_DEC_SOUTH = 1
 
     ! ---- Kind and range limits ----
 
@@ -125,6 +152,23 @@ module parquet_healpix
     !! A compile-time constant so that the resolution costs one division and contains no `sqrt` of
     !! a runtime value -- one less thing to reason about for the module's IEEE promise.
     real(real64), parameter :: hpx_sqrt_pi_third = 1.023326707946488151_real64
+    !> Radians per degree, for `pf_healpix_grid`'s RA/Dec layer.
+    real(real64), parameter :: hpx_deg2rad = hpx_pi / 180.0_real64
+    !> Degrees per radian, the exact reciprocal pairing of `hpx_deg2rad`.
+    real(real64), parameter :: hpx_rad2deg = 180.0_real64 / hpx_pi
+
+    !> What every real-valued `pf_healpix_grid` binding returns for a grid `%init` has never run on.
+    !!
+    !! **One value for every angle, chosen to be outside the legal range of all of them** --
+    !! colatitude lies in `[0, pi]`, longitude in `[0, 2*pi)`, right ascension in `[0, 360)`,
+    !! declination in `[-90, 90]` and a unit-vector component in `[-1, 1]`, so -999 can be mistaken
+    !! for none of them. The integer bindings use the module's existing -1 instead, which is
+    !! already outside `0 .. npix-1`.
+    !!
+    !! It exists because the elemental bindings are `pure` and so cannot abort (F2018 C1592), and
+    !! because delegating an unset grid to the free procedures would divide by `nside = 0` --
+    !! raising `IEEE_DIVIDE_BY_ZERO` and breaking the one promise this module exists to make.
+    real(real64), parameter :: hpx_grid_unset_real = -999.0_real64
 
     !> Largest resolution order, `log2(hpx_nside_max)`.
     integer(int64), parameter :: hpx_order_max = 29_int64
@@ -171,6 +215,199 @@ module parquet_healpix
     !> Longitude offset of each face centre, in units of a ring's quarter width.
     integer(int64), parameter :: hpx_jpll(0:11) = [1_int64, 3_int64, 5_int64, 7_int64, &
         0_int64, 2_int64, 4_int64, 6_int64, 1_int64, 3_int64, 5_int64, 7_int64]
+
+    ! ---- The grid object ----
+
+    !> A HEALPix grid: a resolution, a numbering scheme and a declination convention, carried
+    !! together so that no call has to restate them.
+    !!
+    !! **What it is for.** Two things, and the second is the reason it exists at all:
+    !!
+    !! * **It is the only place this module offers an RA/Dec layer.** A free procedure taking a
+    !!   bare `dec` cannot say which of the two mirrored conventions it means (`PF_HP_DEC_NORTH`
+    !!   and `PF_HP_DEC_SOUTH` above), and both are in live use, so mixing them searches the wrong
+    !!   hemisphere silently. An object can say: the convention is set once, at `%init`, and is
+    !!   then carried to every call.
+    !! * **The scheme being state collapses the `_ring`/`_nest` twins.** `%ang2pix`, `%pix2ang`,
+    !!   `%vec2pix` and `%pix2vec` are four bindings covering what takes eight free procedures, and
+    !!   `nside` disappears from every call having been validated once.
+    !!
+    !! **The free procedures remain the primary API and this is sugar over them.** Every binding
+    !! delegates to one, so results are identical by construction rather than by test.
+    !!
+    !! **The delegation is inlined, but it is not free on every compiler.** `bench/benchmark_healpix.sh
+    !! --mode=grid` measures each binding against the free procedure it calls, best of five passes
+    !! over two million elements at `nside = 1024`. Under gfortran 15.2.1 every row is within 5%
+    !! (worst 1.05x). Under ifx 2026.1 three rows are, `%ang2pix` costs **1.12x**, and `%pix2ang`
+    !! costs **0.67x** -- that is, the bound form is a third FASTER than the free one. Both figures
+    !! reproduce to three digits across four runs, so neither is noise, and the sub-unity one is
+    !! what rules out dispatch as the explanation: a call that was not inlined could not beat the
+    !! procedure it delegates to. What differs is how ifx optimises the merged body at each site.
+    !! Take the object for what it says at the call, not for speed, and measure if a loop is hot.
+    !!
+    !! **`%init` is the only binding that validates, and the only one that can abort.** Everything
+    !! elemental is total, exactly as the free conversions are: a grid `%init` has never run on
+    !! yields -1 from a pixel binding and `-999` from a real-valued one, rather than an error. The
+    !! disc bindings do abort, being once-per-query entry points.
+    !!
+    !! **No allocatable components, no pointers, no finalizer.** 32 bytes, trivially copyable and
+    !! assignable, safe to share across an OpenMP team, safe in a `private`/`firstprivate` clause,
+    !! safe to hold in an array or return from a function. It is not an extension point: every
+    !! binding is `non_overridable`.
+    !!
+    !!```fortran
+    !! type(pf_healpix_grid) :: sky
+    !! integer(int64) :: ipix, npix
+    !!
+    !! call sky%init(1024_int64, PF_HP_NEST)              ! frame defaults to PF_HP_DEC_NORTH
+    !! call sky%get_npix(npix)                            ! 12582912
+    !! call sky%radec2pix(214.25_real64, 52.5_real64, ipix)
+    !!```
+    type :: pf_healpix_grid
+        private
+        !> Resolution parameter, or 0 for a grid `%init` has never run on.
+        integer(int64) :: nside_v = 0_int64
+        !> `log2(nside)`, cached at construction; -1 before it.
+        integer(int32) :: order_v = -1_int32
+        !> `12*nside**2`, cached at construction; 0 before it.
+        integer(int64) :: npix_v = 0_int64
+        !> `PF_HP_RING` or `PF_HP_NEST`; mandatory at `%init`.
+        integer(int32) :: scheme_id = PF_HP_RING
+        !> `PF_HP_DEC_NORTH` or `PF_HP_DEC_SOUTH`; always has a value.
+        integer(int32) :: frame_id = PF_HP_DEC_NORTH
+    contains
+        ! ---- Construction ----
+        procedure, private, non_overridable :: hpx_grid_init_i32 !! %init with an int32 nside.
+        procedure, private, non_overridable :: hpx_grid_init_i64 !! %init with an int64 nside.
+        !> Builds the grid: `%init(nside, scheme [, frame])`. The one binding that aborts.
+        generic :: init => hpx_grid_init_i32, hpx_grid_init_i64
+
+        ! ---- Accessors with no kind question: elemental functions, total ----
+        procedure, non_overridable :: is_set => hpx_grid_is_set !! Whether `%init` has run.
+        procedure, non_overridable :: order => hpx_grid_order !! `log2(nside)`, or -1 before `%init`.
+        procedure, non_overridable :: scheme => hpx_grid_scheme !! `PF_HP_RING` or `PF_HP_NEST`.
+        procedure, non_overridable :: frame => hpx_grid_frame !! `PF_HP_DEC_NORTH` or `PF_HP_DEC_SOUTH`.
+        procedure, non_overridable :: pixarea => hpx_grid_pixarea !! Pixel area, steradians.
+        procedure, non_overridable :: resol => hpx_grid_resol !! Nominal resolution, radians.
+        procedure, non_overridable :: max_pixrad => hpx_grid_max_pixrad !! Pixel centre-to-corner, radians.
+
+        ! ---- Accessors that do have one: kind-generic subroutines, int32 aborts on overflow ----
+        procedure, private, non_overridable :: hpx_grid_get_nside_i32 !! %get_nside into an int32.
+        procedure, private, non_overridable :: hpx_grid_get_nside_i64 !! %get_nside into an int64.
+        !> Resolution parameter, in the kind of the argument: `call grid%get_nside(n)`.
+        generic :: get_nside => hpx_grid_get_nside_i32, hpx_grid_get_nside_i64
+        procedure, private, non_overridable :: hpx_grid_get_npix_i32 !! %get_npix into an int32.
+        procedure, private, non_overridable :: hpx_grid_get_npix_i64 !! %get_npix into an int64.
+        !> Pixel count, in the kind of the argument: `call grid%get_npix(n)`.
+        generic :: get_npix => hpx_grid_get_npix_i32, hpx_grid_get_npix_i64
+
+        ! ---- Native conversions: radians and unit vectors, this grid's scheme ----
+        procedure, private, non_overridable :: hpx_grid_ang2pix_i32 !! %ang2pix into an int32.
+        procedure, private, non_overridable :: hpx_grid_ang2pix_i64 !! %ang2pix into an int64.
+        !> Pixel containing `(theta, phi)`, radians. Elemental, so whole arrays work.
+        generic :: ang2pix => hpx_grid_ang2pix_i32, hpx_grid_ang2pix_i64
+        procedure, private, non_overridable :: hpx_grid_pix2ang_i32 !! %pix2ang from an int32.
+        procedure, private, non_overridable :: hpx_grid_pix2ang_i64 !! %pix2ang from an int64.
+        !> Direction of a pixel centre as `(theta, phi)`, radians. Elemental.
+        generic :: pix2ang => hpx_grid_pix2ang_i32, hpx_grid_pix2ang_i64
+        procedure, private, non_overridable :: hpx_grid_vec2pix_i32 !! %vec2pix into an int32.
+        procedure, private, non_overridable :: hpx_grid_vec2pix_i64 !! %vec2pix into an int64.
+        !> Pixel containing the direction `vec(3)`; any nonzero length.
+        generic :: vec2pix => hpx_grid_vec2pix_i32, hpx_grid_vec2pix_i64
+        procedure, private, non_overridable :: hpx_grid_pix2vec_i32 !! %pix2vec from an int32.
+        procedure, private, non_overridable :: hpx_grid_pix2vec_i64 !! %pix2vec from an int64.
+        !> Unit vector of a pixel centre.
+        generic :: pix2vec => hpx_grid_pix2vec_i32, hpx_grid_pix2vec_i64
+
+        ! ---- The RA/Dec layer: DEGREES, this grid's declination convention ----
+        procedure, private, non_overridable :: hpx_grid_radec2pix_i32 !! %radec2pix into an int32.
+        procedure, private, non_overridable :: hpx_grid_radec2pix_i64 !! %radec2pix into an int64.
+        !> Pixel containing `(ra, dec)` in DEGREES, read in this grid's frame. Elemental.
+        generic :: radec2pix => hpx_grid_radec2pix_i32, hpx_grid_radec2pix_i64
+        procedure, private, non_overridable :: hpx_grid_pix2radec_i32 !! %pix2radec from an int32.
+        procedure, private, non_overridable :: hpx_grid_pix2radec_i64 !! %pix2radec from an int64.
+        !> A pixel centre as `(ra, dec)` in DEGREES, in this grid's frame. Elemental.
+        generic :: pix2radec => hpx_grid_pix2radec_i32, hpx_grid_pix2radec_i64
+        !> Unit vector of `(ra, dec)` in DEGREES, read in this grid's frame.
+        procedure, non_overridable :: radec2vec => hpx_grid_radec2vec
+        !> `(ra, dec)` in DEGREES of a direction, written in this grid's frame.
+        procedure, non_overridable :: vec2radec => hpx_grid_vec2radec
+
+        ! ---- Disc queries: this grid's scheme; these validate and abort ----
+        procedure, private, non_overridable :: hpx_grid_disc_i32 !! %query_disc into an int32 buffer.
+        procedure, private, non_overridable :: hpx_grid_disc_i64 !! %query_disc into an int64 buffer.
+        !> Pixels within `radius` (RADIANS) of the direction `vec`, into a buffer you own.
+        generic :: query_disc => hpx_grid_disc_i32, hpx_grid_disc_i64
+        procedure, private, non_overridable :: hpx_grid_disc_count_i32 !! %query_disc_count, int32.
+        procedure, private, non_overridable :: hpx_grid_disc_count_i64 !! %query_disc_count, int64.
+        !> How many pixels that disc holds, without materialising the list.
+        generic :: query_disc_count => hpx_grid_disc_count_i32, hpx_grid_disc_count_i64
+        procedure, private, non_overridable :: hpx_grid_disc_alloc_i32 !! %query_disc_alloc, int32.
+        procedure, private, non_overridable :: hpx_grid_disc_alloc_i64 !! %query_disc_alloc, int64.
+        !> The same disc, into an allocatable the library sizes for you.
+        generic :: query_disc_alloc => hpx_grid_disc_alloc_i32, hpx_grid_disc_alloc_i64
+        procedure, private, non_overridable :: hpx_grid_disc_rd_i32 !! %query_disc_radec, int32.
+        procedure, private, non_overridable :: hpx_grid_disc_rd_i64 !! %query_disc_radec, int64.
+        !> Pixels within `radius_deg` (DEGREES) of `(ra, dec)` in DEGREES, into a buffer you own.
+        generic :: query_disc_radec => hpx_grid_disc_rd_i32, hpx_grid_disc_rd_i64
+        procedure, private, non_overridable :: hpx_grid_disc_rd_count_i32 !! Counting form, int32.
+        procedure, private, non_overridable :: hpx_grid_disc_rd_count_i64 !! Counting form, int64.
+        !> How many pixels that RA/Dec disc holds.
+        generic :: query_disc_radec_count => hpx_grid_disc_rd_count_i32, hpx_grid_disc_rd_count_i64
+        procedure, private, non_overridable :: hpx_grid_disc_rd_alloc_i32 !! Allocating form, int32.
+        procedure, private, non_overridable :: hpx_grid_disc_rd_alloc_i64 !! Allocating form, int64.
+        !> The same RA/Dec disc, into an allocatable the library sizes for you.
+        generic :: query_disc_radec_alloc => hpx_grid_disc_rd_alloc_i32, hpx_grid_disc_rd_alloc_i64
+
+        ! ---- Threaded forms: the only reason a non-elemental array binding exists ----
+        procedure, private, non_overridable :: hpx_grid_ang2pix_bulk_i32 !! Bulk %ang2pix, int32.
+        procedure, private, non_overridable :: hpx_grid_ang2pix_bulk_i64 !! Bulk %ang2pix, int64.
+        !> `%ang2pix` over whole arrays, with an optional `threads=`.
+        generic :: ang2pix_bulk => hpx_grid_ang2pix_bulk_i32, hpx_grid_ang2pix_bulk_i64
+        procedure, private, non_overridable :: hpx_grid_pix2ang_bulk_i32 !! Bulk %pix2ang, int32.
+        procedure, private, non_overridable :: hpx_grid_pix2ang_bulk_i64 !! Bulk %pix2ang, int64.
+        !> `%pix2ang` over whole arrays, with an optional `threads=`.
+        generic :: pix2ang_bulk => hpx_grid_pix2ang_bulk_i32, hpx_grid_pix2ang_bulk_i64
+        procedure, private, non_overridable :: hpx_grid_vec2pix_bulk_i32 !! Bulk %vec2pix, int32.
+        procedure, private, non_overridable :: hpx_grid_vec2pix_bulk_i64 !! Bulk %vec2pix, int64.
+        !> `%vec2pix` over a `(3, n)` array of directions, with an optional `threads=`.
+        generic :: vec2pix_bulk => hpx_grid_vec2pix_bulk_i32, hpx_grid_vec2pix_bulk_i64
+        procedure, private, non_overridable :: hpx_grid_pix2vec_bulk_i32 !! Bulk %pix2vec, int32.
+        procedure, private, non_overridable :: hpx_grid_pix2vec_bulk_i64 !! Bulk %pix2vec, int64.
+        !> `%pix2vec` into a `(3, n)` array, with an optional `threads=`.
+        generic :: pix2vec_bulk => hpx_grid_pix2vec_bulk_i32, hpx_grid_pix2vec_bulk_i64
+        procedure, private, non_overridable :: hpx_grid_radec2pix_bulk_i32 !! Bulk %radec2pix, int32.
+        procedure, private, non_overridable :: hpx_grid_radec2pix_bulk_i64 !! Bulk %radec2pix, int64.
+        !> `%radec2pix` over whole DEGREE arrays, with an optional `threads=`.
+        generic :: radec2pix_bulk => hpx_grid_radec2pix_bulk_i32, hpx_grid_radec2pix_bulk_i64
+        procedure, private, non_overridable :: hpx_grid_pix2radec_bulk_i32 !! Bulk %pix2radec, int32.
+        procedure, private, non_overridable :: hpx_grid_pix2radec_bulk_i64 !! Bulk %pix2radec, int64.
+        !> `%pix2radec` into whole DEGREE arrays, with an optional `threads=`.
+        generic :: pix2radec_bulk => hpx_grid_pix2radec_bulk_i32, hpx_grid_pix2radec_bulk_i64
+
+        ! ---- Resolution change and comparison ----
+        procedure, private, non_overridable :: hpx_grid_at_nside_i32 !! %at_nside from an int32.
+        procedure, private, non_overridable :: hpx_grid_at_nside_i64 !! %at_nside from an int64.
+        !> The same grid at another resolution, keeping scheme and frame.
+        generic :: at_nside => hpx_grid_at_nside_i32, hpx_grid_at_nside_i64
+        procedure, private, non_overridable :: hpx_grid_at_order_i32 !! %at_order from an int32.
+        procedure, private, non_overridable :: hpx_grid_at_order_i64 !! %at_order from an int64.
+        !> The same grid at another order, keeping scheme and frame.
+        generic :: at_order => hpx_grid_at_order_i32, hpx_grid_at_order_i64
+        procedure, private, non_overridable :: hpx_grid_ud_ord_i32 !! %ud_pix to an order, int32.
+        procedure, private, non_overridable :: hpx_grid_ud_ord_i64 !! %ud_pix to an order, int64.
+        procedure, private, non_overridable :: hpx_grid_ud_grid_i32 !! %ud_pix to a grid, int32.
+        procedure, private, non_overridable :: hpx_grid_ud_grid_i64 !! %ud_pix to a grid, int64.
+        !> NEST resolution change of a pixel index, to an order or to another grid. Elemental.
+        generic :: ud_pix => hpx_grid_ud_ord_i32, hpx_grid_ud_ord_i64, &
+                             hpx_grid_ud_grid_i32, hpx_grid_ud_grid_i64
+        procedure, private, non_overridable :: hpx_grid_eq !! Backs `operator(==)`.
+        procedure, private, non_overridable :: hpx_grid_ne !! Backs `operator(/=)`.
+        !> Same resolution, same scheme and same declination convention.
+        generic :: operator(==) => hpx_grid_eq
+        !> The negation of `operator(==)`.
+        generic :: operator(/=) => hpx_grid_ne
+    end type pf_healpix_grid
 
     ! ---- Public generic interfaces ----
 
@@ -954,7 +1191,7 @@ module parquet_healpix
 
     ! ---- Interfaces: Tier B grid arithmetic and vector conversions ----
     !
-    ! Implemented in submodule parquet_healpix_grid. Nothing in that file touches a ring walk, a
+    ! Implemented in submodule parquet_healpix_arith. Nothing in that file touches a ring walk, a
     ! face or a Morton code: it is closed-form arithmetic on `nside` and on angles, which is why
     ! it is a file of its own rather than more of parquet_healpix_core.
 
@@ -1502,5 +1739,687 @@ module parquet_healpix
             character(len=:), allocatable, intent(out) :: text !! its text, unpadded.
         end subroutine hpx_rtoa
     end interface
+
+    ! ---- Interfaces: the pf_healpix_grid type ----
+    !
+    ! Implemented in submodule parquet_healpix_grid. Every body there is a delegation to a free
+    ! procedure declared above, which is what makes the object and the free API agree by
+    ! construction rather than by test; the only arithmetic the file introduces is the
+    ! degree/radian scaling and the declination reflection.
+
+    ! ---- Construction ----
+
+    interface
+        !> `pf_healpix_grid%init`, int32 `nside`. See the int64 specific for the contract.
+        module subroutine hpx_grid_init_i32(this, nside, scheme, frame)
+            class(pf_healpix_grid), intent(out) :: this !! the grid to build; every field is reset.
+            integer(int32), intent(in) :: nside !! resolution parameter, a positive power of two, at most 8192.
+            integer, intent(in) :: scheme !! `PF_HP_RING` or `PF_HP_NEST`; mandatory.
+            integer, intent(in), optional :: frame !! declination convention; default `PF_HP_DEC_NORTH`.
+        end subroutine hpx_grid_init_i32
+
+        !> Builds a grid at `nside`, in `scheme`, reading declinations in `frame`.
+        !>
+        !> **The only binding that validates, and the only one that can abort.** It aborts, naming
+        !> itself and the offending value, when `nside` is not a positive power of two or exceeds
+        !> the ceiling for the kind passed (8192 for int32, 2**29 for int64), when `scheme` is
+        !> neither selector, or when `frame` is present and is neither selector. Everything
+        !> elemental on the resulting object is then total, exactly as the free conversions are.
+        !>
+        !> **`scheme` is mandatory, deliberately unlike `pf_query_disc`'s optional `scheme=`.** On
+        !> a free procedure the argument sits beside `vec` and `radius`, where a reader sees its
+        !> absence; on an object it is written once and possibly far from every query, so a grid
+        !> silently RING against NEST data would be wrong everywhere with no error at any point.
+        !>
+        !> **`frame` is optional and defaults to `PF_HP_DEC_NORTH`**, the standard astronomical
+        !> convention. A caller whose declinations follow it writes nothing; a caller whose data
+        !> uses the mirrored `theta = pi/2 + dec` must pass `PF_HP_DEC_SOUTH`, and is the only one
+        !> who has to think about it.
+        !>
+        !> **The passed object is `intent(out)`, so calling `%init` twice is safe and needs no
+        !> guard.** Fortran resets every component to its default initialiser on entry, the type
+        !> has no allocatable component to leak and no finalizer to trip, and this routine then
+        !> writes all five fields unconditionally -- so a second call rebuilds exactly the same
+        !> state from the same inputs, with nothing carried over.
+        module subroutine hpx_grid_init_i64(this, nside, scheme, frame)
+            class(pf_healpix_grid), intent(out) :: this !! the grid to build; every field is reset.
+            integer(int64), intent(in) :: nside !! resolution parameter, a positive power of two, at most 2**29.
+            integer, intent(in) :: scheme !! `PF_HP_RING` or `PF_HP_NEST`; mandatory.
+            integer, intent(in), optional :: frame !! declination convention; default `PF_HP_DEC_NORTH`.
+        end subroutine hpx_grid_init_i64
+    end interface
+
+    ! ---- Accessors: elemental functions, total ----
+
+    interface
+        !> Whether `%init` has run on this grid.
+        !>
+        !> It is the query to use rather than reading a value back: `%frame()` reports
+        !> `PF_HP_DEC_NORTH` on an untouched grid because that is the default, not because anything
+        !> was decided about that grid.
+        elemental module function hpx_grid_is_set(this) result(ok)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            logical :: ok !! `.true.` once `%init` has run.
+        end function hpx_grid_is_set
+
+        !> Resolution order, `log2(nside)`, or -1 before `%init`.
+        elemental module function hpx_grid_order(this) result(order)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            integer(int32) :: order !! `0 .. 29`, or -1.
+        end function hpx_grid_order
+
+        !> Numbering scheme: `PF_HP_RING` or `PF_HP_NEST`.
+        elemental module function hpx_grid_scheme(this) result(scheme)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            integer(int32) :: scheme !! the selector `%init` was given.
+        end function hpx_grid_scheme
+
+        !> Declination convention: `PF_HP_DEC_NORTH` or `PF_HP_DEC_SOUTH`, never a third value.
+        elemental module function hpx_grid_frame(this) result(frame)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            integer(int32) :: frame !! the convention the RA/Dec bindings read.
+        end function hpx_grid_frame
+
+        !> Area of one pixel, steradians, or -1 before `%init`. See `pf_nside2pixarea`.
+        elemental module function hpx_grid_pixarea(this) result(area)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            real(real64) :: area !! `4*pi/npix`, or -1.
+        end function hpx_grid_pixarea
+
+        !> Nominal resolution, radians, or -1 before `%init`. See `pf_nside2resol`.
+        elemental module function hpx_grid_resol(this) result(resol)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            real(real64) :: resol !! the square root of the pixel area, or -1.
+        end function hpx_grid_resol
+
+        !> Largest pixel centre-to-corner distance, radians, or -1 before `%init`.
+        !>
+        !> The margin `inclusive = .true.` enlarges a disc by, and the honest way to size a search
+        !> margin. See `pf_max_pixrad`.
+        elemental module function hpx_grid_max_pixrad(this) result(r)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            real(real64) :: r !! radians, or -1.
+        end function hpx_grid_max_pixrad
+    end interface
+
+    ! ---- Accessors that carry a kind question: subroutines, and they can abort ----
+
+    interface
+        !> `%get_nside` into an `integer(int32)`. See the int64 specific.
+        module subroutine hpx_grid_get_nside_i32(this, nside)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            integer(int32), intent(out) :: nside !! the resolution parameter; 0 before `%init`.
+        end subroutine hpx_grid_get_nside_i32
+
+        !> Resolution parameter, in whichever integer kind the argument has.
+        !>
+        !> **A subroutine rather than a function, and that is the point of it.** A function cannot
+        !> resolve on the kind a caller wants -- there is nothing to resolve on -- so
+        !> `n = grid%nside()` would return one fixed kind and truncate silently on assignment into
+        !> the other. Taking the result through an `intent(out)` argument makes the caller's own
+        !> declaration select the specific, which is how every other output in this module works.
+        !>
+        !> **The int32 specific aborts rather than truncating** when the value exceeds
+        !> `huge(0_int32)`. For `nside` that is unreachable today, since `%init` caps it at 2**29,
+        !> which is below `huge(0_int32)`; the guard is kept for symmetry with `%get_npix`, where
+        !> it is reachable, and because it survives any future change to that ceiling.
+        module subroutine hpx_grid_get_nside_i64(this, nside)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            integer(int64), intent(out) :: nside !! the resolution parameter; 0 before `%init`.
+        end subroutine hpx_grid_get_nside_i64
+
+        !> `%get_npix` into an `integer(int32)`. **Aborts above `huge(0_int32)`** -- see below.
+        module subroutine hpx_grid_get_npix_i32(this, npix)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            integer(int32), intent(out) :: npix !! `12*nside**2`; 0 before `%init`.
+        end subroutine hpx_grid_get_npix_i32
+
+        !> Pixel count `12*nside**2`, in whichever integer kind the argument has.
+        !>
+        !> Same shape and same reasoning as `%get_nside`, and this is the one where the overflow
+        !> is reachable: `npix` passes `huge(0_int32)` at `nside = 16384`, which `%init` accepts
+        !> from an int64 argument. Asking for it in int32 there aborts, naming the binding and both
+        !> numbers, rather than handing back a wrapped value.
+        module subroutine hpx_grid_get_npix_i64(this, npix)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            integer(int64), intent(out) :: npix !! `12*nside**2`; 0 before `%init`.
+        end subroutine hpx_grid_get_npix_i64
+    end interface
+
+    ! ---- Native conversions: radians and unit vectors, in this grid's scheme ----
+
+    interface
+        !> `%ang2pix` into an `integer(int32)`. See the int64 specific for the contract.
+        elemental module subroutine hpx_grid_ang2pix_i32(this, theta, phi, ipix)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            real(real64), intent(in) :: theta !! colatitude, radians.
+            real(real64), intent(in) :: phi !! longitude, radians; any value.
+            integer(int32), intent(out) :: ipix !! the pixel containing it, or -1 on an unbuilt grid.
+        end subroutine hpx_grid_ang2pix_i32
+
+        !> Pixel containing the direction `(theta, phi)`, in this grid's scheme.
+        !>
+        !> Delegates to `pf_ang2pix_ring` or `pf_ang2pix_nest` according to `%scheme()`, so the
+        !> answer is identical to the free call by construction.
+        !>
+        !> **Total and `elemental`.** It validates nothing and never aborts, exactly as the free
+        !> conversions do not: a grid `%init` has never run on yields -1, and a `theta` outside
+        !> `[0, pi]` yields a meaningless index rather than an error. Being elemental, it also
+        !> accepts whole arrays -- `call grid%ang2pix(theta(:), phi(:), ipix(:))` is this same
+        !> binding, and needs no separate array form. `%ang2pix_bulk` exists only to carry
+        !> `threads=`, which an elemental procedure cannot take.
+        elemental module subroutine hpx_grid_ang2pix_i64(this, theta, phi, ipix)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            real(real64), intent(in) :: theta !! colatitude, radians.
+            real(real64), intent(in) :: phi !! longitude, radians; any value.
+            integer(int64), intent(out) :: ipix !! the pixel containing it, or -1 on an unbuilt grid.
+        end subroutine hpx_grid_ang2pix_i64
+
+        !> `%pix2ang` from an `integer(int32)` index. See the int64 specific.
+        elemental module subroutine hpx_grid_pix2ang_i32(this, ipix, theta, phi)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            integer(int32), intent(in) :: ipix !! a pixel index in this grid's scheme.
+            real(real64), intent(out) :: theta !! its centre's colatitude, radians, or -999.
+            real(real64), intent(out) :: phi !! its centre's longitude, radians, or -999.
+        end subroutine hpx_grid_pix2ang_i32
+
+        !> Direction of a pixel centre, as `(theta, phi)` in radians.
+        !>
+        !> Total and `elemental`, as `%ang2pix` is. A grid `%init` has never run on yields -999 in
+        !> both outputs -- a value outside the range of either angle. **That case is answered here
+        !> rather than delegated**, because delegating would divide by `nside = 0` and raise
+        !> `IEEE_DIVIDE_BY_ZERO`, which is the one thing this module promises never to do.
+        elemental module subroutine hpx_grid_pix2ang_i64(this, ipix, theta, phi)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            integer(int64), intent(in) :: ipix !! a pixel index in this grid's scheme.
+            real(real64), intent(out) :: theta !! its centre's colatitude, radians, or -999.
+            real(real64), intent(out) :: phi !! its centre's longitude, radians, or -999.
+        end subroutine hpx_grid_pix2ang_i64
+
+        !> `%vec2pix` into an `integer(int32)`. See the int64 specific.
+        pure module subroutine hpx_grid_vec2pix_i32(this, vec, ipix)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            real(real64), intent(in) :: vec(3) !! a direction; any nonzero length.
+            integer(int32), intent(out) :: ipix !! the pixel containing it, or -1 on an unbuilt grid.
+        end subroutine hpx_grid_vec2pix_i32
+
+        !> Pixel containing the direction `vec`, in this grid's scheme.
+        !>
+        !> `pure` rather than `elemental`, because an array dummy forbids elemental; use
+        !> `%vec2pix_bulk` for a whole `(3, n)` array. Total, as every conversion here is.
+        pure module subroutine hpx_grid_vec2pix_i64(this, vec, ipix)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            real(real64), intent(in) :: vec(3) !! a direction; any nonzero length.
+            integer(int64), intent(out) :: ipix !! the pixel containing it, or -1 on an unbuilt grid.
+        end subroutine hpx_grid_vec2pix_i64
+
+        !> `%pix2vec` from an `integer(int32)` index. See the int64 specific.
+        pure module subroutine hpx_grid_pix2vec_i32(this, ipix, vec)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            integer(int32), intent(in) :: ipix !! a pixel index in this grid's scheme.
+            real(real64), intent(out) :: vec(3) !! its centre's unit vector, or -999 in each component.
+        end subroutine hpx_grid_pix2vec_i32
+
+        !> Unit vector of a pixel centre, in this grid's scheme.
+        !>
+        !> The primitive form: no `acos`/`cos` round trip, so a centre lying exactly on a disc's
+        !> rim stays on the side of it the pixelisation puts it. Total.
+        pure module subroutine hpx_grid_pix2vec_i64(this, ipix, vec)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            integer(int64), intent(in) :: ipix !! a pixel index in this grid's scheme.
+            real(real64), intent(out) :: vec(3) !! its centre's unit vector, or -999 in each component.
+        end subroutine hpx_grid_pix2vec_i64
+    end interface
+
+    ! ---- The RA/Dec layer: DEGREES, in this grid's declination convention ----
+
+    interface
+        !> `%radec2pix` into an `integer(int32)`. See the int64 specific for the contract.
+        elemental module subroutine hpx_grid_radec2pix_i32(this, ra, dec, ipix)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            real(real64), intent(in) :: ra !! right ascension, DEGREES; any value.
+            real(real64), intent(in) :: dec !! declination, DEGREES, in `[-90, 90]`.
+            integer(int32), intent(out) :: ipix !! the pixel containing it, or -1 on an unbuilt grid.
+        end subroutine hpx_grid_radec2pix_i32
+
+        !> Pixel containing `(ra, dec)`, in DEGREES, read in this grid's declination convention.
+        !>
+        !> **This is the layer the type exists for.** `theta` is built as `pi/2 - dec` under
+        !> `PF_HP_DEC_NORTH` and as `pi/2 + dec` under `PF_HP_DEC_SOUTH`, and `phi` is `ra` in
+        !> radians; which one applies was fixed at `%init` and is visible through `%frame()`. The
+        !> free procedures offer no equivalent, and that is deliberate -- a signature taking a bare
+        !> `dec` cannot say which convention it means.
+        !>
+        !> **Degrees, always.** Making the unit configurable would recreate for units exactly the
+        !> silent-convention problem the frame state removes. A caller working in radians has
+        !> `%ang2pix`.
+        !>
+        !> Total and `elemental`, so whole arrays work and nothing aborts: an unbuilt grid yields
+        !> -1, and a `dec` outside `[-90, 90]` yields a meaningless index rather than an error.
+        elemental module subroutine hpx_grid_radec2pix_i64(this, ra, dec, ipix)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            real(real64), intent(in) :: ra !! right ascension, DEGREES; any value.
+            real(real64), intent(in) :: dec !! declination, DEGREES, in `[-90, 90]`.
+            integer(int64), intent(out) :: ipix !! the pixel containing it, or -1 on an unbuilt grid.
+        end subroutine hpx_grid_radec2pix_i64
+
+        !> `%pix2radec` from an `integer(int32)` index. See the int64 specific.
+        elemental module subroutine hpx_grid_pix2radec_i32(this, ipix, ra, dec)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            integer(int32), intent(in) :: ipix !! a pixel index in this grid's scheme.
+            real(real64), intent(out) :: ra !! right ascension, DEGREES, in `[0, 360)`, or -999.
+            real(real64), intent(out) :: dec !! declination, DEGREES, in `[-90, 90]`, or -999.
+        end subroutine hpx_grid_pix2radec_i32
+
+        !> A pixel centre as `(ra, dec)` in DEGREES, written in this grid's convention.
+        !>
+        !> The exact inverse of `%radec2pix` to within the pixelisation itself: feeding the result
+        !> back returns the same pixel. `ra` comes back in `[0, 360)` and `dec` in `[-90, 90]`, so
+        !> a value outside either is the unbuilt-grid sentinel -999 rather than an angle.
+        elemental module subroutine hpx_grid_pix2radec_i64(this, ipix, ra, dec)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            integer(int64), intent(in) :: ipix !! a pixel index in this grid's scheme.
+            real(real64), intent(out) :: ra !! right ascension, DEGREES, in `[0, 360)`, or -999.
+            real(real64), intent(out) :: dec !! declination, DEGREES, in `[-90, 90]`, or -999.
+        end subroutine hpx_grid_pix2radec_i64
+
+        !> Unit vector of `(ra, dec)` in DEGREES, read in this grid's convention.
+        !>
+        !> What a caller holding RA/Dec needs in order to reach `%query_disc`, which takes a
+        !> vector. It uses no resolution at all, so it answers on an unbuilt grid as readily as on
+        !> a built one -- the frame is the only state it reads.
+        pure module subroutine hpx_grid_radec2vec(this, ra, dec, vec)
+            class(pf_healpix_grid), intent(in) :: this !! the grid, for its frame alone.
+            real(real64), intent(in) :: ra !! right ascension, DEGREES; any value.
+            real(real64), intent(in) :: dec !! declination, DEGREES, in `[-90, 90]`.
+            real(real64), intent(out) :: vec(3) !! the unit vector of that direction.
+        end subroutine hpx_grid_radec2vec
+
+        !> `(ra, dec)` in DEGREES of a direction, written in this grid's convention.
+        !>
+        !> The inverse of `%radec2vec`, and like it independent of the resolution.
+        pure module subroutine hpx_grid_vec2radec(this, vec, ra, dec)
+            class(pf_healpix_grid), intent(in) :: this !! the grid, for its frame alone.
+            real(real64), intent(in) :: vec(3) !! a direction; any nonzero length.
+            real(real64), intent(out) :: ra !! right ascension, DEGREES, in `[0, 360)`.
+            real(real64), intent(out) :: dec !! declination, DEGREES, in `[-90, 90]`.
+        end subroutine hpx_grid_vec2radec
+    end interface
+
+    ! ---- Disc queries: this grid's scheme; these validate and abort ----
+
+    interface
+        !> `%query_disc` into an int32 buffer. See the int64 specific for the contract.
+        module subroutine hpx_grid_disc_i32(this, vec, radius, listpix, nlist, inclusive)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            real(real64), intent(in) :: vec(3) !! direction of the disc centre; any nonzero length.
+            real(real64), intent(in) :: radius !! disc radius, RADIANS, >= 0.
+            integer(int32), intent(out) :: listpix(:) !! filled from element 1 with 0-based indices.
+            integer(int32), intent(out) :: nlist !! how many elements of `listpix` were filled.
+            logical, intent(in), optional :: inclusive !! overlap superset; default `.false.`.
+        end subroutine hpx_grid_disc_i32
+
+        !> Pixels of a disc around `vec`, in this grid's scheme, into a buffer you own.
+        !>
+        !> Delegates to `pf_query_disc` with `scheme = %scheme()`, so every part of that
+        !> procedure's published contract applies unchanged and is not restated here: the two
+        !> `inclusive` modes and the `radius + max_pixrad` bound, the ordering promise (ascending
+        !> for `PF_HP_RING`, unspecified for `PF_HP_NEST`), the 1-based buffer holding 0-based
+        !> pixel values, the abort on a buffer too small, and the guarantee that no IEEE exception
+        !> is raised. Read `pf_query_disc` for all of it.
+        !>
+        !> **Impure, and it aborts** -- it is a once-per-query entry point, where validation
+        !> belongs. On top of `pf_query_disc`'s own checks it adds one of its own: a grid `%init`
+        !> has never run on is refused, naming this binding.
+        module subroutine hpx_grid_disc_i64(this, vec, radius, listpix, nlist, inclusive)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            real(real64), intent(in) :: vec(3) !! direction of the disc centre; any nonzero length.
+            real(real64), intent(in) :: radius !! disc radius, RADIANS, >= 0; above pi acts as pi.
+            integer(int64), intent(out) :: listpix(:) !! filled from element 1 with 0-based indices.
+            integer(int64), intent(out) :: nlist !! how many elements of `listpix` were filled.
+            logical, intent(in), optional :: inclusive !! overlap superset; default `.false.`.
+        end subroutine hpx_grid_disc_i64
+
+        !> `%query_disc_count`, int32. See `pf_query_disc_count`.
+        module subroutine hpx_grid_disc_count_i32(this, vec, radius, nlist, inclusive)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            real(real64), intent(in) :: vec(3) !! direction of the disc centre; any nonzero length.
+            real(real64), intent(in) :: radius !! disc radius, RADIANS, >= 0.
+            integer(int32), intent(out) :: nlist !! how many pixels the disc holds.
+            logical, intent(in), optional :: inclusive !! overlap superset; default `.false.`.
+        end subroutine hpx_grid_disc_count_i32
+
+        !> How many pixels the disc holds, without materialising the list.
+        !>
+        !> The same walk as `%query_disc` with the emission suppressed, so a count cannot disagree
+        !> with the list it predicts. See `pf_query_disc_count`.
+        module subroutine hpx_grid_disc_count_i64(this, vec, radius, nlist, inclusive)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            real(real64), intent(in) :: vec(3) !! direction of the disc centre; any nonzero length.
+            real(real64), intent(in) :: radius !! disc radius, RADIANS, >= 0; above pi acts as pi.
+            integer(int64), intent(out) :: nlist !! how many pixels the disc holds.
+            logical, intent(in), optional :: inclusive !! overlap superset; default `.false.`.
+        end subroutine hpx_grid_disc_count_i64
+
+        !> `%query_disc_alloc`, int32. See `pf_query_disc_alloc`.
+        module subroutine hpx_grid_disc_alloc_i32(this, vec, radius, listpix, nlist, inclusive)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            real(real64), intent(in) :: vec(3) !! direction of the disc centre; any nonzero length.
+            real(real64), intent(in) :: radius !! disc radius, RADIANS, >= 0.
+            integer(int32), allocatable, intent(out) :: listpix(:) !! allocated to exactly `nlist`.
+            integer(int32), intent(out) :: nlist !! how many pixels the disc holds.
+            logical, intent(in), optional :: inclusive !! overlap superset; default `.false.`.
+        end subroutine hpx_grid_disc_alloc_i32
+
+        !> The same disc, into an allocatable this library sizes for you.
+        !>
+        !> Removes the buffer-sizing question outright. See `pf_query_disc_alloc`.
+        module subroutine hpx_grid_disc_alloc_i64(this, vec, radius, listpix, nlist, inclusive)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            real(real64), intent(in) :: vec(3) !! direction of the disc centre; any nonzero length.
+            real(real64), intent(in) :: radius !! disc radius, RADIANS, >= 0; above pi acts as pi.
+            integer(int64), allocatable, intent(out) :: listpix(:) !! allocated to exactly `nlist`.
+            integer(int64), intent(out) :: nlist !! how many pixels the disc holds.
+            logical, intent(in), optional :: inclusive !! overlap superset; default `.false.`.
+        end subroutine hpx_grid_disc_alloc_i64
+
+        !> `%query_disc_radec` into an int32 buffer. See the int64 specific.
+        module subroutine hpx_grid_disc_rd_i32(this, ra, dec, radius_deg, listpix, nlist, inclusive)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            real(real64), intent(in) :: ra !! disc centre right ascension, DEGREES.
+            real(real64), intent(in) :: dec !! disc centre declination, DEGREES, in this grid's frame.
+            real(real64), intent(in) :: radius_deg !! disc radius, DEGREES, >= 0.
+            integer(int32), intent(out) :: listpix(:) !! filled from element 1 with 0-based indices.
+            integer(int32), intent(out) :: nlist !! how many elements of `listpix` were filled.
+            logical, intent(in), optional :: inclusive !! overlap superset; default `.false.`.
+        end subroutine hpx_grid_disc_rd_i32
+
+        !> Pixels of a disc around `(ra, dec)`, everything in DEGREES.
+        !>
+        !> **Within this call every angle is in degrees, the radius included.** That is why it has
+        !> its own name rather than sharing `%query_disc`: one name whose radius meant radians in
+        !> one call and degrees in another would be exactly the silent ambiguity this type exists
+        !> to remove.
+        !>
+        !> The centre is read in this grid's declination convention, then handed to `pf_query_disc`
+        !> as a unit vector; everything else is that procedure's contract unchanged.
+        module subroutine hpx_grid_disc_rd_i64(this, ra, dec, radius_deg, listpix, nlist, inclusive)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            real(real64), intent(in) :: ra !! disc centre right ascension, DEGREES.
+            real(real64), intent(in) :: dec !! disc centre declination, DEGREES, in this grid's frame.
+            real(real64), intent(in) :: radius_deg !! disc radius, DEGREES, >= 0; above 180 acts as 180.
+            integer(int64), intent(out) :: listpix(:) !! filled from element 1 with 0-based indices.
+            integer(int64), intent(out) :: nlist !! how many elements of `listpix` were filled.
+            logical, intent(in), optional :: inclusive !! overlap superset; default `.false.`.
+        end subroutine hpx_grid_disc_rd_i64
+
+        !> `%query_disc_radec_count`, int32. Degrees throughout.
+        module subroutine hpx_grid_disc_rd_count_i32(this, ra, dec, radius_deg, nlist, inclusive)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            real(real64), intent(in) :: ra !! disc centre right ascension, DEGREES.
+            real(real64), intent(in) :: dec !! disc centre declination, DEGREES, in this grid's frame.
+            real(real64), intent(in) :: radius_deg !! disc radius, DEGREES, >= 0.
+            integer(int32), intent(out) :: nlist !! how many pixels the disc holds.
+            logical, intent(in), optional :: inclusive !! overlap superset; default `.false.`.
+        end subroutine hpx_grid_disc_rd_count_i32
+
+        !> How many pixels that RA/Dec disc holds. Degrees throughout.
+        module subroutine hpx_grid_disc_rd_count_i64(this, ra, dec, radius_deg, nlist, inclusive)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            real(real64), intent(in) :: ra !! disc centre right ascension, DEGREES.
+            real(real64), intent(in) :: dec !! disc centre declination, DEGREES, in this grid's frame.
+            real(real64), intent(in) :: radius_deg !! disc radius, DEGREES, >= 0; above 180 acts as 180.
+            integer(int64), intent(out) :: nlist !! how many pixels the disc holds.
+            logical, intent(in), optional :: inclusive !! overlap superset; default `.false.`.
+        end subroutine hpx_grid_disc_rd_count_i64
+
+        !> `%query_disc_radec_alloc`, int32. Degrees throughout.
+        module subroutine hpx_grid_disc_rd_alloc_i32(this, ra, dec, radius_deg, listpix, nlist, &
+                                                     inclusive)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            real(real64), intent(in) :: ra !! disc centre right ascension, DEGREES.
+            real(real64), intent(in) :: dec !! disc centre declination, DEGREES, in this grid's frame.
+            real(real64), intent(in) :: radius_deg !! disc radius, DEGREES, >= 0.
+            integer(int32), allocatable, intent(out) :: listpix(:) !! allocated to exactly `nlist`.
+            integer(int32), intent(out) :: nlist !! how many pixels the disc holds.
+            logical, intent(in), optional :: inclusive !! overlap superset; default `.false.`.
+        end subroutine hpx_grid_disc_rd_alloc_i32
+
+        !> The same RA/Dec disc, into an allocatable this library sizes for you.
+        module subroutine hpx_grid_disc_rd_alloc_i64(this, ra, dec, radius_deg, listpix, nlist, &
+                                                     inclusive)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            real(real64), intent(in) :: ra !! disc centre right ascension, DEGREES.
+            real(real64), intent(in) :: dec !! disc centre declination, DEGREES, in this grid's frame.
+            real(real64), intent(in) :: radius_deg !! disc radius, DEGREES, >= 0; above 180 acts as 180.
+            integer(int64), allocatable, intent(out) :: listpix(:) !! allocated to exactly `nlist`.
+            integer(int64), intent(out) :: nlist !! how many pixels the disc holds.
+            logical, intent(in), optional :: inclusive !! overlap superset; default `.false.`.
+        end subroutine hpx_grid_disc_rd_alloc_i64
+    end interface
+
+    ! ---- Threaded forms: the only reason a non-elemental array binding exists ----
+
+    interface
+        !> `%ang2pix_bulk`, int32. See the int64 specific.
+        module subroutine hpx_grid_ang2pix_bulk_i32(this, theta, phi, ipix, threads)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            real(real64), intent(in) :: theta(:) !! colatitudes, radians.
+            real(real64), intent(in) :: phi(:) !! longitudes, radians; any values.
+            integer(int32), intent(out) :: ipix(:) !! the pixel containing each direction.
+            integer, intent(in), optional :: threads !! threads to open; absent resolves automatically.
+        end subroutine hpx_grid_ang2pix_bulk_i32
+
+        !> `%ang2pix` over whole arrays, with an optional `threads=`.
+        !>
+        !> **The elemental binding already accepts whole arrays**, so this exists for one reason:
+        !> an elemental procedure cannot take a `threads=` argument. Reach for it when the arrays
+        !> are large enough for threading to pay, and for `call grid%ang2pix(theta, phi, ipix)`
+        !> otherwise.
+        !>
+        !> Impure and validating, as the free bulk forms are: the arrays must conform, `threads`
+        !> must be at least 1, and a grid `%init` has never run on is refused.
+        module subroutine hpx_grid_ang2pix_bulk_i64(this, theta, phi, ipix, threads)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            real(real64), intent(in) :: theta(:) !! colatitudes, radians.
+            real(real64), intent(in) :: phi(:) !! longitudes, radians; any values.
+            integer(int64), intent(out) :: ipix(:) !! the pixel containing each direction.
+            integer, intent(in), optional :: threads !! threads to open; absent resolves automatically.
+        end subroutine hpx_grid_ang2pix_bulk_i64
+
+        !> `%pix2ang_bulk`, int32. See `pf_pix2ang_ring_bulk`.
+        module subroutine hpx_grid_pix2ang_bulk_i32(this, ipix, theta, phi, threads)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            integer(int32), intent(in) :: ipix(:) !! pixel indices in this grid's scheme.
+            real(real64), intent(out) :: theta(:) !! each pixel centre's colatitude, radians.
+            real(real64), intent(out) :: phi(:) !! each pixel centre's longitude, radians.
+            integer, intent(in), optional :: threads !! threads to open; absent resolves automatically.
+        end subroutine hpx_grid_pix2ang_bulk_i32
+
+        !> `%pix2ang` over whole arrays, with an optional `threads=`.
+        module subroutine hpx_grid_pix2ang_bulk_i64(this, ipix, theta, phi, threads)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            integer(int64), intent(in) :: ipix(:) !! pixel indices in this grid's scheme.
+            real(real64), intent(out) :: theta(:) !! each pixel centre's colatitude, radians.
+            real(real64), intent(out) :: phi(:) !! each pixel centre's longitude, radians.
+            integer, intent(in), optional :: threads !! threads to open; absent resolves automatically.
+        end subroutine hpx_grid_pix2ang_bulk_i64
+
+        !> `%vec2pix_bulk`, int32. See `pf_vec2pix_ring_bulk`.
+        module subroutine hpx_grid_vec2pix_bulk_i32(this, vec, ipix, threads)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            real(real64), intent(in) :: vec(:,:) !! directions, shaped `(3, n)`; any nonzero length.
+            integer(int32), intent(out) :: ipix(:) !! the pixel containing each direction.
+            integer, intent(in), optional :: threads !! threads to open; absent resolves automatically.
+        end subroutine hpx_grid_vec2pix_bulk_i32
+
+        !> `%vec2pix` over a `(3, n)` array of directions, with an optional `threads=`.
+        !>
+        !> The scalar `%vec2pix` cannot be elemental (its `vec(3)` dummy is an array), so unlike
+        !> `%ang2pix_bulk` this one is the only array form there is.
+        module subroutine hpx_grid_vec2pix_bulk_i64(this, vec, ipix, threads)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            real(real64), intent(in) :: vec(:,:) !! directions, shaped `(3, n)`; any nonzero length.
+            integer(int64), intent(out) :: ipix(:) !! the pixel containing each direction.
+            integer, intent(in), optional :: threads !! threads to open; absent resolves automatically.
+        end subroutine hpx_grid_vec2pix_bulk_i64
+
+        !> `%pix2vec_bulk`, int32. See `pf_pix2vec_ring_bulk`.
+        module subroutine hpx_grid_pix2vec_bulk_i32(this, ipix, vec, threads)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            integer(int32), intent(in) :: ipix(:) !! pixel indices in this grid's scheme.
+            real(real64), intent(out) :: vec(:,:) !! each centre's unit vector, shaped `(3, n)`.
+            integer, intent(in), optional :: threads !! threads to open; absent resolves automatically.
+        end subroutine hpx_grid_pix2vec_bulk_i32
+
+        !> `%pix2vec` into a `(3, n)` array, with an optional `threads=`.
+        module subroutine hpx_grid_pix2vec_bulk_i64(this, ipix, vec, threads)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            integer(int64), intent(in) :: ipix(:) !! pixel indices in this grid's scheme.
+            real(real64), intent(out) :: vec(:,:) !! each centre's unit vector, shaped `(3, n)`.
+            integer, intent(in), optional :: threads !! threads to open; absent resolves automatically.
+        end subroutine hpx_grid_pix2vec_bulk_i64
+
+        !> `%radec2pix_bulk`, int32. See the int64 specific.
+        module subroutine hpx_grid_radec2pix_bulk_i32(this, ra, dec, ipix, threads)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            real(real64), intent(in) :: ra(:) !! right ascensions, DEGREES.
+            real(real64), intent(in) :: dec(:) !! declinations, DEGREES, in this grid's frame.
+            integer(int32), intent(out) :: ipix(:) !! the pixel containing each direction.
+            integer, intent(in), optional :: threads !! threads to open; absent resolves automatically.
+        end subroutine hpx_grid_radec2pix_bulk_i32
+
+        !> `%radec2pix` over whole DEGREE arrays, with an optional `threads=`.
+        !>
+        !> The reflection and the degree scaling are applied inside the threaded loop rather than
+        !> through a temporary array, so converting several million catalogue rows costs no extra
+        !> allocation. This is the path the surveys feeding this module actually run.
+        module subroutine hpx_grid_radec2pix_bulk_i64(this, ra, dec, ipix, threads)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            real(real64), intent(in) :: ra(:) !! right ascensions, DEGREES.
+            real(real64), intent(in) :: dec(:) !! declinations, DEGREES, in this grid's frame.
+            integer(int64), intent(out) :: ipix(:) !! the pixel containing each direction.
+            integer, intent(in), optional :: threads !! threads to open; absent resolves automatically.
+        end subroutine hpx_grid_radec2pix_bulk_i64
+
+        !> `%pix2radec_bulk`, int32. See the int64 specific.
+        module subroutine hpx_grid_pix2radec_bulk_i32(this, ipix, ra, dec, threads)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            integer(int32), intent(in) :: ipix(:) !! pixel indices in this grid's scheme.
+            real(real64), intent(out) :: ra(:) !! right ascensions, DEGREES, in `[0, 360)`.
+            real(real64), intent(out) :: dec(:) !! declinations, DEGREES, in this grid's frame.
+            integer, intent(in), optional :: threads !! threads to open; absent resolves automatically.
+        end subroutine hpx_grid_pix2radec_bulk_i32
+
+        !> `%pix2radec` into whole DEGREE arrays, with an optional `threads=`.
+        module subroutine hpx_grid_pix2radec_bulk_i64(this, ipix, ra, dec, threads)
+            class(pf_healpix_grid), intent(in) :: this !! the grid.
+            integer(int64), intent(in) :: ipix(:) !! pixel indices in this grid's scheme.
+            real(real64), intent(out) :: ra(:) !! right ascensions, DEGREES, in `[0, 360)`.
+            real(real64), intent(out) :: dec(:) !! declinations, DEGREES, in this grid's frame.
+            integer, intent(in), optional :: threads !! threads to open; absent resolves automatically.
+        end subroutine hpx_grid_pix2radec_bulk_i64
+    end interface
+
+    ! ---- Resolution change and comparison ----
+
+    interface
+        !> `%at_nside` from an int32. See the int64 specific.
+        pure module function hpx_grid_at_nside_i32(this, nside) result(g)
+            class(pf_healpix_grid), intent(in) :: this !! the grid to derive from.
+            integer(int32), intent(in) :: nside !! the new resolution parameter.
+            type(pf_healpix_grid) :: g !! the same scheme and frame at `nside`.
+        end function hpx_grid_at_nside_i32
+
+        !> The same grid at another resolution, keeping the scheme and the declination convention.
+        !>
+        !> What the two-grid pattern wants: `sky = tar%at_nside(1024_int64)` says "same scheme,
+        !> same frame, four times finer" in one line that cannot get the frame wrong.
+        !>
+        !> **`pure`, so it cannot validate.** An `nside` that is not a positive power of two within
+        !> range yields a grid for which `%is_set()` is `.false.` and every binding then reports
+        !> the sentinel -- a failure that is visible at the next call rather than at this one, and
+        !> the price of being usable from inside another `pure` procedure.
+        pure module function hpx_grid_at_nside_i64(this, nside) result(g)
+            class(pf_healpix_grid), intent(in) :: this !! the grid to derive from.
+            integer(int64), intent(in) :: nside !! the new resolution parameter.
+            type(pf_healpix_grid) :: g !! the same scheme and frame at `nside`.
+        end function hpx_grid_at_nside_i64
+
+        !> `%at_order` from an int32. See the int64 specific.
+        pure module function hpx_grid_at_order_i32(this, order) result(g)
+            class(pf_healpix_grid), intent(in) :: this !! the grid to derive from.
+            integer(int32), intent(in) :: order !! the new resolution order, `0 .. 29`.
+            type(pf_healpix_grid) :: g !! the same scheme and frame at `2**order`.
+        end function hpx_grid_at_order_i32
+
+        !> The same grid at another order. `%at_nside` by another name; same `pure` contract.
+        pure module function hpx_grid_at_order_i64(this, order) result(g)
+            class(pf_healpix_grid), intent(in) :: this !! the grid to derive from.
+            integer(int64), intent(in) :: order !! the new resolution order, `0 .. 29`.
+            type(pf_healpix_grid) :: g !! the same scheme and frame at `2**order`.
+        end function hpx_grid_at_order_i64
+
+        !> `%ud_pix` to an order, int32. See the order-taking int64 specific.
+        elemental module subroutine hpx_grid_ud_ord_i32(this, ipix, order_out, ipix_out)
+            class(pf_healpix_grid), intent(in) :: this !! the grid the index belongs to; NEST only.
+            integer(int32), intent(in) :: ipix !! a NEST pixel index at this grid's order.
+            integer(int32), intent(in) :: order_out !! the order to convert it to, `0 .. 29`.
+            integer(int32), intent(out) :: ipix_out !! the result, or -1 out of domain.
+        end subroutine hpx_grid_ud_ord_i32
+
+        !> NEST resolution change of a pixel index, from this grid's order to `order_out`.
+        !>
+        !> A bit shift, exact in both directions: coarsening drops the low bits, refining supplies
+        !> the first child. See `pf_ud_pix_nest`.
+        !>
+        !> **Returns -1 on a RING grid**, since the operation is defined only in NEST, and -1 on a
+        !> grid `%init` has never run on. Total and `elemental`, so it never aborts.
+        elemental module subroutine hpx_grid_ud_ord_i64(this, ipix, order_out, ipix_out)
+            class(pf_healpix_grid), intent(in) :: this !! the grid the index belongs to; NEST only.
+            integer(int64), intent(in) :: ipix !! a NEST pixel index at this grid's order.
+            integer(int64), intent(in) :: order_out !! the order to convert it to, `0 .. 29`.
+            integer(int64), intent(out) :: ipix_out !! the result, or -1 out of domain.
+        end subroutine hpx_grid_ud_ord_i64
+
+        !> `%ud_pix` to another grid, int32. See the grid-taking int64 specific.
+        elemental module subroutine hpx_grid_ud_grid_i32(this, ipix, grid_out, ipix_out)
+            class(pf_healpix_grid), intent(in) :: this !! the grid the index belongs to; NEST only.
+            integer(int32), intent(in) :: ipix !! a NEST pixel index at this grid's order.
+            type(pf_healpix_grid), intent(in) :: grid_out !! the destination grid; NEST, and built.
+            integer(int32), intent(out) :: ipix_out !! the result, or -1 out of domain.
+        end subroutine hpx_grid_ud_grid_i32
+
+        !> The same resolution change, naming the destination grid instead of its order.
+        !>
+        !> The form to prefer when both grids are in hand: it reads as what it is, and it reports
+        !> -1 rather than a wrong answer when the destination is RING or unbuilt, which an order
+        !> alone cannot detect.
+        elemental module subroutine hpx_grid_ud_grid_i64(this, ipix, grid_out, ipix_out)
+            class(pf_healpix_grid), intent(in) :: this !! the grid the index belongs to; NEST only.
+            integer(int64), intent(in) :: ipix !! a NEST pixel index at this grid's order.
+            type(pf_healpix_grid), intent(in) :: grid_out !! the destination grid; NEST, and built.
+            integer(int64), intent(out) :: ipix_out !! the result, or -1 out of domain.
+        end subroutine hpx_grid_ud_grid_i64
+
+        !> Whether two grids agree on resolution, scheme AND declination convention.
+        !>
+        !> The frame is part of the comparison deliberately: two objects describing the same
+        !> pixelisation but disagreeing about declination are not interchangeable, and the one
+        !> question this operator is for -- "does this file's grid match mine" -- wants to know.
+        elemental module function hpx_grid_eq(this, other) result(same)
+            class(pf_healpix_grid), intent(in) :: this !! the left grid.
+            type(pf_healpix_grid), intent(in) :: other !! the right grid.
+            logical :: same !! `.true.` when all three agree.
+        end function hpx_grid_eq
+
+        !> The negation of `operator(==)`.
+        elemental module function hpx_grid_ne(this, other) result(diff)
+            class(pf_healpix_grid), intent(in) :: this !! the left grid.
+            type(pf_healpix_grid), intent(in) :: other !! the right grid.
+            logical :: diff !! `.true.` when any of the three differs.
+        end function hpx_grid_ne
+    end interface
+
 
 end module parquet_healpix

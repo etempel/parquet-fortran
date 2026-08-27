@@ -306,10 +306,18 @@ contains
 
         ! parquet_healpix: the sphere pixelisation, whose public names are pf_*, not parquet_*.
         block
-            integer(int64) :: hp_pix
+            integer(int64) :: hp_pix, hp_grid_pix
+            type(pf_healpix_grid) :: hp_grid
             call pf_ang2pix_ring(4_int64, 1.0_real64, 2.0_real64, hp_pix)
             call check(error, hp_pix >= 0_int64 .and. hp_pix < 192_int64, &
                 "pf_ang2pix_ring must be reachable from use parquet alone and land in range")
+            if (allocated(error)) return
+            ! The type and the frame selectors are separate `public ::` entries from the
+            ! procedures, so each can be lost from the facade independently of them.
+            call hp_grid%init(4_int64, PF_HP_RING, frame=PF_HP_DEC_NORTH)
+            call hp_grid%ang2pix(1.0_real64, 2.0_real64, hp_grid_pix)
+            call check(error, hp_grid_pix == hp_pix, &
+                "pf_healpix_grid must be reachable from use parquet alone and agree with pf_ang2pix_ring")
             if (allocated(error)) return
         end block
 

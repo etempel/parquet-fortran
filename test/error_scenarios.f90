@@ -2065,6 +2065,24 @@ program error_scenarios
         call scenario_healpix_bulk_threads_zero()
     case ("healpix_bulk_vec_shape")
         call scenario_healpix_bulk_vec_shape()
+    case ("healpix_grid_init_nside_zero")
+        call scenario_healpix_grid_init_nside_zero()
+    case ("healpix_grid_init_nside_not_power")
+        call scenario_healpix_grid_init_nside_not_power()
+    case ("healpix_grid_init_nside_int32_ceiling")
+        call scenario_healpix_grid_init_nside_int32_ceiling()
+    case ("healpix_grid_init_bad_scheme")
+        call scenario_healpix_grid_init_bad_scheme()
+    case ("healpix_grid_init_bad_frame")
+        call scenario_healpix_grid_init_bad_frame()
+    case ("healpix_grid_disc_unset")
+        call scenario_healpix_grid_disc_unset()
+    case ("healpix_grid_bulk_unset")
+        call scenario_healpix_grid_bulk_unset()
+    case ("healpix_grid_npix_int32_overflow")
+        call scenario_healpix_grid_npix_int32_overflow()
+    case ("healpix_grid_disc_int32_too_fine")
+        call scenario_healpix_grid_disc_int32_too_fine()
     case ("spatial_sky_query_on_euclidean")
         call scenario_spatial_sky_query_on_euclidean()
     case ("spatial_euclidean_query_on_sky")
@@ -18484,6 +18502,93 @@ contains
     end subroutine scenario_healpix_disc_nside_not_power2
 
     !> An nside of zero, which the power-of-two bit test alone would accept.
+    ! ---- pf_healpix_grid ----
+
+    !> `%init` with an nside of zero.
+    subroutine scenario_healpix_grid_init_nside_zero()
+        type(pf_healpix_grid) :: g
+
+        call g%init(0_int64, PF_HP_RING)
+        print '(a)', "unexpectedly accepted nside= 0"
+    end subroutine scenario_healpix_grid_init_nside_zero
+
+    !> `%init` with an nside that is not a power of two.
+    subroutine scenario_healpix_grid_init_nside_not_power()
+        type(pf_healpix_grid) :: g
+
+        call g%init(100_int64, PF_HP_RING)
+        print '(a)', "unexpectedly accepted nside= 100"
+    end subroutine scenario_healpix_grid_init_nside_not_power
+
+    !> `%init` in the int32 kind, above what a 32-bit pixel index can address.
+    subroutine scenario_healpix_grid_init_nside_int32_ceiling()
+        type(pf_healpix_grid) :: g
+
+        call g%init(16384_int32, PF_HP_RING)
+        print '(a)', "unexpectedly accepted nside= 16384 in the int32 kind"
+    end subroutine scenario_healpix_grid_init_nside_int32_ceiling
+
+    !> `%init` with a scheme that is neither selector.
+    subroutine scenario_healpix_grid_init_bad_scheme()
+        type(pf_healpix_grid) :: g
+
+        call g%init(64_int64, 7)
+        print '(a)', "unexpectedly accepted scheme= 7"
+    end subroutine scenario_healpix_grid_init_bad_scheme
+
+    !> `%init` with a declination convention that is neither selector.
+    subroutine scenario_healpix_grid_init_bad_frame()
+        type(pf_healpix_grid) :: g
+
+        call g%init(64_int64, PF_HP_RING, frame=7)
+        print '(a)', "unexpectedly accepted frame= 7"
+    end subroutine scenario_healpix_grid_init_bad_frame
+
+    !> A disc query on a grid `%init` has never run on.
+    subroutine scenario_healpix_grid_disc_unset()
+        type(pf_healpix_grid) :: g
+        integer(int64) :: listpix(64), nlist
+
+        call g%query_disc([0.0_real64, 0.0_real64, 1.0_real64], 0.1_real64, listpix, nlist)
+        print '(a)', "unexpectedly queried a disc on an unbuilt grid"
+    end subroutine scenario_healpix_grid_disc_unset
+
+    !> A bulk conversion on a grid `%init` has never run on.
+    subroutine scenario_healpix_grid_bulk_unset()
+        type(pf_healpix_grid) :: g
+        real(real64) :: theta(4), phi(4)
+        integer(int64) :: ipix(4)
+
+        theta = 1.0_real64
+        phi = 0.5_real64
+        call g%ang2pix_bulk(theta, phi, ipix)
+        print '(a)', "unexpectedly converted in bulk on an unbuilt grid"
+    end subroutine scenario_healpix_grid_bulk_unset
+
+    !> `%get_npix` into an int32, on a grid whose pixel count does not fit one.
+    !>
+    !> nside 16384 is legal for the int64 API and gives npix = 3221225472, which is above
+    !> `huge(0_int32)` = 2147483647. This is the reachable half of the kind-matching rule: asking
+    !> for a value in a kind that cannot hold it aborts rather than wrapping.
+    subroutine scenario_healpix_grid_npix_int32_overflow()
+        type(pf_healpix_grid) :: g
+        integer(int32) :: npix
+
+        call g%init(16384_int64, PF_HP_RING)
+        call g%get_npix(npix)
+        print '(a)', "unexpectedly narrowed npix= 3221225472 into an integer(int32)"
+    end subroutine scenario_healpix_grid_npix_int32_overflow
+
+    !> An int32 disc query on a grid too fine for a 32-bit pixel index.
+    subroutine scenario_healpix_grid_disc_int32_too_fine()
+        type(pf_healpix_grid) :: g
+        integer(int32) :: listpix(64), nlist
+
+        call g%init(16384_int64, PF_HP_RING)
+        call g%query_disc([0.0_real64, 0.0_real64, 1.0_real64], 0.0001_real64, listpix, nlist)
+        print '(a)', "unexpectedly ran an int32 disc query on an nside= 16384 grid"
+    end subroutine scenario_healpix_grid_disc_int32_too_fine
+
     subroutine scenario_healpix_disc_nside_zero()
         integer(int64) :: listpix(64), nlist
 

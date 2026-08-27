@@ -234,11 +234,18 @@ one is written as `large_utf8` and a list column as `large_list`; a map has nowh
 so a column that does not fit is **refused** rather than written in a wider form. Split it across
 more row groups.
 
+## In a `parquet_table`
+
+A table column can be a `parquet_map_column`. See
+[Container columns in a table](../tables/table.html) for the five accessors it gets
+(`%col`, `%get`, `%set`, `%add_column` and a handle's `%ref`), the two element-granular queries it
+declines, and how row-structural mutations carry it along.
+
+No argument is needed: a `MAP` is a container in the file's own schema, so a table classifies one
+automatically whenever its keys are strings and its values are one of the nine element types.
+
 ## What this module does not do yet
 
-- **A map column cannot be held by a `parquet_table`.** It travels through `parquet_read_column` /
-  `parquet_write_column` and inside a `parquet_column`, but the table layer does not yet classify
-  one.
 - **A value cannot itself be a container.** `map<string, list<int32>>`,
   `map<string, struct<...>>` and `map<string, map<...>>` are all refused, naming the value type.
 - **Keys must be strings.** Reading a map keyed by anything else is a clean refusal.

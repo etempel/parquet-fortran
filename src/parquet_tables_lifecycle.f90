@@ -20,7 +20,7 @@ contains
     !
     module procedure open_table_full
         call open_table_impl(table, filename, .false., 0_int64, 0_int64, maml, filter, sort, qc, &
-            qc_soft, use_threads, sample_fraction, sample_seed)
+            qc_soft, use_threads, sample_fraction, sample_seed, list_columns)
     end procedure open_table_full
     !
     ! Both slice specifics pass no `sort` at all -- there is no argument to pass, which is how the
@@ -28,20 +28,20 @@ contains
     module procedure open_table_slice_i32
         call open_table_impl(table, filename, .true., int(row_lo, int64), int(row_hi, int64), maml, &
             filter, qc=qc, qc_soft=qc_soft, use_threads=use_threads, &
-            sample_fraction=sample_fraction, sample_seed=sample_seed)
+            sample_fraction=sample_fraction, sample_seed=sample_seed, list_columns=list_columns)
     end procedure open_table_slice_i32
     !
     module procedure open_table_slice_i64
         call open_table_impl(table, filename, .true., row_lo, row_hi, maml, &
             filter, qc=qc, qc_soft=qc_soft, use_threads=use_threads, &
-            sample_fraction=sample_fraction, sample_seed=sample_seed)
+            sample_fraction=sample_fraction, sample_seed=sample_seed, list_columns=list_columns)
     end procedure open_table_slice_i64
     !
     !> The one open path: both regimes differ only in which rows the table claims, and both
     !! classify without reading. Shared rather than duplicated so the slice regime cannot drift
     !! from the full one on anything but its row scope.
     subroutine open_table_impl(table, filename, sliced, row_lo, row_hi, maml, filter, sort, qc, &
-            qc_soft, use_threads, sample_fraction, sample_seed)
+            qc_soft, use_threads, sample_fraction, sample_seed, list_columns)
         type(parquet_table), intent(out) :: table !! the table to fill.
         character(len=*), intent(in) :: filename  !! parquet file to open.
         logical, intent(in) :: sliced             !! .true. for the slice regime.
@@ -55,6 +55,7 @@ contains
         logical, intent(in), optional :: use_threads !! forwarded to parquet_open_reader.
         real(real64), intent(in), optional :: sample_fraction !! keep each row with this probability.
         integer(int64), intent(in), optional :: sample_seed !! seed for that draw; `42_int64`, not `42`.
+        character(len=*), intent(in), optional :: list_columns !! `"auto"` (default) or `"container"`.
         integer :: i, j, ncol, n_remap, n_qc, n_units
         integer(int64) :: file_rows
         logical :: masked
@@ -98,6 +99,9 @@ contains
         call table_init_lock(table%cache)
         table%cache%file_backed = .true.
         table%cache%source_file = trim(filename)
+        ! Validated and stored BEFORE the reader opens, so a mistyped token aborts with no live
+        ! Arrow object in scope -- the same reason the read-time transform is composed first.
+        table%cache%list_columns = resolve_list_columns_token(list_columns, filename)
         ! Retained only so %clone can reattach the SAME transform when it reopens the file. Stored
         ! as the composed, already-translated values rather than the caller's originals: a clone
         ! opens the same file, so re-deriving them would only risk the two drifting. They live on
@@ -228,6 +232,25 @@ contains
             call table_release_one(table%cache, table%cache%cols(i)%file_name)
         end do
     end subroutine open_table_impl
+    !
+    !> Validates `parquet_open_table`'s `list_columns=` and returns the token to store, defaulting
+    !! to `"auto"` when the argument is absent.
+    !!
+    !! A token rather than a logical because a third policy is foreseeable, and an unrecognised one
+    !! aborts naming BOTH accepted values -- a caller who mistyped `"containers"` needs to be told
+    !! what was expected, not merely that this was not it.
+    function resolve_list_columns_token(list_columns, filename) result(token)
+        character(len=*), intent(in), optional :: list_columns !! the caller's argument, if given.
+        character(len=*), intent(in) :: filename !! for the error message's file context.
+        character(len=:), allocatable :: token !! `"auto"` or `"container"`.
+        !
+        token = "auto"
+        if (.not. present(list_columns)) return
+        token = trim(adjustl(list_columns))
+        if (token == "auto" .or. token == "container") return
+        error stop "parquet_open_table: unrecognized list_columns value '" // token // &
+            "'; expected 'auto' or 'container' (file '" // trim(filename) // "')"
+    end function resolve_list_columns_token
     !
     !> Removes a file column that would occupy the reserved `parquet_row_index` name, with a
     !! warning.

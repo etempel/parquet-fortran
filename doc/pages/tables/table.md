@@ -763,6 +763,59 @@ keeps each value's own length; there is no such path for a vector one.
 
 See [Compact string columns with `parquet_string_column`](../types/string-columns.html) for the type itself.
 
+## Container columns in a table
+
+A table column can be a **list**, a **map** or a **struct** — a
+[`parquet_list_column`](../types/list-columns.html),
+[`parquet_map_column`](../types/map-columns.html) or
+[`parquet_struct_column`](../types/struct-columns.html) held under a column name, with `%kind()`
+answering `PK_LIST`, `PK_MAP` or `PK_STRUCT`. Where they come from is covered in
+[Opening a table](table-open.html): a `MAP` column arrives as one automatically, a `LIST` column
+does when you ask with `list_columns="container"`, and a struct column is built in memory rather
+than read.
+
+They get **the same five accessors a `parquet_string_column` does, and no others**:
+
+```fortran
+type(parquet_list_column), pointer :: p
+type(parquet_list_column)          :: copy
+
+call t%col("spec", p)          ! a pointer to the LIVE container
+call t%get("spec", copy)       ! an independent copy
+call t%set("spec", copy)       ! replace the values; the row count must already match
+call t%add_column("spec", copy)! a new column, copied in
+call h%ref(p)                  ! the same pointer, from a column handle
+```
+
+`%get_slice`/`%set_slice`, `%get_element`/`%set_element` and a row handle's `%get`/`%set` are
+deliberately **not** offered, for the same reason the packed string store declines them: all three
+address a fixed-width cell, and a container row is a variable-length object. Reach the container
+through `%col` and ask it about one row directly.
+
+Four rules follow from a container carrying its own per-row nullness:
+
+- **No `is_valid=` argument anywhere.** A list's, map's or struct's null rows live inside the
+  container, so `%get`/`%set`/`%add_column` take none — the nullness travels with the values, as it
+  does for the [date/time types](../types/date-time.html).
+- **`%is_null(name, i)` and the rank-1 `%get_valid_mask` answer**, reading through to the
+  container. The ELEMENT forms — `%is_null(name, i, e)` and the rank-2 `(width, nrows)`
+  `%get_valid_mask` — are refused with an `error stop`, because a container row is not a fixed row
+  of elements and answering would report on the row while looking like an answer about one element.
+- **`%ensure_validity` works**, and is the way to make a container column safe for concurrent
+  nulling, exactly as for any other kind.
+- **Row-structural mutations carry a container along.** `%sort_by`, `%filter_rows`, `%delete_rows`,
+  `%truncate`, `%top_n` and `%append` all rebuild it with every other column, so the rows stay
+  aligned. A container column may not be a **sort key**, though — there is no defined order on a
+  list, a map or a struct — so sort by a scalar column and the container follows.
+
+`%print_stat` has nothing to report as a minimum or maximum VALUE for such a column, so its `min`
+and `max` columns show the **shortest and longest row** instead, counting only rows that are
+present; a struct, whose rows all carry the same fields, shows `-`.
+
+Writing works too: `parquet_write_table` emits a list column as `list[<element>]`, a map as
+`map[<value>]` and a struct as `struct`, and a payload's temporal resolution is carried across, so
+a `list[timestamp[ms]]` column round-trips as milliseconds.
+
 ## Changing a column's type
 
 `%col` hands back a typed pointer and insists on the exact stored kind, which is awkward when the

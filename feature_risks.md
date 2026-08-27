@@ -217,12 +217,15 @@ something a reader is expected to have.
 | [Risk-149](#risk-149--a-per-point-r_inner-on-the-pair-sweep-would-silently-drop-pairs) | A per-point `r_inner` on the pair sweep would silently drop pairs | 4 — covered |
 | [Risk-150](#risk-150--a-nearest-that-stopped-at-k-candidates-rather-than-at-a-radius-would-be-plausibly-wrong) | A `%nearest` that stopped at k CANDIDATES rather than at a radius would be plausibly wrong | 4 — covered |
 | [Risk-151](#risk-151--axis_point-taken-as-the-infinite-line-projection-disagrees-with-dist-and-both-look-right) | `axis_point` taken as the infinite-line projection disagrees with `dist`, and both look right | 4 — covered |
-| [Risk-152](#risk-152--two-tables-over-one-file-disagree-about-a-plain-list-columns-kind-and-both-answer-quietly) | Two tables over one file disagree about a plain `LIST` column's KIND, and both answer quietly | 1 — new |
+| [Risk-152](#risk-152--two-tables-over-one-file-disagree-about-a-plain-list-columns-kind-and-both-answer-quietly) | Two tables over one file disagree about a plain `LIST` column's KIND, and both answer quietly | 4 — covered |
 | [Risk-153](#risk-153--a-container-columns-row-nullness-has-two-possible-homes-and-writing-to-the-wrong-one-is-silent) | A container column's row nullness has TWO possible homes, and writing to the wrong one is silent | 1 — new |
 | [Risk-154](#risk-154--a-sliced-list-array-carries-three-independent-offsets-and-dropping-any-one-is-a-plausible-wrong-answer) | A sliced list array carries THREE independent offsets, and dropping any one is a plausible wrong answer | 1 — new |
 | [Risk-155](#risk-155--a-structs-field-mask-is-taken-at-face-value-and-the-arithmetic-that-looks-necessary-is-not) | A struct's field mask is taken at face value, and the arithmetic that looks necessary is not | 1 — new |
 | [Risk-156](#risk-156--a-struct-write-loses-a-field-because-a-push-was-forgotten) | A struct write loses a field because a push was forgotten | 3 — not testable |
 | [Risk-157](#risk-157--a-map-columns-entry-ceiling-has-no-widening-fallback-and-the-narrowing-cast-is-one-line-away) | A map column's entry ceiling has NO widening fallback, and the narrowing cast is one line away | 1 — new |
+| [Risk-158](#risk-158--a-skipped-column-is-safe-only-because-it-is-res_empty-and-res_partial-would-make-the-same-skip-a-silent-misalignment) | A skipped column is safe only because it is `RES_EMPTY`, and `RES_PARTIAL` would make the same skip a silent misalignment | 3 — not testable |
+| [Risk-159](#risk-159--a-columns-validity-readers-and-writers-delegate-to-its-container-asymmetrically-and-two-public-queries-then-disagree-about-the-same-row) | A column's validity READERS and WRITERS delegate to its container asymmetrically, and two public queries then disagree about the same row | 4 — covered |
+| [Risk-160](#risk-160--append_from-rebases-a-containers-offsets-and-dropping-the-rebase-is-a-plausible-wrong-answer) | `append_from` rebases a container's offsets, and dropping the rebase is a plausible wrong answer | 4 — covered |
 
 ---
 
@@ -233,68 +236,6 @@ decided whether it is testable, and before any test is written. Give it the next
 **one above the highest in the [Index](#index)**, read from there rather than from any number
 written in prose — state what breaks and why the failure is quiet, and leave the **Test** half to
 whoever triages it into one of the three sections below.
-
-### Risk-152 — Two tables over one file disagree about a plain LIST column's KIND, and both answer quietly
-
-A plain `LIST`/`LARGE_LIST` column — one this library never writes, but any other tool can — has no
-width in its schema, so `table_classify` (`src/parquet_tables_read.f90`) marks it `width_pending`
-and `table_resolve_width` measures it on first touch. **It measures over the slice's own row
-groups**: `resolve_width_row_groups` passes `rg_covering_range`'s bounds for a `REGIME_SLICE` table
-and `0/0` ("every row group") otherwise. `list_width_verified` (`src/parquet_wrapper.cpp`) then
-returns the uniform width if one exists over that range and **`1` if the rows are ragged**, and
-`table_kind_from_type` sets `vec = col_size > 1` — so **a ragged range yields the SCALAR kind at
-width 1**, not a vector kind and not an error.
-
-So on one globally-ragged file, two tables disagree about the same column:
-
-| table | `%kind()` | `%width()` |
-|---|---|---|
-| a slice whose row groups happen to be uniform | `PK_INT32_VEC` | 3 |
-| the whole file, or a slice that is ragged | `PK_INT32` | 1 |
-
-**Both are metadata queries and neither aborts.** Code branching on `%kind()` is correct on one and
-wrong on the other, and the scalar answer is not merely inconvenient — it is untrue of a list
-column. The abort arrives later, if and when the column is actually read, at a call site that has
-no visible connection to the disagreement.
-
-**Why this is not simply the documented width-is-a-slice-property behaviour.** `CLAUDE.md` records,
-deliberately, that *"a slice measures over its own row groups, so a globally-ragged file can present
-a uniform width within one slice and two tables over the same file can legitimately disagree"* — and
-that is accepted for **width**. What is not covered by it is that the same mechanism moves the
-**kind**, across the scalar/vector boundary, which is a different class of statement about the
-column and the thing callers dispatch on.
-
-**Two paths make it worse rather than better.** `%kind`/`%width` reach `table_resolve_width`
-*directly*, without going through `table_touch`, so a caller can provoke the wrong answer without
-ever reading a value. And the measurement is memoised on the descriptor (`width_pending` is cleared),
-so the first range a column is asked about wins for that table's lifetime.
-
-**Its scope widened when a `LIST` leaf became addressable through a dotted struct path.** Such a
-column was previously classified `unsupported` and never reached the width machinery at all; it is
-now classified exactly like a top-level one, so a ragged `struct.field` inherits this entry
-unchanged. That is the right outcome — a dotted-path-specific rule here would have been a second
-place for the two to disagree — but it means the fix (T5's `list_columns=`) has to cover dotted
-names too. `test_struct_nested_ragged_matches_top_level` (`test/test_list_read.f90`) pins the
-equivalence, asserting that a ragged struct-nested list resolves to the same kind and width a ragged
-top-level one does.
-
-**What must NOT be the fix.** Making `table_resolve_width` abort on a ragged range would break files
-that read correctly today — a table over a *uniform* file is unaffected, and a slice over a
-uniform region of a ragged file is exactly the case that currently works. The decided fix is
-`feature_map_list_struct.md`'s **T5**: an explicit `list_columns=` argument on `parquet_open_table`,
-with the default flipping at 3.0.0 to resolving the KIND over **every** row group while the WIDTH
-keeps being measured over the slice's own — which removes the disagreement without changing what a
-slice's width means.
-
-**Testability, for whoever triages this.** It is testable in principle — open a whole-file table and
-a slice over a fixture whose raggedness is slice-dependent, and assert `%kind()` differs — but two
-things stand in the way of writing that test now, and neither is a reason to file it under
-"not testable". **No fixture exists**: `test/fixtures/list_widths.parquet` covers the width screen's
-own cases, not a file that is uniform within one row-group range and ragged across the whole, which
-has to be authored by placing specific row lengths in specific row groups. And **a test asserting
-today's disagreement is rewritten by the T5 default flip**, so per `CLAUDE.md` it would have to say
-what to assert once the refusal lifts. The natural home for both is the phase that implements
-`list_columns=`.
 
 ### Risk-153 — A container column's row nullness has TWO possible homes, and writing to the wrong one is silent
 
@@ -1174,6 +1115,33 @@ indistinguishable from a correct index over different data, and the dangling cas
 behaviour. `%rebuild`'s own detection IS tested (Risk-140); what cannot be tested is a caller who
 never calls it. The contract belongs in `%build`'s doc-comment and in the guide, which is where it
 is.
+
+### Risk-158 — A skipped column is safe only because it is RES_EMPTY, and RES_PARTIAL would make the same skip a silent misalignment
+
+`table_mutable_column` (`src/parquet_tables_rowmutate.f90`) is one line —
+`ok = supported .and. residency == RES_FULL` — so every row-structural mutation SKIPS a column that
+is not fully resident, rebuilding the others around it. That is safe today for a reason that is not
+stated anywhere near it: a skipped column is `RES_EMPTY`, so it holds no storage that could be
+misaligned, and every later read of it goes through `table_check_not_detached` and aborts. Those two
+facts together are what let `feature_container_phase6.md`'s Q2 resolve to "skip, and let the detach
+guard catch it" rather than adding a refusal.
+
+**`RES_PARTIAL` breaks both.** It is declared and reserved (`src/parquet_tables.f90`), and a
+partially resident column skipped by a rebuild is a different object entirely: its storage survives,
+its rows no longer correspond to the table's, and the detach guard does not fire because the column
+reads as resident rather than as empty. The result is a table whose row count is right and whose
+columns no longer line up — for EVERY kind at once, not just containers.
+
+**Not testable while the state is unreachable**: nothing can produce a `RES_PARTIAL` column today,
+so a test would have to fake one, and a test of a state the library cannot enter asserts nothing
+about the library.
+
+**What it forbids.** Whoever implements `RES_PARTIAL` must revisit `table_mutable_column` in the
+same change — either by making a partial column materialize before a rebuild, or by refusing the
+mutation. Reading the one-line predicate and concluding "a skipped column was always fine" is the
+mistake this entry exists to prevent. The behaviour it protects is pinned from the other side by
+`container_skipped_by_mutation` (`test/error_scenarios.f90`), which asserts that a skipped
+`RES_EMPTY` column aborts on read rather than answering.
 
 ## 4. Risks already covered, kept for what they still forbid
 
@@ -6529,3 +6497,129 @@ parameter where 0 was meant.
 shapes) and `test_axis_point_clamps_at_the_ends` (points past both ends, asserting the foot is
 exactly `p1` or `p2` and `axis_t` exactly 0 or 1). Confirmed by mutation: reporting the unclamped
 projection fails three tests.
+
+### Risk-152 — Two tables over one file disagree about a plain LIST column's KIND, and both answer quietly
+
+A plain `LIST`/`LARGE_LIST` column — one this library never writes, but any other tool can — has no
+width in its schema, so `table_classify` (`src/parquet_tables_read.f90`) marks it `width_pending`
+and `table_resolve_width` measures it on first touch. **It measures over the slice's own row
+groups**: `resolve_width_row_groups` passes `rg_covering_range`'s bounds for a `REGIME_SLICE` table
+and `0/0` ("every row group") otherwise. `list_width_verified` (`src/parquet_wrapper.cpp`) then
+returns the uniform width if one exists over that range and **`1` if the rows are ragged**, and
+`table_kind_from_type` sets `vec = col_size > 1` — so **a ragged range yields the SCALAR kind at
+width 1**, not a vector kind and not an error.
+
+So on one globally-ragged file, two tables disagree about the same column:
+
+| table | `%kind()` | `%width()` |
+|---|---|---|
+| a slice whose row groups happen to be uniform | `PK_INT32_VEC` | 3 |
+| the whole file, or a slice that is ragged | `PK_INT32` | 1 |
+
+**Both are metadata queries and neither aborts.** Code branching on `%kind()` is correct on one and
+wrong on the other, and the scalar answer is not merely inconvenient — it is untrue of a list
+column. The abort arrives later, if and when the column is actually read, at a call site that has
+no visible connection to the disagreement.
+
+**Why this is not simply the documented width-is-a-slice-property behaviour.** `CLAUDE.md` records,
+deliberately, that *"a slice measures over its own row groups, so a globally-ragged file can present
+a uniform width within one slice and two tables over the same file can legitimately disagree"* — and
+that is accepted for **width**. What is not covered by it is that the same mechanism moves the
+**kind**, across the scalar/vector boundary, which is a different class of statement about the
+column and the thing callers dispatch on.
+
+**Two paths make it worse rather than better.** `%kind`/`%width` reach `table_resolve_width`
+*directly*, without going through `table_touch`, so a caller can provoke the wrong answer without
+ever reading a value. And the measurement is memoised on the descriptor (`width_pending` is cleared),
+so the first range a column is asked about wins for that table's lifetime.
+
+**Its scope widened when a `LIST` leaf became addressable through a dotted struct path.** Such a
+column was previously classified `unsupported` and never reached the width machinery at all; it is
+now classified exactly like a top-level one, so a ragged `struct.field` inherits this entry
+unchanged. That is the right outcome — a dotted-path-specific rule here would have been a second
+place for the two to disagree — but it means the fix (T5's `list_columns=`) has to cover dotted
+names too. `test_struct_nested_ragged_matches_top_level` (`test/test_list_read.f90`) pins the
+equivalence, asserting that a ragged struct-nested list resolves to the same kind and width a ragged
+top-level one does.
+
+**What must NOT be the fix.** Making `table_resolve_width` abort on a ragged range would break files
+that read correctly today — a table over a *uniform* file is unaffected, and a slice over a
+uniform region of a ragged file is exactly the case that currently works. The decided fix is
+`feature_map_list_struct.md`'s **T5**: an explicit `list_columns=` argument on `parquet_open_table`,
+with the default flipping at 3.0.0 to resolving the KIND over **every** row group while the WIDTH
+keeps being measured over the slice's own — which removes the disagreement without changing what a
+slice's width means.
+
+**COVERED as of Phase 6, and kept because the disagreement is still real under the default.**
+`list_columns=` shipped (`parquet_open_table`, all three specifics), and
+`test_slice_whole_file_agreement` (`test/test_table_container.f90`) asserts both halves: under
+`"auto"` the whole file answers `PK_INT32` for `list_widths.parquet`'s `late` column while rows
+1..12 answer `PK_INT32_VEC` width 3, and under `"container"` both answer `PK_LIST`. **The default is
+still `"auto"`, so the disagreement above is still what a program gets unless it asks otherwise** —
+which is why this entry stays here rather than being deleted, and why the test's own doc-comment
+says what to assert after the 3.0.0 flip rather than assuming it will be rewritten.
+
+**Two things the triage note above got wrong, recorded so nobody re-derives them.** It said no
+fixture existed and that one would have to be authored: `test/fixtures/list_widths.parquet`'s `late`
+column IS uniform (length 3) in row groups 1-3 and ragged only in the last, which is exactly "uniform
+within one row-group range, ragged across the whole" — so the fixture was already there and the new
+one `feature_container_phase6.md`'s D14 budgeted was not needed. And it expected the test to be
+*rewritten* by the flip; written against an explicit `list_columns="auto"` it is not, because the
+disagreement it pins is a property of that policy rather than of the default.
+
+### Risk-159 — A column's validity READERS and WRITERS delegate to its container asymmetrically, and two public queries then disagree about the same row
+
+`adopt_container` deliberately leaves a container column's own `has_nulls` flag `.false.` and its
+bitmap unallocated: the container carries the row nullness, and a second copy beside it would be the
+divergent answer Risk-153 exists to forbid. That is right, and it makes every validity query on a
+`parquet_column` a two-case problem — read the bitmap for an array kind, ask the container for a
+container kind.
+
+**Three writers were delegated and four readers were not**, and nothing in the source connects the
+two sets. Measured on `main` before Phase 6, through the public API, on a three-row list column
+whose middle row is a null container:
+
+```
+ is_null(1..3)      = F T F        <- CORRECT (delegated)
+ any_null()         = F            <- WRONG
+ row_validity alloc = F            <- WRONG ("no nulls at all")
+ is_null(2,1)       = F            <- WRONG (the row form says T)
+ element_validity   = F            <- WRONG
+```
+
+Each wrong answer is one line: `parquet_column_any_null` fell through to
+`if (.not. col%has_nulls) return`, and `row_validity`/`element_validity` both gate on it.
+**Two public queries disagreed about the same row and nothing announced it.**
+
+**Fixed in Phase 6 (P6-1)** — five arms in `src/parquet_columns_validity.f90`, and note the count:
+`any_null` has TWO implementations (the typed `parquet_column_any_null` and the type-bound
+`any_null`, which refreshes the temporal cache and so cannot share a body), each with its own
+dispatch ladder. Covered by `test_container_validity_queries_agree` (`test/test_columns.f90`), which
+asserts the row form and every summary form against each other rather than each against a constant.
+
+**What it still forbids.** Any NEW query that reads `has_nulls`, or that walks the validity bitmap
+directly, must be checked against the container case — the flag is *correctly* `.false.` there, so
+the query will answer, plausibly, and wrongly. The file's own dispatch-table header records which
+arms exist; keep it current, because it is the only place the asymmetry is visible at a glance.
+
+### Risk-160 — `append_from` rebases a container's offsets, and dropping the rebase is a plausible wrong answer
+
+Concatenating two container columns is not a buffer append: the source's offsets count from ITS
+first element, so every one has to be re-expressed against the destination's current element count
+(`base + (src%offsets(k+1) - first)` in `lc_append_from`, and the same shape in the map and struct
+twins). Drop the rebase and the rows still come back — with lengths taken from wherever the source's
+offsets happen to land in the destination's payload.
+
+**It is a sibling of Risk-154**, which is the same hazard on the C++ read side; the two are
+independent implementations of the same arithmetic and neither would catch the other's mistake.
+
+**Covered**, by two tests that fail for different reasons, which is what makes them worth keeping
+as a pair: `test_container_slice` (`test/test_table_container.f90`) compares a slice spanning four
+row groups against a whole-file read of the same rows, and `test_container_append` asserts the
+lengths of the rows either side of a `%append` join. Verified by deleting the rebase: both fail.
+
+**What it still forbids.** `%append` and the slice regime are the only two callers today, and both
+concatenate at a row-group boundary where an off-by-one is invisible in the row COUNT. Any new
+caller needs a fixture whose rows have DISTINCT lengths across the join — `list_widths.parquet`'s
+`ragged` column cycles 1,2,3,4, which is why the assertions above can name specific rows.
+

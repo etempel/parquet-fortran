@@ -2091,35 +2091,49 @@ contains
         character(len=:), allocatable :: names(:)
         integer(int64), allocatable :: ids(:)
         integer :: i
-        logical :: saw_uint32, ok
+        logical :: saw_unreadable, ok
         character(len=*), parameter :: f = "test/fixtures/map_list_types.parquet"
         !
-        ! map_list_types.parquet carries a MAP column, which this library cannot read at all.
-        ! Opening the file must still work: the column gets a slot, appears in the listing, and is
-        ! simply marked unreadable.
+        ! map_list_types.parquet carries a map whose VALUES are themselves maps, which this
+        ! library cannot read at any nesting depth. Opening the file must still work: the column
+        ! gets a slot, appears in the listing, and is simply marked unreadable.
         !
-        ! This test used extended_types.parquet's v_uint32 as its unreadable column until
-        ! parquet_get_column_type gained the narrowest-lossless mapping, which made every column in
-        ! that file readable -- see test_widened_types_are_readable below, which pins the other
-        ! side of the same change.
+        ! The unreadable column here has been replaced TWICE, each time because the library learned
+        ! to read what it used to name -- which is the shape to expect of this test rather than a
+        ! sign of churn. It was extended_types.parquet's `v_uint32` until parquet_get_column_type
+        ! gained the narrowest-lossless mapping (test_widened_types_are_readable below pins the
+        ! other side of that change), then `map_col` until a MAP column became an ordinary PK_MAP
+        ! table column. `map_of_map` is the current choice because its unreadability is structural:
+        ! a map's value type must be one of the nine element tokens, and a MAP is not one of them.
+        ! If nested containers are ever supported, pick another column from this same fixture --
+        ! `struct_of_map.attrs` is the most durable, since it is a name that does not resolve at all
+        ! rather than a type that might one day be read.
         call parquet_open_table(t, f)
         call check(error, t%nrows() > 0, "a file with a foreign column should still open")
         if (allocated(error)) return
         call t%column_names(names)
-        saw_uint32 = .false.
+        saw_unreadable = .false.
         do i = 1, size(names)
-            if (trim(names(i)) == "map_col") saw_uint32 = .true.
+            if (trim(names(i)) == "map_of_map") saw_unreadable = .true.
         end do
-        call check(error, saw_uint32, "an unsupported column should still be listed")
+        call check(error, saw_unreadable, "an unsupported column should still be listed")
         if (allocated(error)) return
-        call check(error, .not. t%is_supported("map_col"), &
-            "a MAP column should report as unsupported")
+        call check(error, .not. t%is_supported("map_of_map"), &
+            "a map whose value type is itself a map should report as unsupported")
         if (allocated(error)) return
-        call check(error, t%kind("map_col") == PK_NONE, &
+        call check(error, t%kind("map_of_map") == PK_NONE, &
             "an unsupported column should have no PK_* kind")
         if (allocated(error)) return
-        call check(error, t%residency("map_col") == RES_EMPTY, &
+        call check(error, t%residency("map_of_map") == RES_EMPTY, &
             "an unsupported column should hold no values")
+        if (allocated(error)) return
+        ! The NEGATIVE CONTROL for the clause above, and it is what stops this test passing against
+        ! a classification pass that simply refused every map: a map with a readable value type in
+        ! the same file is supported, and is a PK_MAP column.
+        call check(error, t%is_supported("map_col"), &
+            "a map with a readable value type should be supported")
+        if (allocated(error)) return
+        call check(error, t%kind("map_col") == PK_MAP, "a readable map column reports PK_MAP")
         if (allocated(error)) return
         ! A supported column in the same file still works normally. It has to be a genuine SCALAR
         ! leaf: every top-level column in this fixture is a container, and `list_col` -- the
@@ -2148,7 +2162,7 @@ contains
             "the readable sibling should yield one value per row")
         if (allocated(error)) return
         ! And a soft-failing read of the unsupported column reports rather than aborts.
-        call t%get("map_col", names, found=ok)
+        call t%get("map_of_map", names, found=ok)
         call check(error, .not. ok, "a soft-failing read of an unsupported column should report .false.")
     end subroutine test_unsupported_column
     !

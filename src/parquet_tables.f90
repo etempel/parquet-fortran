@@ -56,9 +56,17 @@ module parquet_tables
     use parquet_columns
     use parquet_strings, only : parquet_string_column
     use parquet_temporal, only : parquet_date, parquet_time, parquet_timestamp
+    ! The three container element types. They cost this module's compile footprint NOTHING -- all
+    ! three are already in it through parquet_core, which imports them for the reader and writer --
+    ! so this is a namespace import, not a new dependency (tools/check_module_footprints.sh is the
+    ! check that keeps that true).
+    use parquet_list, only : parquet_list_column
+    use parquet_map, only : parquet_map_column
+    use parquet_struct, only : parquet_struct_column
     use parquet_core, only : parquet_reader, parquet_writer, parquet_schema, &
         parquet_open_reader, parquet_close_reader, parquet_get_nrows, parquet_get_col_size, &
         parquet_get_column_names, parquet_get_column_type, parquet_column_exists, &
+        parquet_get_column_shape, parquet_get_map_value_type, &
         parquet_release_column, parquet_read_column, parquet_get_string_length, &
         parquet_get_num_row_groups, parquet_get_chunk_size, parquet_read_column_chunk, &
         parquet_open_writer, parquet_write_column, parquet_close_writer, parquet_write_row_mask, &
@@ -143,6 +151,23 @@ module parquet_tables
     !! table takes or reports counts those survivors -- row 1 is the first surviving row, not file
     !! row `row_lo`. Without a filter and without `sample_fraction=` nothing changes: the slice is
     !! trimmed out of the covering row groups in memory, exactly as it always was.
+    !!
+    !! **`list_columns=` decides what a variable-length `LIST` column becomes**, and it takes a
+    !! token rather than a logical so a third policy can be added later without a second argument:
+    !!
+    !! - `"auto"` (the default, and what every earlier release did) measures the column. A `LIST`
+    !!   whose rows all happen to hold the same number of elements becomes an ordinary VECTOR
+    !!   column of that width; a ragged one becomes a `parquet_list_column`. The measurement is
+    !!   over the rows the table covers, so **a slice and the whole file can legitimately disagree**
+    !!   about the same column -- a file that is ragged overall may be uniform inside one slice.
+    !! - `"container"` makes every `LIST` column a `parquet_list_column`, from the schema alone,
+    !!   with nothing measured and nothing data-dependent. That is what a program wants when it is
+    !!   going to treat the column as a list whatever the data happens to look like, and it is the
+    !!   only way to be sure two tables over one file agree.
+    !!
+    !! It governs the plain-`LIST` case and nothing else: a `FIXED_SIZE_LIST` column -- which is
+    !! what every column this library writes is -- carries its width in the schema and is a vector
+    !! column under both tokens.
     interface parquet_open_table
         module procedure open_table_full
         module procedure open_table_slice_i32
@@ -373,6 +398,19 @@ module parquet_tables
         !! what makes a `%clone`, a reopen and a per-thread reader all keep the same rows; before
         !! it existed, an unseeded clone redrew and silently held a different sample.
         integer(int64), allocatable :: read_sample_seed
+        !> How a variable-length `LIST` column is classified: `"auto"` (the default) or
+        !! `"container"`. Settled once at open from `parquet_open_table`'s `list_columns=`
+        !! argument and never changed afterwards.
+        !!
+        !! **It is on the cache because every reader this table opens must agree with it.** `%clone`
+        !! reopens the file and the internally-parallel `%prefetch` opens a reader per thread; a
+        !! policy held anywhere else would let two readers over one table disagree about whether a
+        !! column is a `PK_LIST` or a `*_VEC`, which is `feature_risks.md` Risk-152's
+        !! whole-file-versus-slice disagreement reappearing INSIDE one table.
+        !!
+        !! Unallocated is read as `"auto"` everywhere, so a cache built by `parquet_new_table` --
+        !! which has no file and classifies nothing -- needs no initialiser and no special case.
+        character(len=:), allocatable :: list_columns
     end type parquet_table_cache
     !
     !> Which rows to pick out of a column: `1:`, `1:10`, `1:10:2` or an explicit list.
@@ -613,6 +651,9 @@ module parquet_tables
         procedure, private :: col_ptr_timev !! %col specific for the timev kind.
         procedure, private :: col_ptr_tsv !! %col specific for the tsv kind.
         procedure, private :: col_ptr_strcol !! %col specific aliasing the compact string store.
+        procedure, private :: col_ptr_listcol !! %col specific aliasing a PK_LIST container.
+        procedure, private :: col_ptr_mapcol !! %col specific aliasing a PK_MAP container.
+        procedure, private :: col_ptr_structcol !! %col specific aliasing a PK_STRUCT container.
         !> Points `p` at a column's storage: zero copy, writable, and the pointer kind must
         !! match the stored kind exactly (ask %kind first if you do not know it). A
         !! `parquet_string_column` pointer aliases a PK_STRING column's packed store: read
@@ -627,7 +668,7 @@ module parquet_tables
         !! which reorders every column together.
         generic :: col => col_ptr_i32, col_ptr_i64, col_ptr_f32, col_ptr_f64, col_ptr_bool, col_ptr_date, col_ptr_time, &
             col_ptr_ts, col_ptr_i32v, col_ptr_i64v, col_ptr_f32v, col_ptr_f64v, col_ptr_boolv, col_ptr_datev, col_ptr_timev, &
-            col_ptr_tsv, col_ptr_strcol
+            col_ptr_tsv, col_ptr_strcol, col_ptr_listcol, col_ptr_mapcol, col_ptr_structcol
         ! --- copy out (widens int32->int64, float32->float64) ---
         procedure, private :: get_arr_i32 !! %get specific for the i32 kind.
         procedure, private :: get_arr_i64 !! %get specific for the i64 kind.
@@ -646,12 +687,15 @@ module parquet_tables
         procedure, private :: get_arr_timev !! %get specific for the timev kind.
         procedure, private :: get_arr_tsv !! %get specific for the tsv kind.
         procedure, private :: get_arr_str  !! %get specific returning a parquet_string_column.
+        procedure, private :: get_arr_listcol !! %get specific returning a parquet_list_column.
+        procedure, private :: get_arr_mapcol !! %get specific returning a parquet_map_column.
+        procedure, private :: get_arr_structcol !! %get specific returning a parquet_struct_column.
         procedure, private :: get_arr_chr  !! %get specific returning a character array.
         procedure, private :: get_arr_chrv !! %get specific returning a character (elem, row) array.
         !> Copies a column into a freshly allocated array of the caller's own kind.
         generic :: get => get_arr_i32, get_arr_i64, get_arr_f32, get_arr_f64, get_arr_bool, get_arr_date, get_arr_time, &
             get_arr_ts, get_arr_i32v, get_arr_i64v, get_arr_f32v, get_arr_f64v, get_arr_boolv, get_arr_datev, get_arr_timev, &
-            get_arr_tsv, get_arr_str, get_arr_chr, get_arr_chrv
+            get_arr_tsv, get_arr_str, get_arr_chr, get_arr_chrv, get_arr_listcol, get_arr_mapcol, get_arr_structcol
         ! --- copy back (same length, exact kind) ---
         procedure, private :: set_arr_i32 !! %set specific for the i32 kind.
         procedure, private :: set_arr_i64 !! %set specific for the i64 kind.
@@ -673,9 +717,12 @@ module parquet_tables
         procedure, private :: set_arr_chrv !! %set specific taking a character (elem, row) array.
         !> Replaces every value of an existing column from an array of the same length.
         procedure, private :: set_arr_strcol !! %set specific taking a parquet_string_column.
+        procedure, private :: set_arr_listcol !! %set specific taking a parquet_list_column.
+        procedure, private :: set_arr_mapcol !! %set specific taking a parquet_map_column.
+        procedure, private :: set_arr_structcol !! %set specific taking a parquet_struct_column.
         generic :: set => set_arr_i32, set_arr_i64, set_arr_f32, set_arr_f64, set_arr_bool, set_arr_date, set_arr_time, &
             set_arr_ts, set_arr_i32v, set_arr_i64v, set_arr_f32v, set_arr_f64v, set_arr_boolv, set_arr_datev, set_arr_timev, &
-            set_arr_tsv, set_arr_chr, set_arr_chrv, set_arr_strcol
+            set_arr_tsv, set_arr_chr, set_arr_chrv, set_arr_strcol, set_arr_listcol, set_arr_mapcol, set_arr_structcol
         ! --- from-scratch construction ---
         procedure, private :: add_column_i32 !! %add_column specific for the i32 kind.
         procedure, private :: add_column_i64 !! %add_column specific for the i64 kind.
@@ -697,11 +744,14 @@ module parquet_tables
         procedure, private :: add_column_chrv !! %add_column specific taking a character (elem, row) array.
         !> Appends a new column, taking its values (and so its kind, width and row count).
         procedure, private :: add_column_strcol !! %add_column specific taking a parquet_string_column.
+        procedure, private :: add_column_listcol !! %add_column specific taking a parquet_list_column.
+        procedure, private :: add_column_mapcol !! %add_column specific taking a parquet_map_column.
+        procedure, private :: add_column_structcol !! %add_column specific taking a parquet_struct_column.
         procedure, private :: add_column_col  !! %add_column specific taking a whole parquet_column.
         generic :: add_column => add_column_i32, add_column_i64, add_column_f32, add_column_f64, add_column_bool, &
             add_column_date, add_column_time, add_column_ts, add_column_i32v, add_column_i64v, add_column_f32v, add_column_f64v, &
             add_column_boolv, add_column_datev, add_column_timev, add_column_tsv, add_column_chr, add_column_chrv, &
-            add_column_strcol, add_column_col
+            add_column_strcol, add_column_col, add_column_listcol, add_column_mapcol, add_column_structcol
         ! --- mutation: one cell at a time (never changes the row set) ---
         procedure, private :: set_element_i32_i32 !! %set_element specific, i32 kind, i32 row index.
         procedure, private :: set_element_i32_i64 !! %set_element specific, i32 kind, i64 row index.
@@ -1276,13 +1326,16 @@ module parquet_tables
         procedure, private :: col_ref_timev !! %ref specific, timev storage.
         procedure, private :: col_ref_tsv !! %ref specific, tsv storage.
         procedure, private :: col_ref_strcol !! %ref specific, the packed string store.
+        procedure, private :: col_ref_listcol !! %ref specific, a PK_LIST container.
+        procedure, private :: col_ref_mapcol !! %ref specific, a PK_MAP container.
+        procedure, private :: col_ref_structcol !! %ref specific, a PK_STRUCT container.
         !> Points `p` at this column's live storage -- the `%col` pointer, without the name
         !! lookup. Same rules: the kind must match exactly (a pointer never widens), a write
         !! through `p` changes the table, and REORDERING one column through its pointer
         !! breaks the table's row alignment with nothing to report it.
         generic :: ref => col_ref_i32, col_ref_i64, col_ref_f32, col_ref_f64, col_ref_bool, col_ref_date, col_ref_time, &
             col_ref_ts, col_ref_i32v, col_ref_i64v, col_ref_f32v, col_ref_f64v, col_ref_boolv, col_ref_datev, col_ref_timev, &
-            col_ref_tsv, col_ref_strcol
+            col_ref_tsv, col_ref_strcol, col_ref_listcol, col_ref_mapcol, col_ref_structcol
         procedure :: is_valid => col_is_valid   !! Whether the handle is attached AND still current.
         procedure :: index => col_index         !! This column's 1-based position in the table.
         procedure :: kind => col_kind           !! This column's PK_* kind.
@@ -1310,7 +1363,7 @@ module parquet_tables
         !! reader is opened. A MAML's own `extra: filter:`/`extra: sort:`/`fields: qc:` are in FILE
         !! names, because a read-in MAML describes the physical file and travels with it.
         module subroutine open_table_full(table, filename, maml, filter, sort, qc, qc_soft, use_threads, &
-                sample_fraction, sample_seed)
+                sample_fraction, sample_seed, list_columns)
             type(parquet_table), intent(out) :: table !! the table to fill.
             character(len=*), intent(in) :: filename  !! parquet file to open.
             character(len=*), intent(in), optional :: maml !! read-in (Role-B) MAML file describing `filename`.
@@ -1322,12 +1375,13 @@ module parquet_tables
             real(real64), intent(in), optional :: sample_fraction !! keep each row with this probability.
             integer(int64), intent(in), optional :: sample_seed !! seed for that draw; omitted = nondeterministic.
             !! `integer(int64)` only, as everywhere in this library: a literal is `42_int64`.
+            character(len=*), intent(in), optional :: list_columns !! `"auto"` (default) or `"container"`.
         end subroutine open_table_full
         !> Slice-regime open, int32 row bounds -- see the `parquet_open_table` generic above, which
         !! also explains why there is no `sort` argument here and what `filter=`/`sample_fraction=`
         !! do to the slice's row count.
         module subroutine open_table_slice_i32(table, filename, row_lo, row_hi, maml, filter, qc, &
-                qc_soft, use_threads, sample_fraction, sample_seed)
+                qc_soft, use_threads, sample_fraction, sample_seed, list_columns)
             type(parquet_table), intent(out) :: table !! the table to fill.
             character(len=*), intent(in) :: filename  !! parquet file to open.
             integer(int32), intent(in) :: row_lo      !! first file row to cover (1-based).
@@ -1340,10 +1394,11 @@ module parquet_tables
             real(real64), intent(in), optional :: sample_fraction !! keep each row with this probability.
             integer(int64), intent(in), optional :: sample_seed !! seed for that draw; omitted = nondeterministic.
             !! `integer(int64)` only, as everywhere in this library: a literal is `42_int64`.
+            character(len=*), intent(in), optional :: list_columns !! `"auto"` (default) or `"container"`.
         end subroutine open_table_slice_i32
         !> Slice-regime open, int64 row bounds -- see the `parquet_open_table` generic above.
         module subroutine open_table_slice_i64(table, filename, row_lo, row_hi, maml, filter, qc, &
-                qc_soft, use_threads, sample_fraction, sample_seed)
+                qc_soft, use_threads, sample_fraction, sample_seed, list_columns)
             type(parquet_table), intent(out) :: table !! the table to fill.
             character(len=*), intent(in) :: filename  !! parquet file to open.
             integer(int64), intent(in) :: row_lo      !! first file row to cover (1-based).
@@ -1356,6 +1411,7 @@ module parquet_tables
             real(real64), intent(in), optional :: sample_fraction !! keep each row with this probability.
             integer(int64), intent(in), optional :: sample_seed !! seed for that draw; omitted = nondeterministic.
             !! `integer(int64)` only, as everywhere in this library: a literal is `42_int64`.
+            character(len=*), intent(in), optional :: list_columns !! `"auto"` (default) or `"container"`.
         end subroutine open_table_slice_i64
         !> Opens a reader on `filename` with whatever read-time transform the table carries in its
         !! `read_*` components already attached -- `cache%reader` itself, or, when `rdr` is given,
@@ -4360,6 +4416,175 @@ module parquet_tables
             class(parquet_table_col), intent(in) :: self              !! the handle.
             type(parquet_string_column), pointer, intent(out) :: p    !! alias to the packed store.
         end subroutine col_ref_strcol
+    end interface
+    !
+    ! ---- Container column access (parquet_tables_container) ----
+    interface
+        !> Points `p` at a PK_LIST column's live container.
+        !!
+        !! The container counterpart of `%col`'s typed pointers, and it carries their warning: `p`
+        !! aliases the LIVE column, a write through it changes the table, and nothing revalidates
+        !! the result. It is also subject to the same detach rule as every other `%col` pointer --
+        !! any row-structural mutation (`%sort_by`, `%filter_rows`, `%delete_rows`, `%truncate`,
+        !! `%append`) rebuilds the storage and leaves `p` dangling; `%generation()` is how a caller
+        !! finds out.
+        !!
+        !! Changing how many ROWS the container holds through this pointer is not supported: the
+        !! table keeps its own row count, which would stop matching.
+        module subroutine col_ptr_listcol(self, name, p, found)
+            class(parquet_table), intent(in), target :: self       !! the table.
+            character(len=*), intent(in) :: name                   !! column name.
+            type(parquet_list_column), pointer, intent(out) :: p               !! alias to the live container.
+            logical, intent(out), optional :: found                !! present: report a miss instead of aborting.
+        end subroutine col_ptr_listcol
+        !> Points `p` at a PK_MAP column's live container.
+        !!
+        !! The container counterpart of `%col`'s typed pointers, and it carries their warning: `p`
+        !! aliases the LIVE column, a write through it changes the table, and nothing revalidates
+        !! the result. It is also subject to the same detach rule as every other `%col` pointer --
+        !! any row-structural mutation (`%sort_by`, `%filter_rows`, `%delete_rows`, `%truncate`,
+        !! `%append`) rebuilds the storage and leaves `p` dangling; `%generation()` is how a caller
+        !! finds out.
+        !!
+        !! Changing how many ROWS the container holds through this pointer is not supported: the
+        !! table keeps its own row count, which would stop matching.
+        module subroutine col_ptr_mapcol(self, name, p, found)
+            class(parquet_table), intent(in), target :: self       !! the table.
+            character(len=*), intent(in) :: name                   !! column name.
+            type(parquet_map_column), pointer, intent(out) :: p               !! alias to the live container.
+            logical, intent(out), optional :: found                !! present: report a miss instead of aborting.
+        end subroutine col_ptr_mapcol
+        !> Points `p` at a PK_STRUCT column's live container.
+        !!
+        !! The container counterpart of `%col`'s typed pointers, and it carries their warning: `p`
+        !! aliases the LIVE column, a write through it changes the table, and nothing revalidates
+        !! the result. It is also subject to the same detach rule as every other `%col` pointer --
+        !! any row-structural mutation (`%sort_by`, `%filter_rows`, `%delete_rows`, `%truncate`,
+        !! `%append`) rebuilds the storage and leaves `p` dangling; `%generation()` is how a caller
+        !! finds out.
+        !!
+        !! Changing how many ROWS the container holds through this pointer is not supported: the
+        !! table keeps its own row count, which would stop matching.
+        module subroutine col_ptr_structcol(self, name, p, found)
+            class(parquet_table), intent(in), target :: self       !! the table.
+            character(len=*), intent(in) :: name                   !! column name.
+            type(parquet_struct_column), pointer, intent(out) :: p               !! alias to the live container.
+            logical, intent(out), optional :: found                !! present: report a miss instead of aborting.
+        end subroutine col_ptr_structcol
+        !> Copies a PK_LIST column out as an independent `parquet_list_column`.
+        !!
+        !! A genuine copy, exactly as every other `%get` is: `arr` shares no storage with the table
+        !! and outlives any mutation. `%col` is the zero-copy route.
+        module subroutine get_arr_listcol(self, name, arr, found)
+            class(parquet_table), intent(in) :: self        !! the table.
+            character(len=*), intent(in) :: name            !! column name.
+            type(parquet_list_column), intent(out) :: arr               !! independent copy of the column.
+            logical, intent(out), optional :: found         !! present: report a miss instead of aborting.
+        end subroutine get_arr_listcol
+        !> Copies a PK_MAP column out as an independent `parquet_map_column`.
+        !!
+        !! A genuine copy, exactly as every other `%get` is: `arr` shares no storage with the table
+        !! and outlives any mutation. `%col` is the zero-copy route.
+        module subroutine get_arr_mapcol(self, name, arr, found)
+            class(parquet_table), intent(in) :: self        !! the table.
+            character(len=*), intent(in) :: name            !! column name.
+            type(parquet_map_column), intent(out) :: arr               !! independent copy of the column.
+            logical, intent(out), optional :: found         !! present: report a miss instead of aborting.
+        end subroutine get_arr_mapcol
+        !> Copies a PK_STRUCT column out as an independent `parquet_struct_column`.
+        !!
+        !! A genuine copy, exactly as every other `%get` is: `arr` shares no storage with the table
+        !! and outlives any mutation. `%col` is the zero-copy route.
+        module subroutine get_arr_structcol(self, name, arr, found)
+            class(parquet_table), intent(in) :: self        !! the table.
+            character(len=*), intent(in) :: name            !! column name.
+            type(parquet_struct_column), intent(out) :: arr               !! independent copy of the column.
+            logical, intent(out), optional :: found         !! present: report a miss instead of aborting.
+        end subroutine get_arr_structcol
+        !> Replaces a PK_LIST column's values with an independent copy of `arr`.
+        !!
+        !! The row count must already match -- `%set` never changes a table's shape. Row nullness
+        !! comes across with the container, since that is where a container's nullness lives; there
+        !! is no `is_valid=` and no `modify_nulls=` for the same reason.
+        module subroutine set_arr_listcol(self, name, arr, found)
+            class(parquet_table), intent(inout) :: self     !! the table.
+            character(len=*), intent(in) :: name            !! column name.
+            type(parquet_list_column), intent(in) :: arr                !! values to copy in.
+            logical, intent(out), optional :: found         !! present: report a miss instead of aborting.
+        end subroutine set_arr_listcol
+        !> Replaces a PK_MAP column's values with an independent copy of `arr`.
+        !!
+        !! The row count must already match -- `%set` never changes a table's shape. Row nullness
+        !! comes across with the container, since that is where a container's nullness lives; there
+        !! is no `is_valid=` and no `modify_nulls=` for the same reason.
+        module subroutine set_arr_mapcol(self, name, arr, found)
+            class(parquet_table), intent(inout) :: self     !! the table.
+            character(len=*), intent(in) :: name            !! column name.
+            type(parquet_map_column), intent(in) :: arr                !! values to copy in.
+            logical, intent(out), optional :: found         !! present: report a miss instead of aborting.
+        end subroutine set_arr_mapcol
+        !> Replaces a PK_STRUCT column's values with an independent copy of `arr`.
+        !!
+        !! The row count must already match -- `%set` never changes a table's shape. Row nullness
+        !! comes across with the container, since that is where a container's nullness lives; there
+        !! is no `is_valid=` and no `modify_nulls=` for the same reason.
+        module subroutine set_arr_structcol(self, name, arr, found)
+            class(parquet_table), intent(inout) :: self     !! the table.
+            character(len=*), intent(in) :: name            !! column name.
+            type(parquet_struct_column), intent(in) :: arr                !! values to copy in.
+            logical, intent(out), optional :: found         !! present: report a miss instead of aborting.
+        end subroutine set_arr_structcol
+        !> Appends a new PK_LIST column holding an independent copy of `values`.
+        !!
+        !! No `unit=`: a container's unit belongs to its PAYLOAD column, which the container itself
+        !! already carries, so a second one on the outer column could only disagree with it.
+        module subroutine add_column_listcol(self, name, values, force)
+            class(parquet_table), intent(inout) :: self     !! the table.
+            character(len=*), intent(in) :: name            !! the new column's name.
+            type(parquet_list_column), intent(in) :: values             !! values to copy in.
+            logical, intent(in), optional :: force          !! .true. replaces an existing same-named column.
+        end subroutine add_column_listcol
+        !> Appends a new PK_MAP column holding an independent copy of `values`.
+        !!
+        !! No `unit=`: a container's unit belongs to its PAYLOAD column, which the container itself
+        !! already carries, so a second one on the outer column could only disagree with it.
+        module subroutine add_column_mapcol(self, name, values, force)
+            class(parquet_table), intent(inout) :: self     !! the table.
+            character(len=*), intent(in) :: name            !! the new column's name.
+            type(parquet_map_column), intent(in) :: values             !! values to copy in.
+            logical, intent(in), optional :: force          !! .true. replaces an existing same-named column.
+        end subroutine add_column_mapcol
+        !> Appends a new PK_STRUCT column holding an independent copy of `values`.
+        !!
+        !! No `unit=`: a container's unit belongs to its PAYLOAD column, which the container itself
+        !! already carries, so a second one on the outer column could only disagree with it.
+        module subroutine add_column_structcol(self, name, values, force)
+            class(parquet_table), intent(inout) :: self     !! the table.
+            character(len=*), intent(in) :: name            !! the new column's name.
+            type(parquet_struct_column), intent(in) :: values             !! values to copy in.
+            logical, intent(in), optional :: force          !! .true. replaces an existing same-named column.
+        end subroutine add_column_structcol
+        !> Points `p` at a PK_LIST column's live container, from an already-resolved handle.
+        !!
+        !! The handle twin of `%col`'s container form, carrying its warnings verbatim.
+        module subroutine col_ref_listcol(self, p)
+            class(parquet_table_col), intent(in) :: self    !! the handle.
+            type(parquet_list_column), pointer, intent(out) :: p        !! alias to the live container.
+        end subroutine col_ref_listcol
+        !> Points `p` at a PK_MAP column's live container, from an already-resolved handle.
+        !!
+        !! The handle twin of `%col`'s container form, carrying its warnings verbatim.
+        module subroutine col_ref_mapcol(self, p)
+            class(parquet_table_col), intent(in) :: self    !! the handle.
+            type(parquet_map_column), pointer, intent(out) :: p        !! alias to the live container.
+        end subroutine col_ref_mapcol
+        !> Points `p` at a PK_STRUCT column's live container, from an already-resolved handle.
+        !!
+        !! The handle twin of `%col`'s container form, carrying its warnings verbatim.
+        module subroutine col_ref_structcol(self, p)
+            class(parquet_table_col), intent(in) :: self    !! the handle.
+            type(parquet_struct_column), pointer, intent(out) :: p        !! alias to the live container.
+        end subroutine col_ref_structcol
     end interface
     !
     ! ---- Copy out (parquet_tables_access) ----
@@ -7778,6 +8003,50 @@ module parquet_tables
             integer(int32), intent(in) :: wdt            !! values per row.
             character(len=*), intent(in) :: unit         !! unit string to store ("" for none).
         end subroutine matchunk_tsv
+        !> Reads a PK_LIST file column into `col`, carrying its row nulls across.
+        module subroutine mat_list(reader, name, col, nrows, wdt, unit)
+            type(parquet_reader), intent(in) :: reader   !! open reader.
+            character(len=*), intent(in) :: name         !! file column name.
+            type(parquet_column), intent(inout) :: col   !! value store to fill.
+            integer(int64), intent(in) :: nrows          !! rows the column holds (unused: the
+            !! container reports its own row count, and adopt_container takes it from there).
+            integer(int32), intent(in) :: wdt            !! values per row (unused: a container row
+            !! has no fixed width -- that is what makes it a container).
+            character(len=*), intent(in) :: unit         !! unit string (unused: a container's unit
+            !! belongs to its payload column, which the reader has already set).
+        end subroutine mat_list
+        !> Reads a PK_MAP file column into `col`, carrying its row nulls across.
+        module subroutine mat_map(reader, name, col, nrows, wdt, unit)
+            type(parquet_reader), intent(in) :: reader   !! open reader.
+            character(len=*), intent(in) :: name         !! file column name.
+            type(parquet_column), intent(inout) :: col   !! value store to fill.
+            integer(int64), intent(in) :: nrows          !! rows the column holds (unused: the
+            !! container reports its own row count, and adopt_container takes it from there).
+            integer(int32), intent(in) :: wdt            !! values per row (unused: a container row
+            !! has no fixed width -- that is what makes it a container).
+            character(len=*), intent(in) :: unit         !! unit string (unused: a container's unit
+            !! belongs to its payload column, which the reader has already set).
+        end subroutine mat_map
+        !> Reads one row group of a PK_LIST file column into `col`.
+        module subroutine matchunk_list(reader, name, rg, col, nrows, wdt, unit)
+            type(parquet_reader), intent(in) :: reader   !! open reader.
+            character(len=*), intent(in) :: name         !! file column name.
+            integer(int64), intent(in) :: rg             !! 1-based row group.
+            type(parquet_column), intent(inout) :: col   !! value store to fill.
+            integer(int64), intent(in) :: nrows          !! rows in that row group (unused, as in mat_list).
+            integer(int32), intent(in) :: wdt            !! values per row (unused, as in mat_list).
+            character(len=*), intent(in) :: unit         !! unit string (unused, as in mat_list).
+        end subroutine matchunk_list
+        !> Reads one row group of a PK_MAP file column into `col`.
+        module subroutine matchunk_map(reader, name, rg, col, nrows, wdt, unit)
+            type(parquet_reader), intent(in) :: reader   !! open reader.
+            character(len=*), intent(in) :: name         !! file column name.
+            integer(int64), intent(in) :: rg             !! 1-based row group.
+            type(parquet_column), intent(inout) :: col   !! value store to fill.
+            integer(int64), intent(in) :: nrows          !! rows in that row group (unused, as in mat_map).
+            integer(int32), intent(in) :: wdt            !! values per row (unused, as in mat_map).
+            character(len=*), intent(in) :: unit         !! unit string (unused, as in mat_map).
+        end subroutine matchunk_map
         !> Dispatches one file column's read to the specific matching `kind`.
         module subroutine table_materialize_kind(kind, reader, name, col, nrows, wdt, unit)
             integer, intent(in) :: kind                  !! PK_* discriminator to read as.

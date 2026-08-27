@@ -711,6 +711,60 @@ contains
         call col%adopt(tmp, unit)
     end procedure matchunk_tsv
     !
+    module procedure mat_list
+        class(parquet_container_column), allocatable :: tmp
+        !
+        ! Allocated as the ABSTRACT class holding a parquet_list_column, rather than read into a concrete
+        ! local and copied into a box afterwards: adopt_container MOVES what it is given, so this
+        ! shape hands the reader's own allocation straight to the column with no second live copy
+        ! of the payload. `allocate(box, source=concrete)` would deep-copy the whole column.
+        allocate(parquet_list_column :: tmp)
+        select type (dest => tmp)
+        type is (parquet_list_column)
+            call parquet_read_column(reader, name, dest)
+        end select
+        ! nrows/wdt/unit are deliberately unread here -- see this procedure's interface.
+        call col%adopt_container(tmp)
+    end procedure mat_list
+    !
+    module procedure mat_map
+        class(parquet_container_column), allocatable :: tmp
+        !
+        ! Allocated as the ABSTRACT class holding a parquet_map_column, rather than read into a concrete
+        ! local and copied into a box afterwards: adopt_container MOVES what it is given, so this
+        ! shape hands the reader's own allocation straight to the column with no second live copy
+        ! of the payload. `allocate(box, source=concrete)` would deep-copy the whole column.
+        allocate(parquet_map_column :: tmp)
+        select type (dest => tmp)
+        type is (parquet_map_column)
+            call parquet_read_column(reader, name, dest)
+        end select
+        ! nrows/wdt/unit are deliberately unread here -- see this procedure's interface.
+        call col%adopt_container(tmp)
+    end procedure mat_map
+    !
+    module procedure matchunk_list
+        class(parquet_container_column), allocatable :: tmp
+        !
+        allocate(parquet_list_column :: tmp)
+        select type (dest => tmp)
+        type is (parquet_list_column)
+            call parquet_read_column_chunk(reader, name, rg, dest)
+        end select
+        call col%adopt_container(tmp)
+    end procedure matchunk_list
+    !
+    module procedure matchunk_map
+        class(parquet_container_column), allocatable :: tmp
+        !
+        allocate(parquet_map_column :: tmp)
+        select type (dest => tmp)
+        type is (parquet_map_column)
+            call parquet_read_column_chunk(reader, name, rg, dest)
+        end select
+        call col%adopt_container(tmp)
+    end procedure matchunk_map
+    !
     module procedure table_materialize_kind
         select case (kind)
         case (PK_INT32)
@@ -749,11 +803,22 @@ contains
             call mat_timev(reader, name, col, nrows, wdt, unit)
         case (PK_TIMESTAMP_VEC)
             call mat_tsv(reader, name, col, nrows, wdt, unit)
+        case (PK_LIST)
+            call mat_list(reader, name, col, nrows, wdt, unit)
+        case (PK_MAP)
+            call mat_map(reader, name, col, nrows, wdt, unit)
         case default
             ! table_classify only ever assigns a slot one of the supported PK_* kinds handled
             ! above (an unsupported column stays PK_NONE and is never routed to a materializer),
             ! so this branch guards an internal invariant with no path reachable through the
             ! public API -- there is no way to feed it a value that would actually take it.
+            !
+            ! PK_STRUCT is the one supported kind deliberately absent from the list above, and it
+            ! is unreachable here for a reason worth knowing before adding an arm: a struct column
+            ! is never CLASSIFIED, because parquet_get_column_names expands a top-level struct into
+            ! one dotted path per leaf and so never emits the struct's own name. A PK_STRUCT column
+            ! therefore only ever exists in memory (%add_column, %set), where it is RES_FULL from
+            ! birth and nothing materializes it.
             error stop EP // "internal: no materializer for this column kind" ! GCOVR_EXCL_LINE
         end select
     end procedure table_materialize_kind
@@ -796,6 +861,10 @@ contains
             call matchunk_timev(reader, name, rg, col, nrows, wdt, unit)
         case (PK_TIMESTAMP_VEC)
             call matchunk_tsv(reader, name, rg, col, nrows, wdt, unit)
+        case (PK_LIST)
+            call matchunk_list(reader, name, rg, col, nrows, wdt, unit)
+        case (PK_MAP)
+            call matchunk_map(reader, name, rg, col, nrows, wdt, unit)
         case default
             ! Same internal invariant as table_materialize_kind's own case default above -- not
             ! reachable through the public API.

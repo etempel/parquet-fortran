@@ -73,6 +73,13 @@ contains
             ! table_classify probes before it asks, and table_resolve_width only ever runs for a
             ! column table_classify already accepted, so both call sites pass one of exactly the
             ! 9 tokens above. There is no path that reaches this select with any other token.
+            !
+            ! The CONTAINER kinds do not reach here either, and by a different route: a map column
+            ! and -- under list_columns="container" -- a list column are settled inside
+            ! table_classify itself and return before this is called, while a deferred list column
+            ! reaches table_resolve_width only through `width_pending`, which those two never set.
+            ! So this select is still exactly the nine ELEMENT tokens, and widening it is not how a
+            ! container kind gets in.
             kind = PK_NONE ! GCOVR_EXCL_LINE
             ok = .false. ! GCOVR_EXCL_LINE -- gcov attribution artifact: shows a large positive
                 ! hit count under -O0 despite gcov's own unexecuted_block flag agreeing with
@@ -81,11 +88,68 @@ contains
     end procedure table_kind_from_type
     !
     module procedure table_classify
-        character(len=:), allocatable :: type_name
+        character(len=:), allocatable :: type_name, shape_name
         integer :: kind, col_size
         logical :: ok
         !
         associate (slot => cache%cols(idx))
+            ! (0) EXISTENCE FIRST, and this probe is load-bearing rather than defensive.
+            ! parquet_get_column_names EXPANDS a top-level struct into one dotted path per leaf,
+            ! and it emits a leaf whose own type is a MAP -- while parquet_get_column_shape (and
+            ! every other query built on resolve_struct_path) REFUSES such a path, because a
+            ! dotted name landing on a map or a struct is not addressable. So a name this loop was
+            ! handed can fail to resolve, and asking the shape query about it would abort the whole
+            ! open on a column that is merely unreadable. Confirmed on
+            ! test/fixtures/map_list_types.parquet, whose `struct_of_map.attrs` is exactly that.
+            !
+            ! It used to be the types= probe below that covered this, since it answers .false. for
+            ! an unresolvable name too. That is no longer enough on its own: the shape query now
+            ! runs BEFORE it, for the container shapes the types= probe cannot describe.
+            if (.not. parquet_column_exists(cache%reader, slot%file_name)) then
+                slot%supported = .false.
+                slot%declared_kind = PK_NONE
+                slot%width = 1
+                slot%residency = RES_EMPTY
+                return
+            end if
+            ! (1) SHAPE next, because it is the query that means what we mean.
+            ! parquet_column_width_needs_data answers "is the width knowable from the schema",
+            ! which coincides with "is this a container" for a LIST and says nothing at all about
+            ! a MAP -- so the deferred-width test below can no longer be the thing that decides
+            ! containerhood. Both are schema-only, so this costs no read.
+            call parquet_get_column_shape(cache%reader, slot%file_name, shape_name)
+            if (shape_name == "map") then
+                ! A map's VALUE type is the one thing parquet_get_column_type cannot report -- it
+                ! answers "unknown" for every map, by design -- so the readability question the
+                ! types= probe answers for every other column is answered here instead, by
+                ! parquet_get_map_value_type. It is schema-only and covers BOTH ways a map can be
+                ! unreadable (a non-string key, an unsupported value type), which is exactly the
+                ! pair parquet_read_map_column_shape aborts on. Classifying an unreadable map as
+                ! supported would turn one exotic column into an abort on first touch, which is
+                ! the failure the types= probe exists to prevent everywhere else.
+                call parquet_get_map_value_type(cache%reader, slot%file_name, type_name)
+                if (type_name == "unknown") then
+                    slot%supported = .false.
+                    slot%declared_kind = PK_NONE
+                    slot%width = 1
+                    slot%residency = RES_EMPTY
+                    return
+                end if
+                ! The VALUE kind is deliberately not recorded: %kind() answers PK_MAP for a map
+                ! column at all times, and a caller wanting the value kind asks the
+                ! parquet_map_column itself through %col. That mirrors what parquet_kind_name
+                ! spells -- three container kinds, none of them parameterised.
+                slot%supported = .true.
+                slot%declared_kind = PK_MAP
+                slot%width = 1
+                slot%residency = RES_EMPTY
+                ! The VALUE's temporal resolution, for exactly the reason a scalar timestamp
+                ! column records its own: nothing else in the table remembers it, and a
+                ! schema-less write reads it back to emit `map[timestamp[ns]]` rather than
+                ! silently defaulting to microseconds.
+                call record_temporal_unit(cache, slot, type_name)
+                return
+            end if
             ! Ask whether the type is readable BEFORE asking what it is. parquet_get_column_type
             ! does NOT abort on a type this library cannot read -- it answers "unknown", by
             ! design (see its own doc-comment in parquet_read.f90, and the `default:` arm of
@@ -120,9 +184,28 @@ contains
             slot%supported = .true.
             slot%residency = RES_EMPTY
             ! A plain LIST/LARGE_LIST is the one type whose width lives in the data rather than the
-            ! schema, so it is DEFERRED rather than measured here: classifying it now would mean
-            ! decoding the column at open, which is exactly what makes a lazy open worthless. Its
-            ! kind and width are resolved by table_resolve_width on first use.
+            ! schema, and what becomes of it is the caller's choice, made at open:
+            !
+            !   list_columns="container"  -- a parquet_list_column, from the SCHEMA alone. Nothing
+            !                                is measured, nothing is data-dependent, and two tables
+            !                                over one file cannot disagree.
+            !   list_columns="auto"       -- the default and every earlier release's behaviour: the
+            !                                width is DEFERRED rather than measured here, because
+            !                                classifying it now would mean decoding the column at
+            !                                open, which is exactly what makes a lazy open
+            !                                worthless. table_resolve_width settles it on first use,
+            !                                and a uniform column becomes an ordinary vector one.
+            !
+            ! The element type has already been checked by the types= probe above -- unlike a map,
+            ! a LIST is unwrapped by parquet_get_column_type, so `list<decimal>` answers "unknown"
+            ! there and never reaches either branch.
+            if (shape_name == "list" .and. table_list_columns_are_containers(cache)) then
+                slot%declared_kind = PK_LIST
+                slot%width = 1
+                ! The ELEMENT's temporal resolution -- see the map arm above for why.
+                call record_temporal_unit(cache, slot, type_name)
+                return
+            end if
             if (parquet_column_width_needs_data(cache%reader, slot%file_name)) then
                 slot%declared_kind = PK_NONE
                 slot%width = 0
@@ -138,8 +221,26 @@ contains
         end associate
     end procedure table_classify
     !
+    !> `.true.` when this table was opened with `list_columns="container"`.
+    !!
+    !! Unallocated is read as `"auto"`, which is what lets `parquet_new_table` build a cache with
+    !! no token at all -- a batch table classifies nothing, so there would be nothing for a value
+    !! to govern.
+    pure function table_list_columns_are_containers(cache) result(res)
+        type(parquet_table_cache), intent(in) :: cache !! the table's cache.
+        logical :: res !! .true. for "container", .false. for "auto".
+        !
+        res = .false.
+        if (allocated(cache%list_columns)) res = cache%list_columns == "container"
+    end function table_list_columns_are_containers
+    !
     !> Records a TIME/TIMESTAMP column's stored resolution (and, for a timestamp, its timezone
     !! flag) on the descriptor, while the reader is still there to answer.
+    !!
+    !! Serves a CONTAINER column too, on the payload's token: a `list[timestamp[ns]]` records `ns`
+    !! exactly as a scalar timestamp column does, and for the identical reason. That works because
+    !! `resolve_temporal_value_type` (`parquet_wrapper.cpp`) unwraps a LIST and a MAP as well as a
+    !! FIXED_SIZE_LIST -- it used to unwrap only the last, and the query ABORTED for a container.
     !!
     !! This has to happen at classification time and nowhere later, because nothing else in the
     !! table remembers it: a `parquet_timestamp` stores seconds+nanoseconds and carries no unit,
@@ -469,13 +570,27 @@ contains
         type(parquet_reader), intent(inout), optional :: rdr !! reader override; see table_materialize.
         logical, allocatable :: keep(:)
         character(len=:), allocatable :: sfx
+        class(parquet_container_column), pointer :: cc
         integer(int64) :: rg, rg_lo, rg_hi, lo, hi, rows_rg, cursor, take
-        logical :: in_place
+        logical :: in_place, is_container
         !
         associate (slot => cache%cols(idx), bounds => cache%rg_bounds)
-            in_place = .not. (slot%declared_kind == PK_STRING .or. slot%declared_kind == PK_STRING_VEC)
+            ! THREE assembly shapes, not two. The array kinds are preallocated and %paste'd into
+            ! place; the string kinds and the containers are grown by %append, because neither has
+            ! fixed-width row slots for a paste to overwrite (%paste refuses both).
+            !
+            ! A CONTAINER cannot even be %init'd: `init(PK_LIST, 100)` would have to mean "a
+            ! hundred rows of what?", so adopt_container is the only writer of a container kind and
+            ! the column is BUILT by the first row group rather than allocated up front. It is
+            ! presized instead, once that first chunk has established the payload kind -- see the
+            ! reserve_rows call in the loop.
+            is_container = parquet_kind_is_container(slot%declared_kind)
+            in_place = .not. (slot%declared_kind == PK_STRING .or. slot%declared_kind == PK_STRING_VEC &
+                .or. is_container)
             if (in_place) then
                 call slot%values%init(slot%declared_kind, sc%nrows, int(slot%width, int32), "")
+            else if (is_container) then
+                call slot%values%clear()
             else
                 call slot%values%init(slot%declared_kind, 0_int64, int(slot%width, int32), "")
             end if
@@ -505,7 +620,17 @@ contains
                         call chunk%delete_by_mask(keep)
                         deallocate(keep)
                     end if
-                    call slot%values%append(chunk)
+                    if (is_container .and. slot%values%kindof() == PK_NONE) then
+                        ! The FIRST covering row group builds the column: its container is moved
+                        ! in whole (no copy), which is also what settles the payload kind that
+                        ! nothing knew before the read. Only then can the column be presized --
+                        ! reserve_rows needs a container to reserve in.
+                        call slot%values%move_from(chunk)
+                        call parquet_column_container(slot%values, cc)
+                        call cc%reserve_rows(sc%nrows)
+                    else
+                        call slot%values%append(chunk)
+                    end if
                 end if
                 cursor = cursor + take
                 call chunk%clear()

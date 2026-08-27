@@ -329,6 +329,16 @@ contains
         if (.not. sort_kind_is_orderable(self%cache%cols(idx)%values%kindof())) then
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             call table_context_suffix(self%cache, name, sfx)
+            ! Two reasons, one refusal. A *_VEC row is several values and has no single one to
+            ! order by; a CONTAINER row is a list, a map or a struct, for which no total order
+            ! exists that this library could have picked -- and the sort must keep reproducing
+            ! arrow::compute::SortIndices, which has none for them either. Naming the kind is what
+            ! makes the two distinguishable to a reader of the message.
+            if (parquet_kind_is_container(self%cache%cols(idx)%values%kindof())) then
+                error stop EP // proc // ": a " // kname // " column cannot be a sort key; there " // &
+                    "is no defined order on a list, a map or a struct -- sort by a scalar column " // &
+                    "and the container is carried along with it" // sfx
+            end if
             error stop EP // proc // ": a " // kname // " column cannot be a sort key; there is " // &
                 "no defined order on a whole vector row" // sfx
         end if

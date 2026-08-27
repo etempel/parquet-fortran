@@ -1197,6 +1197,18 @@ contains
                 test_table_cast_f32_fractional_aborts), &
             new_unittest("cast of an unsupported column aborts", &
                 test_table_cast_unsupported_column_aborts), &
+            new_unittest("%is_null's ELEMENT form on a container column aborts", &
+                test_container_is_null_element_aborts), &
+            new_unittest("the rank-2 %get_valid_mask on a container column aborts", &
+                test_container_valid_mask_rank2_aborts), &
+            new_unittest("sorting by a container column aborts", &
+                test_container_sort_key_aborts), &
+            new_unittest("an unrecognized list_columns= token aborts naming both values", &
+                test_container_bad_list_columns_aborts), &
+            new_unittest("%print_stat reports a container column's row-length extremes", &
+                test_container_print_stat_lengths), &
+            new_unittest("reading a container column a mutation skipped aborts", &
+                test_container_skipped_by_mutation_aborts), &
             new_unittest("clone into another table type aborts", &
                 test_table_clone_type_mismatch_aborts), &
             new_unittest("a row handle reading an unsupported column aborts", &
@@ -10165,6 +10177,84 @@ contains
             failure_message="casting an unsupported column was expected to abort", &
             required_stderr="cast: this column's type is not supported by parquet_table")
     end subroutine test_table_cast_unsupported_column_aborts
+
+    !> **The three container refusals (feature_container_phase6.md's D7).** Each has a negative
+    !! control in `test/test_table_container.f90` rather than here, because what has to be shown is
+    !! that the guard did NOT fire on the neighbouring permitted case -- which is an assertion, not
+    !! an abort.
+    subroutine test_container_is_null_element_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "container_is_null_element", expect_abort=.true., &
+            failure_message="the element form of %is_null on a container column was expected to abort", &
+            required_stderr="PK_LIST is a container kind and this is the element form")
+    end subroutine test_container_is_null_element_aborts
+
+    subroutine test_container_valid_mask_rank2_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "container_valid_mask_rank2", expect_abort=.true., &
+            failure_message="the rank-2 %get_valid_mask on a container column was expected to abort", &
+            required_stderr="no fixed per-row width for a (width, nrows) mask to have")
+    end subroutine test_container_valid_mask_rank2_aborts
+
+    !> The message must name the KIND, which is what tells this refusal apart from the *_VEC one
+    !! that shares the guard -- the two have different reasons and different remedies.
+    subroutine test_container_sort_key_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "container_sort_key", expect_abort=.true., &
+            failure_message="sorting by a container column was expected to abort", &
+            required_stderr="a PK_LIST column cannot be a sort key; there is no defined order on a list")
+    end subroutine test_container_sort_key_aborts
+
+    !> A token argument's rejection has to name what WAS expected -- a caller who typed
+    !! `"containers"` needs the list, not merely the news that this was not it.
+    subroutine test_container_bad_list_columns_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "container_bad_list_columns", expect_abort=.true., &
+            failure_message="an unrecognized list_columns= token was expected to abort", &
+            required_stderr="expected 'auto' or 'container'")
+    end subroutine test_container_bad_list_columns_aborts
+
+    !> **The VALUES %print_stat's container arm computes**, which nothing in process can capture:
+    !! %print_stat writes to stdout and parquet_set_message_stream takes "stdout"/"stderr" and no
+    !! file. The laziness half of the same feature IS asserted in process, by
+    !! test/test_table_container.f90's test_container_print_stat.
+    !!
+    !! Three rows, each pinning a different rule. `ragged` (1..4) shows the extremes are real
+    !! per-row lengths; `with_empty` (0..3) shows an EMPTY row is a present row of length zero and
+    !! is counted; `null_avg` (5..5, with four null rows) shows a NULL row is excluded rather than
+    !! counted as zero -- which is the rule an ordinary implementation gets wrong, and the only one
+    !! of the three whose expected minimum differs from what a null-as-zero arm would print.
+    subroutine test_container_print_stat_lengths(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_streams(error, "container_print_stat_lengths", &
+            "ragged       PK_LIST             1       0           1                       4", &
+            expect_on="stdout", &
+            failure_message="%print_stat should report a ragged container column's row-length extremes")
+        if (allocated(error)) return
+        call check_scenario_streams(error, "container_print_stat_lengths", &
+            "with_empty   PK_LIST             1       0           0                       3", &
+            expect_on="stdout", &
+            failure_message="an EMPTY container row is length zero and must be counted")
+        if (allocated(error)) return
+        call check_scenario_streams(error, "container_print_stat_lengths", &
+            "null_avg     PK_LIST             1       4           5                       5", &
+            expect_on="stdout", &
+            failure_message="a NULL container row has no length and must be excluded from the extremes")
+    end subroutine test_container_print_stat_lengths
+
+    !> **feature_container_phase6.md's Q2, as resolved.** A row-structural mutation skips a column
+    !! that is not resident and the detach guard catches the later read -- there is no separate
+    !! container guard, because a skipped column is RES_EMPTY and holds no storage to misalign.
+    !!
+    !! What this actually pins is that the container accessors route through `table_resolve`: one
+    !! written any other way would hand back the skipped column instead of aborting, and nothing
+    !! else in the suite would see it. The negative control is test_container_row_alignment.
+    subroutine test_container_skipped_by_mutation_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "container_skipped_by_mutation", expect_abort=.true., &
+            failure_message="reading a container column that a row mutation had skipped was expected to abort", &
+            required_stderr="this table has been detached from its file by a row-structural change")
+    end subroutine test_container_skipped_by_mutation_aborts
 
     subroutine test_table_clone_type_mismatch_aborts(error)
         type(error_type), allocatable, intent(out) :: error

@@ -1330,6 +1330,7 @@ module parquet_core
     public :: parquet_column_exists
     public :: parquet_get_column_type
     public :: parquet_get_column_shape
+    public :: parquet_get_map_value_type
     public :: parquet_get_column_nullable
     public :: parquet_get_column_names
     public :: parquet_release_column
@@ -3175,6 +3176,29 @@ module parquet_core
             character(len=*), intent(in) :: name !! existing column name (dotted struct-leaf path allowed).
             character(len=:), allocatable, intent(out) :: shape !! resolved container-shape token.
         end subroutine parquet_get_column_shape
+        !> Reports map column `name`'s VALUE type in `type_name`, as one of the same nine tokens
+        !! parquet_get_column_type uses, or `"unknown"`. A schema-only query: it reads no column
+        !! data at all.
+        !!
+        !! This is the one thing parquet_get_column_type cannot answer. That query deliberately
+        !! reports `"unknown"` for a map, because a map cell is not one value and the question it
+        !! answers is "what element type would I declare?". This one answers the narrower question
+        !! a caller has once it already knows the column is a map: what kind will the values come
+        !! back as?
+        !!
+        !! `"unknown"` means *this library cannot read the column*, and covers three cases that a
+        !! caller does not need to tell apart: `name` is not a map at all, its keys are not strings
+        !! (only string keys are supported), or its values are of a type outside the nine. Ask
+        !! parquet_get_column_shape first if "is it a map?" is the question -- the pairing of the
+        !! two is deliberate, and neither is derivable from the other.
+        !!
+        !! error stops only if `name` doesn't exist, same as parquet_get_column_type and
+        !! parquet_get_column_shape: an unreadable column is an answer, not an error.
+        module subroutine parquet_get_map_value_type(reader, name, type_name)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! existing column name (dotted struct-leaf path allowed).
+            character(len=:), allocatable, intent(out) :: type_name !! resolved value-type token, or "unknown".
+        end subroutine parquet_get_map_value_type
         !> Reports whether existing column `name` is declared NULLABLE in `reader`'s file schema,
         !> in `is_nullable`. A schema-only query -- it reads no column data, and says nothing about
         !> whether the column actually contains any Null (parquet_column_has_nulls answers that,

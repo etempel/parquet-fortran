@@ -675,6 +675,32 @@ contains
         any_null = parquet_column_has_nulls(self%cache%reader, self%cache%cols(idx)%file_name, rg_lo, rg_hi)
     end function slot_has_nulls
     !
+    !> Refuses an ELEMENT-granular query on a container column, naming why and what to ask instead.
+    !!
+    !! The two callers are the only element-granular queries a container column can reach --
+    !! `%is_null(i, e)` and the rank-2 `%get_valid_mask` -- and both would otherwise answer rather
+    !! than abort: a container's descriptor records `width = 1`, so the element axis is a
+    !! degenerate one and every query about it silently reports on the ROW instead. That is worse
+    !! than a refusal, because the answer looks right.
+    !!
+    !! The ROW forms of both are deliberately NOT refused: `%is_null(name, i)` and the rank-1
+    !! `%get_valid_mask` are exactly the granularity a container's own nullness has, and they read
+    !! through to the container. See feature_container_phase6.md's D7, and the negative controls
+    !! its table names.
+    subroutine reject_container_element_query(self, idx, proc, why)
+        class(parquet_table), intent(in) :: self !! the table.
+        integer, intent(in) :: idx               !! the slot being queried.
+        character(len=*), intent(in) :: proc     !! calling procedure, for the message.
+        character(len=*), intent(in) :: why      !! what to ask instead.
+        character(len=:), allocatable :: sfx, kname
+        !
+        if (.not. parquet_kind_is_container(self%cache%cols(idx)%values%kindof())) return
+        call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
+        call table_context_suffix(self%cache, self%cache%cols(idx)%name, sfx)
+        error stop EP // proc // ": " // kname // " is a container kind and this is the " // &
+            "element form; " // why // sfx
+    end subroutine reject_container_element_query
+    !
     module procedure table_get_valid_mask
         integer :: idx
         !
@@ -694,6 +720,9 @@ contains
             allocate(mask(0, 0))
             return
         end if
+        call reject_container_element_query(self, idx, "get_valid_mask", &
+            "a container column has no fixed per-row width for a (width, nrows) mask to have; " // &
+            "the rank-1 form answers per ROW, which is the granularity a container's nullness has")
         call fill_elem_mask(self%cache, idx, mask)
     end procedure table_get_valid_mask_elem
     !
@@ -827,6 +856,10 @@ contains
         call table_resolve(self, name, "is_null", idx, found)
         if (idx == 0) return
         call table_require_row(self, i, "is_null")
+        call reject_container_element_query(self, idx, "is_null", &
+            "a container row is a variable-length object, not a fixed row of elements; ask the " // &
+            "row form %is_null(name, i) whether the whole row is null, or reach the container " // &
+            "through %col and ask it about one element")
         ! The element index is bounds-checked by parquet_column itself (check_element), which
         ! names the element axis in its message -- the mistake this guards is passing a FLAT
         ! element position where a row and an element were wanted.

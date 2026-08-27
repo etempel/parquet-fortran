@@ -76,6 +76,12 @@ contains
             out%cache%read_sample_fraction = self%cache%read_sample_fraction
         if (allocated(self%cache%read_sample_seed)) &
             out%cache%read_sample_seed = self%cache%read_sample_seed
+        ! The LIST-column policy travels too, and for a sharper reason than the transform does:
+        ! clone_reopen_reader opens a second reader over the same file, and if the clone classified
+        ! a plain-LIST column differently from its source the two tables would report different
+        ! kinds for the same column with nothing to announce it. That is feature_risks.md Risk-152
+        ! reappearing between a table and its own clone.
+        if (allocated(self%cache%list_columns)) out%cache%list_columns = self%cache%list_columns
         ! Explicit allocate-then-copy, not `out%cache%rg_bounds = self%cache%rg_bounds`: the plain
         ! assignment relies on F2003 automatic reallocation, which should be a no-op concern here
         ! since out%cache%rg_bounds is always freshly unallocated (clone_new_cache just allocated

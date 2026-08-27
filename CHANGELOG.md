@@ -61,8 +61,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   addressable by its dotted path. `parquet_write_column`/`parquet_write_column_chunk` write one back
   out as a genuine variable-length `LIST` column, declared in a schema as `list[<elemtype>]`; the
   value type decides the file's physical shape, so a 2-D array still writes a fixed-width vector
-  column and a `parquet_list_column` always writes a `LIST`. **Not yet**: a list column cannot be
-  held by a `parquet_table`, or nested inside another container.
+  column and a `parquet_list_column` always writes a `LIST`. **Not yet**: a list cannot be nested
+  inside another container.
 - **`parquet_struct`: `parquet_struct_column`, a `STRUCT` column, plus `parquet_struct_row`, a
   lightweight handle to one of its rows.** Every row holds one value per declared field and the
   fields may have different types; the field set is fixed by `%init(names, kinds)` and covers the
@@ -77,8 +77,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file; `parquet_write_column`/`parquet_write_column_chunk` write one back out, declared in a
   schema as `struct` — the field layout comes from the column object, never from MAML. Addressing
   a struct's leaves by their dotted paths (`"person.age"`) is unchanged and still reaches any
-  depth of nesting. **Not yet**: a struct column cannot be held by a `parquet_table`, and a field
-  cannot itself be a struct, list or map.
+  depth of nesting. **Not yet**: a field cannot itself be a struct, list or map.
 - **`parquet_map`: `parquet_map_column`, a `MAP` column, plus `parquet_map_row`, a lightweight
   handle to one of its rows.** Every row holds zero or more `key -> value` entries; keys are
   strings and the value kind is fixed by `%init(value_kind)` and covers the nine scalar kinds.
@@ -92,10 +91,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   module (`use parquet_map` compiles eleven Fortran files). `parquet_read_column`/
   `parquet_read_column_chunk` read a `MAP` column from a Parquet file straight into one, whole or
   one row group at a time; `parquet_write_column`/`parquet_write_column_chunk` write one back out,
-  declared in a schema as `map[<valuetype>]`. **Not yet**: a map column cannot be held by a
-  `parquet_table`, its keys must be strings, and its values cannot themselves be containers. A
+  declared in a schema as `map[<valuetype>]`. **Not yet**: its keys must be strings and its values
+  cannot themselves be containers. A
   map's total entry count is capped at 2,147,483,647 — Arrow has no `large_map` to widen into, so
   a column past it is refused rather than written in a wider form.
+- **A `parquet_table` column can be a list, a map or a struct.** A `MAP` column is classified as a
+  `parquet_map_column` automatically; a variable-length `LIST` column becomes a
+  `parquet_list_column` when `parquet_open_table`'s new `list_columns="container"` argument asks
+  for it, instead of being measured for a uniform width (`"auto"`, the default, is unchanged); a
+  `parquet_struct_column` is added in memory with `%add_column`. Each gets the same five accessors
+  a `parquet_string_column` has — `%col`, `%get`, `%set`, `%add_column` and a column handle's
+  `%ref` — and none takes an `is_valid=` mask, because a container carries its own per-row
+  nullness. `%is_null(name, i)`, the rank-1 `%get_valid_mask` and `%ensure_validity` answer; the
+  element-granular forms are refused. Every row-structural mutation (`%sort_by`, `%filter_rows`,
+  `%delete_rows`, `%truncate`, `%top_n`, `%append`) carries a container column along, though one
+  may not be a sort key. `%print_stat` reports the shortest and longest row in place of a minimum
+  and maximum, and `parquet_write_table` writes all three back out with a temporal payload's
+  resolution intact. **Not yet**: no `%get_slice`, `%get_element` or row-handle access, which
+  address a fixed-width cell a container row does not have.
+- **`parquet_get_map_value_type(reader, name, type_name)`** reports a map column's value type from
+  the file schema alone, or `"unknown"` for a column that is not a readable map. It is what
+  `parquet_get_column_type` cannot answer, since that query reports `"unknown"` for every map.
 
 ### Changed
 

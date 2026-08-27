@@ -219,6 +219,14 @@ contains
                 call schema_type_token(slot, dtype)
                 is_vec = slot%width > 1
                 is_str = slot%declared_kind == PK_STRING .or. slot%declared_kind == PK_STRING_VEC
+                ! A CONTAINER column gets neither key, and that is the point rather than an
+                ! omission: `col_size:` declares a FIXED per-row width and `array_size:` a fixed
+                ! per-element string width, and a container has neither. Its width lives in its own
+                ! offsets, one length per row. See doc/pages/schema/maml-format.md's callout.
+                if (parquet_kind_is_container(slot%declared_kind)) then
+                    is_vec = .false.
+                    is_str = .false.
+                end if
                 ! An UNALLOCATED allocatable actual makes an optional dummy absent (F2018
                 ! 15.5.2.12), which is how a column with no unit gets no `unit:` key at all rather
                 ! than an empty one -- deallocated first, since the previous column may have left
@@ -318,6 +326,19 @@ contains
         case (PK_TIMESTAMP, PK_TIMESTAMP_VEC)
             call temporal_suffix(slot, .true., sfx)
             tok = "timestamp" // sfx
+        case (PK_LIST, PK_MAP)
+            ! `list[<element>]` / `map[<value>]`, with the payload's token taken from the container
+            ! itself rather than from a second table -- one recursive step through the same nine
+            ! tokens the scalar arms use. A struct is NOT here: it has no single payload token, and
+            ! its layout lives in the parquet_struct_column the descriptor already holds, so MAML
+            ! never declares it (the campaign's "struct fields never appear in MAML" decision).
+            !
+            ! Neither emits a `col_size:` key, and that is what the reader needs: `col_size:`
+            ! declares a FIXED per-row width, which is exactly the property a container column does
+            ! not have. See doc/pages/schema/maml-format.md's col_size/array_size callout.
+            call container_type_token(slot, tok)
+        case (PK_STRUCT)
+            tok = "struct"
         case default
             ! Not reachable: build_table_schema skips every unsupported slot, and a resident
             ! column always has one of the 18 kinds above. gcov nonetheless credits the line with
@@ -327,6 +348,60 @@ contains
             tok = "" ! GCOVR_EXCL_LINE -- gcov attribution artifact
         end select
     end subroutine schema_type_token
+    !
+    !> The `list[<element>]`/`map[<value>]` MAML token for a container column.
+    !!
+    !! The payload token comes from the container's own payload `parquet_column`, put back through
+    !! `schema_type_token` -- so a `list<timestamp[us]>` inherits the temporal suffix rule with no
+    !! second copy of it. The recursion is exactly one level deep: a container payload is always a
+    !! scalar kind, because the reader refuses a nested container outright.
+    subroutine container_type_token(slot, tok)
+        type(parquet_table_column), intent(in) :: slot        !! the descriptor to describe.
+        character(len=:), allocatable, intent(out) :: tok     !! the MAML data_type token.
+        type(parquet_table_column) :: payload
+        class(parquet_container_column), pointer :: c
+        character(len=:), allocatable :: inner
+        !
+        call parquet_column_container(slot%values, c)
+        ! A synthetic descriptor rather than a second token table: schema_type_token reads only
+        ! `declared_kind` and `time_unit`/`time_utc`, so handing it the payload's own values is
+        ! what makes the suffix rules apply unchanged.
+        call container_payload_descriptor(c, slot, payload)
+        call schema_type_token(payload, inner)
+        select case (slot%declared_kind)
+        case (PK_LIST)
+            tok = "list[" // inner // "]"
+        case default
+            tok = "map[" // inner // "]"
+        end select
+    end subroutine container_type_token
+    !
+    !> Builds a synthetic descriptor describing a container's PAYLOAD, so that `schema_type_token`
+    !! can be reused on it verbatim.
+    !!
+    !! `schema_type_token` reads exactly three fields -- `declared_kind`, `time_unit` and
+    !! `time_utc` -- so copying the temporal pair off the container's own descriptor and taking the
+    !! kind from the container is enough to make every suffix rule apply with no second copy of it.
+    !! The temporal pair is recorded at classification by `record_temporal_unit`, which asks about
+    !! the payload for a container column.
+    subroutine container_payload_descriptor(c, slot, payload)
+        class(parquet_container_column), intent(in) :: c      !! the container.
+        type(parquet_table_column), intent(in) :: slot        !! the container's own descriptor.
+        type(parquet_table_column), intent(out) :: payload    !! descriptor of its payload.
+        !
+        payload%time_unit = slot%time_unit
+        payload%time_utc = slot%time_utc
+        select type (c)
+        type is (parquet_list_column)
+            payload%declared_kind = c%element_kind()
+        type is (parquet_map_column)
+            payload%declared_kind = c%element_kind()
+        class default ! GCOVR_EXCL_START -- only a list or a map reaches container_type_token,
+            ! which is the only caller; a struct emits a bare `struct` token and never asks for a
+            ! payload kind, because it has several.
+            payload%declared_kind = PK_NONE
+        end select ! GCOVR_EXCL_STOP
+    end subroutine container_payload_descriptor
     !
     !> The `[unit]`/`[unit,utc]` suffix for a TIME/TIMESTAMP token, or "" when the column carries
     !! no recorded unit (an in-memory column) and the writer's default should stand.
@@ -588,6 +663,7 @@ contains
         type(parquet_time), pointer :: p_tm(:), p_tmv(:,:)
         type(parquet_timestamp), pointer :: p_ts(:), p_tsv(:,:)
         type(parquet_string_column), pointer :: p_str
+        class(parquet_container_column), pointer :: p_cont
         logical, allocatable :: valid(:), validv(:,:)
         character(len=:), allocatable :: sfx, kname, chr(:,:)
         !
@@ -660,6 +736,12 @@ contains
             case (PK_TIMESTAMP_VEC)
                 call col%data_ptr(p_tsv)
                 call parquet_write_column(writer, name, p_tsv)
+            case (PK_LIST, PK_MAP, PK_STRUCT)
+                ! No `is_valid=`, exactly as the temporal kinds take none: a container carries its
+                ! own per-row nullness inside itself, and adopt_container deliberately leaves the
+                ! surrounding parquet_column's bitmap unallocated so there is only one answer.
+                call parquet_column_container(col, p_cont)
+                call write_container_column(writer, name, p_cont)
             case default
                 ! Not reachable through the public API: by the time write_one_column runs, the
                 ! caller (parquet_write_table) has already rejected an unsupported slot and
@@ -672,6 +754,32 @@ contains
             end select
         end associate
     end subroutine write_one_column
+    !
+    !> Writes a container column through the `parquet_write_column` specific matching its concrete
+    !! type.
+    !!
+    !! The downcast is unavoidable and belongs here rather than at the call site: the three
+    !! `parquet_write_column` specifics take a `type(parquet_list_column)` / `type(parquet_map_column)`
+    !! / `type(parquet_struct_column)`, so a generic reference needs the concrete type to resolve.
+    subroutine write_container_column(writer, name, c)
+        type(parquet_writer), intent(inout) :: writer            !! open writer.
+        character(len=*), intent(in) :: name                     !! the column's internal name.
+        class(parquet_container_column), pointer, intent(in) :: c !! the container to write.
+        !
+        select type (c)
+        type is (parquet_list_column)
+            call parquet_write_column(writer, name, c)
+        type is (parquet_map_column)
+            call parquet_write_column(writer, name, c)
+        type is (parquet_struct_column)
+            call parquet_write_column(writer, name, c)
+        class default ! GCOVR_EXCL_START -- unreachable: adopt_container is the only writer of a
+            ! container kind and takes the kind FROM the container, so a PK_LIST/PK_MAP/PK_STRUCT
+            ! column always holds the matching concrete type.
+            error stop EP // "parquet_write_table: internal: unknown container type for column '" // &
+                trim(name) // "'"
+        end select ! GCOVR_EXCL_STOP
+    end subroutine write_container_column
     !
     !> Builds a per-row validity mask for a scalar column, or leaves `valid` UNALLOCATED when the
     !! column holds no nulls.

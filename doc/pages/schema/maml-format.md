@@ -144,7 +144,11 @@ Notes on the `fields:` entries:
   written rather than the declaration it outgrew.
   > Don't confuse `col_size` with `array_size` — despite the similar-sounding names, they're
   > unrelated: `col_size` is how many elements a vector column's row holds, `array_size` is how many
-  > characters a `string` column's values can hold.
+  > characters a `string` column's values can hold. And a **container** column (`list[...]`,
+  > `map[...]`, `struct`) declares NEITHER: both fix a width that is the same in every row, which
+  > is exactly the property a container does not have — its rows carry their own lengths. A
+  > schema-less `parquet_write_table` therefore emits a container column with no `col_size:` and no
+  > `array_size:` key at all, which is what tells a reader of the sidecar that the width is per-row.
 - Either can be declared `auto` instead of a number (`col_size: auto` / `array_size: auto`) when the
   value is only known to the calling Fortran code, not in advance in the MAML file itself — see
   [Deferring col_size/array_size until write time with

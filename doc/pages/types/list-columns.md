@@ -370,11 +370,21 @@ exceed that freely. Only two cases abort rather than being silently resized — 
 both are values the caller chose and neither should be silently overridden. A **single row** longer
 than the limit aborts too, since no row-group size can help: a row is never split across row groups.
 
+## In a `parquet_table`
+
+A table column can be a `parquet_list_column`. See
+[Container columns in a table](../tables/table.html) for the five accessors it gets
+(`%col`, `%get`, `%set`, `%add_column` and a handle's `%ref`), the two element-granular queries it
+declines, and how row-structural mutations carry it along.
+
+Open the file with `list_columns="container"` to have every variable-length `LIST` column
+classified as one, from the schema alone -- see
+[Opening a table](../tables/table-open.html).
+
 ## What this module does not do yet
 
 - **No nesting.** A list of lists, a list of structs and a list of maps are not available; the
   payload must be one of the nine scalar kinds. `STRUCT` columns have their own type — see
   [Struct columns with `parquet_struct_column`](struct-columns.html) — but a struct cannot be a
   list's payload and a list cannot be a struct's field. `MAP` is not available at all yet.
-- **No `parquet_table` integration.** A table cannot yet hold a list column.
 - **No `%append` between container columns**, and no `%paste` at all — see above.

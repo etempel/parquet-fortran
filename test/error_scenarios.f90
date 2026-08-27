@@ -1911,6 +1911,18 @@ program error_scenarios
         call scenario_table_cast_exact_precision()
     case ("table_cast_unsupported_column")
         call scenario_table_cast_unsupported_column()
+    case ("container_is_null_element")
+        call scenario_container_is_null_element()
+    case ("container_valid_mask_rank2")
+        call scenario_container_valid_mask_rank2()
+    case ("container_sort_key")
+        call scenario_container_sort_key()
+    case ("container_bad_list_columns")
+        call scenario_container_bad_list_columns()
+    case ("container_print_stat_lengths")
+        call scenario_container_print_stat_lengths()
+    case ("container_skipped_by_mutation")
+        call scenario_container_skipped_by_mutation()
     case ("table_clone_type_mismatch")
         call scenario_table_clone_type_mismatch()
     case ("table_row_string_kind_mismatch")
@@ -14050,7 +14062,7 @@ contains
         type(parquet_table) :: t
         integer(int32), allocatable :: v(:)
         call parquet_open_table(t, "test/fixtures/map_list_types.parquet")
-        call t%get("map_col", v)   ! a MAP column, unreadable -> aborts
+        call t%get("map_of_map", v)   ! a MAP OF MAPS: no readable value type -> aborts
         print '(a,i0)', "unexpectedly read an unsupported column, size=", size(v)
     end subroutine scenario_table_unsupported_column_read
 
@@ -14071,7 +14083,7 @@ contains
     subroutine scenario_table_prefetch_unsupported_column()
         type(parquet_table) :: t
         call parquet_open_table(t, "test/fixtures/map_list_types.parquet")
-        call t%prefetch("map_col")   ! a MAP column, unreadable -> aborts
+        call t%prefetch("map_of_map")   ! a MAP OF MAPS: no readable value type -> aborts
         print '(a)', "unexpectedly prefetched an unsupported column"
     end subroutine scenario_table_prefetch_unsupported_column
 
@@ -14206,7 +14218,7 @@ contains
         type(parquet_schema) :: s
         call parquet_open_table(t, "test/fixtures/map_list_types.parquet")
         call s%init("wunsupported")
-        call s%add_field("map_col", "int32")
+        call s%add_field("map_of_map", "int32")
         call parquet_write_table(t, "test_run/es_table_wunsupported_out.parquet", s)   ! -> aborts
         print '(a)', "unexpectedly wrote a table's unsupported column"
     end subroutine scenario_table_write_unsupported_column
@@ -14587,7 +14599,7 @@ contains
         integer(int32) :: v
         call parquet_open_table(t, "test/fixtures/map_list_types.parquet")
         r = t%row(1)
-        call r%get("map_col", v)   ! a MAP column, unreadable -> aborts
+        call r%get("map_of_map", v)   ! a MAP OF MAPS: no readable value type -> aborts
         print '(a,i0)', "unexpectedly read an unsupported column through a row handle, v=", v
     end subroutine scenario_table_row_unsupported_column
 
@@ -15554,7 +15566,7 @@ contains
     subroutine scenario_table_mutate_unsupported_column()
         type(parquet_table) :: t
         call parquet_open_table(t, "test/fixtures/map_list_types.parquet")
-        call t%sort_by(["map_col"])   ! a MAP column, unreadable -> aborts
+        call t%sort_by(["map_of_map"])   ! a MAP OF MAPS: no readable value type -> aborts
         print '(a,i0)', "unexpectedly sorted by an unsupported column, nrows=", t%nrows()
     end subroutine scenario_table_mutate_unsupported_column
 
@@ -16216,9 +16228,92 @@ contains
     subroutine scenario_table_cast_unsupported_column()
         type(parquet_table) :: t
         call parquet_open_table(t, "test/fixtures/map_list_types.parquet")
-        call t%cast("map_col", PK_FLOAT64)   ! -> aborts
+        call t%cast("map_of_map", PK_FLOAT64)   ! -> aborts
         print '(a,i0)', "unexpectedly cast an unsupported column, ncols=", t%ncols()
     end subroutine scenario_table_cast_unsupported_column
+
+    !> Element-granular nullness has no meaning on a container column: a row is a variable-length
+    !! object, not a fixed row of elements. The ROW form answers, and is asserted by
+    !! test/test_table_container.f90's test_container_row_validity -- which is this scenario's
+    !! negative control, and without it a guard that refused BOTH forms would pass here while
+    !! making a container column's nullness unaskable.
+    subroutine scenario_container_is_null_element()
+        type(parquet_table) :: t
+        logical :: v
+        call parquet_open_table(t, "test/fixtures/list_widths.parquet", list_columns="container")
+        call t%materialize_all()
+        v = t%is_null("ragged", 1_int64, 1_int64)   ! the ELEMENT form -> aborts
+        print '(a,l1)', "unexpectedly asked a container column about one element, v=", v
+    end subroutine scenario_container_is_null_element
+
+    !> The rank-2 `%get_valid_mask` is `(width, nrows)`, and a container column has no fixed width
+    !! for the first axis to have. The rank-1 form answers per ROW, which is the granularity a
+    !! container's nullness actually has; test_container_row_validity is the negative control.
+    subroutine scenario_container_valid_mask_rank2()
+        type(parquet_table) :: t
+        logical, allocatable :: mask(:,:)
+        call parquet_open_table(t, "test/fixtures/list_widths.parquet", list_columns="container")
+        call t%materialize_all()
+        call t%get_valid_mask("ragged", mask)   ! the rank-2 form -> aborts
+        print '(a,i0)', "unexpectedly built a rank-2 mask for a container column, size=", size(mask)
+    end subroutine scenario_container_valid_mask_rank2
+
+    !> There is no total order on a list, a map or a struct that this library could have chosen --
+    !! and the sort must keep reproducing arrow::compute::SortIndices, which has none for them
+    !! either. Sorting the same table by a SCALAR key works and carries the container along; that
+    !! is asserted by test_container_row_alignment, this scenario's negative control.
+    subroutine scenario_container_sort_key()
+        type(parquet_table) :: t
+        call parquet_open_table(t, "test/fixtures/list_widths.parquet", list_columns="container")
+        call t%materialize_all()
+        call t%sort_by(["ragged"])   ! a PK_LIST sort key -> aborts
+        print '(a,i0)', "unexpectedly sorted by a container column, nrows=", t%nrows()
+    end subroutine scenario_container_sort_key
+
+    !> `list_columns=` takes a token, so a mistyped one has to name what was expected rather than
+    !! merely say it was wrong -- and it is validated BEFORE the reader opens, so the abort happens
+    !! with no live Arrow object in scope.
+    subroutine scenario_container_bad_list_columns()
+        type(parquet_table) :: t
+        call parquet_open_table(t, "test/fixtures/list_widths.parquet", list_columns="containers")
+        print '(a,i0)', "unexpectedly opened a table with an unrecognized list_columns, ncols=", t%ncols()
+    end subroutine scenario_container_bad_list_columns
+
+    !> %print_stat's container arm, printed so its VALUES can be asserted.
+    !!
+    !! It is out of process because %print_stat writes to stdout and parquet_set_message_stream
+    !! takes "stdout"/"stderr" and no file, so nothing in process can capture it. Exits cleanly:
+    !! the assertion is on what it printed, not on an abort.
+    !!
+    !! `null_avg` is the discriminating column -- its present rows are all length 5 and four of its
+    !! rows are NULL, so a null counted as length zero would print a minimum of 0.
+    subroutine scenario_container_print_stat_lengths()
+        type(parquet_table) :: t
+        call parquet_open_table(t, "test/fixtures/list_widths.parquet", list_columns="container")
+        call t%materialize_all()
+        call t%print_stat()
+    end subroutine scenario_container_print_stat_lengths
+
+    !> A row-structural mutation SKIPS a column that is not resident -- container or not -- and the
+    !! detach guard is the only thing that reports it afterwards.
+    !!
+    !! This is feature_container_phase6.md's Q2, resolved to "skip, and let the detach guard catch
+    !! the read". The column is left RES_EMPTY, so it holds no storage that could be misaligned;
+    !! what makes that safe is that every value accessor routes through table_resolve, which runs
+    !! table_check_not_detached. An accessor written any other way would read the skipped column
+    !! instead of aborting, and this scenario is what would notice.
+    !!
+    !! Its negative control is test/test_table_container.f90's test_container_row_alignment, where
+    !! the same mutations run on a MATERIALIZED container column and every row stays aligned.
+    subroutine scenario_container_skipped_by_mutation()
+        type(parquet_table) :: t
+        type(parquet_list_column), pointer :: p
+        call parquet_open_table(t, "test/fixtures/list_widths.parquet", list_columns="container")
+        call t%prefetch("scalar")     ! the container column is deliberately left unread
+        call t%delete_rows([1_int64]) ! skips it, and detaches the table from its file
+        call t%col("ragged", p)       ! -> aborts rather than handing back a stale column
+        print '(a,i0)', "unexpectedly read a container column a mutation had skipped, nrows=", p%nrows()
+    end subroutine scenario_container_skipped_by_mutation
 
     !> Cloning into a different table type would silently produce a copy without the extended
     !! type's own accessors, so it is refused.

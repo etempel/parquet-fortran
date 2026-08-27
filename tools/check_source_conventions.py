@@ -444,6 +444,70 @@ def _column_bindings():
     return names
 
 
+def check_container_accessors_resolve():
+    """Every container-column accessor must route through `table_resolve` / `col_resolve`.
+
+    feature_container_phase6.md's D6. A row-structural mutation SKIPS a column that is not
+    resident, leaving it RES_EMPTY and the table detached from its file; the detach guard inside
+    `table_resolve` is the ONLY thing that then reports a read of it. An accessor written any other
+    way -- reaching `self%cache%cols(idx)` from a name it looked up itself -- would hand back the
+    skipped column instead of aborting, and every existing test would still pass, because the
+    column's row COUNT is not what is wrong with it.
+
+    Matched by shape rather than from a list of names: any `module procedure` in
+    `parquet_tables_container.f90` whose body mentions `self%cache%cols(` must also call one of the
+    two resolvers. The downcast helpers (`container_as_*`) touch no cache at all and are covered by
+    that same rule for free.
+
+    **`%add_column` is exempt, and that is a real distinction rather than a carve-out**: it CREATES
+    a slot (`table_new_slot`) instead of resolving an existing one, so there is no column for a
+    detach guard to be in front of. The exemption is keyed on the creation call actually being
+    there, so an `%add_column` specific that stopped creating and started reading would fail this
+    check rather than slip through it.
+
+    An empty derivation fails rather than passing vacuously, per this file's own "a static check
+    that enumerates names goes stale silently" rule.
+    """
+    problems = []
+    path = SRC / "parquet_tables_container.f90"
+    if not path.exists():
+        return ["src/parquet_tables_container.f90 is missing -- this check can no longer see the "
+                "container accessors and is passing vacuously"]
+    bodies = {}
+    current = None
+    for raw in path.read_text().split("\n"):
+        code = strip_comment(raw)
+        header = re.match(r"^\s*module\s+procedure\s+(\w+)\s*$", code, re.I)
+        if header:
+            current = header.group(1)
+            bodies[current] = []
+            continue
+        if re.match(r"^\s*end\s+procedure\b", code, re.I):
+            current = None
+            continue
+        if current:
+            bodies[current].append(code)
+    if not bodies:
+        problems.append("src/parquet_tables_container.f90: found no `module procedure` body -- "
+                        "this check can no longer see the accessors and is passing vacuously")
+    for name, lines in sorted(bodies.items()):
+        text = "\n".join(lines)
+        if "%cache%cols(" not in text:
+            continue
+        if re.search(r"\bcall\s+(table_resolve|col_resolve)\s*\(", text, re.I):
+            continue
+        if re.search(r"\bcall\s+table_new_slot\s*\(", text, re.I):
+            continue
+        problems.append(
+            "src/parquet_tables_container.f90: `%s` reaches `%%cache%%cols(...)` without going "
+            "through table_resolve/col_resolve. That is what puts table_check_not_detached in "
+            "front of the access -- without it, a container column a row mutation SKIPPED is read "
+            "rather than reported (feature_container_phase6.md D6). Nothing fails if this "
+            "regresses: the row count is still right." % name
+        )
+    return problems
+
+
 def check_no_type_bound_column_access():
     """feature_ifx.md -- no per-cell path may reach a `type(parquet_column)` through a binding.
 
@@ -3469,6 +3533,7 @@ CHECKS = (
     ("MAML block headers are matched case-insensitively", check_maml_keys_case_insensitive),
     ("table pointers are reached through %cache", check_pointers_go_through_cache),
     ("no per-cell path reaches a column through a binding", check_no_type_bound_column_access),
+    ("container accessors resolve through table_resolve", check_container_accessors_resolve),
     ("no path reaches a column's string store through a binding",
      check_no_type_bound_string_column_access),
     ("generated files carry their conventions", check_generated_file_conventions),

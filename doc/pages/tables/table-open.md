@@ -474,6 +474,56 @@ w = full%width("spec")            ! measured over every row group; nothing stays
 call parquet_open_table(part, "from_another_tool.parquet", lo, hi)
 ```
 
+### `list_columns=`: keep a `LIST` column as a list
+
+The measurement above is what an unqualified open does, and it is the right default for a file
+whose `LIST` columns really are uniform — the column arrives as an ordinary 2-D one and every
+existing accessor works on it. When that is not what you want, `list_columns=` says so at the open:
+
+```fortran
+call parquet_open_table(t, "from_another_tool.parquet", list_columns="container")
+```
+
+- **`"auto"`** — the default, and what every earlier release did. A `LIST` column whose rows all
+  hold the same number of elements becomes a vector column of that width; a ragged one is read one
+  row at a time. The width is measured, so it depends on the data and on which rows the table
+  covers.
+- **`"container"`** — every `LIST` column becomes a
+  [`parquet_list_column`](../types/list-columns.html), decided from the schema alone. Nothing is
+  measured, nothing is data-dependent, and no `%kind` or `%width` call reads anything.
+
+**Choose `"container"` when the column is genuinely a list to your program**, or when you need two
+tables over one file to agree: under `"auto"` a slice covering a uniform stretch of a ragged file
+reports a vector column while the whole file reports a scalar one, and both are answering honestly
+about the rows they hold. It also removes the "`%kind` counts as a read" caveat above entirely.
+
+It governs the plain-`LIST` case and nothing else. A `fixed_size_list` column — which is what every
+column this library writes is — carries its width in the schema and is a vector column under both
+tokens, so turning `"container"` on cannot reshape your own files.
+
+### Map columns
+
+A `MAP` column becomes a [`parquet_map_column`](../types/map-columns.html), with no argument needed
+and nothing measured: a map is a container in the file's schema, so there is no width to discover
+and no policy to choose. Its keys must be strings and its values one of the
+[nine element types](../types/supported-data-types.html); a map that fails either test is reported
+as an unreadable column, exactly like any other type this library cannot read, and does not stop the
+file opening.
+
+```fortran
+call parquet_open_table(t, "with_maps.parquet")
+if (t%kind("tags") == PK_MAP) then
+    call t%col("tags", m)                      ! m is a type(parquet_map_column), pointer
+    print *, m%length(1_int64), " entries in row 1"
+end if
+```
+
+A `STRUCT` column is different again, and the difference is in the file's own addressing rather
+than here: a table lists a struct's LEAVES under their dotted paths
+(`nested.vals`, and see below), never the struct itself, so a table opened from a file never holds
+a `parquet_struct_column`. Build one with
+[`%add_column`](table-mutate.html) when you want a struct column in a table.
+
 ### Nested struct columns
 
 A struct field's leaves are addressable by their dotted paths, exactly as in

@@ -10389,6 +10389,23 @@ static std::shared_ptr<arrow::DataType> resolve_temporal_value_type(ParquetReade
 	{
 		return std::static_pointer_cast<arrow::FixedSizeListType>(type)->value_type();
 	}
+	// A CONTAINER column reports its PAYLOAD's unit, for the same reason a vector column does: the
+	// unit is a property of the values, and a list<timestamp[ns]> has exactly one of them. Without
+	// this the query ABORTED for such a column, which meant parquet_table could not record the
+	// resolution at classification -- and a list[timestamp[ns]] column read into a table and
+	// written back came out as the writer's default microseconds, silently.
+	//
+	// A MAP reports its VALUE type's unit; its keys are always strings and have none. A map whose
+	// value type is not temporal falls through to the caller's own "not a time/timestamp column"
+	// abort exactly as before, because map_value_type returns the value type unchanged.
+	if (type->id() == arrow::Type::LIST || type->id() == arrow::Type::LARGE_LIST)
+	{
+		return type->field(0)->type();
+	}
+	if (type->id() == arrow::Type::MAP)
+	{
+		return std::static_pointer_cast<arrow::MapType>(type)->item_type();
+	}
 	return type;
 }
 
@@ -12020,6 +12037,46 @@ extern "C"
 	// report it. There is no "unknown" key kind for a map to hold, so a clean refusal naming the
 	// actual key type is the only truthful answer -- the same one an unsupported LIST element type
 	// gets.
+
+	// Writes `name`'s map VALUE type token into `buf` (space-padded to buf_len) and returns 1, if
+	// `name` is a map column this library can actually read; otherwise writes "unknown" and
+	// returns 0. Schema-only: reads no column data at all.
+	//
+	// This exists because parquet_reader_get_column_type_name deliberately does NOT unwrap a map --
+	// it answers "unknown" for one, which is the right answer for a query whose contract is "what
+	// element type would I declare?", since a map cell is not one value. But parquet_open_table's
+	// classification pass has to decide, WITHOUT READING, whether a map column is readable at all,
+	// and the two things that make one unreadable both live in the schema: a non-string key, and a
+	// value type outside the nine families. Both are refused by parquet_read_map_column_shape
+	// below -- with report_fatal_error, on the read. Classifying such a column as supported would
+	// therefore turn one exotic map into an abort on first touch, which is precisely what
+	// table_classify's types= probe exists to prevent for every other unreadable type.
+	//
+	// "unknown" for a non-map is deliberate rather than an error, matching
+	// parquet_reader_get_column_type_name's own contract: a caller that needs to tell "not a map"
+	// from "a map I cannot read" asks parquet_reader_get_column_shape_name, and the pairing of the
+	// two is what the Fortran doc-comment documents.
+	int64_t parquet_reader_get_map_value_type_name(void *handle, const char *name, char *buf, int64_t buf_len)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto resolved = resolve_struct_path(reader_handle->schema, name);
+		auto key_type = map_key_type(resolved.leaf_field);
+		auto value_type = map_value_type(resolved.leaf_field);
+		int32_t family = kElemFamilyNone;
+		// Both null exactly when the field is not a map at all; the key test is what rejects the
+		// int-keyed map that map_payloads.parquet carries for this purpose.
+		if (key_type && value_type && is_string_like_type(key_type->id()))
+		{
+			family = arrow_leaf_family(value_type);
+		}
+		if (family == kElemFamilyNone)
+		{
+			copy_string_with_padding(buf, buf_len, std::string("unknown"));
+			return 0;
+		}
+		copy_string_with_padding(buf, buf_len, std::string(elem_family_token(family)));
+		return 1;
+	}
 
 	// The FIRST crossing: everything Fortran needs in order to allocate its buffers and %init a
 	// parquet_map_column to the right value kind. Writes no data.

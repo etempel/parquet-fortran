@@ -255,10 +255,19 @@ null row nor a null field value. That is the only way to declare a *streamed* st
 null-free, because a struct column carries its null state inside itself and there is no mask whose
 presence could stand in for "might this contain a Null?".
 
+## In a `parquet_table`
+
+A table column can be a `parquet_struct_column`. See
+[Container columns in a table](../tables/table.html) for the five accessors it gets
+(`%col`, `%get`, `%set`, `%add_column` and a handle's `%ref`), the two element-granular queries it
+declines, and how row-structural mutations carry it along.
+
+Build it with `%add_column` rather than expecting one from a file: a table lists a struct's
+LEAVES under their dotted paths and never the struct itself, so an opened table never holds one.
+
 ## What this module does not do yet
 
 - **No nesting.** A field must be one of the nine scalar kinds; a struct of structs, a struct of
   lists and a struct of maps are not available. The dotted-path reader still reaches any of those
   as flat leaf columns.
-- **No `parquet_table` integration.** A table cannot yet hold a struct column.
 - **No `MAP` container** at all yet.

@@ -1619,6 +1619,20 @@ contains
             int(len(buf), kind=c_long_long))
         shape = trim(buf)
     end procedure parquet_get_column_shape
+    module procedure parquet_get_map_value_type
+        character(len=16) :: buf
+        integer(c_long_long) :: recognized
+
+        call check_reader_open(reader, "parquet_get_map_value_type")
+        ! Same contract as its two siblings: a name that does not exist is a caller mistake and
+        ! aborts, while a column this library cannot read is the ANSWER "unknown". `recognized` is
+        ! deliberately unused beyond documenting that the C++ side has already written the token --
+        ! there is nothing for a second channel to say that the token does not.
+        call check_column_exists(reader, name, "parquet_get_map_value_type")
+        recognized = parquet_reader_get_map_value_type_name(reader%handle, trim(name)//char(0), buf, &
+            int(len(buf), kind=c_long_long))
+        type_name = trim(buf)
+    end procedure parquet_get_map_value_type
     module procedure parquet_get_column_nullable
         call check_reader_open(reader, "parquet_get_column_nullable")
         ! Same rule as parquet_get_column_type: a missing name is a caller mistake and aborts,

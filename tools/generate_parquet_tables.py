@@ -214,9 +214,17 @@ module parquet_tables
     use parquet_columns
     use parquet_strings, only : parquet_string_column
     use parquet_temporal, only : parquet_date, parquet_time, parquet_timestamp
+    ! The three container element types. They cost this module's compile footprint NOTHING -- all
+    ! three are already in it through parquet_core, which imports them for the reader and writer --
+    ! so this is a namespace import, not a new dependency (tools/check_module_footprints.sh is the
+    ! check that keeps that true).
+    use parquet_list, only : parquet_list_column
+    use parquet_map, only : parquet_map_column
+    use parquet_struct, only : parquet_struct_column
     use parquet_core, only : parquet_reader, parquet_writer, parquet_schema, &
         parquet_open_reader, parquet_close_reader, parquet_get_nrows, parquet_get_col_size, &
         parquet_get_column_names, parquet_get_column_type, parquet_column_exists, &
+        parquet_get_column_shape, parquet_get_map_value_type, &
         parquet_release_column, parquet_read_column, parquet_get_string_length, &
         parquet_get_num_row_groups, parquet_get_chunk_size, parquet_read_column_chunk, &
         parquet_open_writer, parquet_write_column, parquet_close_writer, parquet_write_row_mask, &
@@ -301,6 +309,23 @@ module parquet_tables
     !! table takes or reports counts those survivors -- row 1 is the first surviving row, not file
     !! row `row_lo`. Without a filter and without `sample_fraction=` nothing changes: the slice is
     !! trimmed out of the covering row groups in memory, exactly as it always was.
+    !!
+    !! **`list_columns=` decides what a variable-length `LIST` column becomes**, and it takes a
+    !! token rather than a logical so a third policy can be added later without a second argument:
+    !!
+    !! - `"auto"` (the default, and what every earlier release did) measures the column. A `LIST`
+    !!   whose rows all happen to hold the same number of elements becomes an ordinary VECTOR
+    !!   column of that width; a ragged one becomes a `parquet_list_column`. The measurement is
+    !!   over the rows the table covers, so **a slice and the whole file can legitimately disagree**
+    !!   about the same column -- a file that is ragged overall may be uniform inside one slice.
+    !! - `"container"` makes every `LIST` column a `parquet_list_column`, from the schema alone,
+    !!   with nothing measured and nothing data-dependent. That is what a program wants when it is
+    !!   going to treat the column as a list whatever the data happens to look like, and it is the
+    !!   only way to be sure two tables over one file agree.
+    !!
+    !! It governs the plain-`LIST` case and nothing else: a `FIXED_SIZE_LIST` column -- which is
+    !! what every column this library writes is -- carries its width in the schema and is a vector
+    !! column under both tokens.
     interface parquet_open_table
         module procedure open_table_full
         module procedure open_table_slice_i32
@@ -531,6 +556,19 @@ module parquet_tables
         !! what makes a `%clone`, a reopen and a per-thread reader all keep the same rows; before
         !! it existed, an unseeded clone redrew and silently held a different sample.
         integer(int64), allocatable :: read_sample_seed
+        !> How a variable-length `LIST` column is classified: `"auto"` (the default) or
+        !! `"container"`. Settled once at open from `parquet_open_table`'s `list_columns=`
+        !! argument and never changed afterwards.
+        !!
+        !! **It is on the cache because every reader this table opens must agree with it.** `%clone`
+        !! reopens the file and the internally-parallel `%prefetch` opens a reader per thread; a
+        !! policy held anywhere else would let two readers over one table disagree about whether a
+        !! column is a `PK_LIST` or a `*_VEC`, which is `feature_risks.md` Risk-152's
+        !! whole-file-versus-slice disagreement reappearing INSIDE one table.
+        !!
+        !! Unallocated is read as `"auto"` everywhere, so a cache built by `parquet_new_table` --
+        !! which has no file and classifies nothing -- needs no initialiser and no special case.
+        character(len=:), allocatable :: list_columns
     end type parquet_table_cache
     !
     !> Which rows to pick out of a column: `1:`, `1:10`, `1:10:2` or an explicit list.
@@ -783,6 +821,8 @@ def gen_table_type():
         tag = k[0]
         w(f"        procedure, private :: col_ptr_{tag} !! %col specific for the {tag} kind.")
     w("        procedure, private :: col_ptr_strcol !! %col specific aliasing the compact string store.")
+    for tag, pk, ctype in CONTAINERS:
+        w(f"        procedure, private :: col_ptr_{tag}col !! %col specific aliasing a {pk} container.")
     w("        !> Points `p` at a column's storage: zero copy, writable, and the pointer kind must")
     w("        !! match the stored kind exactly (ask %kind first if you do not know it). A")
     w("        !! `parquet_string_column` pointer aliases a PK_STRING column's packed store: read")
@@ -795,19 +835,24 @@ def gen_table_type():
     w("        !! correspondence, and nothing detects it: the row count is unchanged and every later")
     w("        !! read returns values that are individually valid and jointly wrong. Use `%sort_by`,")
     w("        !! which reorders every column together.")
-    w("        generic :: col => " + wrap_list([f"col_ptr_{k[0]}" for k in PTR_KINDS] + ["col_ptr_strcol"], 12,
-                                                first_prefix=len("        generic :: col => ")))
+    w("        generic :: col => " + wrap_list(
+        [f"col_ptr_{k[0]}" for k in PTR_KINDS] + ["col_ptr_strcol"]
+        + [f"col_ptr_{c[0]}col" for c in CONTAINERS], 12,
+        first_prefix=len("        generic :: col => ")))
     # get
     w("        ! --- copy out (widens int32->int64, float32->float64) ---")
     for k in ARRAY_KINDS:
         tag = k[0]
         w(f"        procedure, private :: get_arr_{tag} !! %get specific for the {tag} kind.")
     w("        procedure, private :: get_arr_str  !! %get specific returning a parquet_string_column.")
+    for tag, pk, ctype in CONTAINERS:
+        w(f"        procedure, private :: get_arr_{tag}col !! %get specific returning a {ctype}.")
     w("        procedure, private :: get_arr_chr  !! %get specific returning a character array.")
     w("        procedure, private :: get_arr_chrv !! %get specific returning a character (elem, row) array.")
     w("        !> Copies a column into a freshly allocated array of the caller's own kind.")
     w("        generic :: get => " + wrap_list(
-        [f"get_arr_{k[0]}" for k in ARRAY_KINDS] + ["get_arr_str", "get_arr_chr", "get_arr_chrv"], 12,
+        [f"get_arr_{k[0]}" for k in ARRAY_KINDS] + ["get_arr_str", "get_arr_chr", "get_arr_chrv"]
+        + [f"get_arr_{c[0]}col" for c in CONTAINERS], 12,
         first_prefix=len("        generic :: get => ")))
     # set
     w("        ! --- copy back (same length, exact kind) ---")
@@ -818,8 +863,11 @@ def gen_table_type():
     w("        procedure, private :: set_arr_chrv !! %set specific taking a character (elem, row) array.")
     w("        !> Replaces every value of an existing column from an array of the same length.")
     w("        procedure, private :: set_arr_strcol !! %set specific taking a parquet_string_column.")
+    for tag, pk, ctype in CONTAINERS:
+        w(f"        procedure, private :: set_arr_{tag}col !! %set specific taking a {ctype}.")
     w("        generic :: set => " + wrap_list(
-        [f"set_arr_{k[0]}" for k in ARRAY_KINDS] + ["set_arr_chr", "set_arr_chrv", "set_arr_strcol"], 12,
+        [f"set_arr_{k[0]}" for k in ARRAY_KINDS] + ["set_arr_chr", "set_arr_chrv", "set_arr_strcol"]
+        + [f"set_arr_{c[0]}col" for c in CONTAINERS], 12,
         first_prefix=len("        generic :: set => ")))
     # add_column
     w("        ! --- from-scratch construction ---")
@@ -830,10 +878,13 @@ def gen_table_type():
     w("        procedure, private :: add_column_chrv !! %add_column specific taking a character (elem, row) array.")
     w("        !> Appends a new column, taking its values (and so its kind, width and row count).")
     w("        procedure, private :: add_column_strcol !! %add_column specific taking a parquet_string_column.")
+    for tag, pk, ctype in CONTAINERS:
+        w(f"        procedure, private :: add_column_{tag}col !! %add_column specific taking a {ctype}.")
     w("        procedure, private :: add_column_col  !! %add_column specific taking a whole parquet_column.")
     w("        generic :: add_column => " + wrap_list(
         [f"add_column_{k[0]}" for k in ARRAY_KINDS]
-        + ["add_column_chr", "add_column_chrv", "add_column_strcol", "add_column_col"], 12,
+        + ["add_column_chr", "add_column_chrv", "add_column_strcol", "add_column_col"]
+        + [f"add_column_{c[0]}col" for c in CONTAINERS], 12,
         first_prefix=len("        generic :: add_column => ")))
     # set_element + validity
     w("        ! --- mutation: one cell at a time (never changes the row set) ---")
@@ -1158,12 +1209,15 @@ def gen_row_type():
         tag = k[0]
         w(f"        procedure, private :: col_ref_{tag} !! %ref specific, {tag} storage.")
     w("        procedure, private :: col_ref_strcol !! %ref specific, the packed string store.")
+    for tag, pk, ctype in CONTAINERS:
+        w(f"        procedure, private :: col_ref_{tag}col !! %ref specific, a {pk} container.")
     w("        !> Points `p` at this column's live storage -- the `%col` pointer, without the name")
     w("        !! lookup. Same rules: the kind must match exactly (a pointer never widens), a write")
     w("        !! through `p` changes the table, and REORDERING one column through its pointer")
     w("        !! breaks the table's row alignment with nothing to report it.")
     w("        generic :: ref => " + wrap_list(
-        [f"col_ref_{k[0]}" for k in PTR_KINDS] + ["col_ref_strcol"], 12,
+        [f"col_ref_{k[0]}" for k in PTR_KINDS] + ["col_ref_strcol"]
+        + [f"col_ref_{c[0]}col" for c in CONTAINERS], 12,
         first_prefix=len("        generic :: ref => ")))
     w("""        procedure :: is_valid => col_is_valid   !! Whether the handle is attached AND still current.
         procedure :: index => col_index         !! This column's 1-based position in the table.
@@ -1221,7 +1275,7 @@ def gen_spec_interfaces():
         !! reader is opened. A MAML's own `extra: filter:`/`extra: sort:`/`fields: qc:` are in FILE
         !! names, because a read-in MAML describes the physical file and travels with it.
         module subroutine open_table_full(table, filename, maml, filter, sort, qc, qc_soft, use_threads, &
-                sample_fraction, sample_seed)
+                sample_fraction, sample_seed, list_columns)
             type(parquet_table), intent(out) :: table !! the table to fill.
             character(len=*), intent(in) :: filename  !! parquet file to open.
             character(len=*), intent(in), optional :: maml !! read-in (Role-B) MAML file describing `filename`.
@@ -1233,12 +1287,13 @@ def gen_spec_interfaces():
             real(real64), intent(in), optional :: sample_fraction !! keep each row with this probability.
             integer(int64), intent(in), optional :: sample_seed !! seed for that draw; omitted = nondeterministic.
             !! `integer(int64)` only, as everywhere in this library: a literal is `42_int64`.
+            character(len=*), intent(in), optional :: list_columns !! `"auto"` (default) or `"container"`.
         end subroutine open_table_full
         !> Slice-regime open, int32 row bounds -- see the `parquet_open_table` generic above, which
         !! also explains why there is no `sort` argument here and what `filter=`/`sample_fraction=`
         !! do to the slice's row count.
         module subroutine open_table_slice_i32(table, filename, row_lo, row_hi, maml, filter, qc, &
-                qc_soft, use_threads, sample_fraction, sample_seed)
+                qc_soft, use_threads, sample_fraction, sample_seed, list_columns)
             type(parquet_table), intent(out) :: table !! the table to fill.
             character(len=*), intent(in) :: filename  !! parquet file to open.
             integer(int32), intent(in) :: row_lo      !! first file row to cover (1-based).
@@ -1251,10 +1306,11 @@ def gen_spec_interfaces():
             real(real64), intent(in), optional :: sample_fraction !! keep each row with this probability.
             integer(int64), intent(in), optional :: sample_seed !! seed for that draw; omitted = nondeterministic.
             !! `integer(int64)` only, as everywhere in this library: a literal is `42_int64`.
+            character(len=*), intent(in), optional :: list_columns !! `"auto"` (default) or `"container"`.
         end subroutine open_table_slice_i32
         !> Slice-regime open, int64 row bounds -- see the `parquet_open_table` generic above.
         module subroutine open_table_slice_i64(table, filename, row_lo, row_hi, maml, filter, qc, &
-                qc_soft, use_threads, sample_fraction, sample_seed)
+                qc_soft, use_threads, sample_fraction, sample_seed, list_columns)
             type(parquet_table), intent(out) :: table !! the table to fill.
             character(len=*), intent(in) :: filename  !! parquet file to open.
             integer(int64), intent(in) :: row_lo      !! first file row to cover (1-based).
@@ -1267,6 +1323,7 @@ def gen_spec_interfaces():
             real(real64), intent(in), optional :: sample_fraction !! keep each row with this probability.
             integer(int64), intent(in), optional :: sample_seed !! seed for that draw; omitted = nondeterministic.
             !! `integer(int64)` only, as everywhere in this library: a literal is `42_int64`.
+            character(len=*), intent(in), optional :: list_columns !! `"auto"` (default) or `"container"`.
         end subroutine open_table_slice_i64
         !> Opens a reader on `filename` with whatever read-time transform the table carries in its
         !! `read_*` components already attached -- `cache%reader` itself, or, when `rdr` is given,
@@ -2867,6 +2924,11 @@ def gen_spec_interfaces():
     w(ref_str_iface())
     w("    end interface")
     w("    !")
+    w("    ! ---- Container column access (parquet_tables_container) ----")
+    w("    interface")
+    w(container_ifaces())
+    w("    end interface")
+    w("    !")
     w("    ! ---- Copy out (parquet_tables_access) ----")
     w("    interface")
     for k in ARRAY_KINDS:
@@ -3807,6 +3869,10 @@ def gen_spec_interfaces():
         w(mat_iface(k))
     for k in KINDS:
         w(matchunk_iface(k))
+    for c in READ_CONTAINERS:
+        w(mat_container_iface(c))
+    for c in READ_CONTAINERS:
+        w(matchunk_container_iface(c))
     w("""        !> Dispatches one file column's read to the specific matching `kind`.
         module subroutine table_materialize_kind(kind, reader, name, col, nrows, wdt, unit)
             integer, intent(in) :: kind                  !! PK_* discriminator to read as.
@@ -4196,6 +4262,303 @@ def add_str_iface():
         end subroutine add_column_chrv"""
 
 
+# The three container column kinds, as (tag, PK_*, concrete type).
+#
+# Deliberately NOT rows of KINDS. A KINDS row carries an element declaration, a storage component
+# and a rank, and a container has none of the three: its storage is the concrete container object
+# itself, reached through parquet_column_container rather than through a typed array component. So
+# everything container-shaped is emitted from this table by its own helper, and no KINDS-driven
+# emitter has to grow a special case.
+CONTAINERS = [
+    ("list", "PK_LIST", "parquet_list_column"),
+    ("map", "PK_MAP", "parquet_map_column"),
+    ("struct", "PK_STRUCT", "parquet_struct_column"),
+]
+
+# The container kinds a FILE column can be classified as, in the order the dispatchers list them.
+#
+# `struct` is absent, and that is a property of the file format's own addressing rather than a gap
+# here: parquet_get_column_names EXPANDS a top-level struct into one dotted path per leaf, so a
+# struct column is never enumerated under its own name and table_classify never sees one. A
+# PK_STRUCT column therefore only ever exists in memory -- built with %add_column or %set -- and is
+# already RES_FULL, so no materializer could run for it. Adding one would be dead code; see the
+# case default arms in gen_dispatch, which say so where a reader would look.
+READ_CONTAINERS = [c for c in CONTAINERS if c[0] != "struct"]
+
+
+def mat_container_iface(c):
+    tag, pk, ctype = c
+    return f"""        !> Reads a {pk} file column into `col`, carrying its row nulls across.
+        module subroutine mat_{tag}(reader, name, col, nrows, wdt, unit)
+            type(parquet_reader), intent(in) :: reader   !! open reader.
+            character(len=*), intent(in) :: name         !! file column name.
+            type(parquet_column), intent(inout) :: col   !! value store to fill.
+            integer(int64), intent(in) :: nrows          !! rows the column holds (unused: the
+            !! container reports its own row count, and adopt_container takes it from there).
+            integer(int32), intent(in) :: wdt            !! values per row (unused: a container row
+            !! has no fixed width -- that is what makes it a container).
+            character(len=*), intent(in) :: unit         !! unit string (unused: a container's unit
+            !! belongs to its payload column, which the reader has already set).
+        end subroutine mat_{tag}"""
+
+
+def matchunk_container_iface(c):
+    tag, pk, ctype = c
+    return f"""        !> Reads one row group of a {pk} file column into `col`.
+        module subroutine matchunk_{tag}(reader, name, rg, col, nrows, wdt, unit)
+            type(parquet_reader), intent(in) :: reader   !! open reader.
+            character(len=*), intent(in) :: name         !! file column name.
+            integer(int64), intent(in) :: rg             !! 1-based row group.
+            type(parquet_column), intent(inout) :: col   !! value store to fill.
+            integer(int64), intent(in) :: nrows          !! rows in that row group (unused, as in mat_{tag}).
+            integer(int32), intent(in) :: wdt            !! values per row (unused, as in mat_{tag}).
+            character(len=*), intent(in) :: unit         !! unit string (unused, as in mat_{tag}).
+        end subroutine matchunk_{tag}"""
+
+
+def mat_container_impl(c):
+    tag, pk, ctype = c
+    return f"""    module procedure mat_{tag}
+        class(parquet_container_column), allocatable :: tmp
+        !
+        ! Allocated as the ABSTRACT class holding a {ctype}, rather than read into a concrete
+        ! local and copied into a box afterwards: adopt_container MOVES what it is given, so this
+        ! shape hands the reader's own allocation straight to the column with no second live copy
+        ! of the payload. `allocate(box, source=concrete)` would deep-copy the whole column.
+        allocate({ctype} :: tmp)
+        select type (dest => tmp)
+        type is ({ctype})
+            call parquet_read_column(reader, name, dest)
+        end select
+        ! nrows/wdt/unit are deliberately unread here -- see this procedure's interface.
+        call col%adopt_container(tmp)
+    end procedure mat_{tag}
+    !"""
+
+
+def matchunk_container_impl(c):
+    tag, pk, ctype = c
+    return f"""    module procedure matchunk_{tag}
+        class(parquet_container_column), allocatable :: tmp
+        !
+        allocate({ctype} :: tmp)
+        select type (dest => tmp)
+        type is ({ctype})
+            call parquet_read_column_chunk(reader, name, rg, dest)
+        end select
+        call col%adopt_container(tmp)
+    end procedure matchunk_{tag}
+    !"""
+
+
+def container_ifaces():
+    """The fifteen container accessors' interfaces: %col, %get, %set, %add_column and %ref.
+
+    Exactly the five specifics `parquet_string_column` has, and no others. There is deliberately no
+    `%get_slice`/`%set_slice`, no `%get_element`/`%set_element` and no `%row%get`/`%set`: all three
+    address a fixed-width CELL, and a container row is a variable-length object with no such shape.
+    The packed string store declines the same three for the same reason.
+
+    NO `is_valid=` on any of them, matching the temporal kinds rather than the array kinds: a
+    container carries its own per-row nullness inside itself (`is_null_row`), so a second mask
+    beside it would be the divergent-second-answer `adopt_container` exists to prevent. `%get`'s
+    caller reads nullness off the returned container; `%get_valid_mask` still answers rank-1 for a
+    container column, which is the table-level way to ask.
+    """
+    o = []
+    for tag, pk, ctype in CONTAINERS:
+        o.append(f"""        !> Points `p` at a {pk} column's live container.
+        !!
+        !! The container counterpart of `%col`'s typed pointers, and it carries their warning: `p`
+        !! aliases the LIVE column, a write through it changes the table, and nothing revalidates
+        !! the result. It is also subject to the same detach rule as every other `%col` pointer --
+        !! any row-structural mutation (`%sort_by`, `%filter_rows`, `%delete_rows`, `%truncate`,
+        !! `%append`) rebuilds the storage and leaves `p` dangling; `%generation()` is how a caller
+        !! finds out.
+        !!
+        !! Changing how many ROWS the container holds through this pointer is not supported: the
+        !! table keeps its own row count, which would stop matching.
+        module subroutine col_ptr_{tag}col(self, name, p, found)
+            class(parquet_table), intent(in), target :: self       !! the table.
+            character(len=*), intent(in) :: name                   !! column name.
+            type({ctype}), pointer, intent(out) :: p               !! alias to the live container.
+            logical, intent(out), optional :: found                !! present: report a miss instead of aborting.
+        end subroutine col_ptr_{tag}col""")
+    for tag, pk, ctype in CONTAINERS:
+        o.append(f"""        !> Copies a {pk} column out as an independent `{ctype}`.
+        !!
+        !! A genuine copy, exactly as every other `%get` is: `arr` shares no storage with the table
+        !! and outlives any mutation. `%col` is the zero-copy route.
+        module subroutine get_arr_{tag}col(self, name, arr, found)
+            class(parquet_table), intent(in) :: self        !! the table.
+            character(len=*), intent(in) :: name            !! column name.
+            type({ctype}), intent(out) :: arr               !! independent copy of the column.
+            logical, intent(out), optional :: found         !! present: report a miss instead of aborting.
+        end subroutine get_arr_{tag}col""")
+    for tag, pk, ctype in CONTAINERS:
+        o.append(f"""        !> Replaces a {pk} column's values with an independent copy of `arr`.
+        !!
+        !! The row count must already match -- `%set` never changes a table's shape. Row nullness
+        !! comes across with the container, since that is where a container's nullness lives; there
+        !! is no `is_valid=` and no `modify_nulls=` for the same reason.
+        module subroutine set_arr_{tag}col(self, name, arr, found)
+            class(parquet_table), intent(inout) :: self     !! the table.
+            character(len=*), intent(in) :: name            !! column name.
+            type({ctype}), intent(in) :: arr                !! values to copy in.
+            logical, intent(out), optional :: found         !! present: report a miss instead of aborting.
+        end subroutine set_arr_{tag}col""")
+    for tag, pk, ctype in CONTAINERS:
+        o.append(f"""        !> Appends a new {pk} column holding an independent copy of `values`.
+        !!
+        !! No `unit=`: a container's unit belongs to its PAYLOAD column, which the container itself
+        !! already carries, so a second one on the outer column could only disagree with it.
+        module subroutine add_column_{tag}col(self, name, values, force)
+            class(parquet_table), intent(inout) :: self     !! the table.
+            character(len=*), intent(in) :: name            !! the new column's name.
+            type({ctype}), intent(in) :: values             !! values to copy in.
+            logical, intent(in), optional :: force          !! .true. replaces an existing same-named column.
+        end subroutine add_column_{tag}col""")
+    for tag, pk, ctype in CONTAINERS:
+        o.append(f"""        !> Points `p` at a {pk} column's live container, from an already-resolved handle.
+        !!
+        !! The handle twin of `%col`'s container form, carrying its warnings verbatim.
+        module subroutine col_ref_{tag}col(self, p)
+            class(parquet_table_col), intent(in) :: self    !! the handle.
+            type({ctype}), pointer, intent(out) :: p        !! alias to the live container.
+        end subroutine col_ref_{tag}col""")
+    return "\n".join(o)
+
+
+def container_impls():
+    """The fifteen container accessors' bodies.
+
+    Every one of them resolves through `table_resolve` (or `col_resolve` for the handle form), and
+    that is not a stylistic choice: it is what puts `table_check_not_detached` and the append guard
+    in front of the access. A row-structural mutation SKIPS a column that is not resident, leaving
+    it unreadable for good, and the detach guard is the only thing that reports it -- so a specific
+    written any other way would silently read a skipped container column instead of aborting.
+    See feature_container_phase6.md's D6.
+    """
+    o = []
+    for tag, pk, ctype in CONTAINERS:
+        o.append(f"""    module procedure col_ptr_{tag}col
+        integer :: idx
+        class(parquet_container_column), pointer :: c
+        !
+        nullify(p)
+        call table_resolve(self, name, "col", idx, found)
+        if (idx == 0) return
+        call table_require_kind(self, idx, {pk}, "col")
+        call parquet_column_container(self%cache%cols(idx)%values, c)
+        call container_as_{tag}(c, p)
+    end procedure col_ptr_{tag}col
+    !""")
+    for tag, pk, ctype in CONTAINERS:
+        o.append(f"""    module procedure get_arr_{tag}col
+        integer :: idx
+        class(parquet_container_column), pointer :: c
+        type({ctype}), pointer :: src
+        class(parquet_container_column), allocatable :: copy
+        !
+        call table_resolve(self, name, "get", idx, found)
+        if (idx == 0) return
+        call table_require_kind(self, idx, {pk}, "get")
+        call parquet_column_container(self%cache%cols(idx)%values, c)
+        call container_as_{tag}(c, src)
+        ! clone_into rather than a component-wise copy: it is the container's own deep copy, so a
+        ! future component is carried across without this file having to learn about it.
+        call src%clone_into(copy)
+        select type (copy)
+        type is ({ctype})
+            call arr%move_from(copy)
+        end select
+    end procedure get_arr_{tag}col
+    !""")
+    for tag, pk, ctype in CONTAINERS:
+        o.append(f"""    module procedure set_arr_{tag}col
+        integer :: idx
+        class(parquet_container_column), allocatable :: copy
+        !
+        call table_resolve(self, name, "set", idx, found, writing=.true.)
+        if (idx == 0) return
+        call table_require_kind(self, idx, {pk}, "set")
+        call table_require_length(self, idx, arr%nrows(), "set")
+        ! An independent copy, then adopt_container MOVES it in -- so the caller's own container
+        ! and the table's never share storage, and no second live copy of the payload survives the
+        ! call. %set is a value replacement, not a way to hand ownership over.
+        call arr%clone_into(copy)
+        call self%cache%cols(idx)%values%adopt_container(copy)
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure set_arr_{tag}col
+    !""")
+    for tag, pk, ctype in CONTAINERS:
+        o.append(f"""    module procedure add_column_{tag}col
+        integer :: idx
+        class(parquet_container_column), allocatable :: copy
+        !
+        call table_check_open(self, "add_column")
+        call table_fix_nrows(self, name, values%nrows())
+        call table_new_slot(self, name, force, idx)
+        call values%clone_into(copy)
+        ! adopt_container is the ONLY writer of a container kind, and it settles the kind, the row
+        ! count and the width from the container itself -- so unlike every other %add_column form
+        ! there is no %init call here to keep in step with it.
+        call self%cache%cols(idx)%values%adopt_container(copy)
+        self%cache%cols(idx)%declared_kind = {pk}
+        self%cache%cols(idx)%width = 1
+        self%cache%cols(idx)%residency = RES_FULL
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure add_column_{tag}col
+    !""")
+    for tag, pk, ctype in CONTAINERS:
+        o.append(f"""    module procedure col_ref_{tag}col
+        class(parquet_container_column), pointer :: c
+        !
+        call col_resolve(self, "ref")
+        nullify(p)
+        call cache_require_kind(self%cache, self%slot, {pk}, "ref")
+        call parquet_column_container(self%cache%cols(self%slot)%values, c)
+        call container_as_{tag}(c, p)
+    end procedure col_ref_{tag}col
+    !""")
+    return "\n".join(o)
+
+
+def container_downcasts():
+    """One `select type` downcast per container type, shared by `%col` and `%ref`.
+
+    The downcast has to happen SOMEWHERE -- `parquet_column_container` hands back the abstract
+    class, and `%col` promises a concrete pointer (which is the whole point: a caller wants
+    `%length(i)`, not the eleven bindings the base declares). Doing it once per type here rather
+    than inline at each of the six call sites keeps the `class default` arm, and its reasoning,
+    in one place.
+    """
+    o = []
+    for tag, pk, ctype in CONTAINERS:
+        o.append(f"""    !> Downcasts an abstract container pointer to a `{ctype}`.
+    !!
+    !! Both callers run `table_require_kind`/`cache_require_kind` first, so by the time this is
+    !! reached the column's declared kind is already {pk} and `adopt_container` -- the only writer
+    !! of a container kind -- takes the kind FROM the container it is given. The two therefore
+    !! cannot disagree, which is what makes the `class default` arm below unreachable rather than
+    !! merely unlikely. It still aborts rather than leaving `p` null, because a null pointer that
+    !! a caller then dereferences is a worse failure than an abort naming the cause.
+    subroutine container_as_{tag}(c, p)
+        class(parquet_container_column), pointer, intent(in) :: c !! the abstract container.
+        type({ctype}), pointer, intent(out) :: p                  !! the same object, concretely typed.
+        !
+        nullify(p)
+        select type (c)
+        type is ({ctype})
+            p => c
+        class default ! GCOVR_EXCL_START -- unreachable, see this procedure's own doc-comment.
+            error stop EP // "internal: a {pk} column does not hold a {ctype}"
+        end select ! GCOVR_EXCL_STOP
+    end subroutine container_as_{tag}
+    !""")
+    return "\n".join(o)
+
+
 def mat_iface(k):
     tag, pk, decl, comp, rank, cat = k
     return f"""        !> Reads a {pk} file column into `col`, carrying its nulls across.
@@ -4389,11 +4752,22 @@ def gen_dispatch():
         tag, pk = k[0], k[1]
         w(f"        case ({pk})")
         w(f"            call mat_{tag}(reader, name, col, nrows, wdt, unit)")
+    for c in READ_CONTAINERS:
+        tag, pk = c[0], c[1]
+        w(f"        case ({pk})")
+        w(f"            call mat_{tag}(reader, name, col, nrows, wdt, unit)")
     w("""        case default
             ! table_classify only ever assigns a slot one of the supported PK_* kinds handled
             ! above (an unsupported column stays PK_NONE and is never routed to a materializer),
             ! so this branch guards an internal invariant with no path reachable through the
             ! public API -- there is no way to feed it a value that would actually take it.
+            !
+            ! PK_STRUCT is the one supported kind deliberately absent from the list above, and it
+            ! is unreachable here for a reason worth knowing before adding an arm: a struct column
+            ! is never CLASSIFIED, because parquet_get_column_names expands a top-level struct into
+            ! one dotted path per leaf and so never emits the struct's own name. A PK_STRUCT column
+            ! therefore only ever exists in memory (%add_column, %set), where it is RES_FULL from
+            ! birth and nothing materializes it.
             error stop EP // "internal: no materializer for this column kind" ! GCOVR_EXCL_LINE
         end select
     end procedure table_materialize_kind
@@ -4402,6 +4776,10 @@ def gen_dispatch():
         select case (kind)""")
     for k in KINDS:
         tag, pk = k[0], k[1]
+        w(f"        case ({pk})")
+        w(f"            call matchunk_{tag}(reader, name, rg, col, nrows, wdt, unit)")
+    for c in READ_CONTAINERS:
+        tag, pk = c[0], c[1]
         w(f"        case ({pk})")
         w(f"            call matchunk_{tag}(reader, name, rg, col, nrows, wdt, unit)")
     w("""        case default
@@ -5190,11 +5568,88 @@ def stat_dispatch():
         max_s = "-"
         select case (values%kindof())
 """ + "\n".join(arms) + """
+        case (PK_LIST, PK_MAP)
+            ! A list or a map has no min/max VALUE -- there is no order on a whole row -- so the
+            ! stat columns report the shortest and longest ROW instead, which is the one summary a
+            ! reader of a %print_stat table actually wants from a ragged column.
+            call stat_container_lengths(values, min_s, max_s)
         case default
-            ! PK_NONE, and the reserved container kinds: nothing to summarize.
+            ! PK_NONE, and PK_STRUCT: nothing to summarize. A struct's rows all carry the same
+            ! field count by construction, so a length extreme would print the same number twice.
             return
         end select
     end procedure table_column_stat_text
+    !
+    !> Shortest and longest ROW of a container column, excluding null rows.
+    !!
+    !! **Reads nothing.** The lengths come from the container's own offsets, which are resident
+    !! whenever the column is -- %print_stat's documented contract is that it leaves a lazy table
+    !! lazy, and a stat routine that triggered a read would break it silently (the table's own
+    !! %print_stat test is what asserts that, not this procedure).
+    !!
+    !! **A NULL row has no length and is excluded from both extremes**, rather than counted as
+    !! zero: a column of mostly nulls would otherwise report `min = 0` for rows that do not exist.
+    !! An all-null column reports "-" for both, exactly as an unsummarizable kind does. Note this
+    !! is a different question from a row of length zero, which is a real, present, empty list and
+    !! IS counted -- `test/fixtures/list_widths.parquet`'s `with_empty` column has both.
+    subroutine stat_container_lengths(values, min_s, max_s)
+        type(parquet_column), intent(in) :: values         !! the column to summarize.
+        character(len=:), allocatable, intent(out) :: min_s !! shortest present row, or "-".
+        character(len=:), allocatable, intent(out) :: max_s !! longest present row, or "-".
+        class(parquet_container_column), pointer :: c
+        integer(int64) :: k, n, lo, hi, len_k
+        logical :: seen
+        character(len=32) :: buf
+        !
+        min_s = "-"
+        max_s = "-"
+        call parquet_column_container(values, c)
+        if (.not. associated(c)) return
+        n = c%nrows()
+        seen = .false.
+        lo = 0_int64
+        hi = 0_int64
+        do k = 1_int64, n
+            if (c%is_null_row(k)) cycle
+            call container_row_length(c, k, len_k)
+            if (.not. seen) then
+                lo = len_k
+                hi = len_k
+                seen = .true.
+            else
+                lo = min(lo, len_k)
+                hi = max(hi, len_k)
+            end if
+        end do
+        if (.not. seen) return
+        write (buf, '(i0)') lo
+        min_s = trim(buf)
+        write (buf, '(i0)') hi
+        max_s = trim(buf)
+    end subroutine stat_container_lengths
+    !
+    !> The number of elements (list) or entries (map) in row `k` of a container.
+    !!
+    !! A `select type` rather than a twelfth deferred binding on the abstract base: a row length is
+    !! a display feature, and the base's bindings are the ones every structural operation needs.
+    !! Adding one there would oblige every future container type to implement it for a `%print_stat`
+    !! column -- see feature_container_phase6.md's Q4.
+    subroutine container_row_length(c, k, n)
+        class(parquet_container_column), intent(in) :: c !! the container.
+        integer(int64), intent(in) :: k                  !! 1-based row.
+        integer(int64), intent(out) :: n                 !! elements/entries in that row.
+        !
+        n = 0_int64
+        select type (c)
+        type is (parquet_list_column)
+            n = c%length(k)
+        type is (parquet_map_column)
+            n = c%length(k)
+        class default ! GCOVR_EXCL_START -- only PK_LIST and PK_MAP reach here; PK_STRUCT is
+            ! handled by table_column_stat_text's own case default above.
+            n = 0_int64
+        end select ! GCOVR_EXCL_STOP
+    end subroutine container_row_length
     !"""
 
 
@@ -5769,6 +6224,37 @@ contains
 # --------------------------------------------------------------------------------------
 # src/parquet_tables_addcol.f90
 # --------------------------------------------------------------------------------------
+def gen_container():
+    o = []
+    w = o.append
+    w(BANNER)
+    w("""!> Container-column access for `parquet_table`: the `%col`, `%get`, `%set`, `%add_column` and
+!! `%ref` specifics for a `parquet_list_column`, a `parquet_map_column` and a
+!! `parquet_struct_column`.
+!!
+!! **Five specifics per type, and deliberately no more.** They mirror exactly what
+!! `parquet_string_column` gets, and decline the same three families for the same reason:
+!! `%get_slice`/`%set_slice`, `%get_element`/`%set_element` and `%row%get`/`%set` all address a
+!! fixed-width CELL, and a container row is a variable-length object with no such shape. A caller
+!! that wants one row reaches the container through `%col` and asks it directly.
+!!
+!! **None of them takes an `is_valid=` mask**, matching the temporal kinds rather than the array
+!! kinds: a container holds its own per-row nullness (`is_null_row`), and `adopt_container`
+!! deliberately leaves the surrounding `parquet_column`'s own bitmap unallocated so that there is
+!! exactly one answer to "is row i null?". A mask argument here would be the second one.
+!! `%get_valid_mask` still answers for a container column, in its rank-1 form -- that is the
+!! table-level way to ask, and it reads through to the container.
+submodule (parquet_tables) parquet_tables_container
+    implicit none
+    !
+contains
+    !""")
+    w(container_downcasts())
+    w(container_impls())
+    w("end submodule parquet_tables_container ! GCOVR_EXCL_LINE")
+    return "\n".join(o) + "\n"
+
+
 def gen_addcol():
     o = []
     w = o.append
@@ -5863,6 +6349,10 @@ contains
         w(mat_impl(k))
     for k in KINDS:
         w(matchunk_impl(k))
+    for c in READ_CONTAINERS:
+        w(mat_container_impl(c))
+    for c in READ_CONTAINERS:
+        w(matchunk_container_impl(c))
     w(gen_dispatch())
     w("end submodule parquet_tables_materialize ! GCOVR_EXCL_LINE")
     return "\n".join(o) + "\n"
@@ -6079,6 +6569,7 @@ def main():
         root / "src" / "parquet_tables_colaccess.f90": gen_colaccess(),
         root / "src" / "parquet_tables_addcol.f90": gen_addcol(),
         root / "src" / "parquet_tables_materialize.f90": gen_materialize(),
+        root / "src" / "parquet_tables_container.f90": gen_container(),
     }
 
     # Guard the project's hard 132-column limit at generation time: a template edit that pushes

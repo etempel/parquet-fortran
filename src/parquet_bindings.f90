@@ -68,7 +68,7 @@ module parquet_bindings
     public :: parquet_reader_get_column_name, parquet_reader_release_column
     public :: parquet_reader_prefetch_columns, parquet_reader_prefetch_all_columns, parquet_reader_has_column
     public :: parquet_reader_get_column_type_name, parquet_reader_get_column_nullable
-    public :: parquet_reader_get_column_shape_name
+    public :: parquet_reader_get_column_shape_name, parquet_reader_get_map_value_type_name
     public :: parquet_writer_set_protected_column
     public :: c_reader_set_filter, parquet_reader_has_decoded_columns, parquet_reader_has_filter_clauses
     public :: parquet_reader_has_chunk_reads
@@ -2498,6 +2498,19 @@ module parquet_bindings
             character(kind=c_char) :: buf(*)
             integer(c_long_long), value :: buf_len
         end subroutine
+
+        !> Writes map column `name`'s VALUE type token into `buf` (space-padded to buf_len) and
+        !> returns 1, if `name` is a map column this library can read; otherwise writes "unknown"
+        !> and returns 0. Schema-only: reads no column data.
+        function parquet_reader_get_map_value_type_name(reader, name, buf, buf_len) result(recognized) &
+                bind(C, name="parquet_reader_get_map_value_type_name")
+            import
+            type(c_ptr), value :: reader
+            character(kind=c_char) :: name(*)
+            character(kind=c_char) :: buf(*)
+            integer(c_long_long), value :: buf_len
+            integer(c_long_long) :: recognized
+        end function
 
         !> Reads one row (`row_index`) of vector int32 column `name` from `reader` into `data`.
         subroutine parquet_read_int32_array_row(reader, name, row_index, data, col_size, valid_out) &

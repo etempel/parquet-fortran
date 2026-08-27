@@ -376,11 +376,88 @@ contains
             call stat_timev(values, min_s, max_s)
         case (PK_TIMESTAMP_VEC)
             call stat_tsv(values, min_s, max_s)
+        case (PK_LIST, PK_MAP)
+            ! A list or a map has no min/max VALUE -- there is no order on a whole row -- so the
+            ! stat columns report the shortest and longest ROW instead, which is the one summary a
+            ! reader of a %print_stat table actually wants from a ragged column.
+            call stat_container_lengths(values, min_s, max_s)
         case default
-            ! PK_NONE, and the reserved container kinds: nothing to summarize.
+            ! PK_NONE, and PK_STRUCT: nothing to summarize. A struct's rows all carry the same
+            ! field count by construction, so a length extreme would print the same number twice.
             return
         end select
     end procedure table_column_stat_text
+    !
+    !> Shortest and longest ROW of a container column, excluding null rows.
+    !!
+    !! **Reads nothing.** The lengths come from the container's own offsets, which are resident
+    !! whenever the column is -- %print_stat's documented contract is that it leaves a lazy table
+    !! lazy, and a stat routine that triggered a read would break it silently (the table's own
+    !! %print_stat test is what asserts that, not this procedure).
+    !!
+    !! **A NULL row has no length and is excluded from both extremes**, rather than counted as
+    !! zero: a column of mostly nulls would otherwise report `min = 0` for rows that do not exist.
+    !! An all-null column reports "-" for both, exactly as an unsummarizable kind does. Note this
+    !! is a different question from a row of length zero, which is a real, present, empty list and
+    !! IS counted -- `test/fixtures/list_widths.parquet`'s `with_empty` column has both.
+    subroutine stat_container_lengths(values, min_s, max_s)
+        type(parquet_column), intent(in) :: values         !! the column to summarize.
+        character(len=:), allocatable, intent(out) :: min_s !! shortest present row, or "-".
+        character(len=:), allocatable, intent(out) :: max_s !! longest present row, or "-".
+        class(parquet_container_column), pointer :: c
+        integer(int64) :: k, n, lo, hi, len_k
+        logical :: seen
+        character(len=32) :: buf
+        !
+        min_s = "-"
+        max_s = "-"
+        call parquet_column_container(values, c)
+        if (.not. associated(c)) return
+        n = c%nrows()
+        seen = .false.
+        lo = 0_int64
+        hi = 0_int64
+        do k = 1_int64, n
+            if (c%is_null_row(k)) cycle
+            call container_row_length(c, k, len_k)
+            if (.not. seen) then
+                lo = len_k
+                hi = len_k
+                seen = .true.
+            else
+                lo = min(lo, len_k)
+                hi = max(hi, len_k)
+            end if
+        end do
+        if (.not. seen) return
+        write (buf, '(i0)') lo
+        min_s = trim(buf)
+        write (buf, '(i0)') hi
+        max_s = trim(buf)
+    end subroutine stat_container_lengths
+    !
+    !> The number of elements (list) or entries (map) in row `k` of a container.
+    !!
+    !! A `select type` rather than a twelfth deferred binding on the abstract base: a row length is
+    !! a display feature, and the base's bindings are the ones every structural operation needs.
+    !! Adding one there would oblige every future container type to implement it for a `%print_stat`
+    !! column -- see feature_container_phase6.md's Q4.
+    subroutine container_row_length(c, k, n)
+        class(parquet_container_column), intent(in) :: c !! the container.
+        integer(int64), intent(in) :: k                  !! 1-based row.
+        integer(int64), intent(out) :: n                 !! elements/entries in that row.
+        !
+        n = 0_int64
+        select type (c)
+        type is (parquet_list_column)
+            n = c%length(k)
+        type is (parquet_map_column)
+            n = c%length(k)
+        class default ! GCOVR_EXCL_START -- only PK_LIST and PK_MAP reach here; PK_STRUCT is
+            ! handled by table_column_stat_text's own case default above.
+            n = 0_int64
+        end select ! GCOVR_EXCL_STOP
+    end subroutine container_row_length
     !
     !> PK_INT32: smallest and largest value, over the rows that hold one.
     subroutine stat_i32(values, min_s, max_s)

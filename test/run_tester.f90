@@ -41,6 +41,7 @@ program tester
     use test_table_parallel, only : collect_tests_table_parallel
     use test_string_parallel, only : collect_tests_string_parallel
     use test_table_codegen, only : collect_tests_table_codegen
+    use test_table_container, only : collect_tests_table_container
     use test_settings, only : collect_tests_parquet_settings
     use test_module_surface, only : collect_tests_module_surface
     use test_diagnostics, only : collect_tests_diagnostics
@@ -112,6 +113,7 @@ program tester
         new_testsuite("table_parallel", collect_tests_table_parallel), &
         new_testsuite("string_parallel", collect_tests_string_parallel), &
         new_testsuite("table_codegen", collect_tests_table_codegen), &
+        new_testsuite("table_container", collect_tests_table_container), &
         new_testsuite("settings", collect_tests_parquet_settings), &
         new_testsuite("module_surface", collect_tests_module_surface), &
         new_testsuite("diagnostics", collect_tests_diagnostics), &

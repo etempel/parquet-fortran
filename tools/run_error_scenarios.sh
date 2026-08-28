@@ -1155,6 +1155,16 @@ scenarios=(
     "spatial_sky_nside_zero:1"
     "spatial_rebuild_warning_on:0"
     "spatial_rebuild_warning_off:0"
+    "logging_unknown_layout_field:1"
+    "logging_second_console_sink:1"
+    "logging_too_many_sinks:1"
+    "logging_sink_and_name_together:1"
+    "logging_rank_filter_without_rank:1"
+    "logging_pop_context_token_mismatch:1"
+    "logging_unknown_level_name:1"
+    "logging_fatal:1"
+    "logging_write_to_closed_sink:1"
+    "logging_control:0"
 )
 
 # writer_guard_sequential_handoff is the negative control for the two racy

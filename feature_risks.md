@@ -232,6 +232,10 @@ something a reader is expected to have.
 | [Risk-164](#risk-164--the-healpix-sky-backend-must-ask-for-the-overlap-superset-and-the-word-that-says-so-is-a-default) | The HEALPix sky backend must ask for the OVERLAP superset, and the word that says so is a default | 4 — covered |
 | [Risk-165](#risk-165--two-sky-backends-must-share-one-tail-or-pairs_within_sky-emits-every-pair-twice) | Two sky backends must share one tail, or `%pairs_within_sky` emits every pair twice | 4 — covered |
 | [Risk-166](#risk-166--a-disc-outgrowing-the-walks-run-buffer-truncates-rather-than-aborting) | A disc outgrowing the walk's run buffer TRUNCATES rather than aborting | 4 — covered |
+| [Risk-167](#risk-167--a-thread-private-log-buffer-strands-every-workers-records-at-the-post-region-flush) | A thread-private log buffer STRANDS every worker's records at the post-region flush | 4 — covered |
+| [Risk-168](#risk-168--a-once-decision-that-is-not-taken-inside-the-write-lock-emits-a-once-only-record-twice) | A `once=` decision that is not taken inside the write lock emits a once-only record twice | 4 — covered |
+| [Risk-169](#risk-169--a-saturating-context-budget-must-drop-the-frames-text-and-never-its-depth) | A saturating context budget must drop the frame's TEXT and never its DEPTH | 4 — covered |
+| [Risk-170](#risk-170--a-write-to-a-log-sink-a-copy-has-closed-must-abort-not-go-nowhere) | A write to a log sink a copy has closed must ABORT, not go nowhere | 4 — covered |
 
 ---
 
@@ -6803,3 +6807,86 @@ what the whole arrangement rests on: if `pf_query_disc_runs` were ever changed t
 STORED rather than the number that exist — which is what `parquet_healpix` records internally, with
 a `-1` sentinel — this comparison would silently always be false. That is why the public form
 deliberately does not copy the internal one.
+
+### Risk-167 — A thread-private log buffer STRANDS every worker's records at the post-region flush
+
+`parquet_logging`'s buffered mode collects rendered records per thread and emits them when
+`%flush()` is called after the parallel region. The obvious implementation is an `!$omp
+threadprivate` buffer — and it cannot work: a `threadprivate` copy belongs to the thread that
+filled it and is unreachable from any other, so a `%flush()` running on the initial thread emits
+its own records and **silently strands every worker's**. The file is shorter than the run, nothing
+fails, and the missing lines are exactly the ones describing what the workers did.
+
+The shipped design is therefore a **shared collector**: one slot per thread, sized at
+`%set_thread_mode` time to `omp_get_max_threads()`, indexed by `omp_get_thread_num() + 1`, with only
+the owning thread ever appending to its own slot so an append still needs no lock. A thread number
+outside the sized range falls back to direct emission, never to a drop.
+
+**What this entry forbids** is reverting that to per-thread-private storage, which reads as the
+simpler and more obviously race-free design and is the one that loses output. It also forbids
+dropping the post-region `%flush()` from the guide's example, since without it the records are
+still in the collector when the program ends.
+
+**Test.** `test_buffered_mode_recovers_every_thread` (`test/test_logging.f90`) runs 40 iterations
+over a shared logger in buffered mode and asserts that **every** record is recovered by one
+post-region `%flush()` *and* that each thread's pair of records stays adjacent — the count catches
+the stranding, the adjacency catches a collector that has degenerated into direct emission. It
+skips without OpenMP, where both arms would hold for the wrong reason.
+
+### Risk-168 — A `once=` decision that is not taken inside the write lock emits a once-only record twice
+
+`once=`/`every=` consult a process-wide table. The lookup, the insert and the write are **one**
+decision taken inside the output critical section; split them for speed — test the table, leave the
+section, then write — and two threads arriving together both find the key absent and both emit. The
+result is a "once" record appearing two or three times, which nobody reads as a bug in the logger.
+
+The same applies to the key: it is the logger name, the level and the trimmed message text, and
+deliberately **not** the context, since deduplicating across contexts is the usual intent. Adding
+context to the key would silently turn `once=` into "once per tile".
+
+**Test.** `test_concurrent_once` (`test/test_logging.f90`) issues 200 concurrent `once=` calls from
+a parallel region and asserts exactly one line. It skips without OpenMP, where the table cannot be
+raced and the assertion would hold whether or not the decision is atomic.
+
+### Risk-169 — A saturating context budget must drop the frame's TEXT and never its DEPTH
+
+The per-thread context stack has two budgets: `PF_LOG_MAX_CONTEXT_DEPTH` frames and
+`PF_LOG_MAX_CONTEXT` rendered characters. Past either, the frame's **text** is dropped while the
+**depth accounting stays exact**. That asymmetry is the whole design: a later `pop` uses the depth
+to decide which frame to remove, so a depth that stopped counting would shift the stack and every
+subsequent record would be tagged with **another frame's context** — a plausible, wrong label rather
+than a missing one.
+
+This is the one place the module trades "never silently lose" for "never misattribute", and it is
+deliberate: a missing frame degrades a diagnostic, whereas a shifted stack lies about which unit of
+work a record came from. It warns once, through `machinery_warning`, which writes straight to
+`error_unit` and must never re-enter emission — see Risk-170's note on the lock.
+
+**What this entry forbids** is "simplifying" the push to stop incrementing the depth once the
+budget is reached, which looks like the same thing and is not.
+
+**Test.** `test_context_saturation_keeps_depth` (`test/test_logging.f90`) pushes three frames past
+the depth budget and asserts `pf_log_context_depth()` counts all of them, then pops exactly those
+three and asserts the rendered text is **identical** to what it was at the budget. Asserting the
+depth is the point: the rendered text alone cannot tell saturation from a shifted stack.
+
+### Risk-170 — A write to a log sink a copy has closed must ABORT, not go nowhere
+
+`pf_logger` is a copyable value type with no finalizer — that is what makes it safe in an OpenMP
+`firstprivate` clause — so two copies name the same unit, and `%close` on one closes the file the
+other is still writing to. **A value type cannot infer which copy is the owner**, so there is no
+ownership model to enforce; what there is instead is a loud failure. Every record's `write` carries
+`iostat`, and writing to a disconnected unit sets it, so the mistake aborts naming the path rather
+than silently discarding every later record.
+
+That `iostat` check looks like defensive boilerplate at the site and is the entire defence. Two
+adjacent rules go with it: `%close` `inquire`s first, so a second close from another copy is a
+harmless no-op rather than an error; and the failure policy is **split by sink kind** — a file or
+unit sink aborts, a console sink warns once and drops itself, because `./prog | head` closing
+standard output must not kill the program.
+
+**Test.** `logging_write_to_closed_sink` (`test/error_scenarios.f90`, with its wrapper in
+`test/test_errors.f90` and its entry in `tools/run_error_scenarios.sh`) copies a logger, writes
+through the copy while the unit is open, closes the original, and writes again — asserting the
+abort names the file. `logging_control` is the negative control for it and for every other
+`parquet_logging` refusal.

@@ -3,7 +3,7 @@ title: Choosing a module: what each entry module costs to import
 ---
 
 `use parquet` brings the whole library into scope and is the right answer for most programs. It is
-also the largest: a project that imports it compiles **87** of this library's Fortran files.
+also the largest: a project that imports it compiles **88** of this library's Fortran files.
 
 Every layer underneath is importable on its own, and several of them cost a great deal less. This
 page says what each entry module gives you, what it costs, and — the part that is easy to get wrong
@@ -52,11 +52,12 @@ in every one of them.
 | `parquet_list` | 11 | no | `parquet_list_column` / `parquet_list_row`: variable-length list storage |
 | `parquet_struct` | 11 | no | `parquet_struct_column` / `parquet_struct_row`: one value per declared field per row |
 | `parquet_map` | 11 | no | `parquet_map_column` / `parquet_map_row`: string-keyed `key -> value` entries per row |
+| `parquet_logging` | 1 | no | `pf_logger` and the `pf_log_*` procedures: leveled logging to several destinations at once, with a layout you choose and correct behaviour inside an OpenMP parallel region |
 | `parquet_sorting` | 21 | no | the whole sorting API, every element type, including `pf_sort_keys` |
 | `parquet_settings` | 3 | **yes** | the process-global knobs, and `parquet_get_arrow_version` |
 | `parquet_io` | 53 | **yes** | reading and writing Parquet files, and nothing else |
 | `parquet_tables` | 72 | **yes** | the `parquet_table` container |
-| `parquet` | 87 | **yes** | everything above, through one `use` |
+| `parquet` | 88 | **yes** | everything above, through one `use` |
 
 Four rows deserve a note.
 

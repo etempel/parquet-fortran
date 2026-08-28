@@ -17,10 +17,20 @@
 !>   * `parquet_strings` -- `parquet_string_column`/`parquet_string`.
 !>   * `parquet_temporal`-- `parquet_date`/`parquet_time`/`parquet_timestamp`
 !>                          and the `parquet_unit_*`/`parquet_ns_*` constants.
+!>   * `parquet_list`    -- `parquet_list_column`/`parquet_list_row`.
+!>   * `parquet_struct`  -- `parquet_struct_column`/`parquet_struct_row`.
+!>   * `parquet_map`     -- `parquet_map_column`/`parquet_map_row`.
 !>   * `parquet_sorting` -- `pf_sort`/`pf_argsort`/`pf_permute`/`pf_is_sorted`
 !>                          and the `pf_sort_keys` multi-key builder.
 !>   * `parquet_random` -- counter-based random numbers: `pf_random_at` and
 !>                          friends, reproducible under any OpenMP schedule.
+!>   * `parquet_sampling`-- permutations, subsets, resampling and weighted draws.
+!>   * `parquet_spatial` -- `pf_spatial_index`: neighbour and k-nearest search.
+!>   * `parquet_healpix` -- the HEALPix sphere pixelisation.
+!>   * `parquet_logging` -- `pf_logger` and the `pf_log_*` procedures: general
+!>                          logging for the calling program. Nothing in this
+!>                          library uses it; the library's own messages go
+!>                          through `parquet_settings`' verbosity and stream.
 !>   * `parquet_settings`-- process-global settings: thread caps, writer
 !>                          defaults, terminal verbosity and message stream,
 !>                          plus the read-only `parquet_max_*` limits.
@@ -55,6 +65,7 @@ module parquet
     use parquet_sampling
     use parquet_spatial
     use parquet_healpix
+    use parquet_logging
     ! Only the test hook: the transform itself and its contract check are internal.
     use parquet_expkey, only: parquet_debug_exp_key, parquet_debug_set_exp_key_contract
     use parquet_settings

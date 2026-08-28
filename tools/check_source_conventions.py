@@ -1071,6 +1071,13 @@ def check_settings_are_read():
 #: the two output settings silently do not apply to it.
 DIRECT_PRINT_ALLOWED = {
     "parquet_emit_info", "parquet_emit_warning", "parquet_emit_error_context",
+    # parquet_logging is a separate system with a separate audience: it carries the USER's
+    # program's output, not the library's, so it must NOT route through the emit channels --
+    # `verbosity` and `message_stream` govern what this library says, not what its caller says.
+    # `machinery_warning` is the one place it writes to a unit by name (every sink write goes to a
+    # unit held in a variable), and it reports a failure of the logging machinery itself, which is
+    # why it deliberately bypasses sinks, layout and the output critical section alike.
+    "machinery_warning",
     "parquet_print_settings", "print_one", "print_text",
     "table_print_stat", "schema_print_schema_info", "col_print", "psv_print",
 }
@@ -1660,6 +1667,59 @@ def check_parquet_version_stays_arrow_free():
     return _check_stays_arrow_free(
         "parquet_version",
         "Reporting a compile-time string must not require the Arrow stack.")
+
+
+def check_parquet_logging_stays_arrow_free():
+    """`use parquet_logging` must not reach parquet_bindings.
+
+    The module is a leaf on purpose: `iso_fortran_env`, and `omp_lib` under `#ifdef _OPENMP`. That
+    is what makes it one compiled Fortran file for a downstream project, and it is the property
+    most easily lost by reflex -- the obvious import to add is `parquet_settings`, for the output
+    knobs, which is exactly the edge that would drag in the C++ boundary. It does not need them:
+    every knob this module has belongs to a `pf_logger` object, not to the library.
+
+    One check per tier rather than one for the group, per the established pattern: no other checked
+    module imports `parquet_logging`, so nothing else would notice this tier acquiring an edge.
+    """
+    return _check_stays_arrow_free(
+        "parquet_logging",
+        "A logging module must not require the Arrow stack to print a line.")
+
+
+def check_facade_inventory_matches_its_use_lines():
+    """`src/parquet.f90`'s doc-comment inventory must name every module it bare-`use`s.
+
+    The facade's `!>` header lists the modules it re-exports. That is a list the code owns written
+    out in prose, and it had drifted by SIX modules -- parquet_list, parquet_struct, parquet_map,
+    parquet_sampling, parquet_spatial and parquet_healpix were all imported and none was listed --
+    before anyone noticed, which is exactly the failure this repository's own rules warn about.
+    Adding a seventh entry by hand does nothing to stop the eighth going missing; this does.
+
+    **One direction only, deliberately**, for the same reason the landing-page check is: a listed
+    module that the facade imports with `use ..., only:` is legitimate -- `parquet_maml_base` is
+    listed because the three types it re-exports really are user API -- and a both-directions rule
+    would fail on that deliberate entry. A check that fails on purpose gets switched off. What is
+    asserted is the direction that actually drifted: every module re-exported by a BARE `use` is
+    named, so a new sibling cannot be added to the facade and left out of the header.
+    """
+    path = SRC / "parquet.f90"
+    text = path.read_text()
+    body = text.split("module parquet", 1)
+    header = body[0]
+    used = []
+    for line in text.split("\n"):
+        m = re.match(r"^\s*use\s+(parquet_\w+)\s*$", line)
+        if m and m.group(1) != "parquet_bindings":
+            used.append(m.group(1))
+    listed = set(re.findall(r"^!>\s+\*\s+`(parquet_\w+)`", header, re.M))
+    problems = []
+    for mod in used:
+        if mod not in listed:
+            problems.append(
+                "src/parquet.f90: the module doc-comment's inventory does not mention `%s`, which "
+                "the facade re-exports with a bare `use`. A reader of that header is told it lists "
+                "every re-exported module." % mod)
+    return problems
 
 
 def check_get_version_has_one_home():
@@ -3659,6 +3719,9 @@ CHECKS = (
     ("parquet_version stays Arrow-free", check_parquet_version_stays_arrow_free),
     ("parquet_spatial stays Arrow-free", check_parquet_spatial_stays_arrow_free),
     ("parquet_healpix stays Arrow-free", check_parquet_healpix_stays_arrow_free),
+    ("parquet_logging stays Arrow-free", check_parquet_logging_stays_arrow_free),
+    ("the facade inventory names every re-exported module",
+     check_facade_inventory_matches_its_use_lines),
     ("parquet_get_version has exactly one home", check_get_version_has_one_home),
     ("parquet_random imports nothing from src/", check_parquet_random_stays_leaf),
     ("no submodule calls a sort-oracle procedure pointer",

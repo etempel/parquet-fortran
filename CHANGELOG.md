@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`parquet_logging`: general-purpose logging for the calling program.** A `pf_logger` type and a
+  matching set of `pf_log_*` procedures on a process-wide default logger: eight ascending severity
+  levels using Python's numbers (`PF_LEVEL_DEBUG` = 10, and an arbitrary integer level is accepted
+  too), several sinks at once — console, a file the logger opens, or a unit you own — each with its
+  own threshold, layout, colour policy, flush policy and rank filter. The line layout is a template
+  with named placeholders (`{stamp}`, `{level}`, `{name}`, `{thread}`, `{rank}`, `{context}`,
+  `{message}`, …) where `{field|sep}` emits its separator only when the field is non-empty; ISO-8601
+  timestamps and a monotonic `{elapsed}`. `%enabled` is one integer comparison, for guarding an
+  expensive message. From an OpenMP region: one shared logger, serialised writes, a per-thread
+  context stack (`pf_log_push_context`/`pf_log_pop_context`) over a shared base, `{thread}` in the
+  layout, and an opt-in buffered mode that keeps one thread's records contiguous. Also `once=` and
+  `every=` deduplication, per-name level overrides for turning down a library's noise, a
+  caller-supplied rank filter that adds no MPI dependency, `pf_str` for building messages by
+  concatenation, and `pf_log_configure_from_env`. It is a leaf — `use parquet_logging` compiles one
+  Fortran file — and it is **not** this library's own messaging, which stays with `verbosity` and
+  `message_stream`; nothing in the library uses it.
 - **`parquet_healpix`: the HEALPix sphere pixelisation.** Direction to pixel and back, from angles
   or from unit vectors (`pf_ang2pix_ring`/`pf_ang2pix_nest`, `pf_vec2pix_*`, `pf_pix2ang_*`,
   `pf_pix2vec_*`, `pf_ang2vec`/`pf_vec2ang`), conversion between the RING and NEST numbering

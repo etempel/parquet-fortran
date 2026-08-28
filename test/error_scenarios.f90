@@ -2177,6 +2177,26 @@ program error_scenarios
         call scenario_spatial_rebuild_warning(warn=.true.)
     case ("spatial_rebuild_warning_off")
         call scenario_spatial_rebuild_warning(warn=.false.)
+    case ("logging_unknown_layout_field")
+        call scenario_logging_unknown_layout_field()
+    case ("logging_second_console_sink")
+        call scenario_logging_second_console_sink()
+    case ("logging_too_many_sinks")
+        call scenario_logging_too_many_sinks()
+    case ("logging_sink_and_name_together")
+        call scenario_logging_sink_and_name_together()
+    case ("logging_rank_filter_without_rank")
+        call scenario_logging_rank_filter_without_rank()
+    case ("logging_pop_context_token_mismatch")
+        call scenario_logging_pop_context_token_mismatch()
+    case ("logging_unknown_level_name")
+        call scenario_logging_unknown_level_name()
+    case ("logging_fatal")
+        call scenario_logging_fatal()
+    case ("logging_write_to_closed_sink")
+        call scenario_logging_write_to_closed_sink()
+    case ("logging_control")
+        call scenario_logging_control()
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -19002,5 +19022,128 @@ contains
         call pf_vec2pix_ring_bulk(16_int64, vec, ipix)
         print '(a)', "unexpectedly accepted a vec array of the wrong shape"
     end subroutine scenario_healpix_bulk_vec_shape
+
+    !> A layout template naming a field that does not exist aborts at configuration time.
+    subroutine scenario_logging_unknown_layout_field()
+        type(pf_logger) :: lg
+
+        call lg%init(console=.false.)
+        call lg%add_file("test_run/es_log_badfield.txt", format="{stamp} {nosuchfield}")
+        print '(a)', "unexpectedly accepted a layout template naming an unknown field"
+    end subroutine scenario_logging_unknown_layout_field
+
+    !> A second console sink on the same stream would double every line, so it is refused.
+    subroutine scenario_logging_second_console_sink()
+        type(pf_logger) :: lg
+
+        call lg%init()
+        call lg%add_console(stream=PF_LOG_STDOUT)
+        print '(a)', "unexpectedly attached a second console sink on the same stream"
+    end subroutine scenario_logging_second_console_sink
+
+    !> Attaching more sinks than PF_LOG_MAX_SINKS aborts rather than silently dropping one.
+    subroutine scenario_logging_too_many_sinks()
+        type(pf_logger) :: lg
+        integer :: i
+        character(len=64) :: path
+
+        call lg%init(console=.false.)
+        do i = 1, PF_LOG_MAX_SINKS + 1
+            write (path, '("test_run/es_log_many_",i0,".txt")') i
+            call lg%add_file(trim(path))
+        end do
+        print '(a)', "unexpectedly attached more than PF_LOG_MAX_SINKS sinks"
+    end subroutine scenario_logging_too_many_sinks
+
+    !> set_level's two selectors have no combined meaning and are refused rather than guessed at.
+    subroutine scenario_logging_sink_and_name_together()
+        type(pf_logger) :: lg
+        integer :: s
+
+        call lg%init(console=.false.)
+        call lg%add_file("test_run/es_log_sel.txt", sink=s)
+        call lg%set_level(PF_LEVEL_ERROR, sink=s, name="a.b")
+        print '(a)', "unexpectedly accepted set_level with both sink= and name="
+    end subroutine scenario_logging_sink_and_name_together
+
+    !> A rank-filtered sink added before the logger has a rank would silently discard every
+    !> record, so it is refused at configuration time instead.
+    subroutine scenario_logging_rank_filter_without_rank()
+        type(pf_logger) :: lg
+
+        call lg%init(console=.false.)
+        call lg%add_file("test_run/es_log_rank.txt", only_rank=0)
+        print '(a)', "unexpectedly added a rank-filtered sink with no rank set"
+    end subroutine scenario_logging_rank_filter_without_rank
+
+    !> A pop whose frame token does not match the current depth means a push and a pop are
+    !> unbalanced somewhere, which would otherwise mislabel every later record on this thread.
+    subroutine scenario_logging_pop_context_token_mismatch()
+        integer :: frame
+
+        call pf_log_clear_context()
+        call pf_log_push_context("outer", frame)
+        call pf_log_push_context("inner")
+        call pf_log_pop_context(frame)
+        print '(a)', "unexpectedly accepted a pop_context token that did not match the depth"
+    end subroutine scenario_logging_pop_context_token_mismatch
+
+    !> Without the optional `ok`, an unrecognised level name aborts.
+    subroutine scenario_logging_unknown_level_name()
+        integer :: lev
+
+        call pf_log_level_from_name("verbose", lev)
+        print '(a,i0)', "unexpectedly converted an unknown level name: ", lev
+    end subroutine scenario_logging_unknown_level_name
+
+    !> pf_log_fatal emits at CRITICAL, flushes every sink, then error stops -- the flush before
+    !> the abort being the whole point, since an unflushed file loses the record explaining why.
+    subroutine scenario_logging_fatal()
+
+        call pf_log_init(console=.false.)
+        call pf_log_add_file("test_run/es_log_fatal.txt", append=.false., format="{message}")
+        call pf_log_fatal("the run cannot continue")
+        print '(a)', "unexpectedly returned from pf_log_fatal"
+    end subroutine scenario_logging_fatal
+
+    !> A logger is copyable -- that is what `firstprivate` does -- so two copies name the same
+    !> unit and closing one closes the file the other is still writing to. Ownership cannot be
+    !> inferred from a value type, so instead the misuse is made LOUD: the next write's `iostat`
+    !> catches it and aborts naming the path, rather than the records silently going nowhere.
+    subroutine scenario_logging_write_to_closed_sink()
+        type(pf_logger) :: a, b
+
+        call a%init(console=.false.)
+        call a%add_file("test_run/es_log_closed.txt", append=.false., format="{message}")
+        b = a
+        call b%info("written through the copy while the unit is open")
+        call a%close()
+        call b%info("written after the other copy closed the unit")
+        print '(a)', "unexpectedly wrote a record to a sink whose unit had been closed"
+    end subroutine scenario_logging_write_to_closed_sink
+
+    !> The negative control for every scenario above: the same configuration calls, made
+    !> correctly, must exit cleanly. Without it each abort test would pass just as happily
+    !> against a guard that fired unconditionally.
+    subroutine scenario_logging_control()
+        type(pf_logger) :: lg
+        integer :: s, frame, lev
+        logical :: ok
+
+        call lg%init(console=.false.)
+        call lg%add_file("test_run/es_log_control.txt", append=.false., format="{stamp} {message}", &
+            sink=s)
+        call lg%set_level(PF_LEVEL_ERROR, sink=s)
+        call lg%set_level(PF_LEVEL_ERROR, name="a.b")
+        call lg%set_rank(0)
+        call lg%add_console(stream=PF_LOG_STDERR, only_rank=0)
+        call pf_log_clear_context()
+        call pf_log_push_context("outer", frame)
+        call pf_log_pop_context(frame)
+        call pf_log_level_from_name("verbose", lev, ok)
+        if (ok) print '(a)', "control: an unknown level name reported success"
+        call lg%error("control record")
+        call lg%close()
+    end subroutine scenario_logging_control
 
 end program error_scenarios

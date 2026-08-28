@@ -169,6 +169,10 @@ parquet_strings.f90
 parquet_temporal.f90
 parquet_wrapper.cpp
 
+[parquet_logging]
+parquet_logging.f90
+parquet_wrapper.cpp
+
 [parquet_settings]
 parquet_bindings.f90
 parquet_settings.f90
@@ -329,6 +333,7 @@ parquet_healpix_grid.f90
 parquet_healpix_query.f90
 parquet_io.f90
 parquet_list.f90
+parquet_logging.f90
 parquet_maml_base.f90
 parquet_maml_base_add_col_qc.f90
 parquet_map.f90

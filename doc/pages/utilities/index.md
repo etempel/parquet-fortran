@@ -4,6 +4,7 @@ ordered_subpage: sorting.md
 ordered_subpage: random.md
 ordered_subpage: spatial.md
 ordered_subpage: healpix.md
+ordered_subpage: logging.md
 ordered_subpage: generated-tables.md
 ordered_subpage: embedding-maml-schemas.md
 ---
@@ -35,6 +36,11 @@ coordinate arrays, the HEALPix sphere pixelisation, and the two generators meant
   covers and the pixel a direction falls in, in both numbering schemes, and the pixels of a disc.
   Equal-area pixels on rings of constant latitude, both integer kinds, and no floating-point
   exception raised — so a program running under `-ffpe-trap` needs no guard around a disc query.
+- [Logging with `parquet_logging`](logging.html) — leveled logging for your own program:
+  several destinations at once each with its own threshold and layout, ISO timestamps, colour,
+  a cheap `%enabled` check before an expensive message, per-thread context tags and a buffered
+  mode that keeps one thread's narrative together inside an OpenMP region. Not this library's
+  own messaging, which the settings page covers.
 - [Generated table types](generated-tables.html) — `tools/generate_user_table_code.py`: named,
   typed accessors on your own `parquet_table` extension, generated from a MAML schema. Opening one
   from a file, from a slice, or from nothing at all (`%init`, `%init_slice`, `%init_empty`);

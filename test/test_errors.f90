@@ -80,7 +80,7 @@ contains
         ! check_testsuite_continuation_lines (tools/check_source_conventions.py) fails the lint
         ! stage before nagfor ever sees it.
         type(unittest_type), allocatable :: p1(:), p2(:), p3(:), p4(:), p5(:), p6(:), p7(:), &
-                                            p8(:)
+                                            p8(:), p9(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -1684,7 +1684,21 @@ contains
             new_unittest("a streamed column that crosses the offset threshold keeps one width", &
                 test_list_write_large_list_chunked) &
             ]
-        testsuite = [p1, p2, p3, p4, p5, p6, p7, p8]
+        ! p9: a new part rather than more entries in p8. A statement may carry at most 255
+        ! continuation lines and only nagfor enforces it, so a part that has filled up is grown by
+        ! adding another, never by appending to it.
+        p9 = [ &
+            new_unittest("parquet_logging refuses every configuration mistake", &
+                test_logging_configuration_aborts), &
+            new_unittest("an unbalanced context pop is caught by its frame token", &
+                test_logging_pop_token_mismatch_aborts), &
+            new_unittest("a write to a closed sink aborts, naming the path", &
+                test_logging_write_to_closed_sink_aborts), &
+            new_unittest("pf_log_fatal aborts after flushing", test_logging_fatal_aborts), &
+            new_unittest("the same logging calls made correctly do not abort", &
+                test_logging_control_does_not_abort) &
+            ]
+        testsuite = [p1, p2, p3, p4, p5, p6, p7, p8, p9]
     end subroutine collect_tests_parquet_errors
 
 
@@ -3694,6 +3708,68 @@ contains
             failure_message="the silenced scenario must still rebuild -- the knob governs the message, not the rebuild", &
             required_stderr="rebuilds=1")
     end subroutine test_spatial_rebuild_warning
+
+    !> Every configuration mistake `parquet_logging` refuses, and the negative control that
+    !> proves the refusals are not simply firing unconditionally.
+    subroutine test_logging_configuration_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "logging_unknown_layout_field", expect_abort=.true., &
+            failure_message="a layout template naming an unknown field was expected to abort", &
+            required_stderr="unknown field")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "logging_second_console_sink", expect_abort=.true., &
+            failure_message="a second console sink on one stream was expected to abort", &
+            required_stderr="would double every line")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "logging_too_many_sinks", expect_abort=.true., &
+            failure_message="attaching more than PF_LOG_MAX_SINKS sinks was expected to abort", &
+            required_stderr="PF_LOG_MAX_SINKS")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "logging_sink_and_name_together", expect_abort=.true., &
+            failure_message="set_level with both selectors was expected to abort", &
+            required_stderr="cannot be combined")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "logging_rank_filter_without_rank", expect_abort=.true., &
+            failure_message="a rank-filtered sink with no rank set was expected to abort", &
+            required_stderr="%set_rank")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "logging_unknown_level_name", expect_abort=.true., &
+            failure_message="an unknown level name with no ok= was expected to abort", &
+            required_stderr="is not a level")
+    end subroutine test_logging_configuration_aborts
+
+    !> An unbalanced push and pop is caught at the site by the frame token, rather than silently
+    !> mislabelling every later record on that thread.
+    subroutine test_logging_pop_token_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "logging_pop_context_token_mismatch", expect_abort=.true., &
+            failure_message="a pop_context token that did not match the depth was expected to abort", &
+            required_stderr="unbalanced")
+    end subroutine test_logging_pop_token_mismatch_aborts
+
+    !> Writing through a copy whose unit another copy has closed aborts naming the path, rather
+    !> than losing every later record silently.
+    subroutine test_logging_write_to_closed_sink_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "logging_write_to_closed_sink", expect_abort=.true., &
+            failure_message="writing to a sink whose unit was closed by another copy was expected to abort", &
+            required_stderr="es_log_closed.txt")
+    end subroutine test_logging_write_to_closed_sink_aborts
+
+    !> pf_log_fatal aborts, and says what it was told to say.
+    subroutine test_logging_fatal_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "logging_fatal", expect_abort=.true., &
+            failure_message="pf_log_fatal was expected to abort", &
+            required_stderr="the run cannot continue")
+    end subroutine test_logging_fatal_aborts
+
+    !> The negative control: the same calls made correctly must not abort.
+    subroutine test_logging_control_does_not_abort(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status(error, "logging_control", expect_abort=.false., &
+            failure_message="the logging control scenario was expected to exit cleanly")
+    end subroutine test_logging_control_does_not_abort
 
     subroutine test_permute_assume_valid_length_aborts(error)
         type(error_type), allocatable, intent(out) :: error

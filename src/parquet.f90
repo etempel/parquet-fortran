@@ -152,6 +152,11 @@ module parquet
     ! that has the column object itself.
     private :: parquet_map_column_offsets, parquet_map_column_keys
     private :: parquet_map_column_values, parquet_map_column_row_validity
+    ! parquet_healpix's run-emitting disc query, hidden for the same reason a fourth time: it is
+    ! how `parquet_spatial`'s HEALPix sky backend turns one disc into contiguous slices of its
+    ! bucketed point array, and a program holding a pixel list has `pf_query_disc` for that. A
+    ! caller who genuinely wants runs writes `use parquet_healpix`.
+    private :: pf_query_disc_runs
     !
     ! ---- The sorting tiers' internals need NO `private ::` here, and that is worth stating ----
     !

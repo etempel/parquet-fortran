@@ -24,6 +24,10 @@
 !>   cell with `cell=` given (which skips the probe entirely), so the difference is the probe.
 !> * `--mode=query` -- single-query and bulk-sweep throughput at the tuned cell.
 !> * `--mode=threads` -- how a bulk sweep scales.
+!> * `--mode=backend` -- **the 3D grid against the HEALPix pixelisation, on the sky.** Builds the
+!>   same `(ra, dec)` catalogue with each backend and times `%within_sky` across a radius sweep
+!>   from `R/3` to `3R` about the build radius. It is the only mode that uses `--skyr` and the
+!>   only one whose fixture is angular rather than Cartesian, so `--side` does not reach it.
 !>
 !> **Every timed figure is a best-of-N**, because a single round swings more than the effects being
 !> measured. Report the noise floor with any result: rebuilding the same source moves untouched
@@ -46,7 +50,7 @@ program benchmark_spatial
     character(len=32) :: mode, dist
     integer(int64) :: np, nq
     integer :: rounds, threads
-    real(real64) :: side, rlo, rhi
+    real(real64) :: side, rlo, rhi, skyr
     real(real64), allocatable :: x(:), y(:), z(:)
 
     mode = "tune"
@@ -58,6 +62,7 @@ program benchmark_spatial
     side = 100.0_real64
     rlo = 1.0_real64
     rhi = 5.0_real64
+    skyr = 1.0_real64
     call read_arguments()
 
     write (output_unit, '(a)') "# benchmark_spatial"
@@ -81,6 +86,8 @@ program benchmark_spatial
         call mode_query()
     case ("threads")
         call mode_threads()
+    case ("backend")
+        call mode_backend()
     case default
         write (output_unit, '(a)') "unknown --mode: " // trim(mode)
         error stop 2
@@ -132,6 +139,8 @@ contains
                 read (arg(eq + 1:), *) rounds
             case ("--threads")
                 read (arg(eq + 1:), *) threads
+            case ("--skyr")
+                read (arg(eq + 1:), *) skyr
             case ("--side")
                 read (arg(eq + 1:), *) side
             case ("--rlo")
@@ -266,6 +275,160 @@ contains
             keep = total
         end do
     end function time_queries
+
+
+    !> The 3D grid against the HEALPix pixelisation, on the same sky catalogue.
+    !>
+    !> **The end comparison the whole backend feature exists to be judged by.** Both indexes are
+    !> built from one `(ra, dec)` fixture at one radius, then queried across a radius sweep about
+    !> that radius -- because the interesting behaviour is not at the tuned radius but away from
+    !> it, where the two backends' costs diverge in opposite directions.
+    !>
+    !> **It asserts the two agree before reporting any timing.** A backend that returns a shorter
+    !> neighbour list is faster for a reason no benchmark should reward, and that failure mode --
+    !> silently losing edge points -- is exactly the one the walk's `inclusive` mode exists to
+    !> prevent. A mismatch stops the run.
+    !>
+    !> `--dist=clustered` is the fixture to read most carefully. The 3D grid buckets a sphere in a
+    !> cube, so its cells are coarse and a cluster falls in few of them and is tested in full; a
+    !> disc's pixels can exclude most of that same cluster. If the two backends differ anywhere by
+    !> more than they differ on `uniform`, this is where.
+    subroutine mode_backend()
+        real(real64), allocatable :: ra(:), dec(:), qra(:), qdec(:)
+        type(pf_spatial_index) :: s3, sh
+        integer(int64), allocatable :: o3(:), oh(:)
+        integer(int64) :: i, q, m3, mh, keep3, keeph, nc, c
+        integer :: it, k
+        real(real64) :: t0, t1, b3, bh, u1, cw, rq
+        real(real64) :: q3, qh
+        real(real64), parameter :: rad2deg = 57.29577951308232_real64
+        real(real64), parameter :: mult(5) = &
+            [1.0_real64 / 3.0_real64, 0.5_real64, 1.0_real64, 2.0_real64, 3.0_real64]
+
+        allocate (ra(np), dec(np))
+        select case (trim(dist))
+        case ("uniform", "sphere")
+            ! Uniform on the sphere: `sin(dec)` uniform, not `dec`, or the poles are oversampled.
+            do i = 1_int64, np
+                ra(i) = 360.0_real64 * pf_random_at(11_int64, i, 1_int64)
+                dec(i) = rad2deg * asin(2.0_real64 * pf_random_at(11_int64, i, 2_int64) - 1.0_real64)
+            end do
+        case ("clustered")
+            ! 200 clumps a few times the build radius across, on a 10% uniform background -- the
+            ! same shape as the Cartesian clustered fixture, projected onto the sphere.
+            nc = 200_int64
+            cw = 3.0_real64 * skyr
+            do i = 1_int64, np
+                u1 = pf_random_at(11_int64, i, 1_int64)
+                if (u1 < 0.1_real64) then
+                    ra(i) = 360.0_real64 * pf_random_at(11_int64, i, 2_int64)
+                    dec(i) = rad2deg * asin(2.0_real64 * pf_random_at(11_int64, i, 3_int64) - 1.0_real64)
+                else
+                    c = 1_int64 + int(real(nc, kind=real64) * pf_random_at(11_int64, i, 5_int64), kind=int64)
+                    ra(i) = modulo(360.0_real64 * pf_random_at(77_int64, c, 1_int64) + cw * gauss(i, 1_int64), &
+                                   360.0_real64)
+                    dec(i) = max(-90.0_real64, min(90.0_real64, &
+                        rad2deg * asin(2.0_real64 * pf_random_at(77_int64, c, 2_int64) - 1.0_real64) &
+                        + cw * gauss(i, 3_int64)))
+                end if
+            end do
+        case default
+            write (output_unit, '(a)') "--mode=backend takes --dist=uniform or --dist=clustered"
+            error stop 2
+        end select
+
+        ! Query points drawn from the catalogue itself, which is what a self-join or a cross-match
+        ! actually does and is already density-weighted on a clustered fixture.
+        allocate (qra(nq), qdec(nq))
+        do q = 1_int64, nq
+            i = 1_int64 + modulo(q * 2654435761_int64, np)
+            qra(q) = ra(i)
+            qdec(q) = dec(i)
+        end do
+
+        b3 = huge(1.0_real64)
+        bh = huge(1.0_real64)
+        do it = 1, rounds
+            call s3%clear()
+            t0 = wtime()
+            call s3%build_sky(ra, dec, radius_deg=skyr)
+            t1 = wtime()
+            b3 = min(b3, t1 - t0)
+            call sh%clear()
+            t0 = wtime()
+            call sh%build_sky(ra, dec, radius_deg=skyr, backend=PF_SKY_HEALPIX)
+            t1 = wtime()
+            bh = min(bh, t1 - t0)
+        end do
+
+        write (output_unit, '(a,f0.4,a)') "# build radius : ", skyr, " deg"
+        write (output_unit, '(a)') ""
+        write (output_unit, '(a)') "backend      buckets    nside     build s"
+        write (output_unit, '(a,i11,i9,f12.4)') "grid3d ", s3%cells(), 0_int64, b3
+        write (output_unit, '(a,i11,i9,f12.4)') "healpix", sh%cells(), sh%nside(), bh
+        write (output_unit, '(a)') ""
+        write (output_unit, '(a)') "  radius/R   radius deg      hits    grid3d us    healpix us   healpix/grid3d"
+
+        allocate (o3(np), oh(np))
+        do k = 1, size(mult)
+            rq = skyr * mult(k)
+            ! Correctness before timing: a faster backend that answers differently is not faster.
+            m3 = s3%within_sky(qra(1), qdec(1), rq, o3, sorted=.true.)
+            mh = sh%within_sky(qra(1), qdec(1), rq, oh, sorted=.true.)
+            if (mh /= m3) then
+                write (output_unit, '(a)') "BACKENDS DISAGREE on the neighbour count -- refusing to time"
+                error stop 3
+            end if
+            if (m3 > 0_int64) then
+                if (any(oh(1:m3) /= o3(1:m3))) then
+                    write (output_unit, '(a)') "BACKENDS DISAGREE on the rows -- refusing to time"
+                    error stop 3
+                end if
+            end if
+            q3 = time_sky(s3, rq, qra, qdec, keep3)
+            qh = time_sky(sh, rq, qra, qdec, keeph)
+            if (keeph /= keep3) then
+                write (output_unit, '(a)') "BACKENDS DISAGREE over the sweep -- refusing to report"
+                error stop 3
+            end if
+            write (output_unit, '(f10.4,f13.5,i10,f13.4,f14.4,f17.3)') mult(k), rq, &
+                keep3 / nq, 1.0e6_real64 * q3 / real(nq, kind=real64), &
+                1.0e6_real64 * qh / real(nq, kind=real64), qh / q3
+        end do
+        write (output_unit, '(a)') ""
+        write (output_unit, '(a)') "# healpix/grid3d below 1 means HEALPix is faster."
+    end subroutine mode_backend
+
+    !> Times `nq` sky queries at one radius, best of `rounds`.
+    real(real64) function time_sky(sx, rq, qra, qdec, keep) result(best)
+        type(pf_spatial_index), intent(in) :: sx !! the index to query.
+        real(real64), intent(in) :: rq !! the angular radius, degrees.
+        real(real64), intent(in) :: qra(:) !! query right ascensions.
+        real(real64), intent(in) :: qdec(:) !! query declinations.
+        integer(int64), intent(out) :: keep !! total neighbours found, so nothing is elided.
+        integer(int64), allocatable :: out(:)
+        integer(int64) :: q, total
+        integer :: it
+        real(real64) :: t0, t1
+
+        ! **A zero-length buffer, deliberately.** `%within_sky` returns the TRUE count whatever
+        ! the buffer holds, so this times the WALK -- the thing the backends differ in -- without
+        ! also timing a store per hit, which they share and which would dilute the comparison at
+        ! large radii where the hit count runs into the thousands.
+        allocate (out(0))
+        best = huge(1.0_real64)
+        keep = 0_int64
+        do it = 1, rounds
+            total = 0_int64
+            t0 = wtime()
+            do q = 1_int64, nq
+                total = total + sx%within_sky(qra(q), qdec(q), rq, out)
+            end do
+            t1 = wtime()
+            best = min(best, t1 - t0)
+            keep = total
+        end do
+    end function time_sky
 
     !> The acceptance measurement: how far the tuner's cell lands from the swept optimum.
     subroutine mode_tune()

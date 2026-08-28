@@ -254,6 +254,149 @@ contains
         end do
     end subroutine spatial_probe_counts
 
+    ! ---- The HEALPix resolution probe ----
+    !
+    ! The pixel counterpart of `spatial_choose_cell`, over the SAME cost model constants and the
+    ! SAME deterministic draw of query points. That sharing is deliberate and load-bearing: two
+    ! backends tuned against two different yardsticks could not be compared, and the whole feature
+    ! rests on being able to compare them.
+
+    !> Chooses the HEALPix resolution. See the interface in `src/parquet_spatial.f90`.
+    module procedure spatial_choose_nside
+        integer(int64) :: cand(6), ns_cap, ns0, maxc
+        real(real64) :: work(6), r_eff, ang
+        integer :: ncand, k, j, best
+        logical :: seen
+
+        ! The buckets-per-point ceiling, exactly as `spatial_set_nside` applies it -- computed
+        ! here too so that no candidate the probe ranks is one the build would then refuse.
+        maxc = max(1_int64, int(spatial_max_cells_per_point * real(self%npts, kind=real64), kind=int64))
+        ns_cap = 1_int64
+        do while (ns_cap < spatial_max_nside)
+            if (12_int64 * (2_int64 * ns_cap) * (2_int64 * ns_cap) > maxc) exit
+            ns_cap = 2_int64 * ns_cap
+        end do
+
+        ! The radius-matched resolution, as the centre of the bracket: a pixel just under the
+        ! query radius makes the disc span a handful of rings whatever the radius is, which is what
+        ! makes the walk's cost flat in both nside and radius. `chord = 2*sin(theta/2)` inverts
+        ! exactly over [0, 180 degrees].
+        r_eff = 1.0_real64
+        if (sum(chords * chords) > 0.0_real64) r_eff = sum(chords ** 3) / sum(chords * chords)
+        ang = 2.0_real64 * asin(min(1.0_real64, 0.5_real64 * r_eff))
+        ns0 = 1_int64
+        if (ang > 0.0_real64) then
+            do while (ns0 < spatial_max_nside)
+                if (pf_nside2resol(ns0) <= ang) exit
+                ns0 = 2_int64 * ns0
+            end do
+        end if
+        ns0 = max(1_int64, min(ns0, ns_cap))
+
+        ! **The bracket reaches the CAP, not just a step or two either side of radius-matched.**
+        ! Radius-matched is right at small radii and wrong at large ones: at a degrees-wide radius
+        ! a coarse pixel holds far more points than the disc can use, so a resolution several
+        ! steps finer wins outright, and without the cap in the candidate list the probe could
+        ! never find it. Duplicates are dropped rather than probed twice.
+        ncand = 0
+        call offer(max(1_int64, ns0 / 4_int64))
+        call offer(max(1_int64, ns0 / 2_int64))
+        call offer(ns0)
+        call offer(min(ns_cap, 2_int64 * ns0))
+        call offer(min(ns_cap, 4_int64 * ns0))
+        call offer(ns_cap)
+        do k = 1, ncand
+            work(k) = spatial_probe_cost_nside(self, cand(k), chords)
+        end do
+        best = minloc(work(1:ncand), dim=1)
+        nside = cand(best)
+        dbg_probe_count = int(ncand, kind=int64)
+
+    contains
+
+        !> Adds one candidate resolution unless it is already in the list.
+        subroutine offer(v)
+            integer(int64), intent(in) :: v !! the candidate resolution.
+
+            seen = .false.
+            do j = 1, ncand
+                if (cand(j) == v) seen = .true.
+            end do
+            if (seen) return
+            ncand = ncand + 1
+            cand(ncand) = v
+        end subroutine offer
+
+    end procedure spatial_choose_nside
+
+    !> The proxy cost of one candidate resolution: `A*pixels_visited + B*points_tested`.
+    !>
+    !> Needs only the counting half of a build, so it is far cheaper than building the candidate --
+    !> the same economy `spatial_probe_cost` relies on, and the reason a handful of candidates can
+    !> be ranked for a fraction of one extra build.
+    function spatial_probe_cost_nside(self, nside, chords) result(w)
+        type(pf_spatial_index), intent(in), target :: self !! the index whose points are probed.
+        integer(int64), intent(in) :: nside !! the candidate resolution parameter.
+        real(real64), intent(in) :: chords(:) !! the radii probe queries are drawn from.
+        real(real64) :: w !! the proxy cost; larger is worse.
+        real(real64), pointer, contiguous :: xs(:), ys(:), zs(:)
+        integer(int64), allocatable :: cnt(:), start(:)
+        integer(int64) :: npix, i, c, pos, stride, ipix, pixels, pts, nruns, k, s0, e0
+        integer(int64) :: runs(2, 512)
+        real(real64) :: v(3), p(3), ang, r
+        integer :: t, nq, nr
+
+        npix = 12_int64 * nside * nside
+        call spatial_storage(self, xs, ys, zs)
+        ! Points per pixel, then a prefix sum -- the counting half of what `spatial_bucket` would
+        ! do, with no sort and no reorder.
+        allocate (cnt(npix))
+        cnt = 0_int64
+        do i = 1_int64, self%npts
+            v(1) = xs(i)
+            v(2) = ys(i)
+            v(3) = zs(i)
+            call pf_vec2pix_ring(nside, v, ipix)
+            cnt(ipix + 1_int64) = cnt(ipix + 1_int64) + 1_int64
+        end do
+        allocate (start(npix + 1_int64))
+        start(1) = 1_int64
+        do c = 1_int64, npix
+            start(c + 1_int64) = start(c) + cnt(c)
+        end do
+        deallocate (cnt)
+
+        pixels = 0_int64
+        pts = 0_int64
+        nq = spatial_probe_points
+        if (int(nq, kind=int64) > self%npts) nq = int(self%npts)
+        nr = size(chords)
+        ! The SAME uniform draw over stored rows that `spatial_probe_counts` uses, golden-ratio
+        ! stride and all, so the two backends are ranked over the same query points.
+        stride = max(1_int64, int(0.6180339887498949_real64 * real(self%npts, kind=real64), kind=int64))
+        pos = 0_int64
+        do t = 1, nq
+            i = pos + 1_int64
+            p(1) = xs(i)
+            p(2) = ys(i)
+            p(3) = zs(i)
+            r = chords(1 + mod(t - 1, nr))
+            ang = 2.0_real64 * asin(min(1.0_real64, 0.5_real64 * r))
+            call pf_query_disc_runs(nside, p, ang, runs, nruns, inclusive=.true.)
+            ! A disc too wide for the probe's buffer is COUNTED SHORT rather than re-queried: the
+            ! probe ranks candidates, so a bound that applies equally to every candidate cannot
+            ! change the ranking, and a re-query here would double the cost of the tuning pass.
+            do k = 1_int64, min(nruns, size(runs, 2, int64))
+                s0 = start(runs(1, k) + 1_int64)
+                e0 = start(runs(1, k) + runs(2, k) + 1_int64) - 1_int64
+                pixels = pixels + runs(2, k)
+                if (e0 >= s0) pts = pts + (e0 - s0 + 1_int64)
+            end do
+            pos = modulo(pos + stride, self%npts)
+        end do
+        w = spatial_work_a * real(pixels, kind=real64) + spatial_work_b * real(pts, kind=real64)
+    end function spatial_probe_cost_nside
+
     !> The two counts the probe ranks by, for any cell size, exposed for re-fitting `A/B`.
     module procedure parquet_debug_spatial_work
 

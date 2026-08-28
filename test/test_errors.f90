@@ -1524,6 +1524,8 @@ contains
             new_unittest("a NaN in the disc centre aborts", test_healpix_vector_nan_aborts), &
             new_unittest("an unknown scheme selector aborts", test_healpix_bad_scheme_aborts), &
             new_unittest("a listpix too small for the disc aborts", test_healpix_buffer_aborts), &
+            new_unittest("a run buffer with the wrong number of rows aborts", &
+                         test_healpix_runs_rows_abort), &
             new_unittest("query_disc_count names ITSELF when it rejects an nside", &
                          test_healpix_count_names_itself), &
             new_unittest("query_disc_alloc names ITSELF when it rejects a scheme", &
@@ -1542,6 +1544,16 @@ contains
             new_unittest("a sky radius past a hemisphere aborts", test_spatial_sky_rsky_aborts), &
             new_unittest("a declination outside [-90, 90] aborts", test_spatial_sky_dec_aborts), &
             new_unittest("rebuilding a sky index aborts", test_spatial_sky_rebuild_aborts), &
+            new_unittest("an unknown backend= aborts rather than defaulting", &
+                         test_spatial_sky_bad_backend_aborts), &
+            new_unittest("cell= on a HEALPix sky index aborts", &
+                         test_spatial_sky_cell_healpix_aborts), &
+            new_unittest("nside= without the HEALPix backend aborts", &
+                         test_spatial_sky_nside_no_healpix_aborts), &
+            new_unittest("an nside= that is not a power of two aborts", &
+                         test_spatial_sky_nside_power2_aborts), &
+            new_unittest("nside=0 aborts, which the power-of-two test alone would admit", &
+                         test_spatial_sky_nside_zero_aborts), &
             new_unittest("an axis query before build aborts", test_spatial_axis_before_build_aborts), &
             new_unittest("a negative cone radius aborts", test_spatial_axis_radius_aborts), &
             new_unittest("an inner radius above the outer one aborts", test_spatial_annulus_inner_aborts), &
@@ -3304,6 +3316,17 @@ contains
             required_stderr="listpix holds 4 elements but the disc needs")
     end subroutine test_healpix_buffer_aborts
 
+    subroutine test_healpix_runs_rows_abort(error)
+        type(error_type), allocatable, intent(out) :: error
+        ! The row count IS the run form's contract, so a four-row buffer -- the shape this module
+        ! records internally, and so the one a reader would reach for -- must be refused rather
+        ! than half-filled. The message names the shape it wanted and the shape it got.
+        call check_scenario_exit_status_and_stderr(error, "healpix_disc_runs_bad_rows", &
+            expect_abort=.true., &
+            failure_message="a run buffer with four rows was expected to abort", &
+            required_stderr="runs must have exactly 2 rows (first pixel, length), got 4")
+    end subroutine test_healpix_runs_rows_abort
+
     ! ---- Tier B ----
     !
     ! The first two assert the PLUMBING rather than the rule: three entry points share one
@@ -3447,6 +3470,41 @@ contains
             failure_message="rebuilding a sky index was expected to abort", &
             required_stderr="rebuild it with %build_sky")
     end subroutine test_spatial_sky_rebuild_aborts
+
+    subroutine test_spatial_sky_bad_backend_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_sky_bad_backend", expect_abort=.true., &
+            failure_message="an unknown backend= was expected to abort", &
+            required_stderr="backend= must be PF_SKY_GRID3D or PF_SKY_HEALPIX")
+    end subroutine test_spatial_sky_bad_backend_aborts
+
+    subroutine test_spatial_sky_cell_healpix_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_sky_cell_with_healpix", expect_abort=.true., &
+            failure_message="cell= on a HEALPix index was expected to abort", &
+            required_stderr="has no meaning for backend=PF_SKY_HEALPIX")
+    end subroutine test_spatial_sky_cell_healpix_aborts
+
+    subroutine test_spatial_sky_nside_no_healpix_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_sky_nside_without_healpix", expect_abort=.true., &
+            failure_message="nside= on a 3D-grid index was expected to abort", &
+            required_stderr="nside= is the HEALPix resolution and needs")
+    end subroutine test_spatial_sky_nside_no_healpix_aborts
+
+    subroutine test_spatial_sky_nside_power2_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_sky_nside_not_power2", expect_abort=.true., &
+            failure_message="an nside= that is not a power of two was expected to abort", &
+            required_stderr="nside= must be a power of two in 1 .. 2**29")
+    end subroutine test_spatial_sky_nside_power2_aborts
+
+    subroutine test_spatial_sky_nside_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_sky_nside_zero", expect_abort=.true., &
+            failure_message="nside=0 was expected to abort", &
+            required_stderr="nside= must be a power of two in 1 .. 2**29")
+    end subroutine test_spatial_sky_nside_zero_aborts
 
     subroutine test_spatial_axis_before_build_aborts(error)
         type(error_type), allocatable, intent(out) :: error

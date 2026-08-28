@@ -52,6 +52,7 @@ module parquet_healpix
     public :: pf_pix2vec_ring, pf_pix2vec_nest
     public :: pf_ring2nest, pf_nest2ring
     public :: pf_query_disc, pf_query_disc_count, pf_query_disc_alloc
+    public :: pf_query_disc_runs
     public :: pf_angdist
     public :: pf_max_pixrad
     !
@@ -585,6 +586,39 @@ module parquet_healpix
         module procedure hpx_query_disc_alloc_i64
     end interface pf_query_disc_alloc
 
+    !> A disc as CONTIGUOUS RUNS of RING pixels, rather than as a list of pixels.
+    !!
+    !! **What a run is.** RING numbering is contiguous along each ring, and a disc covers one arc
+    !! of every ring it touches -- so a disc of nineteen pixels typically arrives as six or seven
+    !! runs, each of them a slice `first .. first + length - 1` of the pixel numbering. Column `k`
+    !! of `runs` is that pair, `runs(1, k)` the run's first RING pixel and `runs(2, k)` its length.
+    !! The runs come back in the same ascending order `pf_query_disc` returns pixels in, because
+    !! they are the walk's own runs rather than a decomposition derived afterwards.
+    !!
+    !! **Why it exists.** Anything that keeps a per-pixel index -- a bucketed point set, a mask, a
+    !! coverage map -- wants a range rather than a pixel, and turning the pixel list back into
+    !! ranges afterwards is a second implementation of a decomposition this module already
+    !! computes. It also never materialises the pixel list at all, which for a large disc is a real
+    !! buffer.
+    !!
+    !! **`nruns` is the TRUE number of runs, not the number stored.** A buffer too small is not an
+    !! error and does not abort: `runs` holds the first `size(runs, 2)` of them and `nruns` reports
+    !! how many there were, so a caller grows and re-queries. That is the same contract `nlist`
+    !! carries throughout this module, and it is deliberately unlike `pf_query_disc`, whose pixel
+    !! buffer overflowing IS an abort -- a run count is bounded by the rings a disc spans and is
+    !! cheap to bound in advance, where a pixel count is not. Only the first
+    !! `min(nruns, size(runs, 2))` columns are written; the rest are left undefined, so read
+    !! `nruns` before `runs`.
+    !!
+    !! **RING only, and there is no `scheme` argument.** A NEST run is not contiguous, so a run
+    !! list would be meaningless there. `radius`, `vec` and `inclusive` mean exactly what they mean
+    !! for `pf_query_disc`, validation is the same and every message names this routine; `runs`
+    !! must have exactly two rows, which is checked.
+    interface pf_query_disc_runs
+        module procedure hpx_query_disc_runs_i32
+        module procedure hpx_query_disc_runs_i64
+    end interface pf_query_disc_runs
+
     ! ---- Interfaces: position <-> pixel ----
     !
     ! Implemented in submodule parquet_healpix_core.
@@ -874,9 +908,23 @@ module parquet_healpix
         !> machine B), because working in the frame where only the RA difference survives removes
         !> one of the four sine/cosine pairs.
         !>
+        !> **A position is EXACTLY zero degrees from itself**, including when the two right
+        !> ascensions differ by whole turns and when both positions sit at a pole with unrelated
+        !> right ascensions. That is a guarantee rather than an arithmetic accident: the formula
+        !> alone gives a few times 1e-15 degrees there on a compiler that contracts a
+        !> multiply-subtract into an FMA, and a caller excluding self-matches with `dist > 0`
+        !> would then keep every one of them.
+        !>
         !> **Total, like every other elemental here: it validates nothing and never aborts.** A
         !> NaN argument gives a NaN result rather than an error, and `dec` outside [-90, 90] is
         !> read as the direction that declination names rather than refused.
+        !>
+        !> **A NaN argument also raises no IEEE flag**, so a caller running with the exceptions
+        !> unmasked -- which is nagfor's default -- can carry a NaN through this procedure without
+        !> being terminated by it. An INFINITE argument is different and does raise `IEEE_INVALID`,
+        !> because taking the sine of an infinite angle is an invalid operation on any conforming
+        !> processor rather than anything this formula chooses; the distinction is between
+        !> propagating a NaN that already exists and creating one.
         pure elemental module function pf_angdist_deg(ra1, dec1, ra2, dec2) result(dist)
             real(real64), intent(in) :: ra1 !! right ascension of the first position, degrees; any value.
             real(real64), intent(in) :: dec1 !! declination of the first position, degrees, in [-90, 90].
@@ -966,7 +1014,7 @@ module parquet_healpix
         !> construction rather than by test. In that mode `cap` should be `huge(0_int64)`, which
         !> makes the capacity abort unreachable.
         module subroutine hpx_query_disc_core(nside, vec, radius, scheme, inclusive, nlist, cap, &
-                                              what, out32, out64, runs, nruns)
+                                              what, out32, out64, runs64, runs32, nruns)
             integer(int64), intent(in) :: nside !! resolution parameter, already validated.
             real(real64), intent(in) :: vec(3) !! disc centre, already validated, any length.
             real(real64), intent(in) :: radius !! disc radius, radians, already validated.
@@ -977,11 +1025,22 @@ module parquet_healpix
             character(len=*), intent(in) :: what !! calling entry point, for a capacity message.
             integer(int32), intent(out), optional :: out32(:) !! int32 output buffer.
             integer(int64), intent(out), optional :: out64(:) !! int64 output buffer.
-            !> Column `k` records the `k`-th run this walk emitted, as `(ring, the ring's first
-            !! RING index, the run's first index within the ring, its length)`. Present only from
-            !! `pf_query_disc_alloc`, which uses it to emit without walking the geometry twice.
-            integer(int64), intent(out), optional :: runs(:,:)
-            integer(int64), intent(out), optional :: nruns !! runs recorded, or -1 if `runs` filled.
+            !> Column `k` records the `k`-th run this walk emitted. **Four rows record the
+            !! walk's own form** -- `(ring, the ring's first RING index, the run's first index
+            !! within the ring, its length)` -- which `pf_query_disc_alloc` replays to emit
+            !! without walking the geometry twice, and which carries the ring and the intra-ring
+            !! offset because a NEST replay needs both. **Two rows record the RING pixel form**,
+            !! `(the run's first RING pixel, its length)`, which is what `pf_query_disc_runs`
+            !! publishes; it is meaningless for NEST, where a run is not contiguous.
+            integer(int64), intent(out), optional :: runs64(:,:)
+            !> The two-row RING pixel form again, in the caller's int32 kind. At most one of the
+            !! two run buffers is ever passed, exactly as for `out32`/`out64` and for the same
+            !! reason: one walk serves both public kinds with no temporary in between.
+            integer(int32), intent(out), optional :: runs32(:,:)
+            !> **The TRUE number of runs, whether or not there was room to record them all** --
+            !! the same contract `nlist` has. A caller detects a short buffer by comparing this
+            !! against the buffer's own `size(..., 2)`; there is no sentinel value.
+            integer(int64), intent(out), optional :: nruns
         end subroutine hpx_query_disc_core
 
         !> `pf_query_disc_count`, int32 kinds.
@@ -1027,6 +1086,26 @@ module parquet_healpix
             integer, intent(in), optional :: scheme !! `PF_HP_RING` (default) or `PF_HP_NEST`.
             logical, intent(in), optional :: inclusive !! overlap superset; default `.false.`.
         end subroutine hpx_query_disc_alloc_i64
+
+        !> `pf_query_disc_runs`, int32 kinds.
+        module subroutine hpx_query_disc_runs_i32(nside, vec, radius, runs, nruns, inclusive)
+            integer(int32), intent(in) :: nside !! resolution parameter, a positive power of two.
+            real(real64), intent(in) :: vec(3) !! direction of the disc centre; any nonzero length.
+            real(real64), intent(in) :: radius !! disc radius, radians, >= 0.
+            integer(int32), intent(out) :: runs(:,:) !! `(first RING pixel, length)` per column.
+            integer(int32), intent(out) :: nruns !! runs the disc holds; may exceed the buffer.
+            logical, intent(in), optional :: inclusive !! overlap superset; default `.false.`.
+        end subroutine hpx_query_disc_runs_i32
+
+        !> `pf_query_disc_runs`, int64 kinds.
+        module subroutine hpx_query_disc_runs_i64(nside, vec, radius, runs, nruns, inclusive)
+            integer(int64), intent(in) :: nside !! resolution parameter, a positive power of two.
+            real(real64), intent(in) :: vec(3) !! direction of the disc centre; any nonzero length.
+            real(real64), intent(in) :: radius !! disc radius, radians, >= 0; above pi acts as pi.
+            integer(int64), intent(out) :: runs(:,:) !! `(first RING pixel, length)` per column.
+            integer(int64), intent(out) :: nruns !! runs the disc holds; may exceed the buffer.
+            logical, intent(in), optional :: inclusive !! overlap superset; default `.false.`.
+        end subroutine hpx_query_disc_runs_i64
 
         !> Validates the arguments shared by all three disc entry points, and aborts on any fault.
         !>

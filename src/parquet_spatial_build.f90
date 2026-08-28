@@ -110,20 +110,85 @@ contains
         self%n_cells = nc(1) * nc(2) * nc(3)
     end procedure spatial_set_grid
 
+    !> Fixes the HEALPix resolution for a query chord. See the interface for the contract.
+    module procedure spatial_set_nside
+        integer(int64) :: ns, ns_cap, maxc
+
+        if (present(coarsened)) coarsened = .false.
+        ! The same buckets-per-point ceiling the 3D grid obeys, and for the same reason: the bucket
+        ! index IS the bucketing sort's key, so it is a KEY RANGE that keeps `pf_argsort` on its
+        ! counting fast path, not a memory budget. `npix = 12*nside**2 <= 0.3*npts` therefore caps
+        ! nside at `sqrt(0.025*npts)`, rounded DOWN to a power of two.
+        !
+        ! **The cap costs HEALPix far less than it costs the 3D grid**, which is the whole reason
+        ! this backend exists: a sphere occupies a zero-thickness shell of the grid's bounding
+        ! cube, so around 95% of its cells can never hold a point and 0.3 cells per point buys
+        ! about 0.014 OCCUPIED ones. Every HEALPix pixel is on the sphere, so 0.3 buys 0.3.
+        maxc = max(1_int64, int(spatial_max_cells_per_point * real(self%npts, kind=real64), kind=int64))
+        ! Written as a loop with the test INSIDE, because `.and.` does not short-circuit in
+        ! Fortran: with the ceiling test as a second operand, `12*(2*nside)**2` would still be
+        ! evaluated at the ceiling and overflow int64. This way `2*ns_cap` never exceeds the
+        ! ceiling, so the product stays under `huge(0_int64)`.
+        ns_cap = 1_int64
+        do while (ns_cap < spatial_max_nside)
+            if (12_int64 * (2_int64 * ns_cap) * (2_int64 * ns_cap) > maxc) exit
+            ns_cap = 2_int64 * ns_cap
+        end do
+        ns = max(1_int64, min(want, ns_cap))
+        ! **nside 1 can violate the cap, and must**: 12 pixels is the coarsest pixelisation that
+        ! exists, so a handful of points cannot have fewer buckets than that. The 3D grid makes the
+        ! same concession with its own `max(1_int64, ...)`, and a sort over 12 keys is not where a
+        ! fast path matters.
+        if (present(coarsened)) coarsened = ns < want
+        self%nside_v = ns
+        self%npix_v = 12_int64 * ns * ns
+        self%n_cells = self%npix_v
+        ! The 3D grid's own description is zeroed rather than left stale, so `%cell_size`,
+        ! `%cell_sides` and `%grid` report a value no valid grid ever has instead of describing a
+        ! grid this index does not have. `%cells` still answers, because a pixel IS a bucket.
+        self%cell_side = 0.0_real64
+        self%cell = 0.0_real64
+        self%cell_inv = 0.0_real64
+        self%grid_n = 0_int64
+    end procedure spatial_set_nside
+
     !> Buckets the stored points into the current grid, filling `start` and `idx`.
     module procedure spatial_bucket
         integer(int64), allocatable :: cid(:), perm(:), offs(:), newstart(:), newidx(:)
         real(real64), allocatable :: tmp(:)
         real(real64), pointer, contiguous :: xs(:), ys(:), zs(:)
-        integer(int64) :: n, i, g, c, run
+        integer(int64) :: n, i, g, c, run, ipix
+        real(real64) :: v(3)
         integer :: d
 
         n = self%npts
         call spatial_storage(self, xs, ys, zs)
         allocate(cid(n))
-        do i = 1_int64, n
-            cid(i) = spatial_cell_of(self, xs(i), ys(i), zs(i))
-        end do
+        if (self%backend_id == PF_SKY_HEALPIX) then
+            ! **The ONLY thing a backend changes on the build side.** Everything below -- the sort,
+            ! the CSR scatter, the composed permutation, the reorder into bucket order -- is
+            ! shared, because a pixel index and a flattened cell index are both just a bucket
+            ! number. `v` is a named local rather than `[xs(i), ys(i), zs(i)]` inline: an array
+            ! constructor passed to an explicit-shape dummy makes ifx build a temporary and warn
+            ! about it once per call under `-check arg_temp_created`.
+            !
+            ! **No declination frame is involved and none can be**, which is what makes this
+            ! simpler than it looks from `parquet_healpix`'s own RA/Dec surface. `%build_sky` has
+            ! already turned `(ra, dec)` into unit vectors with `vz = sin(dec)`, and a vector names
+            ! a direction outright -- so the mirrored convention that `pf_healpix_grid` needs a
+            ! `frame=` to disambiguate cannot arise here at all.
+            do i = 1_int64, n
+                v(1) = xs(i)
+                v(2) = ys(i)
+                v(3) = zs(i)
+                call pf_vec2pix_ring(self%nside_v, v, ipix)
+                cid(i) = ipix + 1_int64
+            end do
+        else
+            do i = 1_int64, n
+                cid(i) = spatial_cell_of(self, xs(i), ys(i), zs(i))
+            end do
+        end if
         call pf_argsort(cid, perm, threads=threads, group_offsets=offs)
         ! group_offsets gives one entry per DISTINCT cell present, not one per grid cell, so the
         ! dense array is scattered from it -- O(occupied + cells) rather than a second O(n) pass.
@@ -194,6 +259,9 @@ contains
         self%ncoord = 3
         self%dims_eff = 3
         self%metric_id = PF_METRIC_EUCLIDEAN
+        self%backend_id = PF_SKY_GRID3D
+        self%nside_v = 0_int64
+        self%npix_v = 0_int64
         self%built_ok = .false.
         self%owns = .true.
         self%periodic_on = .false.
@@ -236,12 +304,30 @@ contains
     !> Re-chooses the cell size for the recorded radii and re-buckets the stored points.
     module procedure spatial_retune
         real(real64) :: h, r_eff
+        integer(int64) :: ns
 
         r_eff = 1.0_real64
         if (self%r2sum > 0.0_real64) r_eff = self%r3sum / self%r2sum
         if (self%periodic_on) then
             if (any(r_eff > 0.5_real64 * self%wrap(1:self%ncoord))) error stop &
                 "pf_spatial_index: a periodic search radius must not exceed half the box on any axis"
+        end if
+        if (self%backend_id == PF_SKY_HEALPIX) then
+            ! `%rebuild_for` re-pixelates a HEALPix index exactly as it re-tunes a grid one -- the
+            ! same operation in the other backend's vocabulary -- and never changes which backend
+            ! the index has.
+            if (dbg_nside > 0_int64) then
+                ns = dbg_nside
+                dbg_probe_count = 0_int64
+            else if (self%npts > 0_int64) then
+                call spatial_choose_nside(self, [r_eff], ns)
+            else
+                ns = 1_int64
+                dbg_probe_count = 0_int64
+            end if
+            call spatial_set_nside(self, ns)
+            call spatial_bucket(self)
+            return
         end if
         if (dbg_cell > 0.0_real64) then
             h = dbg_cell
@@ -257,8 +343,8 @@ contains
 
     !> Builds `self` over the caller's coordinates.
     module procedure spatial_build_worker
-        integer(int64) :: n
-        integer :: nd
+        integer(int64) :: n, ns
+        integer :: nd, back
         logical :: docopy, coarsened
         real(real64) :: h, rmax
         real(real64), pointer, contiguous :: xs(:), ys(:), zs(:)
@@ -283,11 +369,28 @@ contains
         end if
         docopy = .true.
         if (present(copy)) docopy = copy
+        back = PF_SKY_GRID3D
+        if (present(backend)) back = backend
+        if (back == PF_SKY_HEALPIX .and. present(cell)) error stop &
+            "pf_spatial_index%build_sky: cell= describes the 3D grid's cell in unit-vector space " // &
+            "and has no meaning for backend=PF_SKY_HEALPIX; use nside= instead"
+        if (present(nside)) then
+            if (back /= PF_SKY_HEALPIX) error stop &
+                "pf_spatial_index%build_sky: nside= is the HEALPix resolution and needs " // &
+                "backend=PF_SKY_HEALPIX; the 3D grid is tuned with cell="
+            if (nside < 1_int64 .or. nside > spatial_max_nside) error stop &
+                "pf_spatial_index%build_sky: nside= must be a power of two in 1 .. 2**29"
+            if (iand(nside, nside - 1_int64) /= 0_int64) error stop &
+                "pf_spatial_index%build_sky: nside= must be a power of two in 1 .. 2**29"
+        end if
 
         call spatial_clear_worker(self)
         self%npts = n
         self%ncoord = nd
         self%owns = docopy
+        ! Set BEFORE the grid choice and the bucketing, both of which branch on it, and after
+        ! `spatial_clear_worker`, which resets it.
+        self%backend_id = back
         self%r2sum = sum(radii * radii)
         self%r3sum = sum(radii * radii * radii)
 
@@ -348,25 +451,53 @@ contains
             self%hi(3) = maxval(zs)
         end if
 
-        if (present(cell)) then
-            h = cell
-            dbg_probe_count = 0_int64
-        else if (dbg_cell > 0.0_real64) then
-            h = dbg_cell
-            dbg_probe_count = 0_int64
-        else if (n > 0_int64) then
-            call spatial_choose_cell(self, radii, h)
+        if (back == PF_SKY_HEALPIX) then
+            if (present(nside)) then
+                ns = nside
+                dbg_probe_count = 0_int64
+            else if (dbg_nside > 0_int64) then
+                ns = dbg_nside
+                dbg_probe_count = 0_int64
+            else if (n > 0_int64) then
+                call spatial_choose_nside(self, radii, ns)
+            else
+                ns = 1_int64
+                dbg_probe_count = 0_int64
+            end if
+            call spatial_set_nside(self, ns, coarsened)
+            ! **Said out loud only when the caller ASKED for a resolution**, exactly as the grid's
+            ! coarsening warning fires only for an explicit `cell=`. An explicit `nside=` is a
+            ! statement that the caller has measured something, so silently overriding it would
+            ! hide the one case where they need to know; an automatically chosen resolution being
+            ! capped is the ordinary state of any index with more radius than points, and warning
+            ! about it would fire on essentially every small index for no action the caller can
+            ! take.
+            if (present(nside) .and. coarsened .and. .not. parquet_output_is_suppressed()) then
+                call parquet_emit_warning("pf_spatial_index%build_sky: nside= was coarsened from " // &
+                    int_text(ns) // " to " // int_text(self%nside_v) // " to keep the pixel count " // &
+                    "under 0.3 per point, which is what keeps the bucketing on the counting fast path")
+            end if
         else
-            h = 1.0_real64
-            dbg_probe_count = 0_int64
-        end if
-        call spatial_set_grid(self, h, coarsened)
-        ! An explicit cell is a statement that the caller has measured something, so coarsening it
-        ! must SAY so rather than happen in silence.
-        if (present(cell) .and. coarsened .and. .not. parquet_output_is_suppressed()) then
-            call parquet_emit_warning("pf_spatial_index%build: cell= was coarsened from " // &
-                real_text(cell) // " to " // real_text(self%cell_side) // " to keep the grid under " // &
-                "0.3 cells per point, which is what keeps the bucketing on the counting fast path")
+            if (present(cell)) then
+                h = cell
+                dbg_probe_count = 0_int64
+            else if (dbg_cell > 0.0_real64) then
+                h = dbg_cell
+                dbg_probe_count = 0_int64
+            else if (n > 0_int64) then
+                call spatial_choose_cell(self, radii, h)
+            else
+                h = 1.0_real64
+                dbg_probe_count = 0_int64
+            end if
+            call spatial_set_grid(self, h, coarsened)
+            ! An explicit cell is a statement that the caller has measured something, so coarsening
+            ! it must SAY so rather than happen in silence.
+            if (present(cell) .and. coarsened .and. .not. parquet_output_is_suppressed()) then
+                call parquet_emit_warning("pf_spatial_index%build: cell= was coarsened from " // &
+                    real_text(cell) // " to " // real_text(self%cell_side) // " to keep the grid under " // &
+                    "0.3 cells per point, which is what keeps the bucketing on the counting fast path")
+            end if
         end if
         call spatial_bucket(self, threads)
         self%built_ok = .true.
@@ -376,8 +507,12 @@ contains
         real(real64), allocatable :: vx(:), vy(:), vz(:), chords(:)
         real(real64) :: cd, rr
         integer(int64) :: n, i
-        integer :: k
+        integer :: k, back
 
+        back = PF_SKY_GRID3D
+        if (present(backend)) back = backend
+        if (back /= PF_SKY_GRID3D .and. back /= PF_SKY_HEALPIX) error stop &
+            "pf_spatial_index%build_sky: backend= must be PF_SKY_GRID3D or PF_SKY_HEALPIX"
         n = size(ra, kind=int64)
         if (size(dec, kind=int64) /= n) error stop &
             "pf_spatial_index%build_sky: ra and dec must be the same length"
@@ -415,7 +550,8 @@ contains
         ! the [-1, 1]^3 box, so a bounding-box density would be meaningless -- the tuner takes the
         ! MEDIAN OCCUPIED CELL instead, and the sphere is the sharpest instance of the problem that
         ! choice already solves rather than a new one.
-        call spatial_build_worker(self, vx, vy, vz, chords, cell, threads=threads)
+        call spatial_build_worker(self, vx, vy, vz, chords, cell, threads=threads, backend=back, &
+                                  nside=nside)
         self%metric_id = PF_METRIC_SKY
     end procedure spatial_build_sky_worker
 
@@ -505,6 +641,16 @@ contains
         call spatial_fold_radii(self, radii, union)
         call spatial_retune(self)
     end procedure spatial_rebuild_for_worker
+
+    !> A decimal rendering of an integer, for a message.
+    function int_text(v) result(text)
+        integer(int64), intent(in) :: v !! the value to render.
+        character(len=:), allocatable :: text !! the rendered value, trimmed.
+        character(len=32) :: buf
+
+        write (buf, '(i0)') v
+        text = trim(adjustl(buf))
+    end function int_text
 
     !> A short decimal rendering of a real, for a message.
     function real_text(v) result(text)

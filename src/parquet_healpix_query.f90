@@ -38,6 +38,11 @@ submodule(parquet_healpix) parquet_healpix_query
     !! and 2 degrees, so a little over half the call. A disc reaches at most two runs per ring, so
     !! this covers a disc spanning 512 rings; beyond that the walk is repeated as before, which is
     !! why this is a size rather than a limit. 32 kB of stack, per call and per thread.
+    !!
+    !! **Overflow shows as `nruns > hpx_alloc_runs_max`, not as a sentinel.** The walk counts every
+    !! run whether or not it had room to record it, so the two callers below compare the count
+    !! against this size to decide whether a replay is possible -- the same true-count contract
+    !! `nlist` and `pf_query_disc_runs` both publish.
     integer(int64), parameter :: hpx_alloc_runs_max = 1024_int64
 
 contains
@@ -116,6 +121,7 @@ contains
         real(real64) :: v0(3), vnorm, scale, z0, st0, phi0, r, cosr, theta0
         real(real64) :: zmax, zmin, zr, strr, denom, num, a, dphi, w, winv, half
         integer(int64) :: irmin, irmax, i, first, nr, shifted, jlo, jhi, cnt, tail, nr_prev
+        integer(int64) :: runs_cap
         logical :: whole, counting, recording
 
         ! Neither output present is the COUNTING mode: the same walk with its stores switched off,
@@ -123,7 +129,10 @@ contains
         ! construction rather than by test.
         counting = .not. (present(out32) .or. present(out64))
         nr_prev = -1_int64
-        recording = present(runs) .and. present(nruns)
+        recording = (present(runs64) .or. present(runs32)) .and. present(nruns)
+        runs_cap = 0_int64
+        if (present(runs64)) runs_cap = size(runs64, 2, int64)
+        if (present(runs32)) runs_cap = size(runs32, 2, int64)
         if (present(nruns)) nruns = 0_int64
         nlist = 0_int64
 
@@ -323,20 +332,31 @@ contains
             integer(int64), intent(in) :: jstart !! first index within the ring, 0-based.
             integer(int64), intent(in) :: count !! how many consecutive pixels to append.
 
-            ! Recording happens whether or not this walk is a counting one, but in practice only a
-            ! counting walk is ever asked for it -- it is `pf_query_disc_alloc`'s way of not
-            ! repeating the geometry on its second pass. Running out of room is not an error: the
-            ! count is still right, and the caller falls back to walking again.
+            ! **`nruns` counts every run, whether or not there was room to store it**, so a
+            ! caller detects a short buffer by comparing it against the buffer's own size -- the
+            ! same true-count contract `nlist` has, and what `pf_query_disc_runs` publishes.
+            ! Overflowing is not an error on either path: `pf_query_disc_alloc` falls back to a
+            ! second walk, and a public caller re-queries with a larger buffer.
             if (recording) then
-                if (nruns < hpx_alloc_runs_max) then
-                    nruns = nruns + 1_int64
-                    runs(1, nruns) = jr
-                    runs(2, nruns) = first_idx
-                    runs(3, nruns) = jstart
-                    runs(4, nruns) = count
-                else
-                    nruns = -1_int64
-                    recording = .false.
+                nruns = nruns + 1_int64
+                if (nruns <= runs_cap) then
+                    if (present(runs32)) then
+                        ! The RING pixel form: one run is `first .. first + count - 1`. It is
+                        ! meaningless for NEST, where a run is not contiguous -- which is why
+                        ! `pf_query_disc_runs` is RING-only rather than taking a `scheme`.
+                        runs32(1, nruns) = int(first_idx + jstart, int32)
+                        runs32(2, nruns) = int(count, int32)
+                    else if (size(runs64, 1) == 2) then
+                        runs64(1, nruns) = first_idx + jstart
+                        runs64(2, nruns) = count
+                    else
+                        ! The walk's own form, which `pf_query_disc_alloc` replays. It carries the
+                        ! ring and the intra-ring offset because a NEST replay needs both.
+                        runs64(1, nruns) = jr
+                        runs64(2, nruns) = first_idx
+                        runs64(3, nruns) = jstart
+                        runs64(4, nruns) = count
+                    end if
                 end if
             end if
             if (counting) then
@@ -460,12 +480,12 @@ contains
         ! measured, it halves the call. A disc too large to record falls back to the second walk,
         ! which is why `hpx_alloc_runs_max` is a buffer size and not a limit on anything.
         call hpx_query_disc_core(nside, vec, radius, sch, inc, nlist, huge(0_int64), &
-                                 "pf_query_disc_alloc", runs=runs, nruns=nruns)
+                                 "pf_query_disc_alloc", runs64=runs, nruns=nruns)
         ! Allocated and ZERO-LENGTH when the disc is empty, never unallocated, so that `size()` is
         ! the only thing a caller ever tests.
         allocate (listpix(nlist))
         if (nlist > 0_int64) then
-            if (nruns > 0_int64) then
+            if (nruns > 0_int64 .and. nruns <= hpx_alloc_runs_max) then
                 call replay_runs(nside, sch, runs, nruns, out64=listpix)
             else
                 ! `cap` is a COPY of the count, not `nlist` itself: passing one variable to both an
@@ -491,10 +511,10 @@ contains
         call hpx_check_disc_args(int(nside, int64), hpx_nside_max_i32, vec, radius, sch, &
                                  "pf_query_disc_alloc")
         call hpx_query_disc_core(int(nside, int64), vec, radius, sch, inc, n64, huge(0_int64), &
-                                 "pf_query_disc_alloc", runs=runs, nruns=nruns)
+                                 "pf_query_disc_alloc", runs64=runs, nruns=nruns)
         allocate (listpix(n64))
         if (n64 > 0_int64) then
-            if (nruns > 0_int64) then
+            if (nruns > 0_int64 .and. nruns <= hpx_alloc_runs_max) then
                 call replay_runs(int(nside, int64), sch, runs, nruns, out32=listpix)
             else
                 ! A copy, for the aliasing reason `hpx_query_disc_alloc_i64` states.
@@ -505,6 +525,67 @@ contains
         end if
         nlist = int(n64, int32)
     end procedure hpx_query_disc_alloc_i32
+
+    ! ---- The run form ----
+    !
+    ! The same walk once more, with its per-pixel stores switched off and its per-RUN record
+    ! switched on. Nothing here re-derives a ring bound, an arc or a membership rule, for the
+    ! reason the counting form's banner above gives -- the runs ARE the walk's own, so a run list
+    ! cannot disagree with the pixel list `pf_query_disc` would return for the same query.
+
+    module procedure hpx_query_disc_runs_i64
+        logical :: inc
+        integer(int64) :: nlist
+
+        inc = .false.
+        if (present(inclusive)) inc = inclusive
+        call hpx_check_disc_args(nside, hpx_nside_max, vec, radius, PF_HP_RING, &
+                                 "pf_query_disc_runs")
+        call hpx_check_runs_rows(size(runs, 1), "pf_query_disc_runs")
+        ! No pixel output, so the walk stores no pixels and `huge` makes the capacity abort
+        ! unreachable -- there is no pixel buffer here to be too small. The RUN buffer's capacity
+        ! is deliberately not an abort either: `nruns` reports the true count and the caller
+        ! decides whether to grow and re-query. `nlist` is discarded; `pf_query_disc_count`
+        ! answers that question and this one does not duplicate it.
+        call hpx_query_disc_core(nside, vec, radius, PF_HP_RING, inc, nlist, huge(0_int64), &
+                                 "pf_query_disc_runs", runs64=runs, nruns=nruns)
+    end procedure hpx_query_disc_runs_i64
+
+    module procedure hpx_query_disc_runs_i32
+        logical :: inc
+        integer(int64) :: nlist, nruns64
+
+        inc = .false.
+        if (present(inclusive)) inc = inclusive
+        ! The int32 ceiling is a property of the CALLER's integer kind rather than of the
+        ! pixelisation, exactly as it is for `pf_query_disc`: nside 16384 is valid and simply
+        ! cannot be addressed with a 32-bit pixel index. Checking it here is what makes the
+        ! narrowing store in the walk safe.
+        call hpx_check_disc_args(int(nside, int64), hpx_nside_max_i32, vec, radius, PF_HP_RING, &
+                                 "pf_query_disc_runs")
+        call hpx_check_runs_rows(size(runs, 1), "pf_query_disc_runs")
+        call hpx_query_disc_core(int(nside, int64), vec, radius, PF_HP_RING, inc, nlist, &
+                                 huge(0_int64), "pf_query_disc_runs", runs32=runs, nruns=nruns64)
+        ! A run count cannot overflow int32: it is at most two per ring and there are fewer than
+        ! 4*nside rings, so nside 8192 -- the int32 ceiling -- bounds it by 65536.
+        nruns = int(nruns64, int32)
+    end procedure hpx_query_disc_runs_i32
+
+    !> Aborts unless a run buffer has the two rows the contract requires.
+    !>
+    !> A caller who passes the four-row shape this module records internally would otherwise get
+    !> its first two rows filled and the other two left undefined, which reads as a working call.
+    !> The row count IS the contract, so it is checked rather than assumed.
+    subroutine hpx_check_runs_rows(nrows, what)
+        integer, intent(in) :: nrows !! rows of the caller's run buffer.
+        character(len=*), intent(in) :: what !! calling entry point, for the message.
+        character(len=:), allocatable :: got
+
+        if (nrows /= 2) then
+            call hpx_itoa(int(nrows, int64), got)
+            error stop what // ": runs must have exactly 2 rows (first pixel, length), got " // got
+        end if
+    end subroutine hpx_check_runs_rows
 
     !> Writes the pixels of every recorded run, in the order the walk emitted them.
     !>

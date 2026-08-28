@@ -6,11 +6,15 @@
 #   MODE=ab bench/benchmark_spatial.sh               # re-fit the probe's A/B constant here
 #   MODE=build bench/benchmark_spatial.sh            # what the probe costs
 #   MODE=threads bench/benchmark_spatial.sh          # how a bulk sweep scales
+#   MODE=backend bench/benchmark_spatial.sh          # 3D grid vs HEALPix, on the sky
+#   MODE=backend DIST=clustered bench/benchmark_spatial.sh
 #   DIST=clustered NP=2000000 bench/benchmark_spatial.sh
 #
 # Config (env-overridable, matching this repo's other bench/*.sh scripts):
-#   MODE=tune        tune | ab | build | query | threads
+#   MODE=tune        tune | ab | build | query | threads | backend
 #   DIST=uniform     uniform | clustered | wedge | sphere | flat
+#                    (MODE=backend takes uniform or clustered only, on the SPHERE)
+#   SKYR=1           MODE=backend only: the build radius in DEGREES.
 #   NP=1000000       points in the cloud. 1e6 real64 x 3 is 24 MB.
 #   NQ=20000         single queries per timed round.
 #   ROUNDS=3         rounds per arm; the best is kept, per this repo's rules.
@@ -38,6 +42,16 @@
 #           which skips the probe entirely. The difference is the probe.
 #   query   Single-query and bulk-sweep throughput at the tuned cell.
 #   threads How a bulk sweep scales with the team size.
+#   backend THE BACKEND COMPARISON. Builds one (ra, dec) catalogue with the 3D grid and with the
+#           HEALPix pixelisation, checks the two answer identically, then times %within_sky across
+#           a radius sweep from SKYR/3 to 3*SKYR. The last column is healpix/grid3d, so below 1
+#           means HEALPix is faster. Run it on BOTH fixtures: `uniform` is the baseline and
+#           `clustered` is where the gap should be widest, because a 3D cell holding a cluster is
+#           tested in full while a disc's pixels can exclude most of it.
+#             The crossover is machine-dependent and radius-dependent, which is exactly why this
+#           is a mode rather than a number written down anywhere: HEALPix pays a fixed per-query
+#           cost for the disc walk that the grid's integer cell arithmetic does not, and wins it
+#           back on candidates only once the radius is large enough.
 #
 # Report the NOISE FLOOR with any figure. Re-running one binary reproduces to a fraction of a
 # per cent here; anything compared across two BUILDS needs a floor measured across rebuilds with an
@@ -63,11 +77,12 @@ SIDE="${SIDE:-100}"
 RLO="${RLO:-1}"
 RHI="${RHI:-5}"
 THREADS="${THREADS:-0}"
+SKYR="${SKYR:-1}"
 
 for arg in "$@"; do
     case "$arg" in
         -h|--help)
-            sed -n '2,45p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+            sed -n '2,58p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
@@ -132,6 +147,7 @@ echo "  fortran     : ${FPM_FC:-gfortran (fpm default)}"
 echo "  flags       : $FLAGS_LINE"
 echo "  uname -m    : $(uname -m)"
 echo "  mode=$MODE dist=$DIST np=$NP nq=$NQ rounds=$ROUNDS side=$SIDE r=$RLO..$RHI threads=$THREADS"
+echo "  skyr=$SKYR (MODE=backend only)"
 echo "=============================================================================="
 echo
 
@@ -139,7 +155,7 @@ fpm build --profile release >/dev/null
 
 fpm run benchmark_spatial --profile release -- \
     --mode="$MODE" --dist="$DIST" --np="$NP" --nq="$NQ" --rounds="$ROUNDS" \
-    --side="$SIDE" --rlo="$RLO" --rhi="$RHI" --threads="$THREADS"
+    --side="$SIDE" --rlo="$RLO" --rhi="$RHI" --threads="$THREADS" --skyr="$SKYR"
 
 echo
 echo "Build tree left at $FPM_BUILD_DIR (rm -rf test_run/spatial-bench-* to clean up)."

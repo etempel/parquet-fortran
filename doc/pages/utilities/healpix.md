@@ -436,6 +436,11 @@ call pf_query_disc_count(nside, vec, radius, nlist [, scheme] [, inclusive])    
 
 All three answer the same question and run the same walk, so they cannot disagree.
 
+**If what you want is the objects near a position rather than the pixels**, this module is the
+wrong level: `pf_spatial_index` in [`parquet_spatial`](spatial.html#choosing-a-backend) will
+bucket a catalogue by HEALPix pixel for you and answer neighbour, pair and k-nearest queries over
+it, with the pixelisation as a `backend=` choice rather than something you assemble yourself.
+
 **`pf_query_disc_alloc` is the one to reach for by default.** `listpix` comes back allocated to
 exactly `nlist`, so there is no capacity to get wrong and no abort for getting it wrong. An empty
 result allocates a **zero-length** array rather than leaving it unallocated, so `size()` is the

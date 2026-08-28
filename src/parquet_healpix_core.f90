@@ -87,7 +87,48 @@ contains
         ! `anint` rather than a subtract-until-in-range loop: such a loop never terminates on an
         ! infinite argument, since Inf - 360 is Inf. This form yields NaN there and returns.
         dl = ra1 - ra2
+        ! **A QUIET NaN MUST PROPAGATE QUIETLY, and `anint` is the one step that breaks that.**
+        ! IEEE says an operation on a quiet NaN yields a quiet NaN and raises nothing, and every
+        ! other step below obeys it -- but rounding a NaN to an integer is an invalid operation,
+        ! and nagfor duly raises `IEEE_INVALID` on `anint(NaN)` (gfortran, ifx and flang do not).
+        ! That matters because nagfor UNMASKS the traps by default, so a caller who passed a NaN
+        ! right ascension would have their process TERMINATED by a procedure documented as total.
+        ! Returning the NaN before the fold is the whole fix, and it costs one quiet predicate.
+        !
+        ! **An INFINITE right ascension still raises, and must.** `sin(Inf)` and `Inf - Inf` are
+        ! invalid operations on any conforming processor, so no arrangement of this arithmetic can
+        ! make an infinite angle quiet -- and it should not: unlike a NaN, which is already the
+        ! "no answer" value being carried through, an infinity is a real number the caller asked
+        ! to take the sine of. The line is between propagating an existing NaN and creating one.
+        if (ieee_is_nan(dl)) then
+            dist = dl
+            return
+        end if
         dl = (dl - 360.0_real64 * anint(dl / 360.0_real64)) * hpx_deg2rad
+        ! **A POSITION IS EXACTLY ZERO DEGREES FROM ITSELF, and that has to be asserted here
+        ! rather than left to the arithmetic.** Without this the answer is a few times 1e-15
+        ! degrees, and whether it is that or bit-zero depends on the compiler: `y2` below is
+        ! `cd1*sd2 - sd1*cd2*cdl`, whose two products are equal for coincident positions and
+        ! therefore cancel exactly -- UNLESS the compiler contracts the subtraction into an FMA,
+        ! which computes the first product exactly and the second rounded, leaving the second's
+        ! rounding error behind. Measured: gfortran leaves it at zero, nagfor returns
+        ! 1.22e-15 degrees for (12.5, 34.5) against itself.
+        !
+        ! It is worth a branch because the failure is silent and directional: a caller excluding
+        ! self-matches from a cross-match with `dist > 0` keeps every one of them. Two comparisons
+        ! against six transcendentals is not measurable, and nothing else about the result moves --
+        ! this returns the value the formula is trying to compute, not a different one.
+        !
+        ! Both ways two positions can coincide are covered. Equal declinations with no surviving
+        ! RA difference is the ordinary one; equal declinations at a POLE is the other, where any
+        ! two right ascensions name the same point. The pole case is not reachable by the formula
+        ! at all, because `cos(90 * hpx_deg2rad)` is 6.1e-17 rather than zero -- an input
+        ! representation limit that no formulation can remove, which is exactly why it is stated
+        ! as a rule instead. A separation of NaN falls through, so totality is preserved.
+        if (dec1 == dec2 .and. (dl == 0.0_real64 .or. abs(dec1) == 90.0_real64)) then
+            dist = 0.0_real64
+            return
+        end if
         sdl = sin(dl)
         cdl = cos(dl)
         sd1 = sin(dec1 * hpx_deg2rad)

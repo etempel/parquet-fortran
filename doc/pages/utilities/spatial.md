@@ -8,7 +8,7 @@ its search region can reach. Building is roughly one pass over the data, and a q
 something close to the number of points it actually returns rather than the size of the catalogue.
 
 Everything here is reachable from `use parquet`. The narrow import is `use parquet_spatial`, which
-compiles nine Fortran files and never reaches this library's C++ bindings — so it pulls in neither
+compiles fifteen Fortran files and never reaches this library's C++ bindings — so it pulls in neither
 Arrow nor Parquet, and a program that only wants neighbour search need not have them.
 
 Signatures below are written with optional arguments in **square brackets** —
@@ -298,6 +298,70 @@ it, while `%cell_size()` and `cell=` are both in unit-vector space — they are 
 value read from one can be fed back into the other. And `%build_sky` has no `copy=`: the stored
 coordinates are unit vectors it computes, so there is nothing of yours to borrow.
 
+### Choosing a backend
+
+A sky index can be backed by either of two spatial structures, chosen when you build it:
+
+```fortran
+call sky%build_sky(ra, dec, radius_deg=1.0_real64)                         ! the 3D grid, the default
+call sky%build_sky(ra, dec, radius_deg=1.0_real64, backend=PF_SKY_HEALPIX) ! the HEALPix pixelisation
+```
+
+Everything after that is unchanged. All six sky operations — `%within_sky`, `%all_within_sky`,
+`%pairs_within_sky`, `%count_all_within_sky`, `%nearest_sky` and `%kth_distance_sky` — keep their
+signatures, their units and their results. **A backend decides only how the candidate set is
+narrowed, never what the answer is**, and the two are required to agree element for element under
+`sorted=.true.`, which is what the test suite asserts.
+
+**What the choice trades.** `PF_SKY_GRID3D` buckets the unit vectors in a cube. A sphere occupies
+a zero-thickness shell of that cube, so most of the grid's cells can never hold a point — and
+because the number of cells is capped (see [Limitations](#limitations)), the cell cannot shrink to
+match a small query radius. `PF_SKY_HEALPIX` partitions the sphere itself, so every pixel is
+occupied and the same cap buys far more usable resolution. It tests **substantially fewer points
+per hit** as a result, at every radius.
+
+Fewer candidates is not automatically less time. A HEALPix query enumerates the pixels a disc
+touches, which costs a fixed amount per query that the grid's integer cell arithmetic does not pay
+— so the pixelisation gives its candidate saving back at small radii and keeps it at large ones.
+
+**How clustered the field is matters more than anything else here**, and it is the one part of the
+choice worth reasoning about rather than measuring. A cell of the 3D grid that happens to contain a
+cluster is tested in full, however little of it the query disc reaches; a disc's pixels can exclude
+most of that same cluster. So on a **clustered** catalogue — which most real sky data is — the
+pixelisation wins at and above the radius the index was tuned for, by a comfortable margin, and on
+a **uniform** one the grid tends to stay ahead at every radius. That is a direction, not a
+guarantee: **the crossover also depends on the machine, the radius and the catalogue size**, which
+is why no number for it appears here. Measure your own with
+
+```bash
+MODE=backend bench/benchmark_spatial.sh
+MODE=backend DIST=clustered bench/benchmark_spatial.sh
+```
+
+which builds one catalogue both ways, checks the two answers agree, and prints the ratio across a
+radius sweep. Run both fixtures: the clustered one is the one that resembles a real field.
+
+**`nside=` is the HEALPix counterpart of `cell=`.** It forces the resolution and skips the tuner,
+must be a power of two, and is still subject to the pixels-per-point cap. `cell=` is refused on a
+HEALPix index and `nside=` on a 3D-grid one, rather than either being quietly ignored.
+
+**Reporting an index's shape.** `%backend()` answers `PF_SKY_GRID3D` or `PF_SKY_HEALPIX`;
+`%nside()` and `%npix()` answer the HEALPix resolution and pixel count, or zero on a grid index.
+`%cells()` answers the bucket count on both — cells on one, pixels on the other — while
+`%cell_size()`, `%cell_sides()` and `%grid()` answer zero on a HEALPix index, because they describe
+a grid it does not have and `%cell_size()`'s contract is that it can be passed back as `cell=`.
+
+**One visible difference, and it is in the ordering.** Without `sorted=`, results come back in the
+order the walk produced them — cell order on the grid, pixel order under HEALPix. These are
+different orders over the same set. That order was never a contract on either backend (it depends
+on a tuned cell size, and so on the machine), but it is worth knowing before switching a program
+between the two: **the two backends return the same set, and the same order only when you ask for
+`sorted=.true.`** The same applies to `%pairs_within_sky`, whose pair list is emitted in walk
+order; the pairs are the same pairs, each still exactly once with `i < j`.
+
+Finally, `%rebuild_for` re-tunes whichever backend the index has — a cell side for one, a HEALPix
+resolution for the other — and never changes which one that is. Call `%build_sky` again to switch.
+
 ## The k nearest neighbours
 
 `%nearest` answers the other question a spatial index is asked: not "what is within `r`" but "which
@@ -464,7 +528,12 @@ against a swept optimum, and thread scaling, if you want numbers for your own ma
   would not.
 - **The number of cells is capped** at a fraction of the number of points. A very small `cell=` is
   coarsened to stay under it, with a warning: below that ceiling the bucketing keeps a fast path
-  that a finer grid would lose, which costs more than the finer cells save.
+  that a finer grid would lose, which costs more than the finer cells save. **The same cap applies
+  to a HEALPix sky index as a pixel count**, so `nside` is bounded by the catalogue size and an
+  explicit `nside=` is coarsened the same way, with the same warning. It costs a pixelisation far
+  less than it costs the grid, because every pixel is on the sphere while most of the grid's cells
+  are not — but on a small catalogue it still floors the resolution well above what a small query
+  radius would want.
 - **`r_inner=` is scalar-only on `%pairs_within` and `%pairs_within_sky`.** Everywhere else it
   takes one value or one per point. With per-point inner radii a pair would qualify when it lies in
   *i*'s annulus **or** in *j*'s, and the union of two different annuli is not an annulus — which

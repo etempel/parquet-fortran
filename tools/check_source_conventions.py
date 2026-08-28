@@ -1798,6 +1798,48 @@ def check_facades_hide_the_same_names():
     return problems
 
 
+def check_facade_hides_healpix_run_query():
+    """`pf_query_disc_runs` is public in `parquet_healpix` for one caller, and must stay hidden
+    from `use parquet`.
+
+    `parquet_healpix` is an advertised entry module whose public surface is a HEALPix API a user
+    is offered. `pf_query_disc_runs` is not part of that offer: it exists so `parquet_spatial`'s
+    HEALPix sky backend can turn one disc into contiguous slices of its bucketed point array
+    without re-deriving a decomposition the module already computes, and a program holding a pixel
+    list has `pf_query_disc` for everything else. It is public only because Fortran has no package
+    scope -- the same reason `parquet_strings`' typed accessors and `parquet_list`'s offset/payload
+    accessors are public and then privatised again in the facade.
+
+    **Nothing else can see a regression here.** The facade re-exports `parquet_healpix` with a
+    bare `use`, so deleting the `private ::` compiles, links, passes every test, and silently puts
+    a plumbing procedure into every `use parquet` program's namespace -- at which point removing it
+    again is a breaking change.
+
+    The first clause is what stops this check going stale: if the procedure is ever removed or
+    renamed, the check fails saying so rather than passing vacuously against a name that no longer
+    exists.
+    """
+    name = "pf_query_disc_runs"
+    healpix = SRC / "parquet_healpix.f90"
+    facade = SRC / "parquet.f90"
+    for path in (healpix, facade):
+        if not path.exists():
+            return ["%s not found -- this check cannot have run" % path]
+    if name not in _access_names(healpix.read_text(), "public"):
+        return [
+            "src/parquet_healpix.f90 no longer declares `public :: %s`. If it was renamed, "
+            "update this check and src/parquet.f90's `private ::` together; if it was removed, "
+            "delete both." % name
+        ]
+    if name not in _access_names(facade.read_text(), "private"):
+        return [
+            "src/parquet.f90: `%s` is public in parquet_healpix but not privatised here, so "
+            "`use parquet` now exposes it. Add a `private :: %s` with the reason, next to its "
+            "siblings." % (name, name)
+        ]
+    return []
+
+
 def _access_names(text, keyword):
     names = set()
     for raw in text.splitlines():
@@ -3622,6 +3664,7 @@ CHECKS = (
     ("no submodule calls a sort-oracle procedure pointer",
      check_no_submodule_oracle_pointer_call),
     ("the two facades hide the same names", check_facades_hide_the_same_names),
+    ("the facade hides pf_query_disc_runs", check_facade_hides_healpix_run_query),
     ("no per-element helper takes a shared_ptr", check_no_per_element_shared_ptr),
     ("no per-element string allocation in a bulk loop", check_no_per_element_string_alloc),
     ("every error scenario is named in the shell runner", check_scenario_list_is_complete),

@@ -87,6 +87,16 @@ contains
             new_unittest("an inclusive disc stays within radius plus one pixel radius", &
                          test_disc_inclusive_is_bounded), &
             new_unittest("a buffer of exactly the right size is accepted", test_disc_exact_buffer), &
+            new_unittest("query_disc_runs expands to exactly the pixel list, over a sweep", &
+                         test_disc_runs_expand), &
+            new_unittest("query_disc_runs decomposes rather than emitting one run per pixel", &
+                         test_disc_runs_are_ranges), &
+            new_unittest("a short run buffer still reports the true count and a correct prefix", &
+                         test_disc_runs_short_buffer), &
+            new_unittest("query_disc_runs agrees across the two integer kinds", &
+                         test_disc_runs_kinds_agree), &
+            new_unittest("query_disc_alloc is correct for a disc past its run-recording buffer", &
+                         test_disc_alloc_run_overflow), &
             new_unittest("query_disc at the int32 ceiling agrees with the int64 kind", &
                          test_disc_int32_ceiling), &
             new_unittest("no IEEE exception is raised by any entry point", test_no_ieee_exceptions), &
@@ -1252,8 +1262,47 @@ contains
                        "the elemental form did not match the scalar form", thr=0.0_real64)
             if (allocated(error)) return
         end do
+        ! **Exact zero for a coincident pair is a documented guarantee, not a tolerance.** The
+        ! formula alone does not deliver it wherever the compiler contracts `cd1*sd2 - sd1*cd2*cdl`
+        ! into an FMA -- the two products are then rounded differently and the second's rounding
+        ! error survives the cancellation -- so a guard in the procedure is what makes it true.
+        ! nagfor returned 1.22e-15 degrees for the first pair below before that guard existed,
+        ! while gfortran returned zero, which is precisely why this is asserted rather than assumed.
         call check(error, pf_angdist_deg(12.5_real64, 34.5_real64, 12.5_real64, 34.5_real64), &
                    0.0_real64, "a position was not exactly zero degrees from itself", thr=0.0_real64)
+        if (allocated(error)) return
+        call check(error, pf_angdist_deg(359.5_real64, -89.9_real64, 359.5_real64, -89.9_real64), &
+                   0.0_real64, "a position near the south pole was not exactly zero from itself", &
+                   thr=0.0_real64)
+        if (allocated(error)) return
+        ! Whole turns apart in RA is the same position, and the fold has to make it exactly zero
+        ! rather than merely small.
+        call check(error, pf_angdist_deg(10.0_real64, 20.0_real64, 370.0_real64, 20.0_real64), &
+                   0.0_real64, "a whole turn of RA was not exactly zero degrees away", &
+                   thr=0.0_real64)
+        if (allocated(error)) return
+        ! **At a POLE any two right ascensions name the same point**, and this one the formula
+        ! cannot reach even in principle: `cos(90 * pi/180)` is 6.1e-17 rather than zero, so the
+        ! arithmetic answers 6.2e-15 degrees on every compiler. It is a rule, and this asserts it.
+        call check(error, pf_angdist_deg(0.0_real64, 90.0_real64, 123.0_real64, 90.0_real64), &
+                   0.0_real64, "two positions at the north pole were not exactly coincident", &
+                   thr=0.0_real64)
+        if (allocated(error)) return
+        call check(error, pf_angdist_deg(0.0_real64, -90.0_real64, 123.0_real64, -90.0_real64), &
+                   0.0_real64, "two positions at the south pole were not exactly coincident", &
+                   thr=0.0_real64)
+        if (allocated(error)) return
+        ! The negative control for the guard: it must not swallow a real separation. A pair one
+        ! ulp apart in declination, and a pair at the same declination but genuinely apart in RA.
+        call check(error, pf_angdist_deg(30.0_real64, 45.0_real64, 30.0_real64, &
+                                         nearest(45.0_real64, 1.0_real64)) > 0.0_real64, &
+                   "the coincidence guard swallowed a one-ulp declination difference")
+        if (allocated(error)) return
+        call check(error, pf_angdist_deg(0.0_real64, 45.0_real64, 1.0e-9_real64, 45.0_real64) &
+                   > 0.0_real64, "the coincidence guard swallowed a nanodegree RA difference")
+        if (allocated(error)) return
+        call check(error, pf_angdist_deg(0.0_real64, 89.0_real64, 180.0_real64, 89.0_real64) &
+                   > 1.0_real64, "the coincidence guard fired just short of the pole")
     end subroutine test_angdist_deg_agrees
 
     !> `pf_angdist_deg` is total: it validates nothing, aborts on nothing, and propagates NaN.
@@ -1265,12 +1314,49 @@ contains
     subroutine test_angdist_deg_total(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first fault.
         real(real64) :: nan, got
+        logical :: saved, raised, can_test
 
         nan = ieee_value(0.0_real64, ieee_quiet_nan)
+        ! **The flag is saved and restored around the whole test**, because a NaN fixture is
+        ! exactly the sort that raises one by accident and leaves a "Floating invalid operation
+        ! occurred" line at STOP that names no test -- and clearing it is what turns the nuisance
+        ! into the assertion below. `saved .or. raised` on the way out so a flag raised elsewhere
+        ! in the run is neither hidden nor blamed on this call.
+        can_test = ieee_support_flag(ieee_invalid, 0.0_real64)
+        saved = .false.
+        if (can_test) then
+            call ieee_get_flag(ieee_invalid, saved)
+            call ieee_set_flag(ieee_invalid, .false.)
+        end if
         got = pf_angdist_deg(nan, 0.0_real64, 10.0_real64, 20.0_real64)
+        ! **A quiet NaN must propagate quietly.** `anint(NaN)` -- which the RA fold reaches -- is
+        ! an invalid operation and nagfor raises on it, so without the procedure's own guard this
+        ! terminates any caller running with the traps unmasked, which is nagfor's default. Only
+        ! a compiler that raises can see this, so nothing else in the fleet covers it.
+        raised = .false.
+        if (can_test) then
+            call ieee_get_flag(ieee_invalid, raised)
+            call ieee_set_flag(ieee_invalid, .false.)
+        end if
+        call check(error, .not. raised, &
+                   "a NaN right ascension raised IEEE_INVALID, which terminates a caller whose " // &
+                   "traps are unmasked")
+        if (allocated(error)) then
+            if (can_test) call ieee_set_flag(ieee_invalid, saved)
+            return
+        end if
         call check(error, ieee_is_nan(got), "a NaN right ascension did not give a NaN separation")
-        if (allocated(error)) return
+        if (allocated(error)) then
+            if (can_test) call ieee_set_flag(ieee_invalid, saved)
+            return
+        end if
         got = pf_angdist_deg(0.0_real64, nan, 10.0_real64, 20.0_real64)
+        if (can_test) then
+            call ieee_get_flag(ieee_invalid, raised)
+            call ieee_set_flag(ieee_invalid, saved)
+        end if
+        call check(error, .not. raised, "a NaN declination raised IEEE_INVALID")
+        if (allocated(error)) return
         call check(error, ieee_is_nan(got), "a NaN declination did not give a NaN separation")
         if (allocated(error)) return
         ! A declination outside [-90, 90] is read as the direction it names rather than refused:
@@ -1314,5 +1400,202 @@ contains
         call pf_angdist([0.0_real64, 0.0_real64, 0.0_real64], [0.0_real64, 0.0_real64, 0.0_real64], d)
         call check(error, d, 0.0_real64, "two zero vectors did not give zero", thr=0.0_real64)
     end subroutine test_angdist_extremes
+
+    !> Expanding the runs reproduces `pf_query_disc`'s pixel list exactly, over a sweep.
+    !>
+    !> **The master test for the run form.** The runs and the pixels come from the same walk, so
+    !> this asserts they were not decoupled by a change to one of the two recording paths -- which
+    !> is the only way they could ever disagree. The sweep covers both `inclusive` modes, a disc
+    !> at a pole (where the ring band is truncated), one on the phi = 0 seam (where an arc wraps
+    !> and the walk emits two runs for one ring), and radii from below one pixel to several rings.
+    subroutine test_disc_runs_expand(error)
+        type(error_type), allocatable, intent(out) :: error !! set on any disagreement.
+        integer(int64) :: nside, npix, nlist, nruns, k, j, filled, p
+        integer(int64), allocatable :: listpix(:), runs(:,:)
+        real(real64) :: v(3), radius
+        integer :: ic, ir, im
+        logical :: inc, ok
+        real(real64), parameter :: centres(3, 4) = reshape([ &
+            0.0_real64, 0.0_real64, 1.0_real64, &
+            1.0_real64, 0.0_real64, 0.0_real64, &
+            0.6_real64, 0.8_real64, 0.0_real64, &
+            0.2_real64, 0.3_real64, 0.9327379053088815_real64], [3, 4])
+        real(real64), parameter :: radii(5) = &
+            [0.002_real64, 0.02_real64, 0.1_real64, 0.4_real64, 1.2_real64]
+
+        nside = 32_int64
+        npix = 12_int64 * nside * nside
+        allocate (listpix(npix), runs(2, npix))
+        do ic = 1, size(centres, 2)
+            v = centres(:, ic)
+            do ir = 1, size(radii)
+                radius = radii(ir)
+                do im = 1, 2
+                    inc = (im == 2)
+                    call pf_query_disc(nside, v, radius, listpix, nlist, inclusive=inc)
+                    call pf_query_disc_runs(nside, v, radius, runs, nruns, inclusive=inc)
+                    call check(error, nruns >= 0_int64 .and. nruns <= npix, &
+                               "the run count is outside every possible range")
+                    if (allocated(error)) return
+                    filled = 0_int64
+                    ok = .true.
+                    do k = 1_int64, nruns
+                        if (runs(2, k) <= 0_int64) then
+                            ok = .false.
+                            exit
+                        end if
+                        do j = 0_int64, runs(2, k) - 1_int64
+                            p = runs(1, k) + j
+                            filled = filled + 1_int64
+                            if (filled > nlist) then
+                                ok = .false.
+                                exit
+                            end if
+                            if (p /= listpix(filled)) ok = .false.
+                        end do
+                        if (.not. ok) exit
+                    end do
+                    call check(error, ok, "the runs did not expand to the disc's own pixel list")
+                    if (allocated(error)) return
+                    call check(error, filled, nlist, &
+                               "the runs cover a different number of pixels than the disc holds")
+                    if (allocated(error)) return
+                end do
+            end do
+        end do
+    end subroutine test_disc_runs_expand
+
+    !> The runs really are ranges: ascending, non-overlapping, and far fewer than the pixels.
+    !>
+    !> **Without this, `test_disc_runs_expand` passes against a decomposition that emits one run
+    !> per pixel** -- which would expand correctly and be worthless. Maximality is deliberately
+    !> NOT asserted: two runs can legitimately abut, both across a ring boundary (the last pixel
+    !> of one ring and the first of the next are consecutive in RING numbering) and within one
+    !> ring whose arc covers it entirely after trimming.
+    subroutine test_disc_runs_are_ranges(error)
+        type(error_type), allocatable, intent(out) :: error !! set if the decomposition degenerates.
+        integer(int64) :: nside, npix, nlist, nruns, k
+        integer(int64), allocatable :: listpix(:), runs(:,:)
+        real(real64), parameter :: v(3) = [0.2_real64, 0.3_real64, 0.9327379053088815_real64]
+
+        nside = 64_int64
+        npix = 12_int64 * nside * nside
+        allocate (listpix(npix), runs(2, npix))
+        call pf_query_disc(nside, v, 0.05_real64, listpix, nlist)
+        call pf_query_disc_runs(nside, v, 0.05_real64, runs, nruns)
+        call check(error, nlist > 20_int64, "the fixture disc is too small to test a decomposition")
+        if (allocated(error)) return
+        ! A disc spans an arc of each ring it touches, so the run count tracks the RINGS, not the
+        ! pixels. Anything close to one run per pixel is a decomposition that decomposed nothing.
+        call check(error, nruns * 2_int64 < nlist, &
+                   "the run count is not materially below the pixel count, so the runs are not ranges")
+        if (allocated(error)) return
+        do k = 1_int64, nruns
+            call check(error, runs(1, k) >= 0_int64 .and. runs(1, k) < npix, &
+                       "a run starts outside the pixelisation")
+            if (allocated(error)) return
+            call check(error, runs(2, k) > 0_int64, "a run has a non-positive length")
+            if (allocated(error)) return
+            call check(error, runs(1, k) + runs(2, k) <= npix, "a run runs past the last pixel")
+            if (allocated(error)) return
+            if (k > 1_int64) then
+                call check(error, runs(1, k - 1_int64) + runs(2, k - 1_int64) <= runs(1, k), &
+                           "the runs are not ascending and non-overlapping")
+                if (allocated(error)) return
+            end if
+        end do
+    end subroutine test_disc_runs_are_ranges
+
+    !> A run buffer too small reports the TRUE count and fills its prefix correctly.
+    !>
+    !> This is the contract that makes a short buffer recoverable rather than an abort, and it is
+    !> the one place where copying the module's own internal recording -- which used a negative
+    !> sentinel -- would have been wrong. Asserted against the full query rather than against a
+    !> stored expectation, so it cannot drift.
+    subroutine test_disc_runs_short_buffer(error)
+        type(error_type), allocatable, intent(out) :: error !! set if a short buffer misreports.
+        integer(int64) :: nside, npix, nruns_full, nruns, k, cap
+        integer(int64), allocatable :: full(:,:), small(:,:)
+        real(real64), parameter :: v(3) = [0.2_real64, 0.3_real64, 0.9327379053088815_real64]
+        real(real64), parameter :: radius = 0.05_real64
+
+        nside = 64_int64
+        npix = 12_int64 * nside * nside
+        allocate (full(2, npix))
+        call pf_query_disc_runs(nside, v, radius, full, nruns_full)
+        call check(error, nruns_full > 3_int64, "the fixture disc has too few runs to truncate")
+        if (allocated(error)) return
+        do cap = 1_int64, 3_int64
+            deallocate (small, stat=k)
+            allocate (small(2, cap))
+            call pf_query_disc_runs(nside, v, radius, small, nruns)
+            call check(error, nruns, nruns_full, &
+                       "a short run buffer did not report the true run count")
+            if (allocated(error)) return
+            do k = 1_int64, cap
+                call check(error, small(1, k), full(1, k), &
+                           "a short run buffer stored a different run start")
+                if (allocated(error)) return
+                call check(error, small(2, k), full(2, k), &
+                           "a short run buffer stored a different run length")
+                if (allocated(error)) return
+            end do
+        end do
+    end subroutine test_disc_runs_short_buffer
+
+    !> The int32 and int64 kinds return the same runs.
+    subroutine test_disc_runs_kinds_agree(error)
+        type(error_type), allocatable, intent(out) :: error !! set if the two kinds disagree.
+        integer(int32) :: runs32(2, 512), nruns32
+        integer(int64) :: runs64(2, 512), nruns64, k
+        real(real64), parameter :: v(3) = [0.2_real64, 0.3_real64, 0.9327379053088815_real64]
+
+        call pf_query_disc_runs(128_int32, v, 0.05_real64, runs32, nruns32, inclusive=.true.)
+        call pf_query_disc_runs(128_int64, v, 0.05_real64, runs64, nruns64, inclusive=.true.)
+        call check(error, int(nruns32, int64), nruns64, "the two kinds reported different run counts")
+        if (allocated(error)) return
+        call check(error, nruns64 > 0_int64 .and. nruns64 <= 512_int64, &
+                   "the fixture disc did not fit the test buffers")
+        if (allocated(error)) return
+        do k = 1_int64, nruns64
+            call check(error, int(runs32(1, k), int64), runs64(1, k), &
+                       "the two kinds reported different run starts")
+            if (allocated(error)) return
+            call check(error, int(runs32(2, k), int64), runs64(2, k), &
+                       "the two kinds reported different run lengths")
+            if (allocated(error)) return
+        end do
+    end subroutine test_disc_runs_kinds_agree
+
+    !> `pf_query_disc_alloc` is still correct for a disc holding more runs than it can record.
+    !>
+    !> Its counting pass records where each run landed so that the emitting pass is a replay
+    !> rather than a second walk, and that recording has a fixed-size buffer. **The overflow path
+    !> -- walk twice instead -- is what this covers**, and it is reached only by a disc spanning
+    !> more rings than the buffer has columns, so no ordinary disc test goes near it. The
+    !> whole-sphere disc below spans 2047 rings against a 1024-column buffer.
+    subroutine test_disc_alloc_run_overflow(error)
+        type(error_type), allocatable, intent(out) :: error !! set if the fallback misbehaves.
+        integer(int64) :: nside, npix, nlist, k
+        integer(int64), allocatable :: got(:)
+        logical :: ok
+        real(real64), parameter :: v(3) = [0.0_real64, 0.0_real64, 1.0_real64]
+
+        nside = 512_int64
+        npix = 12_int64 * nside * nside
+        call pf_query_disc_alloc(nside, v, 4.0_real64, got, nlist)
+        call check(error, nlist, npix, "a disc past pi/2 radians should still hold every pixel")
+        if (allocated(error)) return
+        call check(error, int(size(got), int64), npix, "the allocated array is the wrong size")
+        if (allocated(error)) return
+        ok = .true.
+        do k = 1_int64, npix
+            if (got(k) /= k - 1_int64) then
+                ok = .false.
+                exit
+            end if
+        end do
+        call check(error, ok, "the whole-sphere disc did not come back in ascending pixel order")
+    end subroutine test_disc_alloc_run_overflow
 
 end module test_healpix

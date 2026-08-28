@@ -137,7 +137,23 @@ contains
             new_unittest("rebuild_for re-tunes without the caller's arrays", test_rebuild_for_retunes), &
             new_unittest("a distant query radius rebuilds, a near one does not", test_auto_rebuild), &
             new_unittest("copy=.false. answers exactly as copy=.true.", test_copy_false_matches), &
-            new_unittest("the metadata queries report what was built", test_metadata_queries) &
+            new_unittest("the metadata queries report what was built", test_metadata_queries), &
+            new_unittest("the HEALPix backend answers every single-point sky query identically", &
+                         test_healpix_matches_grid3d), &
+            new_unittest("the HEALPix backend answers every BULK sky query identically", &
+                         test_healpix_bulk_matches_grid3d), &
+            new_unittest("the HEALPix backend answers nearest and kth-distance identically", &
+                         test_healpix_nearest_matches_grid3d), &
+            new_unittest("a HEALPix index reports its own shape and hides the grid's", &
+                         test_healpix_metadata), &
+            new_unittest("nside= is honoured, and the resolution probe can be stopped", &
+                         test_healpix_nside_forced), &
+            new_unittest("rebuild_for re-pixelates and keeps the backend", &
+                         test_healpix_rebuild_for), &
+            new_unittest("duplicated sky positions tie-break identically on both backends", &
+                         test_healpix_duplicate_positions), &
+            new_unittest("a disc outgrowing the walk's run buffer still answers identically", &
+                         test_healpix_run_buffer_overflow) &
             ]
     end subroutine collect_tests_parquet_spatial
 
@@ -2946,5 +2962,500 @@ contains
         if (allocated(error)) return
         call check(error, sx%size() == 0_int64, "a cleared index must hold no points")
     end subroutine test_metadata_queries
+
+    !> Whether two lists of `(i, j)` pairs hold the same pairs, in any order.
+    !>
+    !> `%pairs_within_sky` promises each close pair exactly once with `i < j`, and promises
+    !> nothing about the order -- which is the walk's, and so differs between the two backends by
+    !> design. Composing each pair into one sortable key and comparing the sorted keys is what
+    !> compares the promise rather than the walk. `n + 1` as the stride keeps the composition
+    !> injective for every row index the fixture can hold.
+    logical function same_pair_set(i1, j1, i2, j2, n) result(ok)
+        integer(int64), intent(in) :: i1(:) !! first list's lower row indices.
+        integer(int64), intent(in) :: j1(:) !! first list's upper row indices.
+        integer(int64), intent(in) :: i2(:) !! second list's lower row indices.
+        integer(int64), intent(in) :: j2(:) !! second list's upper row indices.
+        integer(int64), intent(in) :: n !! how many points the index holds.
+        integer(int64), allocatable :: k1(:), k2(:), p1(:), p2(:)
+        integer(int64) :: t
+
+        ok = size(i1, kind=int64) == size(i2, kind=int64)
+        if (.not. ok) return
+        allocate (k1(size(i1)), k2(size(i2)))
+        k1 = i1 * (n + 1_int64) + j1
+        k2 = i2 * (n + 1_int64) + j2
+        call pf_argsort(k1, p1)
+        call pf_argsort(k2, p2)
+        do t = 1_int64, size(k1, kind=int64)
+            if (k1(p1(t)) /= k2(p2(t))) ok = .false.
+        end do
+    end function same_pair_set
+
+    ! ---- The HEALPix sky backend ----
+    !
+    ! **These are A/B equality tests, and an A/B equality passes just as happily when both arms
+    ! ran the same code.** Every one of them therefore also asserts a NEGATIVE CONTROL: that the
+    ! two indexes report different backends, and that the HEALPix arm really walked pixels while
+    ! the 3D arm walked none. Without that, deleting the branch in `spatial_scan` would leave the
+    ! whole group green.
+
+    !> Builds the same points twice, once per backend, and checks the pair is genuinely a pair.
+    subroutine build_both(ra, dec, radius_deg, s3, sh, error)
+        real(real64), intent(in) :: ra(:) !! right ascension of every point, degrees.
+        real(real64), intent(in) :: dec(:) !! declination of every point, degrees.
+        real(real64), intent(in) :: radius_deg !! the radius both indexes are tuned for.
+        type(pf_spatial_index), intent(out) :: s3 !! the 3D-grid index.
+        type(pf_spatial_index), intent(out) :: sh !! the HEALPix index.
+        type(error_type), allocatable, intent(out) :: error !! set if the pair is not a pair.
+
+        call s3%build_sky(ra, dec, radius_deg=radius_deg)
+        call sh%build_sky(ra, dec, radius_deg=radius_deg, backend=PF_SKY_HEALPIX)
+        call check(error, s3%backend() == PF_SKY_GRID3D, &
+                   "negative control: the default backend must be the 3D grid, or the two arms are one arm")
+        if (allocated(error)) return
+        call check(error, sh%backend() == PF_SKY_HEALPIX, &
+                   "negative control: backend=PF_SKY_HEALPIX must be recorded, or the two arms are one arm")
+        if (allocated(error)) return
+        call check(error, sh%nside() > 0_int64 .and. sh%npix() == 12_int64 * sh%nside() ** 2, &
+                   "a HEALPix index must report a positive nside and a matching pixel count")
+    end subroutine build_both
+
+    !> Every single-point sky query returns the identical result on both backends.
+    !>
+    !> **`sorted=.true.` makes this an ELEMENT-FOR-ELEMENT equality rather than a set comparison.**
+    !> The ordering contract -- increasing distance, ties broken by ascending row index -- is
+    !> applied after the walk from the distances the walk recorded, so it is backend-independent
+    !> by construction and the two arms must agree exactly, in the rows AND in the distances. A
+    !> single differing element is a bug in one of the two walks, and this does not have to know
+    !> which.
+    subroutine test_healpix_matches_grid3d(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:)
+        type(pf_spatial_index) :: s3, sh
+        integer(int64), allocatable :: o3(:), oh(:)
+        real(real64), allocatable :: d3(:), dh(:)
+        integer(int64) :: n, k, m3, mh, pix3, pixh, hits
+        real(real64) :: qra, qdec, rq
+        integer :: t
+        real(real64), parameter :: radii(4) = &
+            [0.05_real64, 0.5_real64, 2.0_real64, 8.0_real64]
+
+        n = 4000_int64
+        call make_sky(n, ra, dec)
+        allocate (o3(n), oh(n), d3(n), dh(n))
+        do t = 1, size(radii)
+            rq = radii(t)
+            call build_both(ra, dec, rq, s3, sh, error)
+            if (allocated(error)) return
+            hits = 0_int64
+            do k = 1_int64, 200_int64
+                ! Query points drawn from the data itself as well as from open sky, so the sweep
+                ! covers the polar caps and the 0h seam that `make_sky` deliberately populates.
+                if (mod(k, 2_int64) == 0_int64) then
+                    qra = ra(k)
+                    qdec = dec(k)
+                else
+                    qra = 360.0_real64 * pf_random_at(fixture_seed + 71_int64, k, 1_int64)
+                    qdec = -90.0_real64 + 180.0_real64 * pf_random_at(fixture_seed + 71_int64, k, 2_int64)
+                end if
+                m3 = s3%within_sky(qra, qdec, rq, o3, d3, sorted=.true.)
+                mh = sh%within_sky(qra, qdec, rq, oh, dh, sorted=.true.)
+                hits = hits + m3
+                call check(error, mh, m3, "the two backends returned different neighbour counts")
+                if (allocated(error)) return
+                if (m3 > 0_int64) then
+                    call check(error, all(oh(1:m3) == o3(1:m3)), &
+                               "the two backends returned different rows, or the same rows in a different order")
+                    if (allocated(error)) return
+                    call check(error, all(dh(1:m3) == d3(1:m3)), &
+                               "the two backends returned different distances for the same neighbours")
+                    if (allocated(error)) return
+                end if
+            end do
+            call check(error, hits > 0_int64, &
+                       "the fixture returned no neighbours at all, so nothing above was compared")
+            if (allocated(error)) return
+        end do
+
+        ! ---- The negative control ----
+        !
+        ! Every assertion above holds just as well if `spatial_scan`'s HEALPix branch were deleted
+        ! and both arms ran the 3D walk. These two say the arms really are different code.
+        rq = 1.0_real64
+        call build_both(ra, dec, rq, s3, sh, error)
+        if (allocated(error)) return
+        call parquet_debug_reset_spatial_counters()
+        m3 = s3%within_sky(ra(1), dec(1), rq, o3)
+        pix3 = parquet_debug_spatial_pixels_visited()
+        call parquet_debug_reset_spatial_counters()
+        mh = sh%within_sky(ra(1), dec(1), rq, oh)
+        pixh = parquet_debug_spatial_pixels_visited()
+        call check(error, pix3, 0_int64, &
+                   "negative control: a 3D-grid query must walk no HEALPix pixels at all")
+        if (allocated(error)) return
+        call check(error, pixh > 0_int64, &
+                   "negative control: a HEALPix query must walk pixels, or its branch never ran")
+    end subroutine test_healpix_matches_grid3d
+
+    !> The three bulk sky sweeps agree element for element across the backends.
+    subroutine test_healpix_bulk_matches_grid3d(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:)
+        type(pf_spatial_index) :: s3, sh
+        integer(int64), allocatable :: f3(:), n3(:), fh(:), nh(:)
+        integer(int64), allocatable :: i3(:), j3(:), ih(:), jh(:), c3(:), ch(:)
+        integer(int64) :: n, i, lo, hi
+        real(real64), parameter :: rq = 1.5_real64
+
+        n = 900_int64
+        call make_sky(n, ra, dec)
+        call build_both(ra, dec, rq, s3, sh, error)
+        if (allocated(error)) return
+
+        call s3%all_within_sky(rq, f3, n3)
+        call sh%all_within_sky(rq, fh, nh)
+        call check(error, all(fh == f3), "the CSR offsets differ between the backends")
+        if (allocated(error)) return
+        ! Row by row rather than whole-array, because a CSR row's ORDER is the walk's order and
+        ! only the sorted contract pins it -- so the rows are compared as sets, which is what
+        ! `%all_within_sky` actually promises.
+        do i = 1_int64, n
+            lo = f3(i)
+            hi = f3(i + 1_int64) - 1_int64
+            call check(error, same_rows(n3(lo:hi), hi - lo + 1_int64, nh(lo:hi), hi - lo + 1_int64), &
+                       "a CSR neighbour row differs between the backends")
+            if (allocated(error)) return
+        end do
+
+        call s3%count_all_within_sky(rq, c3)
+        call sh%count_all_within_sky(rq, ch)
+        call check(error, all(ch == c3), "count_all_within_sky differs between the backends")
+        if (allocated(error)) return
+
+        ! **The pair list is compared as a SET, deliberately.** `%pairs_within_sky` promises every
+        ! close pair exactly once with `i < j` and promises nothing about the order they arrive
+        ! in -- that order is the walk's, so it is bucket order on one backend and pixel order on
+        ! the other, and they genuinely differ (measured: the same 20140 pairs, none of them at
+        ! the same position). Asserting element-for-element here would be asserting an order the
+        ! library does not offer.
+        !
+        ! The COUNT is the sharp half and is asserted first: the `min_key` ranking is what makes
+        ! each pair appear exactly once, it is shared by both walks, and a HEALPix walk that had
+        ! dropped it would emit every pair twice -- which the count catches immediately, where a
+        ! set comparison alone would not.
+        call s3%pairs_within_sky(rq, i3, j3)
+        call sh%pairs_within_sky(rq, ih, jh)
+        call check(error, size(ih, kind=int64), size(i3, kind=int64), &
+                   "the two backends found a different number of sky pairs")
+        if (allocated(error)) return
+        call check(error, all(ih < jh), "every sky pair from the HEALPix backend must have i < j")
+        if (allocated(error)) return
+        call check(error, same_pair_set(i3, j3, ih, jh, n), &
+                   "the two backends emitted different sky pairs")
+    end subroutine test_healpix_bulk_matches_grid3d
+
+    !> The expanding-shell searches agree across the backends.
+    !>
+    !> `%nearest_sky` and `%kth_distance_sky` reach `spatial_scan` through `spatial_shell_search`,
+    !> which widens the radius until it has enough neighbours -- so this is also the only test
+    !> here that drives the HEALPix walk at radii far larger than the index was tuned for, which
+    !> is where a disc outgrows the walk's stack run buffer and takes its allocating fallback.
+    subroutine test_healpix_nearest_matches_grid3d(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:), k3(:), kh(:)
+        type(pf_spatial_index) :: s3, sh
+        integer(int64), allocatable :: o3(:), oh(:)
+        real(real64), allocatable :: d3(:), dh(:)
+        integer(int64) :: n, t, m3, mh
+        real(real64) :: qra, qdec
+        real(real64), parameter :: rq = 1.0_real64
+
+        n = 1500_int64
+        call make_sky(n, ra, dec)
+        call build_both(ra, dec, rq, s3, sh, error)
+        if (allocated(error)) return
+        allocate (o3(32), oh(32), d3(32), dh(32))
+        do t = 1_int64, 60_int64
+            qra = 360.0_real64 * pf_random_at(fixture_seed + 72_int64, t, 1_int64)
+            qdec = -90.0_real64 + 180.0_real64 * pf_random_at(fixture_seed + 72_int64, t, 2_int64)
+            m3 = s3%nearest_sky(qra, qdec, 9_int32, o3, dist_deg=d3)
+            mh = sh%nearest_sky(qra, qdec, 9_int32, oh, dist_deg=dh)
+            call check(error, mh, m3, "the two backends found a different number of nearest neighbours")
+            if (allocated(error)) return
+            call check(error, all(oh(1:m3) == o3(1:m3)), &
+                       "nearest_sky returned different rows on the two backends")
+            if (allocated(error)) return
+            call check(error, all(dh(1:m3) == d3(1:m3)), &
+                       "nearest_sky returned different distances on the two backends")
+            if (allocated(error)) return
+        end do
+        ! A pole query, where the ring arithmetic is most likely to be wrong, and one on the seam.
+        m3 = s3%nearest_sky(0.0_real64, 90.0_real64, 9_int32, o3, dist_deg=d3)
+        mh = sh%nearest_sky(0.0_real64, 90.0_real64, 9_int32, oh, dist_deg=dh)
+        call check(error, all(oh(1:m3) == o3(1:m3)) .and. mh == m3, &
+                   "a nearest_sky query centred on the north pole differed between the backends")
+        if (allocated(error)) return
+        m3 = s3%nearest_sky(360.0_real64, 0.0_real64, 5_int32, o3, dist_deg=d3)
+        mh = sh%nearest_sky(360.0_real64, 0.0_real64, 5_int32, oh, dist_deg=dh)
+        call check(error, all(oh(1:m3) == o3(1:m3)) .and. mh == m3, &
+                   "a nearest_sky query on the 0h seam differed between the backends")
+        if (allocated(error)) return
+
+        call s3%kth_distance_sky(3_int32, k3)
+        call sh%kth_distance_sky(3_int32, kh)
+        call check(error, all(kh == k3), "kth_distance_sky differs between the backends")
+    end subroutine test_healpix_nearest_matches_grid3d
+
+    !> A HEALPix index describes itself, and reports the 3D grid's own fields as absent.
+    subroutine test_healpix_metadata(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:)
+        type(pf_spatial_index) :: s3, sh
+        integer(int64) :: nx, ny, nz
+        real(real64) :: sides(3)
+
+        call make_sky(2000_int64, ra, dec)
+        call build_both(ra, dec, 1.25_real64, s3, sh, error)
+        if (allocated(error)) return
+        call check(error, sh%metric() == PF_METRIC_SKY, "a HEALPix index is still a sky index")
+        if (allocated(error)) return
+        call check(error, sh%ndim() == 3, "a HEALPix index is still three unit-vector coordinates")
+        if (allocated(error)) return
+        call check(error, .not. sh%is_periodic(), "a HEALPix index has no periodic box")
+        if (allocated(error)) return
+        call check(error, sh%size() == s3%size(), "both backends hold the same points")
+        if (allocated(error)) return
+        ! `%effective_radius` is backend-independent: it reports the radius the index was given,
+        ! converted back to degrees, and neither backend changes what that radius was.
+        call check(error, abs(sh%effective_radius() - 1.25_real64) < 1.0e-9_real64, &
+                   "%effective_radius must report degrees on a HEALPix index too")
+        if (allocated(error)) return
+        ! A pixel IS a bucket, so the bucket count is the pixel count.
+        call check(error, sh%cells(), sh%npix(), "%cells must report the pixel count on a HEALPix index")
+        if (allocated(error)) return
+        ! The 3D grid's own description is reported as a value no valid grid ever has, rather than
+        ! as a stale number describing a grid this index does not have -- `%cell_size`'s documented
+        ! contract is that it can be passed back as `cell=`, and a pixel resolution cannot.
+        call check(error, sh%cell_size(), 0.0_real64, &
+                   "%cell_size must report zero on a HEALPix index, not a pixel resolution", thr=0.0_real64)
+        if (allocated(error)) return
+        call sh%cell_sides(sides(1), sides(2), sides(3))
+        call check(error, all(sides == 0.0_real64), "%cell_sides must report zero on a HEALPix index")
+        if (allocated(error)) return
+        call sh%grid(nx, ny, nz)
+        call check(error, nx == 0_int64 .and. ny == 0_int64 .and. nz == 0_int64, &
+                   "%grid must report zero cells per axis on a HEALPix index")
+        if (allocated(error)) return
+        ! And the 3D index answers zero for the HEALPix fields, rather than aborting, so that
+        ! reporting code can print an index's shape without first asking what backs it.
+        call check(error, s3%nside(), 0_int64, "a 3D-grid index has no nside")
+        if (allocated(error)) return
+        call check(error, s3%npix(), 0_int64, "a 3D-grid index has no pixel count")
+    end subroutine test_healpix_metadata
+
+    !> An explicit `nside=` is honoured, and the debug override stops the probe.
+    subroutine test_healpix_nside_forced(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:)
+        type(pf_spatial_index) :: sx, sy
+        integer(int64), allocatable :: o1(:), o2(:)
+        integer(int64) :: n, m1, m2, probed
+        real(real64), parameter :: rq = 1.0_real64
+
+        n = 6000_int64
+        call make_sky(n, ra, dec)
+        ! **Both resolutions must sit inside the buckets-per-point cap**, or the clamp -- not the
+        ! argument -- decides the answer and the test asserts the clamp instead. The cap here is
+        ! `0.3 * 6000 = 1800` pixels, so nside 4 (192) and nside 8 (768) both fit and nside 16
+        ! (3072) would not.
+        call sx%build_sky(ra, dec, radius_deg=rq, backend=PF_SKY_HEALPIX, nside=4_int64)
+        call check(error, sx%nside(), 4_int64, "nside= was not honoured")
+        if (allocated(error)) return
+        call check(error, parquet_debug_spatial_probe_count(), 0_int64, &
+                   "an explicit nside= must stop the resolution probe, as an explicit cell= stops the cell probe")
+        if (allocated(error)) return
+        call sy%build_sky(ra, dec, radius_deg=rq, backend=PF_SKY_HEALPIX, nside=8_int64)
+        call check(error, sy%nside(), 8_int64, "the second nside= was not honoured")
+        if (allocated(error)) return
+        ! **Every resolution must give the same answers.** That is what makes the resolution a
+        ! tuning parameter rather than part of the result, and it is the property a wrong disc
+        ! radius or a wrong bucket-range calculation would break.
+        allocate (o1(n), o2(n))
+        m1 = sx%within_sky(ra(3), dec(3), rq, o1)
+        m2 = sy%within_sky(ra(3), dec(3), rq, o2)
+        call check(error, m2, m1, "two HEALPix resolutions returned different neighbour counts")
+        if (allocated(error)) return
+        call check(error, same_rows(o1, m1, o2, m2), "two HEALPix resolutions returned different rows")
+        if (allocated(error)) return
+
+        ! The probe runs when nothing forces it, which is the negative control for the two
+        ! assertions above -- a probe count of zero would otherwise mean nothing.
+        call sx%clear()
+        call sx%build_sky(ra, dec, radius_deg=rq, backend=PF_SKY_HEALPIX)
+        probed = parquet_debug_spatial_probe_count()
+        call check(error, probed > 1_int64, &
+                   "negative control: with no nside= the resolution probe must evaluate several candidates")
+        if (allocated(error)) return
+
+        ! The debug override forces the resolution exactly as `nside=` does, which is what lets a
+        ! test-sized fixture pin a resolution the probe would never pick.
+        call parquet_debug_set_spatial_nside(2_int64)
+        call sy%clear()
+        call sy%build_sky(ra, dec, radius_deg=rq, backend=PF_SKY_HEALPIX)
+        call parquet_debug_set_spatial_nside(0_int64)
+        call check(error, sy%nside(), 2_int64, "parquet_debug_set_spatial_nside did not force the resolution")
+        if (allocated(error)) return
+        call check(error, parquet_debug_spatial_probe_count(), 0_int64, &
+                   "the debug override must stop the probe exactly as nside= does")
+        if (allocated(error)) return
+        call sy%clear()
+        call sy%build_sky(ra, dec, radius_deg=rq, backend=PF_SKY_HEALPIX)
+        call check(error, parquet_debug_spatial_probe_count() > 1_int64, &
+                   "negative control: clearing the override must return the resolution to the probe")
+    end subroutine test_healpix_nside_forced
+
+    !> `%rebuild_for` re-pixelates a HEALPix index and leaves it a HEALPix index.
+    subroutine test_healpix_rebuild_for(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:)
+        type(pf_spatial_index) :: sx, s3
+        integer(int64), allocatable :: oh(:), o3(:)
+        integer(int64) :: n, fine, coarse, mh, m3
+        real(real64) :: big_chord
+        real(real64), parameter :: deg2rad = 3.141592653589793238462643_real64 / 180.0_real64
+
+        n = 20000_int64
+        call make_sky(n, ra, dec)
+        call sx%build_sky(ra, dec, radius_deg=0.05_real64, backend=PF_SKY_HEALPIX)
+        fine = sx%nside()
+        ! **A CHORD, not degrees.** `%rebuild_for` folds its argument into the same accumulator
+        ! `%build_sky` folded its converted radii into, so a sky index re-tunes in unit-vector
+        ! space -- the same space `cell=` and `%cell_size()` live in.
+        big_chord = 2.0_real64 * sin(0.5_real64 * 20.0_real64 * deg2rad)
+        call sx%rebuild_for(big_chord)
+        coarse = sx%nside()
+        call check(error, sx%backend() == PF_SKY_HEALPIX, "%rebuild_for must not change the backend")
+        if (allocated(error)) return
+        call check(error, sx%npix(), 12_int64 * coarse ** 2, "%rebuild_for left nside and npix disagreeing")
+        if (allocated(error)) return
+        call check(error, coarse < fine, &
+                   "re-tuning for a far larger radius must choose a coarser pixelisation, or nothing was re-tuned")
+        if (allocated(error)) return
+        ! And it still answers correctly afterwards, which is what a re-bucketing can break.
+        allocate (oh(n), o3(n))
+        call s3%build_sky(ra, dec, radius_deg=20.0_real64)
+        mh = sx%within_sky(ra(7), dec(7), 20.0_real64, oh)
+        m3 = s3%within_sky(ra(7), dec(7), 20.0_real64, o3)
+        call check(error, mh, m3, "a re-pixelated HEALPix index disagreed with the 3D grid")
+        if (allocated(error)) return
+        call check(error, same_rows(oh, mh, o3, m3), "a re-pixelated HEALPix index returned different rows")
+    end subroutine test_healpix_rebuild_for
+
+    !> The walk's allocating fallback, reached by narrowing its run buffer to one column.
+    !>
+    !> **Unreachable without the override, which is the whole reason the override exists.** A disc
+    !> arrives as six or seven runs at a tuned resolution, so overflowing the real 512-column
+    !> buffer needs a disc spanning more than 256 rings -- and so a resolution the
+    !> buckets-per-point cap grants only to a catalogue of about a million points. This narrows
+    !> the buffer instead, which exercises the same branch on the same arithmetic at a fixture
+    !> size a test can hold.
+    subroutine test_healpix_run_buffer_overflow(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:)
+        type(pf_spatial_index) :: s3, sh
+        integer(int64), allocatable :: owide(:), onarrow(:), o3(:)
+        real(real64), allocatable :: dwide(:), dnarrow(:)
+        integer(int64) :: n, k, mwide, mnarrow, m3
+        real(real64), parameter :: rq = 3.0_real64
+
+        n = 3000_int64
+        call make_sky(n, ra, dec)
+        call build_both(ra, dec, rq, s3, sh, error)
+        if (allocated(error)) return
+        allocate (owide(n), onarrow(n), o3(n), dwide(n), dnarrow(n))
+        do k = 1_int64, 40_int64
+            ! The full buffer first, then one column, then the 3D grid: the narrowed arm must
+            ! agree with BOTH, which is what tells a broken fallback from a broken walk.
+            call parquet_debug_set_spatial_run_buffer(0_int64)
+            mwide = sh%within_sky(ra(k), dec(k), rq, owide, dwide, sorted=.true.)
+            call parquet_debug_set_spatial_run_buffer(1_int64)
+            mnarrow = sh%within_sky(ra(k), dec(k), rq, onarrow, dnarrow, sorted=.true.)
+            call parquet_debug_set_spatial_run_buffer(0_int64)
+            m3 = s3%within_sky(ra(k), dec(k), rq, o3, sorted=.true.)
+            call check(error, mnarrow, mwide, &
+                       "narrowing the run buffer changed the neighbour count, so the fallback is wrong")
+            if (allocated(error)) return
+            call check(error, m3, mwide, "the 3D grid disagreed with the HEALPix walk on this fixture")
+            if (allocated(error)) return
+            call check(error, all(onarrow(1:mwide) == owide(1:mwide)), &
+                       "the allocating fallback returned different rows than the stack buffer did")
+            if (allocated(error)) return
+            call check(error, all(dnarrow(1:mwide) == dwide(1:mwide)), &
+                       "the allocating fallback returned different distances than the stack buffer did")
+            if (allocated(error)) return
+        end do
+        ! **The negative control.** Every assertion above holds if the override did nothing at all
+        ! and both arms took the stack path -- so this shows the narrowed arm really was short,
+        ! by finding a query whose disc needs more than one run.
+        call parquet_debug_set_spatial_run_buffer(1_int64)
+        mnarrow = 0_int64
+        do k = 1_int64, 40_int64
+            m3 = sh%within_sky(ra(k), dec(k), rq, onarrow)
+            if (m3 > 0_int64) mnarrow = mnarrow + 1_int64
+        end do
+        call parquet_debug_reset_spatial_counters()
+        call check(error, mnarrow > 0_int64, &
+                   "negative control: the narrowed sweep found nothing, so nothing above was compared")
+    end subroutine test_healpix_run_buffer_overflow
+
+    !> Exact ties: many points at identical positions must order identically on both backends.
+    !>
+    !> The `sorted=` contract breaks ties by ASCENDING ROW INDEX, and that tie-break is what a
+    !> duplicated fixture exercises -- with every distance equal, the row order is the whole
+    !> result. It is applied after the walk on both backends, so the two must agree exactly; if
+    !> either walk fed it rows in an order that leaked into the answer, this is what would show it.
+    subroutine test_healpix_duplicate_positions(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:)
+        type(pf_spatial_index) :: s3, sh
+        integer(int64), allocatable :: o3(:), oh(:)
+        real(real64), allocatable :: d3(:), dh(:)
+        integer(int64) :: n, i, m3, mh
+        real(real64), parameter :: rq = 2.0_real64
+
+        n = 600_int64
+        allocate (ra(n), dec(n), o3(n), oh(n), d3(n), dh(n))
+        do i = 1_int64, n
+            ! Twelve distinct positions, fifty rows each: every neighbour list is a block of exact
+            ! ties, including one exactly on a pole and one exactly on the 0h seam.
+            select case (int(mod(i - 1_int64, 12_int64)))
+            case (0)
+                ra(i) = 0.0_real64
+                dec(i) = 90.0_real64
+            case (1)
+                ra(i) = 0.0_real64
+                dec(i) = -90.0_real64
+            case (2)
+                ra(i) = 0.0_real64
+                dec(i) = 0.0_real64
+            case default
+                ra(i) = 30.0_real64 * real(mod(i - 1_int64, 12_int64), real64)
+                dec(i) = -75.0_real64 + 15.0_real64 * real(mod(i - 1_int64, 12_int64), real64)
+            end select
+        end do
+        call build_both(ra, dec, rq, s3, sh, error)
+        if (allocated(error)) return
+        do i = 1_int64, 12_int64
+            m3 = s3%within_sky(ra(i), dec(i), rq, o3, d3, sorted=.true.)
+            mh = sh%within_sky(ra(i), dec(i), rq, oh, dh, sorted=.true.)
+            call check(error, mh, m3, "a duplicated-position query returned different counts")
+            if (allocated(error)) return
+            call check(error, m3 >= 50_int64, "the duplicated fixture returned fewer rows than one block")
+            if (allocated(error)) return
+            call check(error, all(oh(1:m3) == o3(1:m3)), &
+                       "the tie-break ordered exact ties differently on the two backends")
+            if (allocated(error)) return
+        end do
+    end subroutine test_healpix_duplicate_positions
 
 end module test_spatial

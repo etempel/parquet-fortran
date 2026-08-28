@@ -229,6 +229,9 @@ something a reader is expected to have.
 | [Risk-161](#risk-161--a-nested-read-that-sizes-the-inner-container-from-the-outer-row-count) | A nested read that sizes the inner container from the OUTER row count | 4 — covered |
 | [Risk-162](#risk-162--resolve_struct_path-and-struct_path_exists-are-independent-walks-and-must-agree) | `resolve_struct_path` and `struct_path_exists` are independent walks and must agree | 4 — covered |
 | [Risk-163](#risk-163--a-descent-path-reaching-qc-a-filter-or-a-sort-key-is-a-silent-misalignment) | A descent path reaching `qc:`, a filter or a sort key is a silent misalignment | 4 — covered |
+| [Risk-164](#risk-164--the-healpix-sky-backend-must-ask-for-the-overlap-superset-and-the-word-that-says-so-is-a-default) | The HEALPix sky backend must ask for the OVERLAP superset, and the word that says so is a default | 4 — covered |
+| [Risk-165](#risk-165--two-sky-backends-must-share-one-tail-or-pairs_within_sky-emits-every-pair-twice) | Two sky backends must share one tail, or `%pairs_within_sky` emits every pair twice | 4 — covered |
+| [Risk-166](#risk-166--a-disc-outgrowing-the-walks-run-buffer-truncates-rather-than-aborting) | A disc outgrowing the walk's run buffer TRUNCATES rather than aborting | 4 — covered |
 
 ---
 
@@ -6726,3 +6729,77 @@ asserts the message, not merely the exit status.
   this one exercises a REFUSAL, so a shared global would make one scenario silently change the
   other's meaning — the same reason the list and string overrides were kept separate.
 
+### Risk-164 — The HEALPix sky backend must ask for the OVERLAP superset, and the word that says so is a default
+
+`pf_query_disc`'s `inclusive` argument defaults to `.false.`, which returns the pixels whose
+**centre** lies in the disc. As a candidate filter that silently loses points: a point near the
+edge of a pixel whose centre falls just outside the disc is a real neighbour that never reaches the
+distance test. `inclusive = .true.` returns every pixel whose area meets the disc, which is the
+only correct candidate set — and it is measurably more expensive (about +57%), so it is exactly the
+kind of argument a later optimisation pass removes.
+
+**The failure is silent, plausible and hard to attribute.** The neighbour list is short by a few
+rows at the rim, every returned row is correct, the count looks reasonable, and nothing aborts. On
+a uniform fixture at a radius comfortably larger than the pixel it may lose nothing at all, so a
+casual test passes.
+
+**Covered**, by the A/B equality suite in `test/test_spatial.f90`: `test_healpix_matches_grid3d`,
+`test_healpix_bulk_matches_grid3d`, `test_healpix_rebuild_for` and
+`test_healpix_duplicate_positions` all fail when the argument is flipped to `.false.` Verified by
+mutation.
+
+**What it still forbids.** `test_healpix_nearest_matches_grid3d` **passes** under that mutation and
+must not be relied on: `%nearest_sky` widens its radius until it has enough neighbours, so losing
+rim points merely makes the shell expand once more and the same rows come back. Any future test of
+this property has to use a FIXED radius. And the same reasoning applies to a future `%within_sky`
+fast path that reuses the disc: the enlargement is `max_pixrad(nside)`, so a query radius far below
+the pixel size is where the loss would be largest and where a fixture is most likely to be built.
+
+### Risk-165 — Two sky backends must share one tail, or `%pairs_within_sky` emits every pair twice
+
+Every sky operation reaches `spatial_scan`, and the HEALPix backend branches inside it — *after*
+the shared setup and returning through the shared `scan_finish`. That is what makes the annulus
+test, the `min_key`/`keys` ranking, the `cap` truncation that keeps `m` the TRUE count, and the
+`sorted=` ordering contract one piece of code rather than two. A backend that grew its own copy of
+any of them would answer plausibly and differently.
+
+**The `min_key` ranking is the sharpest of the four.** It is what makes each close pair be emitted
+from exactly one endpoint; a walk that dropped it would emit every pair twice, and the row *count*
+would still look like a reasonable number of pairs for the fixture.
+
+**Covered**, by `test_healpix_bulk_matches_grid3d` (`test/test_spatial.f90`), which asserts the
+pair COUNT before comparing the pairs — the count is the half that catches a doubled emission,
+where a set comparison alone would not.
+
+**What it still forbids.** Do not factor the HEALPix walk out into a procedure that repeats the
+setup: the branch belongs after it. And do not tighten the pair-list assertion into an
+element-for-element equality — `%pairs_within_sky` promises each pair once with `i < j` and
+promises nothing about the order, which is the walk's and so genuinely differs between the
+backends (measured: the same 20140 pairs, none at the same position). Asserting the order would be
+asserting something the library does not offer, and it would fail for the wrong reason.
+
+### Risk-166 — A disc outgrowing the walk's run buffer TRUNCATES rather than aborting
+
+The HEALPix walk asks `pf_query_disc_runs` for the disc's contiguous pixel runs into a 512-column
+stack buffer. That call does **not** abort on a short buffer — deliberately, because a run count is
+cheap to bound and a caller can simply grow and re-query — it fills what it can and reports the
+TRUE count. So the walk must compare `nruns` against its own buffer and take the allocating path;
+skip that comparison and the neighbour list is silently short by whatever the dropped runs held.
+
+**Nothing reaches it by accident.** A disc spans about `2r/resol` rings at two runs per ring, and
+the resolution is chosen to sit just under the radius — six or seven runs in practice. Overflowing
+512 needs a disc spanning more than 256 rings, and so a resolution the buckets-per-point cap grants
+only to a catalogue of about a million points. `%nearest_sky`'s expanding shell is the one caller
+that can reach it, by design.
+
+**Covered**, by `test_healpix_run_buffer_overflow` (`test/test_spatial.f90`), which narrows the
+buffer to one column through `parquet_debug_set_spatial_run_buffer` and requires the narrowed arm
+to agree with both the full-buffer arm and the 3D grid. Verified by two mutations: dropping the
+fallback's last run, and making the overflow test never fire.
+
+**What it still forbids.** The override exists because the path is otherwise untestable, so a
+change that removes it removes the only coverage this branch has. And the true-count contract is
+what the whole arrangement rests on: if `pf_query_disc_runs` were ever changed to report the number
+STORED rather than the number that exist — which is what `parquet_healpix` records internally, with
+a `-1` sentinel — this comparison would silently always be false. That is why the public form
+deliberately does not copy the internal one.

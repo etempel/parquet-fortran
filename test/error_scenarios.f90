@@ -18,6 +18,10 @@ program error_scenarios
     use parquet_settings, only : parquet_emit_info, parquet_emit_warning
     use parquet_columns
     use parquet_list, only : parquet_list_column, parquet_list_row
+    ! `pf_query_disc_runs` is deliberately NOT reachable through the `parquet` facade --
+    ! src/parquet.f90 privatises it -- so naming its own module is how a caller reaches it,
+    ! and this import is the documented route rather than a workaround.
+    use parquet_healpix, only : pf_query_disc_runs
     use parquet_table_example, only : parquet_table_test
     use parquet_tables
     use parquet_temporal, only : parquet_date, parquet_time, parquet_timestamp, &
@@ -2073,6 +2077,8 @@ program error_scenarios
         call scenario_healpix_disc_bad_scheme()
     case ("healpix_disc_buffer_too_small")
         call scenario_healpix_disc_buffer_too_small()
+    case ("healpix_disc_runs_bad_rows")
+        call scenario_healpix_disc_runs_bad_rows()
     case ("healpix_disc_count_bad_nside")
         call scenario_healpix_disc_count_bad_nside()
     case ("healpix_disc_alloc_bad_scheme")
@@ -2115,6 +2121,16 @@ program error_scenarios
         call scenario_spatial_sky_rsky_too_large()
     case ("spatial_sky_dec_out_of_range")
         call scenario_spatial_sky_dec_out_of_range()
+    case ("spatial_sky_bad_backend")
+        call scenario_spatial_sky_bad_backend()
+    case ("spatial_sky_cell_with_healpix")
+        call scenario_spatial_sky_cell_with_healpix()
+    case ("spatial_sky_nside_without_healpix")
+        call scenario_spatial_sky_nside_without_healpix()
+    case ("spatial_sky_nside_not_power2")
+        call scenario_spatial_sky_nside_not_power2()
+    case ("spatial_sky_nside_zero")
+        call scenario_spatial_sky_nside_zero()
     case ("spatial_sky_rebuild_refused")
         call scenario_spatial_sky_rebuild_refused()
     case ("spatial_axis_on_periodic")
@@ -17349,6 +17365,61 @@ contains
         print '(a,i0)', "unexpectedly accepted a 120-degree sky radius, m=", m
     end subroutine scenario_spatial_sky_rsky_too_large
 
+    !> `backend=` naming neither of the two constants is refused rather than defaulted.
+    subroutine scenario_spatial_sky_bad_backend()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: ra(:), dec(:)
+
+        call spatial_sky_cloud(64, ra, dec)
+        call sx%build_sky(ra, dec, radius_deg=1.0_real64, backend=7)   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted an unknown backend, backend=", sx%backend()
+    end subroutine scenario_spatial_sky_bad_backend
+
+    !> `cell=` describes the 3D grid and means nothing for a pixelisation, so it is refused.
+    subroutine scenario_spatial_sky_cell_with_healpix()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: ra(:), dec(:)
+
+        call spatial_sky_cloud(64, ra, dec)
+        call sx%build_sky(ra, dec, radius_deg=1.0_real64, backend=PF_SKY_HEALPIX, &
+                          cell=0.05_real64)   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted cell= on a HEALPix index, nside=", sx%nside()
+    end subroutine scenario_spatial_sky_cell_with_healpix
+
+    !> `nside=` on a 3D-grid index is refused rather than ignored, which is the direction that
+    !> matters: a silently ignored resolution would leave the caller believing they had tuned it.
+    subroutine scenario_spatial_sky_nside_without_healpix()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: ra(:), dec(:)
+
+        call spatial_sky_cloud(64, ra, dec)
+        call sx%build_sky(ra, dec, radius_deg=1.0_real64, nside=16_int64)   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted nside= on a 3D-grid index, backend=", sx%backend()
+    end subroutine scenario_spatial_sky_nside_without_healpix
+
+    !> A resolution that is not a power of two is not a HEALPix resolution at all.
+    subroutine scenario_spatial_sky_nside_not_power2()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: ra(:), dec(:)
+
+        call spatial_sky_cloud(64, ra, dec)
+        call sx%build_sky(ra, dec, radius_deg=1.0_real64, backend=PF_SKY_HEALPIX, &
+                          nside=12_int64)   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted nside=12, nside=", sx%nside()
+    end subroutine scenario_spatial_sky_nside_not_power2
+
+    !> Zero is caught by the range half of the same guard, before the power-of-two half --
+    !> which matters, because `iand(0, -1)` is zero and would otherwise read as a power of two.
+    subroutine scenario_spatial_sky_nside_zero()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: ra(:), dec(:)
+
+        call spatial_sky_cloud(64, ra, dec)
+        call sx%build_sky(ra, dec, radius_deg=1.0_real64, backend=PF_SKY_HEALPIX, &
+                          nside=0_int64)   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted nside=0, nside=", sx%nside()
+    end subroutine scenario_spatial_sky_nside_zero
+
     !> A declination outside [-90, 90] is refused at build time.
     subroutine scenario_spatial_sky_dec_out_of_range()
         type(pf_spatial_index) :: sx
@@ -18848,6 +18919,19 @@ contains
         call pf_query_disc(16_int64, [0.0_real64, 0.0_real64, 1.0_real64], 0.5_real64, listpix, nlist)
         print '(a)', "unexpectedly filled a buffer too small for the result"
     end subroutine scenario_healpix_disc_buffer_too_small
+
+    !> A run buffer with the module's INTERNAL four-row shape rather than the public two-row one.
+    !>
+    !> The four-row form is what the walk records for `pf_query_disc_alloc`, so it is exactly the
+    !> shape a reader of this module would reach for -- and it is the one wrong shape that would
+    !> otherwise look like a working call, filling two rows and leaving two undefined.
+    subroutine scenario_healpix_disc_runs_bad_rows()
+        integer(int64) :: runs(4, 64), nruns
+
+        call pf_query_disc_runs(16_int64, [0.0_real64, 0.0_real64, 1.0_real64], 0.5_real64, &
+                                runs, nruns)
+        print '(a)', "unexpectedly accepted a run buffer with the wrong number of rows"
+    end subroutine scenario_healpix_disc_runs_bad_rows
 
     ! ---- Tier B ----
     !

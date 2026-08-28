@@ -78,6 +78,152 @@ contains
         end if
     end subroutine axis_span_wrapped
 
+    !> The HEALPix candidate walk: one disc, its contiguous RING runs, and the same point test.
+    !>
+    !> **Structurally identical to the 3D walk's inner loop**, which is what makes the two
+    !> comparable at all: a run of RING pixels is one contiguous slice of the bucketed point array,
+    !> `start(first+1)` to `start(first+len+1)-1`, exactly the two-lookup shape the cell walk uses
+    !> for its x-runs. About six or seven such runs replace the cell walk's `cnt(2)*cnt(3)`
+    !> iterations.
+    !>
+    !> **`inclusive = .true.` is MANDATORY and is not an optimisation to revisit.** The default
+    !> mode returns the pixels whose CENTRE lies in the disc; used as a candidate filter that
+    !> silently loses points -- a point near the edge of a pixel whose centre falls just outside
+    !> the disc is a real neighbour that never gets distance-tested. The inclusive mode returns
+    !> the overlap superset, every pixel whose area meets the disc, which is the only correct
+    !> candidate set. It costs about 57% more in the disc walk, and every candidate it adds is
+    !> rejected by the exact distance test below, so the ANSWER is unchanged either way -- which
+    !> is precisely why removing it would be a silent wrong answer rather than a visible one.
+    subroutine scan_healpix(self, p, r, m, cap, r2, r2in, minkey, want_min, direct, &
+                            has32, has64, hasd, usework, xs, ys, zs, out32, out64, dist, &
+                            keys, dwork)
+        type(pf_spatial_index), intent(in) :: self !! the index to search.
+        real(real64), intent(in) :: p(3) !! the query direction; need not be normalised.
+        real(real64), intent(in) :: r !! the search radius, as a chord in unit-vector space.
+        integer(int64), intent(inout) :: m !! running count of qualifying points; the TRUE count.
+        integer(int64), intent(in) :: cap !! how many results the caller's buffers can hold.
+        real(real64), intent(in) :: r2 !! `r*r`, the squared acceptance bound.
+        real(real64), intent(in) :: r2in !! squared inner radius, or 0 for a plain ball.
+        integer(int64), intent(in) :: minkey !! accept only points whose key exceeds this.
+        logical, intent(in) :: want_min !! whether `minkey`/`keys` are in play.
+        logical, intent(in) :: direct !! whether the coordinates are in bucket order.
+        logical, intent(in) :: has32 !! whether an int32 output buffer was given.
+        logical, intent(in) :: has64 !! whether an int64 output buffer was given.
+        logical, intent(in) :: hasd !! whether a distance buffer was given.
+        logical, intent(in) :: usework !! whether distances go into `dwork` for ordering.
+        ! **`contiguous` is load-bearing, not decoration.** These arrive as contiguous pointers,
+        ! and an assumed-shape dummy without the attribute forces the compiler to assume a stride
+        ! it must load per element -- which is the difference between a vectorised distance loop
+        ! and a scalar one, on the hottest loop in the backend.
+        real(real64), intent(in), contiguous :: xs(:) !! stored x, in bucket order or the caller's.
+        real(real64), intent(in), contiguous :: ys(:) !! stored y.
+        real(real64), intent(in), contiguous :: zs(:) !! stored z.
+        integer(int32), intent(inout), optional :: out32(:) !! caller's row indices, int32.
+        integer(int64), intent(inout), optional :: out64(:) !! caller's row indices, int64.
+        real(real64), intent(inout), optional :: dist(:) !! distance to each reported point.
+        integer(int64), intent(in), optional :: keys(:) !! order key per stored position.
+        real(real64), intent(inout), optional :: dwork(:) !! distances kept for ordering.
+        ! A stack buffer, sized so that the allocating path below is unreachable for any disc a
+        ! tuned index actually issues: a disc spans about `2r/resol` rings and at most two runs
+        ! per ring, and the resolution is chosen to sit just under the radius. It is
+        ! `%nearest_sky`'s expanding shell that can outgrow it, by design, since that widens the
+        ! radius until it has enough neighbours. 8 kB per call and per thread.
+        integer(int64), parameter :: runs_stack = 512_int64
+        integer(int64), target :: runs(2, runs_stack)
+        integer(int64), allocatable, target :: big_runs(:,:)
+        integer(int64), pointer :: rp(:,:)
+        integer(int64) :: nruns, k, s0, e0, t, row, first, count, buf
+        real(real64) :: ang, dx, dy, dz, d2, p1, p2, p3
+
+        p1 = p(1)
+        p2 = p(2)
+        p3 = p(3)
+        ! `chord = 2*sin(theta/2)` inverts exactly over [0, 180 degrees], and the clamp turns a
+        ! chord past the sphere's diameter into a half-turn rather than a NaN from `asin`.
+        ang = 2.0_real64 * asin(min(1.0_real64, 0.5_real64 * r))
+        ! A section rather than the whole array, so that a test can narrow the buffer and reach
+        ! the allocating path -- which no fixture a test can build would otherwise touch. The
+        ! section is contiguous, so nothing is copied and the default path is one comparison.
+        buf = runs_stack
+        if (dbg_run_buf > 0_int64) buf = min(dbg_run_buf, runs_stack)
+        call pf_query_disc_runs(self%nside_v, p, ang, runs(:, 1:buf), nruns, inclusive=.true.)
+        rp => runs
+        if (nruns > buf) then
+            ! `nruns` is the TRUE count whatever the buffer held, so the exact size is known and
+            ! one re-query with an exact allocation finishes it -- the same count-then-fill shape
+            ! `pf_query_disc_alloc` uses internally, and the reason `pf_query_disc_runs` reports a
+            ! true count rather than a truncation flag. A pointer rather than a second copy of the
+            ! walk below, so the two paths cannot diverge and the loop is written once.
+            allocate (big_runs(2, nruns))
+            call pf_query_disc_runs(self%nside_v, p, ang, big_runs, nruns, inclusive=.true.)
+            rp => big_runs
+        end if
+
+        ! **The run loop and both point loops are written out here rather than factored into a
+        ! contained procedure**, deliberately and for the same reason the 3D walk below writes its
+        ! four out: a per-run call keeps the compiler from holding the query point and the squared
+        ! radius in registers across runs, and a disc has enough runs for that to be measurable.
+        do k = 1_int64, nruns
+            ! Buckets are 1-based over pixels, so pixel `q` is bucket `q + 1` and a run of
+            ! `count` pixels is one slice spanning `count` buckets. Two array reads, no search --
+            ! structurally the same shape the 3D walk uses for its x-runs, which is what makes the
+            ! two backends comparable at all.
+            first = rp(1, k) + 1_int64
+            count = rp(2, k)
+            s0 = self%start(first)
+            e0 = self%start(first + count) - 1_int64
+            if (e0 < s0) cycle
+            !$omp atomic update
+            dbg_pixels_visited = dbg_pixels_visited + count
+            ! The direct/borrowed fork is at the RUN rather than inside the point loop, for the
+            ! reason the 3D walk's own comment gives: testing it per point would slow the default
+            ! path to serve the `copy=.false.` one.
+            if (direct) then
+                do t = s0, e0
+                    dx = xs(t) - p1
+                    dy = ys(t) - p2
+                    dz = zs(t) - p3
+                    d2 = dx * dx + dy * dy + dz * dz
+                    if (d2 <= r2) then
+                        if (d2 < r2in) cycle
+                        if (want_min) then
+                            if (keys(t) <= minkey) cycle
+                        end if
+                        row = self%idx(t)
+                        m = m + 1_int64
+                        if (m <= cap) then
+                            if (has32) out32(m) = int(row, kind=int32)
+                            if (has64) out64(m) = row
+                            if (hasd) dist(m) = sqrt(d2)
+                            if (usework) dwork(m) = sqrt(d2)
+                        end if
+                    end if
+                end do
+            else
+                do t = s0, e0
+                    row = self%idx(t)
+                    dx = xs(row) - p1
+                    dy = ys(row) - p2
+                    dz = zs(row) - p3
+                    d2 = dx * dx + dy * dy + dz * dz
+                    if (d2 <= r2) then
+                        if (d2 < r2in) cycle
+                        if (want_min) then
+                            if (keys(t) <= minkey) cycle
+                        end if
+                        m = m + 1_int64
+                        if (m <= cap) then
+                            if (has32) out32(m) = int(row, kind=int32)
+                            if (has64) out64(m) = row
+                            if (hasd) dist(m) = sqrt(d2)
+                            if (usework) dwork(m) = sqrt(d2)
+                        end if
+                    end if
+                end do
+            end if
+        end do
+    end subroutine scan_healpix
+
     !> Walks the cells a ball of radius `r` about `p` can reach and reports what it finds.
     module procedure spatial_scan
         real(real64), pointer, contiguous :: xs(:), ys(:), zs(:)
@@ -141,6 +287,24 @@ contains
         p2 = p(2)
         p3 = p(3)
         call spatial_storage(self, xs, ys, zs)
+
+        ! ---- HEALPix ----
+        !
+        ! **The branch is here and nowhere else, which is the whole point.** Every sky operation --
+        ! `%within_sky`, `%all_within_sky`, `%pairs_within_sky`, `%count_all_within_sky`,
+        ! `%nearest_sky`, `%kth_distance_sky` -- reaches this one procedure, so one branch gives
+        ! all six the backend and none of them can be forgotten. It sits AFTER the shared setup
+        ! and returns through the shared `scan_finish`, so the annulus test, the `min_key`/`keys`
+        ! ranking `%pairs_within_sky` depends on, the `cap` truncation that makes `m` the TRUE
+        ! count, and the `sorted=` ordering contract are all the same code on both backends. A
+        ! second copy of any of those would be a second place for the two to disagree.
+        if (self%backend_id == PF_SKY_HEALPIX) then
+            call scan_healpix(self, p, r, m, cap, r2, r2in, minkey, want_min, direct, &
+                              has32, has64, hasd, usework, xs, ys, zs, out32, out64, dist, &
+                              keys, dwork)
+            call scan_finish(want_sort, m, cap, dist, dwork, out32, out64)
+            return
+        end if
 
         if (.not. self%periodic_on) then
             do d = 1, 3

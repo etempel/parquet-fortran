@@ -44,17 +44,32 @@ module parquet_spatial
         parquet_set_verbosity, parquet_get_verbosity, &
         parquet_set_message_stream, parquet_get_message_stream, &
         parquet_clamp_to_affinity, parquet_emit_warning, parquet_output_is_suppressed
+    ! **The HEALPix sky backend's whole dependency, and the one import that grows what a
+    ! `use parquet_spatial` consumer compiles** -- from 9 Fortran files to 15. That was weighed
+    ! and accepted: both modules are Arrow-free, so no C++ or Arrow boundary moves and the cost is
+    ! compile time for six small leaf files, and the alternative was a second index type with a
+    ! duplicated walk, annulus, ranking and `sorted=` contract. `tools/module_footprints.txt`
+    ! records the increase; do not "fix" a footprint failure by editing that file.
+    !
+    ! `pf_query_disc_runs` is public in `parquet_healpix` for THIS caller and is privatised again
+    ! in `src/parquet.f90`, so it does not reach a `use parquet` program -- see
+    ! `check_facade_hides_healpix_run_query`.
+    use parquet_healpix, only: pf_vec2pix_ring, pf_query_disc_runs, pf_nside2resol, pf_max_pixrad
     implicit none
     private
 
     public :: pf_spatial_index
     public :: pf_connected_components
     public :: PF_METRIC_EUCLIDEAN, PF_METRIC_SKY
+    public :: PF_SKY_GRID3D, PF_SKY_HEALPIX
     !
     ! ---- Test-only observation and override hooks ----
     !
     public :: parquet_debug_spatial_probe_count
     public :: parquet_debug_spatial_work
+    public :: parquet_debug_spatial_pixels_visited
+    public :: parquet_debug_set_spatial_nside
+    public :: parquet_debug_set_spatial_run_buffer
     public :: parquet_debug_spatial_rebuilds
     public :: parquet_debug_spatial_threads_used
     public :: parquet_debug_set_spatial_cell
@@ -98,6 +113,31 @@ module parquet_spatial
     integer, parameter :: PF_METRIC_EUCLIDEAN = 1
     !> A unit-vector index over `(RA, Dec)`, queried by angular radius. What `%build_sky` produces.
     integer, parameter :: PF_METRIC_SKY = 2
+
+    !> The uniform 3D grid over unit vectors: `%build_sky`'s backend unless another is asked for.
+    !!
+    !! **The default, permanently.** A backend decides only how the candidate set is narrowed,
+    !! never what the answer is -- but it does decide the order an UNSORTED result comes back in,
+    !! so a default that changed later would silently reorder every existing program's results.
+    integer, parameter :: PF_SKY_GRID3D = 1
+    !> The HEALPix pixelisation of the sphere, as `%build_sky`'s backend. Ask for it with `backend=`.
+    !!
+    !! **What it trades.** The 3D grid buckets unit vectors in a cube, and a sphere occupies a
+    !! zero-thickness shell of that cube -- so at a million points about 95% of its cells can never
+    !! hold anything, and the cell size is floored far above what a small query radius wants.
+    !! HEALPix has no empty pixels by construction, so it tests far fewer candidates per hit. It
+    !! pays a fixed per-query cost for the disc walk that the grid's integer cell arithmetic does
+    !! not, so it wins at larger radii and loses at very small ones; `bench/benchmark_spatial.sh`
+    !! is how to find the crossover on a given machine.
+    integer, parameter :: PF_SKY_HEALPIX = 2
+
+    !> The largest HEALPix resolution parameter this backend will consider.
+    !!
+    !! `parquet_healpix`'s own int64 ceiling, restated here because that module keeps its limit
+    !! private. Nothing reaches it in practice -- the buckets-per-point cap binds first for any
+    !! point count a machine can hold -- so its job is to bound the two doubling loops in
+    !! `spatial_set_nside` rather than to express a policy.
+    integer(int64), parameter :: spatial_max_nside = 2_int64 ** 29
 
     !> Degrees to radians, for the sky metric's conversions.
     real(real64), parameter :: spatial_deg2rad = 0.017453292519943295_real64
@@ -211,6 +251,9 @@ module parquet_spatial
         integer :: ncoord = 3                   !! 2 or 3: how many coordinates the caller supplied.
         integer :: dims_eff = 3                 !! non-degenerate axes the points actually occupy: 1, 2 or 3.
         integer :: metric_id = PF_METRIC_EUCLIDEAN !! PF_METRIC_EUCLIDEAN or PF_METRIC_SKY.
+        integer :: backend_id = PF_SKY_GRID3D   !! PF_SKY_GRID3D or PF_SKY_HEALPIX; sky indexes only.
+        integer(int64) :: nside_v = 0_int64     !! HEALPix resolution parameter; 0 on a 3D-grid index.
+        integer(int64) :: npix_v = 0_int64      !! 12*nside_v**2; 0 on a 3D-grid index.
         logical :: built_ok = .false.           !! whether %build has run.
         logical :: owns = .true.                !! .true. holds copies, .false. points at the caller's arrays.
         logical :: periodic_on = .false.        !! whether any axis wraps.
@@ -257,6 +300,9 @@ module parquet_spatial
         procedure :: cell_sides => bind_cell_sides !! The cell side per axis, as the grid uses it.
         procedure :: grid => bind_grid !! Cells along each axis.
         procedure :: metric => bind_metric !! PF_METRIC_EUCLIDEAN or PF_METRIC_SKY.
+        procedure :: backend => bind_backend !! PF_SKY_GRID3D or PF_SKY_HEALPIX.
+        procedure :: nside => bind_nside !! HEALPix resolution parameter, or 0 on a 3D-grid index.
+        procedure :: npix => bind_npix !! HEALPix pixel count, or 0 on a 3D-grid index.
         procedure :: ndim => bind_ndim !! 2 or 3.
         procedure :: is_built => bind_is_built !! Whether %build has run.
         procedure :: is_periodic => bind_is_periodic !! Whether the index wraps at the box faces.
@@ -350,6 +396,25 @@ module parquet_spatial
     integer(int64), save :: dbg_probe_count = 0_int64
     !> How many automatic rebuilds have happened since the counters were reset.
     integer(int64), save :: dbg_rebuilds = 0_int64
+    !> HEALPix resolution forced by `parquet_debug_set_spatial_nside`; <= 0 means "not forced".
+    integer(int64), save :: dbg_nside = 0_int64
+    !> Run-buffer columns the HEALPix walk may use before it allocates; <= 0 means "the whole
+    !! stack buffer".
+    !!
+    !! Forced by `parquet_debug_set_spatial_run_buffer`, and the only way to reach the walk's
+    !! allocating fallback at a test-sized fixture: overflowing the real 512-column buffer needs a
+    !! disc spanning more than 256 rings, which in turn needs a resolution the buckets-per-point
+    !! cap will not grant to anything smaller than about a million points.
+    integer(int64), save :: dbg_run_buf = 0_int64
+    !> Pixels the HEALPix candidate walk has covered since the counters were reset.
+    !!
+    !! Written ONLY by the HEALPix arm of `spatial_scan`, deliberately: staying at zero is what
+    !! makes it a discriminator between the two backends rather than merely a measurement, and it
+    !! keeps the shipped 3D walk's inner loop untouched. Updated atomically because the bulk
+    !! sweeps call the scan from an OpenMP team; it is still process-global, so it is meaningful
+    !! for a serial query and the `spatial` suite is already excluded from test-drive's own
+    !! parallelism.
+    integer(int64), save :: dbg_pixels_visited = 0_int64
     !> The team size the most recent bulk query resolved.
     integer, save :: dbg_threads_used = 0
     !> Initial shell radius forced by `parquet_debug_set_spatial_shell_start`; <= 0 means "not forced".
@@ -362,7 +427,8 @@ module parquet_spatial
     interface
         !> Builds `self` over the caller's coordinates. The single worker every `%build` specific
         !! reaches, taking the radius hint as an already-flattened array.
-        module subroutine spatial_build_worker(self, x, y, z, radii, cell, box_lo, box_hi, copy, threads)
+        module subroutine spatial_build_worker(self, x, y, z, radii, cell, box_lo, box_hi, copy, &
+                                              threads, backend, nside)
             type(pf_spatial_index), intent(inout), target :: self !! the index to fill.
             real(real64), intent(in), target :: x(:) !! x of every point.
             real(real64), intent(in), target :: y(:) !! y of every point.
@@ -373,6 +439,13 @@ module parquet_spatial
             real(real64), intent(in), optional :: box_hi(:) !! the opposite periodic box corner.
             logical, intent(in), optional :: copy !! .false. points at the caller's arrays instead of copying.
             integer, intent(in), optional :: threads !! team size for the bucketing sort.
+            !> `PF_SKY_GRID3D` (default) or `PF_SKY_HEALPIX`. Passed only by
+            !! `spatial_build_sky_worker`: `%build` takes no `backend=` at all, a Euclidean cloud
+            !! having no sphere to pixelate. It arrives here rather than being set afterwards
+            !! because `spatial_clear_worker` runs first and resets it, and because the grid
+            !! choice and the bucketing key both have to know before they run.
+            integer, intent(in), optional :: backend
+            integer(int64), intent(in), optional :: nside !! forced HEALPix resolution; disables tuning.
         end subroutine spatial_build_worker
 
         !> Rebuilds `self` from `x`, `y`, `z` unless they are element-for-element what it already
@@ -383,13 +456,28 @@ module parquet_spatial
         !! increasing in `theta` over [0, 180 degrees], so a Euclidean ball of that radius in
         !! unit-vector space selects exactly the points within `theta` on the sky -- with no pole
         !! special case and no wrap at 0h, because the sphere has neither.
-        module subroutine spatial_build_sky_worker(self, ra, dec, radii_deg, cell, threads)
+        !> Fixes the HEALPix resolution for a query chord, coarsening to keep the counting path.
+        !>
+        !> The pixel counterpart of `spatial_set_grid`, and it answers the same question: what
+        !> bucket size serves a query of this size, subject to the bucket count staying under
+        !> `spatial_max_cells_per_point * npts` so the bucketing sort keeps `pf_argsort`'s counting
+        !> fast path. Sets `nside_v`, `npix_v` and `n_cells`, and zeroes the 3D grid's own fields
+        !> so that `%cell_size`, `%cell_sides` and `%grid` report a value no valid grid ever has.
+        module subroutine spatial_set_nside(self, want, coarsened)
+            type(pf_spatial_index), intent(inout) :: self !! the index whose resolution is being set.
+            integer(int64), intent(in) :: want !! the resolution asked for; clamped by the cap.
+            logical, intent(out), optional :: coarsened !! whether the cap bound before `want` did.
+        end subroutine spatial_set_nside
+
+        module subroutine spatial_build_sky_worker(self, ra, dec, radii_deg, cell, threads, backend, nside)
             type(pf_spatial_index), intent(inout), target :: self !! the index to build.
             real(real64), intent(in) :: ra(:) !! right ascension of every point, in degrees.
             real(real64), intent(in) :: dec(:) !! declination of every point, in degrees.
             real(real64), intent(in) :: radii_deg(:) !! the angular radii later queries will use.
             real(real64), intent(in), optional :: cell !! forced cell side, in unit-vector space.
             integer, intent(in), optional :: threads !! team size for the bucketing sort.
+            integer, intent(in), optional :: backend !! PF_SKY_GRID3D (default) or PF_SKY_HEALPIX.
+            integer(int64), intent(in), optional :: nside !! forced HEALPix resolution; disables tuning.
         end subroutine spatial_build_sky_worker
 
         module subroutine spatial_rebuild_worker(self, x, y, z, radii, rebuilt)
@@ -486,6 +574,26 @@ module parquet_spatial
             real(real64), intent(in) :: radii(:) !! the radii later queries will use.
             real(real64), intent(out) :: h !! the chosen cell side.
         end subroutine spatial_choose_cell
+
+        !> Chooses the HEALPix resolution for `chords` over the points `self` holds.
+        !>
+        !> **The same deterministic work-count probe the cell tuner uses, over the same cost model
+        !> and the same draw of query points** -- only the candidates differ, being powers of two
+        !> rather than a continuous bracket. Reusing it is what keeps a backend comparison honest:
+        !> both are ranked by `spatial_work_a * buckets + spatial_work_b * points`, so neither is
+        !> tuned against a yardstick the other never saw.
+        !>
+        !> **A rule alone would have been wrong, which is why this measures.** Matching the pixel
+        !> to the radius is right at small radii and demonstrably not at large ones -- at a five
+        !> degree radius a resolution several steps FINER than radius-matched tests less than half
+        !> as many candidates, because a coarse pixel then holds far more points than the disc can
+        !> use. The candidate set therefore reaches from well below the radius-matched value up to
+        !> the buckets-per-point cap.
+        module subroutine spatial_choose_nside(self, chords, nside)
+            type(pf_spatial_index), intent(inout), target :: self !! the index being built.
+            real(real64), intent(in) :: chords(:) !! the query radii, as chords in unit-vector space.
+            integer(int64), intent(out) :: nside !! the chosen resolution parameter.
+        end subroutine spatial_choose_nside
 
         !> The cost model's cell size: `h = (kappa^4 * r_eff / ((4/3) pi rho))^(1/(1+ndim))`.
         !!
@@ -780,27 +888,31 @@ contains
     !> `cell=` and `%cell_size()` are both in unit-vector space rather than degrees, so they are a
     !> matched pair and a value read from one can be fed back into the other. `%effective_radius()`
     !> is the one that comes back in DEGREES, because it is a radius the caller gave in degrees.
-    subroutine bind_build_sky_r0(self, ra, dec, radius_deg, cell, threads)
+    subroutine bind_build_sky_r0(self, ra, dec, radius_deg, cell, threads, backend, nside)
         class(pf_spatial_index), intent(inout), target :: self !! the index to build.
         real(real64), intent(in) :: ra(:) !! right ascension of every point, in degrees.
         real(real64), intent(in) :: dec(:) !! declination of every point, in degrees; |dec| <= 90.
         real(real64), intent(in) :: radius_deg !! the angular radius later queries will use.
         real(real64), intent(in), optional :: cell !! forced cell side, in unit-vector space.
         integer, intent(in), optional :: threads !! team size for the bucketing sort.
+        integer, intent(in), optional :: backend !! PF_SKY_GRID3D (default) or PF_SKY_HEALPIX.
+        integer(int64), intent(in), optional :: nside !! forced HEALPix resolution; disables tuning.
 
-        call spatial_build_sky_worker(self, ra, dec, [radius_deg], cell, threads)
+        call spatial_build_sky_worker(self, ra, dec, [radius_deg], cell, threads, backend, nside)
     end subroutine bind_build_sky_r0
 
     !> `%build_sky` with a list of angular radii. See `bind_build_sky_r0`.
-    subroutine bind_build_sky_r1(self, ra, dec, radius_deg, cell, threads)
+    subroutine bind_build_sky_r1(self, ra, dec, radius_deg, cell, threads, backend, nside)
         class(pf_spatial_index), intent(inout), target :: self !! the index to build.
         real(real64), intent(in) :: ra(:) !! right ascension of every point, in degrees.
         real(real64), intent(in) :: dec(:) !! declination of every point, in degrees; |dec| <= 90.
         real(real64), intent(in) :: radius_deg(:) !! the angular radii later queries will use.
         real(real64), intent(in), optional :: cell !! forced cell side, in unit-vector space.
         integer, intent(in), optional :: threads !! team size for the bucketing sort.
+        integer, intent(in), optional :: backend !! PF_SKY_GRID3D (default) or PF_SKY_HEALPIX.
+        integer(int64), intent(in), optional :: nside !! forced HEALPix resolution; disables tuning.
 
-        call spatial_build_sky_worker(self, ra, dec, radius_deg, cell, threads)
+        call spatial_build_sky_worker(self, ra, dec, radius_deg, cell, threads, backend, nside)
     end subroutine bind_build_sky_r1
 
     ! ---- %rebuild and %rebuild_for ----
@@ -834,9 +946,18 @@ contains
     end subroutine bind_rebuild_r1
 
     !> `%rebuild_for` with a single radius: re-tunes over the points already stored.
+    !>
+    !> **On a SKY index the radius is a CHORD in unit-vector space, not degrees.** It joins the
+    !> same accumulator `%build_sky` folded its converted radii into, and pairs with `cell=` and
+    !> `%cell_size()`, which are in that space for the same reason; `%effective_radius()` is the
+    !> one that converts back to degrees. `2*sin(0.5*theta)` is the conversion, exactly.
+    !>
+    !> It re-tunes whichever backend the index has -- a cell side for `PF_SKY_GRID3D`, a HEALPix
+    !> resolution for `PF_SKY_HEALPIX` -- and never changes which one that is. A caller wanting
+    !> the other backend calls `%build_sky` again.
     subroutine bind_rebuild_for_r0(self, radius)
         class(pf_spatial_index), intent(inout), target :: self !! the index to re-tune.
-        real(real64), intent(in) :: radius !! the radius to tune for; must be > 0.
+        real(real64), intent(in) :: radius !! the radius to tune for; must be > 0. A CHORD on a sky index.
 
         call spatial_rebuild_for_worker(self, [radius], .false.)
     end subroutine bind_rebuild_for_r0
@@ -920,6 +1041,38 @@ contains
 
         m = self%metric_id
     end function bind_metric
+
+    !> `PF_SKY_GRID3D` or `PF_SKY_HEALPIX`: which structure narrows the candidate set.
+    !>
+    !> Always `PF_SKY_GRID3D` on a Euclidean index, which has no sphere to pixelate and takes no
+    !> `backend=`. On a sky index it is whatever `%build_sky` was given, and it does not change
+    !> under `%rebuild_for` -- a caller wanting the other backend calls `%build_sky` again.
+    integer function bind_backend(self) result(b)
+        class(pf_spatial_index), intent(in) :: self !! the index queried.
+
+        b = self%backend_id
+    end function bind_backend
+
+    !> The HEALPix resolution parameter, or 0 when this index is not HEALPix-backed.
+    !>
+    !> **Zero is the documented answer for every other index**, rather than an abort, so that
+    !> reporting code can print an index's shape without first asking what backs it -- the same
+    !> reason `%cell_size` answers 0 on a HEALPix index.
+    integer(int64) function bind_nside(self) result(n)
+        class(pf_spatial_index), intent(in) :: self !! the index queried.
+
+        n = self%nside_v
+    end function bind_nside
+
+    !> The HEALPix pixel count `12*nside**2`, or 0 when this index is not HEALPix-backed.
+    !>
+    !> This is also what `%cells` answers on a HEALPix index: a pixel IS its bucket, so the pixel
+    !> count is the bucket count and is what the buckets-per-point cap governs on both backends.
+    integer(int64) function bind_npix(self) result(n)
+        class(pf_spatial_index), intent(in) :: self !! the index queried.
+
+        n = self%npix_v
+    end function bind_npix
 
     !> How many coordinates the caller supplied: 2 or 3.
     integer function bind_ndim(self) result(d)
@@ -1981,13 +2134,62 @@ contains
         n = dbg_threads_used
     end function parquet_debug_spatial_threads_used
 
-    !> Clears the probe, rebuild and thread counters, and the forced cell size.
+    !> Forces the HEALPix resolution every later `%build_sky` will use, bypassing the probe.
+    !>
+    !> **Test-only, and required rather than convenient**, for the same reason
+    !> `parquet_debug_set_spatial_cell` is: a test-sized fixture never reaches the resolutions a
+    !> real catalogue does, so without this every test runs at whatever the probe happens to pick
+    !> and no test can pin a resolution or compare two of them. Public because the state it forces
+    !> is private to this module and there is no `bind(C)` boundary to hide the hook behind. No
+    !> library code calls it.
+    !>
+    !> The buckets-per-point cap still applies on top, exactly as it does to an explicit `nside=`:
+    !> this forces the resolution ASKED FOR, not the one used.
+    subroutine parquet_debug_set_spatial_nside(n)
+        integer(int64), intent(in) :: n !! the resolution to force; <= 0 restores the probe.
+
+        dbg_nside = n
+    end subroutine parquet_debug_set_spatial_nside
+
+    !> Narrows the HEALPix walk's stack run buffer, so a small fixture reaches its fallback.
+    !>
+    !> **Test-only, and required rather than convenient.** A disc arrives as a handful of
+    !> contiguous pixel runs, so the walk keeps a 512-column stack buffer and allocates only when
+    !> a disc outgrows it -- which needs more than 256 rings, and so a resolution the
+    !> buckets-per-point cap grants only to catalogues of about a million points. The fallback is
+    !> therefore unreachable at any size a test can build, while sitting on a path whose failure
+    !> is a silently short neighbour list. Public for the same reason
+    !> `parquet_debug_set_spatial_cell` is: no `bind(C)` boundary exists here to hide it behind.
+    subroutine parquet_debug_set_spatial_run_buffer(n)
+        integer(int64), intent(in) :: n !! columns the walk may use; <= 0 restores the whole buffer.
+
+        dbg_run_buf = n
+    end subroutine parquet_debug_set_spatial_run_buffer
+
+    !> How many pixels the HEALPix candidate walk has covered since the counters were reset.
+    !>
+    !> **The negative control for the backend, and it works in both directions.** An A/B test that
+    !> asserts the two backends return identical results passes just as happily when both arms ran
+    !> the same code -- so a test must also show that the HEALPix arm really walked pixels and that
+    !> the 3D arm really did not. This counter answers both: non-zero after a HEALPix query, still
+    !> zero after a 3D one. Test-only, and public for the same reason as
+    !> `parquet_debug_set_spatial_cell` -- the state is private to this module and there is no
+    !> `bind(C)` boundary to hide the hook behind.
+    integer(int64) function parquet_debug_spatial_pixels_visited() result(n)
+
+        n = dbg_pixels_visited
+    end function parquet_debug_spatial_pixels_visited
+
+    !> Clears the probe, rebuild, pixel and thread counters, and the forced cell size.
     subroutine parquet_debug_reset_spatial_counters()
 
         dbg_probe_count = 0_int64
         dbg_rebuilds = 0_int64
+        dbg_pixels_visited = 0_int64
         dbg_threads_used = 0
         dbg_cell = -1.0_real64
+        dbg_nside = 0_int64
+        dbg_run_buf = 0_int64
         dbg_shell_start = -1.0_real64
         dbg_shell_rounds = 0_int64
     end subroutine parquet_debug_reset_spatial_counters

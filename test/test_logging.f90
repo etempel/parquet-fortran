@@ -431,6 +431,176 @@ contains
             "a name that merely shares a prefix is not a dotted child and is unaffected")
     end subroutine test_name_overrides
 
+    !> A per-name override LOWERS a threshold as well as raising one, which is what makes
+    !> "turn this one subsystem up to TRACE and leave the rest alone" expressible.
+    !!
+    !! Four things are asserted, and the last two are what keep the first two honest. The lowered
+    !! name is admitted below the logger's own level; a name with no rule at that level is still
+    !! dropped, which is the negative control — a cache simply lowered for everyone would pass the
+    !! first assertion and fail this one. Raising the rule back retires it, so the effect is not a
+    !! one-way door. And a SINK's own threshold is not lowered by a rule, since an override
+    !! governs what the logger offers rather than what a sink accepts.
+    subroutine test_name_override_lowers(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
+        character(len=*), parameter :: path = "test_run/log_name_lower.txt"
+        character(len=*), parameter :: spath = "test_run/log_name_lower_sink.txt"
+        type(pf_logger) :: lg
+        character(len=512), allocatable :: lines(:)
+        integer :: n
+        logical :: on_deep, on_other, after_retire, floor_low, floor_restored
+
+        call lg%init(level = PF_LEVEL_DEBUG, console = .false.)
+        call lg%add_file(path, append = .false., format = "{name}|{message}")
+        call lg%set_level(PF_LEVEL_TRACE, name = "deep")
+
+        on_deep  = lg%enabled(PF_LEVEL_TRACE, name = "deep")
+        on_other = lg%enabled(PF_LEVEL_TRACE, name = "other")
+        ! The nameless %enabled reads the cached floor directly, which is the only observable of
+        ! it through the public API -- and the floor is what decides whether a sub-threshold
+        ! record is rejected by one integer comparison or carried as far as the name test. It must
+        ! drop when a lowering rule is added and RISE AGAIN when that rule is retired, or "set the
+        ! level back to normal" would restore the answers while leaving the cost in place forever.
+        floor_low = lg%enabled(PF_LEVEL_TRACE)
+
+        call lg%trace("admitted by the lowered rule", name = "deep")
+        call lg%trace("no rule at this level", name = "other")          ! control: dropped
+        call lg%trace("a dotted child of the rule", name = "deep.inner")
+        call lg%trace("merely shares a prefix", name = "deeper")        ! control: dropped
+        call lg%debug("at the logger's own level", name = "other")
+
+        ! Raising the rule back to the logger's own level retires it.
+        call lg%set_level(PF_LEVEL_DEBUG, name = "deep")
+        after_retire = lg%enabled(PF_LEVEL_TRACE, name = "deep")
+        floor_restored = .not. lg%enabled(PF_LEVEL_TRACE)
+        call lg%trace("after the rule was raised back", name = "deep")  ! control: dropped
+        call lg%close()
+        call read_back(path, lines, n)
+
+        call check(error, on_deep, "enabled says yes for the lowered name")
+        if (allocated(error)) return
+        call check(error, .not. on_other, "enabled still says no for a name with no rule")
+        if (allocated(error)) return
+        call check(error, .not. after_retire, "raising the rule back retires it")
+        if (allocated(error)) return
+        call check(error, floor_low, "the cached floor drops when a lowering rule is added")
+        if (allocated(error)) return
+        call check(error, floor_restored, &
+            "and rises again when that rule is retired, so the cost does not outlive it")
+        if (allocated(error)) return
+        call check(error, n == 3, "exactly the lowered name, its dotted child and the DEBUG record")
+        if (allocated(error)) return
+        call check(error, trim(lines(1)) == "deep|admitted by the lowered rule", &
+            "the lowered rule admits a record below the logger's own level")
+        if (allocated(error)) return
+        call check(error, trim(lines(2)) == "deep.inner|a dotted child of the rule", &
+            "the rule reaches a dotted child")
+        if (allocated(error)) return
+        call check(error, trim(lines(3)) == "other|at the logger's own level", &
+            "a name with no rule keeps the logger's threshold in both directions")
+        if (allocated(error)) return
+
+        ! A sink's own threshold is independent of any name rule.
+        call lg%init(level = PF_LEVEL_DEBUG, console = .false.)
+        call lg%add_file(spath, append = .false., level = PF_LEVEL_WARNING, format = "{message}")
+        call lg%set_level(PF_LEVEL_TRACE, name = "deep")
+        call lg%trace("below the sink's own threshold", name = "deep")
+        call lg%warning("at the sink's threshold", name = "deep")
+        call lg%close()
+        call read_back(spath, lines, n)
+
+        call check(error, n == 1, "a name rule does not lower a sink's own threshold")
+        if (allocated(error)) return
+        call check(error, trim(lines(1)) == "at the sink's threshold", &
+            "the record the sink does accept is the one that arrives")
+    end subroutine test_name_override_lowers
+
+    !> `%unset_level` removes an override, frees its slot, and restores the cached floor.
+    !!
+    !! The slot half is the reason the procedure exists and is asserted directly: the table holds
+    !! `PF_LOG_MAX_NAME_RULES` names and `%set_level` appends, so without a way to free one a
+    !! program that turns tracing on and off for more distinct names than that aborts having
+    !! "undone" every one. Filling the table, unsetting one and adding a further name is what
+    !! proves the slot came back — a test that only checked the threshold would pass against an
+    !! implementation that merely raised the rule to the logger's level.
+    subroutine test_unset_level(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
+        character(len=*), parameter :: path = "test_run/log_unset_level.txt"
+        type(pf_logger) :: lg
+        character(len=512), allocatable :: lines(:)
+        character(len=8) :: nm
+        integer :: n, k
+        logical :: hit_present, hit_absent, floor_low, floor_restored
+
+        call lg%init(level = PF_LEVEL_DEBUG, console = .false.)
+        call lg%add_file(path, append = .false., format = "{name}|{message}")
+        call lg%set_level(PF_LEVEL_TRACE, name = "deep")
+
+        floor_low = lg%enabled(PF_LEVEL_TRACE)          ! the lowering rule dropped the floor
+        call lg%trace("while the rule is set", name = "deep")
+
+        call lg%unset_level("deep", found = hit_present)
+        floor_restored = .not. lg%enabled(PF_LEVEL_TRACE)
+        call lg%trace("after the rule is unset", name = "deep")   ! control: dropped
+        call lg%debug("still at the logger level", name = "deep")
+
+        ! Removing something that is not there is a no-op, and reports so.
+        call lg%unset_level("never-set", found = hit_absent)
+        call lg%debug("unaffected by the no-op", name = "other")
+        call lg%close()
+        call read_back(path, lines, n)
+
+        call check(error, hit_present, "unset_level reports that it removed the override")
+        if (allocated(error)) return
+        call check(error, .not. hit_absent, "and reports that it removed nothing when there was none")
+        if (allocated(error)) return
+        call check(error, floor_low .and. floor_restored, &
+            "the cached floor drops with the rule and rises again when it is unset")
+        if (allocated(error)) return
+        call check(error, n == 3, "only the record emitted while the rule was set gets through")
+        if (allocated(error)) return
+        call check(error, trim(lines(1)) == "deep|while the rule is set", &
+            "the override applied before it was unset")
+        if (allocated(error)) return
+        call check(error, trim(lines(2)) == "deep|still at the logger level", &
+            "and the name follows the logger's own threshold afterwards")
+        if (allocated(error)) return
+        call check(error, trim(lines(3)) == "other|unaffected by the no-op", &
+            "a no-op unset disturbs no other rule")
+        if (allocated(error)) return
+
+        ! The slot is genuinely freed: fill the table, unset one, and add one more distinct name.
+        ! A sink is attached because %enabled answers .false. for everything on a logger with no
+        ! sink at all -- without one, every assertion below would hold for that reason instead.
+        call lg%init(level = PF_LEVEL_DEBUG, console = .false.)
+        call lg%add_file("test_run/log_unset_slots.txt", append = .false., format = "{message}")
+        do k = 1, PF_LOG_MAX_NAME_RULES
+            write (nm, '("r", i0)') k
+            call lg%set_level(PF_LEVEL_WARNING, name = trim(nm))
+        end do
+        call lg%unset_level("r7", found = hit_present)
+        call lg%set_level(PF_LEVEL_ERROR, name = "one-more")   ! aborts if the slot was not freed
+        call check(error, hit_present, "the table was full and one entry was removed")
+        if (allocated(error)) return
+        call check(error, .not. lg%enabled(PF_LEVEL_DEBUG, name = "one-more"), &
+            "the name added into the freed slot has its override")
+        if (allocated(error)) return
+        call check(error, lg%enabled(PF_LEVEL_DEBUG, name = "r7"), &
+            "and the unset name is back on the logger's own threshold")
+        if (allocated(error)) return
+
+        ! With no name, every override goes.
+        call lg%unset_level(found = hit_present)
+        call check(error, hit_present, "unset_level with no name removed the remaining overrides")
+        if (allocated(error)) return
+        call check(error, lg%enabled(PF_LEVEL_DEBUG, name = "r1") .and. &
+            lg%enabled(PF_LEVEL_DEBUG, name = "one-more"), &
+            "every name is back on the logger's own threshold")
+        if (allocated(error)) return
+        call lg%unset_level(found = hit_absent)
+        call check(error, .not. hit_absent, "and a second clear reports that there was nothing left")
+        call lg%close()
+    end subroutine test_unset_level
+
     !> A sink's rank filter emits only for the matching rank.
     subroutine test_rank_filter(error)
         type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
@@ -1231,6 +1401,8 @@ contains
             new_unittest("once= and every= deduplicate, with a control", test_once_and_every), &
             new_unittest("only pf_log_reset_dedup clears the table", test_dedup_reset_is_explicit), &
             new_unittest("per-name level overrides and exact enabled", test_name_overrides), &
+            new_unittest("a per-name override lowers as well as raises", test_name_override_lowers), &
+            new_unittest("unset_level removes an override and frees its slot", test_unset_level), &
             new_unittest("a sink's rank filter selects one rank", test_rank_filter), &
             new_unittest("an over-long line is emitted whole", test_long_line_is_not_truncated), &
             new_unittest("blank lines reach file sinks", test_blank_reaches_file_sinks), &

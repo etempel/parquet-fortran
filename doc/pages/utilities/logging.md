@@ -23,8 +23,10 @@ omitted.
 - [Quick start](#quick-start)
 - [Levels](#levels)
 - [Sinks: where records go](#sinks-where-records-go)
+- [Which threshold decides](#which-threshold-decides)
 - [The line layout](#the-line-layout)
 - [Colour](#colour)
+- [Emitting a record: the call signature](#emitting-a-record-the-call-signature)
 - [Building a message](#building-a-message)
 - [Logging from an OpenMP parallel region](#logging-from-an-openmp-parallel-region)
 - [Deduplicating a repeated record](#deduplicating-a-repeated-record)
@@ -63,7 +65,8 @@ you want a second, independent destination set; every `pf_log_*` procedure has a
 
 Levels **ascend** with severity and use the same numbers as Python's `logging`, so a level carried
 in a shared configuration file means the same thing on both sides of a pipeline. A record is emitted
-when `level >= threshold`.
+when `level >= threshold` — and there is more than one threshold in play, so see
+[Which threshold decides](#which-threshold-decides) for which one applies where.
 
 | constant | value | |
 |---|---|---|
@@ -92,7 +95,8 @@ end if
 ## Sinks: where records go
 
 A sink is one destination, with its own threshold, layout, colour policy, flush policy and rank
-filter. A record is offered to every sink and each decides.
+filter. A record is offered to every sink and each decides — against **both** its own threshold and
+the logger's, whichever is stricter. See [Which threshold decides](#which-threshold-decides).
 
 ```fortran
 type(pf_logger) :: lg
@@ -107,7 +111,10 @@ call lg%set_format("{level}: {message}", sink = s_err)
 - **`%init([level], [name], [format], [console], [thread_mode])`** clears every sink and then
   installs one stdout console sink, unless `console = .false.` It is the "give me a working logger"
   call. Its `format` applies to the console sink it installs and does not become a default for
-  sinks added later.
+  sinks added later. **`level =` sets the LOGGER's threshold, not that console's** — the console
+  `%init` installs is left at `PF_LEVEL_ALL`, so the logger's level is what governs it. The
+  distinction is invisible until a second sink exists; see
+  [Which threshold decides](#which-threshold-decides).
 - **`%add_console([stream], [level], [format], [color], [only_rank], [sink])`**. A second console
   sink on the same stream would double every line, so it is refused.
 - **`%add_file(path, [level], [format], [append], [flush], [only_rank], [sink])`**. `append`
@@ -118,6 +125,8 @@ call lg%set_format("{level}: {message}", sink = s_err)
   already manages its own output file adds logging to it.
 - **`%set_level(level, [sink], [name])`** sets the logger threshold, one sink's, or a per-name
   override. Passing both `sink` and `name` is refused rather than guessed at.
+- **`%unset_level([name], [found])`** removes one per-name override, or every one when `name` is
+  absent. Removing an override that is not there is a no-op; pass `found` to learn which it was.
 - **`%set_format` / `%set_color`** with no `sink` apply to every sink *currently* attached, and do
   not become a default for later ones.
 - **`%close`** closes units this logger opened and clears every sink, leaving it silent. It never
@@ -128,6 +137,63 @@ usable *inside* a library: log into your own named logger and, until the applica
 you print nothing and pay one integer comparison per call site. The module's default logger is the
 exception — it behaves as though it owned a stdout console at `PF_LEVEL_INFO` until you first
 configure it, so a program that just calls `pf_log_info` sees output.
+
+## Which threshold decides
+
+There are two thresholds between a record and a sink, and they compose with **`max`** — the
+stricter one wins. Each is a filter the record has to pass, so adding one can only ever remove
+records, never restore them.
+
+```
+written to sink S  ⟺  level ≥ max( rule(name) or logger_level ,  S%level )
+                      AND S's rank filter matches, if it has one
+```
+
+**The left operand is the logger side.** It is the logger's own threshold — set by `%init(level =)`
+or `%set_level(level)` — *unless* a per-name rule matches the record's name, in which case the rule
+**replaces** it outright. Not a min, not a max: the longest matching rule's level is used instead of
+the logger's. A record with no name, or a name no rule covers, uses the logger's level.
+
+**The right operand is the sink's own threshold**, set by `%add_*(level =)` or
+`%set_level(level, sink =)`. Nothing on the logger side can lower it — a name rule governs which
+records the logger *offers*, never which ones a sink *accepts*.
+
+**`%init(level =)` sets the logger's threshold, and the console it installs is left at
+`PF_LEVEL_ALL`.** So `%init(level = PF_LEVEL_DEBUG)` gives you `max(DEBUG, ALL)` = `DEBUG` on that
+console, which looks exactly like having set the console's level — and stops looking like it the
+moment a second sink appears:
+
+| | logger | sink 1 | sink 2, added at `ALL` | a `TRACE` record reaches |
+|---|---|---|---|---|
+| `%init(level = DEBUG)` | `DEBUG` | `ALL` | `ALL` | nothing — the logger floors both |
+| `%init()` then `%add_console(level = DEBUG)` | `ALL` | `DEBUG` | `ALL` | sink 2 |
+
+So: put the level on the **logger** for "this program logs at DEBUG", a single floor under
+everything and the thing per-name rules override. Put it on a **sink** for "the terminal shows
+warnings, the file keeps everything". To let the sinks decide alone, leave the logger at
+`PF_LEVEL_ALL`.
+
+A worked example, with every combination on one line each — logger `INFO`, one sink at `DEBUG`, and
+a rule putting `deep` at `TRACE`:
+
+| record | logger side | sink | threshold | result |
+|---|---|---|---|---|
+| `TRACE`, name `deep` | 5 (the rule) | 10 | `max(5, 10)` = 10 | dropped |
+| `DEBUG`, name `deep` | 5 (the rule) | 10 | 10 | **written** |
+| `DEBUG`, name `other` | 20 (the logger) | 10 | `max(20, 10)` = 20 | dropped |
+| `INFO`, name `other` | 20 (the logger) | 10 | 20 | **written** |
+
+The rule pulled `deep` below the logger's `INFO`, but the sink's own `DEBUG` still blocked its
+`TRACE`. That is the usual reason a lowered rule appears to reach one sink and not another.
+
+**A per-name rule applies to dotted children, and the longest match wins.** A rule on `"a"` governs
+`a`, `a.x` and `a.x.y`, but not `ab` — the dot is required. With rules on both `"a"` and `"a.b"`, a
+record named `a.b.c` uses `"a.b"`'s level, whichever rule was set first.
+
+**One `min` appears in this module and is not a threshold.** The cached `min_level` answers "could
+this record reach *any* sink?", so it is a minimum over sinks (and over rules) used to reject a
+hopeless record with one integer comparison. A record that passes it still faces the `max` above,
+per sink.
 
 ## The line layout
 
@@ -141,9 +207,37 @@ call lg%set_format("{stamp} [{level}]{name| }{context| }: {message}")
 `{message}`. Timestamps are ISO-8601 ordered (`2026-08-28 14:03:12.481`), so a log file sorts
 chronologically as text; `{elapsed}` comes from a monotonic clock, not from wall-clock arithmetic.
 
-**`{field|sep}` emits `sep` only when the field is non-empty.** That is what keeps an unnamed record
-from leaving a stray `[]` or a doubled separator mid-line, and it is what lets an optional field sit
-in the middle of a template rather than only at the end.
+**`{field|sep}` emits `sep` immediately BEFORE the field, and only when the field is non-empty.**
+That is what keeps an unnamed record from leaving a stray `[]` or a doubled separator mid-line, and
+it is what lets an optional field sit in the middle of a template rather than only at the end.
+
+**`sep` is a separator, not a default** — it is *prepended to* the value, never *substituted for* a
+missing one. `{name|x}` on a logger named `general` renders `xgeneral`, not `general`; and on an
+unnamed record it renders nothing at all, not `x`. There is no "value when absent" syntax, and that
+is deliberate: a placeholder that silently substituted something else would make a missing field
+indistinguishable from a field whose value happened to equal the substitute. If you want a literal
+that always appears, put it outside the braces — `[{name}]` — and accept the empty brackets.
+
+The three cases side by side. **Every `.` below is a space — in the layouts as well as in the
+output**, since a separator that *is* a space is otherwise invisible in the very column that is
+meant to show it. `{level}` pads to 8.
+
+```
+layout                       separator      named "general"        unnamed
+{level}{name|.}: {message}   one space      INFO.....general:.hi   INFO....:.hi
+{level}.{name}: {message}    none           INFO.....general:.hi   INFO.....:.hi   <- stray space
+{level}{name|x}: {message}   the letter x   INFO....xgeneral:.hi   INFO....:.hi
+```
+
+**Rows 1 and 2 render identically when the name is present, and that is the point rather than a
+mistake.** Both put exactly one space before the name — row 1 from the separator inside the braces,
+row 2 from a literal space outside them — so with a name there is nothing to tell them apart. They
+diverge only when the name is empty: row 1 drops the separator *with* the field, while row 2's
+literal space has nothing to do with the field and is stranded, leaving `INFO.....:.hi` with a space
+before the colon that no longer separates anything.
+
+Row 3 is the same mechanism with a visible separator, and is there to show that `sep` is prepended
+rather than substituted: `x` + `general`, and nothing at all when there is no name.
 
 Two templates are provided: `PF_LOG_FMT_BRIEF` (`{time} [{level}] {message}`, the console default)
 and `PF_LOG_FMT_FULL` (date, level, name, thread and context — the file default).
@@ -154,8 +248,168 @@ Per sink: `PF_LOG_COLOR_AUTO` (the default), `_NEVER`, `_ALWAYS`. `AUTO` colours
 only, and only when `NO_COLOR` is unset and `TERM` is set to something other than `dumb`. A file
 sink under `AUTO` never colours, so there is nothing to strip out of a log file.
 
-Colour is applied to the rendered `{level}` field. To colour message text yourself, use
-`pf_log_color(text, code, out)` with one of the `PF_LOG_C_*` codes.
+Colour is applied to the rendered `{level}` field, on this fixed mapping:
+
+| level | colour | constant |
+|---|---|---|
+| `PF_LEVEL_CRITICAL` | bright red | `PF_LOG_C_BRIGHT_RED` |
+| `PF_LEVEL_ERROR` | red | `PF_LOG_C_RED` |
+| `PF_LEVEL_WARNING` | yellow | `PF_LOG_C_YELLOW` |
+| `PF_LEVEL_INFO` | *none* | — |
+| `PF_LEVEL_DEBUG` | cyan | `PF_LOG_C_CYAN` |
+| `PF_LEVEL_TRACE` | dim | `PF_LOG_C_DIM` |
+
+`INFO` is deliberately uncoloured: it is the ordinary case, and colouring it would colour every
+line, which is what the colouring exists to avoid.
+
+To colour message text yourself, use `pf_log_color(text, code, out)`:
+
+```fortran
+character(len=:), allocatable :: hot
+
+call pf_log_color("42 rows dropped", PF_LOG_C_RED, hot)
+call pf_log_warning("screening: " // hot)
+```
+
+It is a subroutine with an `intent(out)` allocatable result rather than a function, for the reason
+given under [Building a message](#building-a-message) below.
+
+Eight codes are published, and they are the ANSI SGR numbers as plain strings:
+
+| constant | code | colour |
+|---|---|---|
+| `PF_LOG_C_RED` | `31` | red |
+| `PF_LOG_C_GREEN` | `32` | green |
+| `PF_LOG_C_YELLOW` | `33` | yellow |
+| `PF_LOG_C_BLUE` | `34` | blue |
+| `PF_LOG_C_MAGENTA` | `35` | magenta |
+| `PF_LOG_C_CYAN` | `36` | cyan |
+| `PF_LOG_C_BRIGHT_RED` | `91` | bright red |
+| `PF_LOG_C_DIM` | `2` | dim (not a colour: reduced intensity) |
+
+Being plain strings, they are a convenience rather than a closed set — `pf_log_color` accepts any
+ANSI code, so `pf_log_color(text, "38;5;208", out)` gives 256-colour orange. `GREEN`, `BLUE` and
+`MAGENTA` are exported for your use and are read by nothing in this module.
+
+**Colouring message text yourself is independent of a sink's policy**, which governs only the
+`{level}` field. Set the sink to `PF_LOG_COLOR_NEVER` if you want your own codes and no others,
+and be aware that codes you embed reach a file sink as escape sequences whatever the policy says.
+
+## Emitting a record: the call signature
+
+Every emission procedure takes the same five arguments, and only the first is required. The
+brackets mark the optional ones; they are not part of the syntax.
+
+```fortran
+call pf_log_info(text, [name], [context], [once], [every])       ! and _trace/_debug/_warning/
+call lg%info     (text, [name], [context], [once], [every])      !     _error/_critical
+call pf_log      (level, text, [name], [context], [once], [every])   ! explicit level
+call lg%log      (level, text, [name], [context], [once], [every])
+```
+
+| argument | type | what it does |
+|---|---|---|
+| `text` | `character(len=*)` | the message. The only required argument |
+| `level` | `integer` | **`pf_log`/`%log` only** — the severity, where the named procedures supply their own |
+| `name` | `character(len=*)` | the record's name, overriding the logger's `%set_name` for this one call. Renders as `{name}`, and selects which per-name level override applies |
+| `context` | `character(len=*)` | the record's context, overriding the ambient context stack for this one call. Renders as `{context}` |
+| `once` | `logical` | `.true.` emits this record once per process and never again |
+| `every` | `integer` | emit only every n-th occurrence of this record |
+
+**Every optional argument is best passed by keyword.** `name` and `context` are both
+`character(len=*)` in adjacent positions, so a positional second argument is a `name` whether or not
+that is what was meant — `call pf_log_trace(msg, "deep")` sets the name, and there is no way for the
+compiler to tell you if you wanted a context.
+
+Two things the argument list deliberately does **not** have. There is no *value* argument — Fortran
+has no varargs, and an unlimited-polymorphic one is indistinguishable from `name` at the same
+position, so a message is built by concatenation with `pf_str` (see
+[Building a message](#building-a-message)). And there is no *destination* argument: which sinks a
+record reaches is a property of the sinks, not of the call.
+
+### `name`, in more detail
+
+A record's name says **which part of your program is speaking**. It is set at two levels, the
+per-call argument winning:
+
+```fortran
+call lg%set_name("solver")                        ! every record from this logger
+call lg%info("converged", name = "solver.newton") ! this record only
+```
+
+It does two things: it renders as `{name}` in the layout, and it selects the per-name level
+override that applies to the record — see
+[Turning down a library's noise](#turning-down-a-librarys-noise). A name it has no rule for simply
+uses the logger's own threshold.
+
+**An override works in both directions.** It can make a name stricter than the logger, and it can
+make one *more verbose* — which is how a single subsystem is turned up for debugging while the rest
+of the program stays quiet:
+
+```fortran
+call pf_log_init(level = PF_LEVEL_DEBUG)
+call pf_log_set_level(PF_LEVEL_TRACE, name = "deep")   ! "deep" alone drops to TRACE
+call pf_log_trace("...", name = "deep")                ! emitted
+call pf_log_trace("...", name = "other")               ! dropped: no rule, logger is at DEBUG
+call pf_log_set_level(PF_LEVEL_DEBUG, name = "deep")   ! back to normal: the rule is retired
+```
+
+A rule is replaced by setting the same name again. `%enabled(level, name = ...)` reports the same
+decision, so it can be used to check a rule is doing what you meant before relying on it.
+
+**To undo an override, use `%unset_level`, not `%set_level` back to the logger's own level.** The
+two look interchangeable and are not:
+
+```fortran
+call pf_log_unset_level("deep")            ! removes the rule: "deep" follows the logger again
+call pf_log_unset_level()                  ! removes every rule
+call pf_log_unset_level("deep", found = f) ! f says whether there was one to remove
+```
+
+Setting the level back instead leaves a rule in place holding a *snapshot* of the logger's level at
+that moment. It stops tracking the logger, so a later `pf_log_set_level(...)` reaches every name but
+that one — and the name you thought you had restored quietly diverges from the rest of the program.
+
+It also matters for a long run: a logger holds `PF_LOG_MAX_NAME_RULES` (16) overrides and appends
+each new name to the first free slot, so a program that turns tracing on and off for more than 16
+*distinct* names aborts if the slots are never released. `%unset_level` frees one; setting the level
+back does not. `%init` is the only other way to clear the table, and it destroys every sink with it.
+
+A name rule never lowers a **sink's** threshold — it governs which records the logger offers, not
+which ones a sink accepts. A sink at `PF_LEVEL_WARNING` stays at `WARNING` however low a rule goes;
+[Which threshold decides](#which-threshold-decides) has the full composition rule.
+
+**A lowering rule costs something, and the cost is bounded and reversible.** Below the logger's own
+level, a record is normally rejected by one integer comparison. A lowering rule drops that cached
+floor, so records between the new floor and the logger's level now reach the per-name test instead
+— a string copy and a scan of at most `PF_LOG_MAX_NAME_RULES` (16) prefixes. The clock reads and the
+context assembly still happen only for a record that *passes* that test, so a record dropped for
+having the wrong name never pays for them. The cost lasts exactly until the rule is raised back, and
+a logger with no lowering rule pays nothing at all.
+
+### `context`, in more detail
+
+The context is ambient by default — pushed and popped around a region of work, and carried by every
+record emitted inside it (see
+[Logging from an OpenMP parallel region](#logging-from-an-openmp-parallel-region)). The `context =`
+argument overrides that for one record, which is what you want for a record *about* a different
+piece of work than the one currently in scope:
+
+```fortran
+call pf_log_push_context("tile=17")
+call pf_log_info("started")                         ! context "tile=17"
+call pf_log_warning("neighbour stalled", context = "tile=18")   ! this one only
+call pf_log_pop_context()
+```
+
+Passing `context = ""` renders no context at all, which is how a record opts out of an ambient one.
+
+### `once` and `every`
+
+Both suppress repeats of the same record; see
+[Deduplicating a repeated record](#deduplicating-a-repeated-record) for the key they use and the
+one call that clears the table. `once = .false.` and `every = 1` both mean "no suppression", so a
+flag computed at runtime can be passed straight through without an `if`.
 
 ## Building a message
 
@@ -248,9 +502,13 @@ the Fortran counterpart of `logging.getLogger('matplotlib').setLevel('INFO')`:
 call pf_log_set_level(PF_LEVEL_WARNING, name = "qfeet.io")   ! and every "qfeet.io.*" below it
 ```
 
-The override applies to that name and to any name below it in dotted notation. `%enabled(level)`
-cannot see a name, so it answers conservatively (it may say yes for a record an override will drop);
-pass `%enabled(level, name = ...)` for the exact answer.
+The override applies to that name and to any name below it in dotted notation, and it works in
+**both** directions — turning one name *up* to `PF_LEVEL_TRACE` for debugging is the same call with
+a lower level. See [`name`, in more detail](#name-in-more-detail) for that direction and what it
+costs.
+
+`%enabled(level)` cannot see a name, so it answers conservatively (it may say yes for a record an
+override will drop); pass `%enabled(level, name = ...)` for the exact answer.
 
 ## Rank filtering, for MPI and worker pools
 

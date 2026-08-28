@@ -23,6 +23,70 @@ public :: do_something_index
 
 contains
     !
+    subroutine test_logging()
+        use parquet_logging
+        integer :: i, sink
+        type(pf_logger) :: lg
+        character(len=:),allocatable:: msg1,msg2
+        !
+        call pf_log_info("Starting test_logging subroutine")
+        !
+        call pf_log_init(level = PF_LEVEL_debug, name="general", console=.false.)
+        !call pf_log_init(level = PF_LEVEL_DEBUG)
+        !
+        call pf_log_add_console(stream = PF_LOG_STDOUT, level = PF_LEVEL_all, sink = sink)
+        print*, "Added console sink ", sink
+        call pf_log_add_console(stream = PF_LOG_STDERR, level = PF_LEVEL_ERROR, sink = sink)
+        print*, "Added console sink ", sink
+        !
+        call pf_log_warning("This is a warning message")
+        call pf_log_info("This is an info message")
+        !
+        call pf_log_error("no statistics in row group 4", once = .true.)
+        call pf_log_error("no statistics in row group 4", once = .true.)
+        !
+        call pf_log_color("nice!", "38;5;208", msg1)
+        call pf_log_color("also nice!", PF_LOG_C_MAGENTA, msg2)
+        !
+        call pf_log_trace("trace message")
+        !
+        call pf_log_set_level(PF_LEVEL_trace, name="deep") ! <-- set lowering
+        call pf_log_trace(msg1//" and "//msg2, "deep")
+        !call pf_log_info(msg1//" and "//msg2, "x")
+        call pf_log_trace("Both outputs...", "deep")
+        call pf_log_set_level(PF_LEVEL_debug, name="deep") ! <-- unset lowering
+        !
+        call pf_log_push_context("outer")
+        call pf_log_set_format("{time} [{level}] {name} {thread|t}: {context|c:}{message| }")
+        !$OMP PARALLEL DO
+        do i = 1, 5
+            call pf_log_debug("debug message for item " // trim(pf_str(i)), every=2)
+            call pf_log_debug("debug message for item EMPTY", every=3)
+        end do
+        !OMP END PARALLEL DO
+        call pf_log_info(" test 1")
+        call pf_log_push_context("inner")
+        call pf_log_info(" test 1")
+        !call pf_log_pop_context()
+        call pf_log_clear_context()
+        call pf_log_info("test none")
+        call pf_log_info(" test 1", context="test")
+        call pf_log_pop_context()
+        call pf_log_info("test 1")
+        !
+        call pf_log_blank()
+        call pf_log_set_level(PF_LEVEL_ERROR, sink=2)
+        call pf_log_set_thread_mode(PF_LOG_THREAD_BUFFERED)   ! BEFORE the region
+        !$omp parallel do
+        do i = 1, 5
+            call pf_log_info("step 1")
+            call pf_log_info("step 2")
+        end do
+        !$omp end parallel do
+        call pf_log_flush()
+        !
+    end subroutine test_logging
+    !
     !> Wall-clock seconds since an arbitrary origin.
     function now() result(t)
         real(real64) :: t !! seconds.
@@ -166,7 +230,8 @@ program playground
     !
     !call test_vector_column() is a playground for testing the conversions
     !call test_print_string_vector() ! test printing a vector of strings
-    call test_select_case() ! test select case with string
+    !call test_select_case() ! test select case with string
+    call test_logging() ! test logging
     !
 contains
     subroutine run_do_something_index(ind, cind, option)

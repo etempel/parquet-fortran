@@ -103,7 +103,8 @@ module parquet_logging
 
     public :: pf_str
     public :: pf_log_init, pf_log_add_console, pf_log_add_file, pf_log_add_unit
-    public :: pf_log_set_level, pf_log_set_format, pf_log_set_color, pf_log_set_name
+    public :: pf_log_set_level, pf_log_unset_level, pf_log_set_format, pf_log_set_color
+    public :: pf_log_set_name
     public :: pf_log_set_rank, pf_log_set_thread_mode, pf_log_close
     public :: pf_log, pf_log_trace, pf_log_debug, pf_log_info, pf_log_warning
     public :: pf_log_error, pf_log_critical, pf_log_blank, pf_log_fatal
@@ -223,6 +224,7 @@ module parquet_logging
         procedure :: add_file => logger_add_file !! Opens a file and attaches it as a sink.
         procedure :: add_unit => logger_add_unit !! Attaches a unit the caller opened and still owns.
         procedure :: set_level => logger_set_level !! Sets the logger, one sink's, or one name prefix's threshold.
+        procedure :: unset_level => logger_unset_level !! Removes one per-name override, or every one.
         procedure :: set_format => logger_set_format !! Sets the layout template of one sink or of every current sink.
         procedure :: set_color => logger_set_color !! Sets the colour policy of one sink or of every current sink.
         procedure :: set_name => logger_set_name !! Sets the name rendered as `{name}` and keyed on by overrides.
@@ -460,7 +462,8 @@ contains
 
     !> Parses one layout template into the sink's fixed plan, once, at configuration time.
     !!
-    !! Recognises `{field}` and `{field|sep}`, where `sep` is emitted only when the field renders
+    !! Recognises `{field}` and `{field|sep}`, where `sep` is a SEPARATOR PREPENDED to the field --
+    !! not a default substituted for a missing one -- and is emitted only when the field renders
     !! non-empty -- the rule that stops an unnamed record leaving a stray separator mid-line.
     !! Everything outside the braces is a literal run. `error stop`s on an unknown field name, an
     !! unclosed brace, or a template needing more than `PF_LOG_MAX_FORMAT_OPS` steps.
@@ -628,19 +631,15 @@ contains
         n = pos - 1
     end subroutine render_line
 
-    !> Fills the shared and per-thread parts of a record: the clock fields, the thread number, and
-    !> the context, which is the shared base followed by this thread's own frames.
-    subroutine fill_record(self, level, name, context, rec)
-        type(pf_logger), intent(in) :: self                     !! The logger emitting the record.
-        integer, intent(in) :: level                            !! The record's severity.
-        character(len=*), intent(in), optional :: name          !! Per-call name, overriding the logger's.
-        character(len=*), intent(in), optional :: context       !! Per-call context, overriding the ambient one.
-        type(rec_fields), intent(out) :: rec                    !! Receives the gathered fields.
-        integer :: v(8), n
-        integer(int64) :: c, rate
-        real(real64) :: secs
-        integer :: hh, mm
-        character(len=16) :: buf
+    !> Resolves the two fields the per-name threshold decision needs: the level, and the name --
+    !> the per-call `name=` when given, else the logger's own. Cheap by construction: a copy and a
+    !> `len_trim`, no clock and no context.
+    subroutine fill_record_name(self, level, name, rec)
+        type(pf_logger), intent(in) :: self               !! The logger emitting the record.
+        integer, intent(in) :: level                      !! The record's severity.
+        character(len=*), intent(in), optional :: name    !! Per-call name, overriding the logger's.
+        type(rec_fields), intent(out) :: rec              !! Receives the level and the name.
+        integer :: n
 
         rec%level = level
         if (present(name)) then
@@ -651,6 +650,25 @@ contains
             rec%name_len = len_trim(self%name)
             rec%name = self%name
         end if
+    end subroutine fill_record_name
+
+    !> Fills everything else: rank, thread, context and the clock fields.
+    !!
+    !! Split from `fill_record_name` above so that `emit_core` can apply the per-name threshold
+    !! **before** paying for any of this. That ordering is what confines the cost of a per-name
+    !! override that LOWERS a threshold to the records the override actually admits: without it, a
+    !! single lowering rule would make every record above the new floor pay two clock reads and a
+    !! context assembly before being dropped for having the wrong name.
+    subroutine fill_record_rest(self, context, rec)
+        type(pf_logger), intent(in) :: self                     !! The logger emitting the record.
+        character(len=*), intent(in), optional :: context       !! Per-call context, overriding the ambient one.
+        type(rec_fields), intent(inout) :: rec                  !! Receives the remaining fields.
+        integer :: v(8), n
+        integer(int64) :: c, rate
+        real(real64) :: secs
+        integer :: hh, mm
+        character(len=16) :: buf
+
         rec%rank = self%rank
         rec%thread = this_thread()
 
@@ -683,7 +701,7 @@ contains
                 rec%elapsed_s = buf
             end if
         end if
-    end subroutine fill_record
+    end subroutine fill_record_rest
 
     !> Builds the context this thread's records carry: the shared base, then this thread's own
     !> frames. Truncation cannot occur here -- both parts were bounded when they were set.
@@ -942,18 +960,34 @@ contains
 
     !> Recomputes the cached cheapest threshold any sink accepts, so that `%enabled` and the first
     !> line of `emit_core` are a single integer comparison rather than a walk over the sinks.
+    !!
+    !! **The per-name rules are folded in, which is what lets an override LOWER a threshold.** The
+    !! cache has to be a true lower bound over every threshold a record could face, and a record's
+    !! logger-side threshold is `effective_level`, whose range is the logger's own level together
+    !! with every rule's. Taking the logger's level alone would leave this cache above a lowering
+    !! rule, and the name-blind first gate in `emit_core` would then drop the record before its
+    !! name was ever read -- so the rule would silently do nothing, which is how this behaved
+    !! before. The exact per-name decision still happens at the second gate; this one only has to
+    !! avoid excluding a record the second gate would have admitted.
+    !!
+    !! A sink's own threshold is *not* lowered by a rule and is still combined with `max`: a name
+    !! override governs which records the LOGGER offers, never which ones a sink accepts.
     subroutine recompute_min_level(self)
         type(pf_logger), intent(inout) :: self  !! The logger whose cache is refreshed.
-        integer :: i
+        integer :: i, floor_level
 
         if (self%nsinks == 0) then
             self%min_level = PF_LEVEL_OFF
             return
         end if
+        floor_level = self%level
+        do i = 1, self%nrules
+            floor_level = min(floor_level, self%rule(i)%level)
+        end do
         self%min_level = PF_LEVEL_OFF
         do i = 1, self%nsinks
             if (self%sink(i)%dead) cycle
-            self%min_level = min(self%min_level, max(self%level, self%sink(i)%level))
+            self%min_level = min(self%min_level, max(floor_level, self%sink(i)%level))
         end do
     end subroutine recompute_min_level
 
@@ -984,8 +1018,12 @@ contains
             if (level < self%min_level) return
         end if
 
-        call fill_record(self, level, name, context, rec)
+        ! The name is resolved first and the per-name threshold applied to it, BEFORE the clock
+        ! reads and the context assembly. A record dropped by a name rule therefore pays a string
+        ! copy and a short prefix scan, not the whole record.
+        call fill_record_name(self, level, name, rec)
         if (level < effective_level(self, rec%name, rec%name_len)) return
+        call fill_record_rest(self, context, rec)
 
         want_once = .false.
         if (present(once)) want_once = once
@@ -1231,6 +1269,23 @@ contains
     !! `name =` adds or updates an override applying to that name and to every name below it in
     !! dotted notation, which is how an application turns down a library's noise. **Passing both
     !! selectors is refused** rather than guessed at -- the combination has no useful meaning.
+    !!
+    !! **An override works in BOTH directions**: it may raise a name's threshold above the
+    !! logger's, and it may lower one below it, which is how one subsystem is turned up to
+    !! `PF_LEVEL_TRACE` while the rest of the program stays quiet. A rule is replaced by setting
+    !! the same name again. **To undo one, use `%unset_level` rather than setting it back to the
+    !! logger's current level** -- the latter leaves a rule behind holding a snapshot of that
+    !! level, which then stops tracking the logger, and it does not free the slot.
+    !!
+    !! **A lowering rule has a cost, and it is bounded.** It drops the cached first-gate threshold
+    !! to the new floor, so records between that floor and the logger's own level now reach the
+    !! per-name test instead of being rejected by one integer comparison. That test is a string
+    !! copy and a scan of at most `PF_LOG_MAX_NAME_RULES` prefixes; the clock reads and the context
+    !! assembly still happen only for a record that passes it. The cost lasts until the rule is
+    !! raised back, and a logger with no lowering rule pays nothing at all.
+    !!
+    !! A rule never lowers a **sink's** own threshold: it governs which records the logger offers,
+    !! not which ones a sink accepts.
     subroutine logger_set_level(self, level, sink, name)
         class(pf_logger), intent(inout) :: self         !! The logger being configured.
         integer, intent(in) :: level                    !! The threshold to set.
@@ -1252,22 +1307,92 @@ contains
             do i = 1, self%nrules
                 if (self%rule(i)%name == name) then
                     self%rule(i)%level = level
-                    return
+                    ! Falls through to recompute_min_level rather than returning: a rule that
+                    ! lowers a threshold has to reach the cache, or the name-blind first gate in
+                    ! emit_core drops the record before the rule is consulted and the call
+                    ! silently does nothing. Raising one back has to reach it too, or the floor
+                    ! stays low and every record keeps paying for a rule that no longer exists.
+                    exit
                 end if
             end do
-            if (self%nrules >= PF_LOG_MAX_NAME_RULES) then
-                error stop "pf_logger%set_level: this logger already holds PF_LOG_MAX_NAME_RULES " // &
-                    "per-name overrides"
+            if (i > self%nrules) then
+                if (self%nrules >= PF_LOG_MAX_NAME_RULES) then
+                    error stop "pf_logger%set_level: this logger already holds " // &
+                        "PF_LOG_MAX_NAME_RULES per-name overrides"
+                end if
+                self%nrules = self%nrules + 1
+                self%rule(self%nrules)%name = name
+                self%rule(self%nrules)%level = level
             end if
-            self%nrules = self%nrules + 1
-            self%rule(self%nrules)%name = name
-            self%rule(self%nrules)%level = level
-            return
         else
             self%level = level
         end if
         call recompute_min_level(self)
     end subroutine logger_set_level
+
+    !> Removes one per-name level override, or every one, restoring the logger's own threshold for
+    !> the names concerned.
+    !!
+    !! **This is not the same as setting the override back to the logger's current level**, and the
+    !! difference is why the procedure exists. Setting it back *snapshots* that level into a rule
+    !! that still exists: a later `%set_level(...)` on the logger then fails to reach the name, so a
+    !! rule meant to have been undone silently makes one name diverge from the rest of the program.
+    !! Removing it leaves nothing behind, and the name follows the logger again.
+    !!
+    !! **It also frees the slot**, which the snapshot does not. A logger holds
+    !! `PF_LOG_MAX_NAME_RULES` overrides and appends a new name to the first free slot, so a
+    !! long-running program that turns tracing on and off for more *distinct* names than that would
+    !! otherwise abort -- having "undone" every one of them. `%init` is the only other way to clear
+    !! the table, and it destroys every sink with it.
+    !!
+    !! With `name` absent every override is removed. That mirrors `%set_format`/`%set_color`, where
+    !! an absent selector likewise means "all of them", and it is unambiguous because an override's
+    !! name can never be empty -- `%set_level` refuses one.
+    !!
+    !! Removing an override that is not there is a no-op rather than an error, so the call is safe
+    !! to make unconditionally; pass `found` when you need to know which it was.
+    subroutine logger_unset_level(self, name, found)
+        class(pf_logger), intent(inout) :: self          !! The logger being configured.
+        character(len=*), intent(in), optional :: name   !! The override to remove; absent means every one.
+        logical, intent(out), optional :: found          !! Receives whether anything was removed.
+        integer :: i, k
+        logical :: hit
+
+        if (.not. present(name)) then
+            hit = self%nrules > 0
+            self%nrules = 0
+            call recompute_min_level(self)
+            if (present(found)) found = hit
+            return
+        end if
+
+        ! Validated exactly as %set_level validates it, so the same name is accepted or refused by
+        ! both. A malformed name is a defect at the call site, not a missing rule.
+        if (len_trim(name) == 0) error stop "pf_logger%unset_level: name= is empty"
+        if (len_trim(name) > PF_LOG_MAX_NAME) then
+            error stop "pf_logger%unset_level: name= is longer than PF_LOG_MAX_NAME characters"
+        end if
+
+        hit = .false.
+        do i = 1, self%nrules
+            if (self%rule(i)%name /= name) cycle
+            ! Shift the tail down rather than swapping the last entry into the hole. Lookup takes
+            ! the longest match and so does not care about order, but keeping insertion order costs
+            ! nothing at this size and keeps the table readable in a debugger.
+            do k = i, self%nrules - 1
+                self%rule(k) = self%rule(k + 1)
+            end do
+            self%rule(self%nrules)%name = ""
+            self%rule(self%nrules)%level = PF_LEVEL_ALL
+            self%nrules = self%nrules - 1
+            hit = .true.
+            exit
+        end do
+        ! Unconditional, not only when something was removed: dropping an override that LOWERED a
+        ! threshold has to raise the cached floor back, or the cost of the removed rule outlives it.
+        call recompute_min_level(self)
+        if (present(found)) found = hit
+    end subroutine logger_unset_level
 
     !> Sets the layout template of one sink, or of **every sink currently attached**.
     !!
@@ -1523,9 +1648,11 @@ contains
     !! It is one integer comparison against a cached threshold, not a walk over the sinks.
     !!
     !! **Without `name` it is a conservative hint, not an oracle.** Per-name overrides mean a
-    !! record's threshold depends on its name, which this cannot see, so for a name whose override
-    !! is stricter it answers `.true.` for a record that is then dropped. That is the safe
-    !! direction -- work is wasted, output is never lost. Pass `name` to get the exact answer.
+    !! record's threshold depends on its name, which this cannot see, so it can answer `.true.`
+    !! for a record that is then dropped -- for a name whose override is stricter, and also for a
+    !! name with no override at all once some other name has a rule lowering the cached floor.
+    !! That is the safe direction -- work is wasted, output is never lost. Pass `name` to get the
+    !! exact answer, which accounts for both directions of override.
     logical function logger_enabled(self, level, name) result(yes)
         class(pf_logger), intent(in) :: self            !! The logger.
         integer, intent(in) :: level                    !! The level a record would carry.
@@ -1846,6 +1973,14 @@ contains
 
         call g_default%set_level(level, sink = sink, name = name)
     end subroutine pf_log_set_level
+
+    !> Removes one per-name override from the default logger, or every one. See `%unset_level`.
+    subroutine pf_log_unset_level(name, found)
+        character(len=*), intent(in), optional :: name  !! The override to remove; absent means every one.
+        logical, intent(out), optional :: found         !! Receives whether anything was removed.
+
+        call g_default%unset_level(name = name, found = found)
+    end subroutine pf_log_unset_level
 
     !> Sets the layout of one of the default logger's sinks, or of every current sink.
     subroutine pf_log_set_format(template, sink)

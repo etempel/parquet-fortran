@@ -1703,6 +1703,8 @@ contains
                 test_logging_implicit_console), &
             new_unittest("configuring the default logger retires the implicit console", &
                 test_logging_implicit_console_retires), &
+            new_unittest("unset_level validates its name as set_level does", &
+                test_logging_unset_level_empty_name), &
             new_unittest("the same logging calls made correctly do not abort", &
                 test_logging_control_does_not_abort) &
             ]
@@ -3817,6 +3819,16 @@ contains
             failure_message="the implicit console emitted below its INFO threshold", &
             forbidden_text="implicit-debug-record")
     end subroutine test_logging_implicit_console_retires
+
+    !> unset_level refuses a name set_level would also refuse, rather than answering "no such
+    !> override" for a name that could never have had one.
+    subroutine test_logging_unset_level_empty_name(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "logging_unset_level_empty_name", &
+            expect_abort=.true., &
+            failure_message="unset_level with an empty name= was expected to abort", &
+            required_stderr="name= is empty")
+    end subroutine test_logging_unset_level_empty_name
 
     !> The negative control: the same calls made correctly must not abort.
     subroutine test_logging_control_does_not_abort(error)

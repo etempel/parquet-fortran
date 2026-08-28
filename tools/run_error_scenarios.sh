@@ -1167,6 +1167,7 @@ scenarios=(
     "logging_path_too_long:1"
     "logging_file_cannot_open:1"
     "logging_implicit_console:0"
+    "logging_unset_level_empty_name:1"
     "logging_control:0"
 )
 

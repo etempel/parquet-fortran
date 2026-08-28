@@ -2201,6 +2201,8 @@ program error_scenarios
         call scenario_logging_file_cannot_open()
     case ("logging_implicit_console")
         call scenario_logging_implicit_console()
+    case ("logging_unset_level_empty_name")
+        call scenario_logging_unset_level_empty_name()
     case ("logging_control")
         call scenario_logging_control()
     case default
@@ -19165,6 +19167,16 @@ contains
         call pf_log_info("after-configuration-record")
     end subroutine scenario_logging_implicit_console
 
+    !> `%unset_level` validates its name exactly as `%set_level` does, so a name neither can
+    !> accept is refused by both rather than silently reporting "no such override".
+    subroutine scenario_logging_unset_level_empty_name()
+        type(pf_logger) :: lg
+
+        call lg%init(console=.false.)
+        call lg%unset_level("")
+        print '(a)', "unexpectedly accepted an empty name= in unset_level"
+    end subroutine scenario_logging_unset_level_empty_name
+
     !> The negative control for every scenario above: the same configuration calls, made
     !> correctly, must exit cleanly. Without it each abort test would pass just as happily
     !> against a guard that fired unconditionally.
@@ -19183,6 +19195,8 @@ contains
         call pf_log_clear_context()
         call pf_log_push_context("outer", frame)
         call pf_log_pop_context(frame)
+        call lg%unset_level("a.b")
+        call lg%unset_level()
         call pf_log_level_from_name("verbose", lev, ok)
         if (ok) print '(a)', "control: an unknown level name reported success"
         call lg%error("control record")

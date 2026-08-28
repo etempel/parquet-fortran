@@ -1384,6 +1384,178 @@ contains
             "pf_log_elapsed is non-negative and does not go backwards")
     end subroutine test_builtin_templates_and_off
 
+    !> A file sink flushes at `flush_level` and above, and a flush pushes everything buffered on
+    !> the unit -- so a WARNING record makes the quieter records before it visible too.
+    !!
+    !! Only positive assertions: "record visible on disk without %flush/close" is deterministic
+    !! (the flush forces it), while "record NOT yet on disk" depends on the runtime's buffer size
+    !! and write-through policy and would be a flaky test on some compiler. The never-flush arm is
+    !! therefore asserted through %flush recovering the records, not through their prior absence.
+    subroutine test_flush_level(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
+        character(len=*), parameter :: pa = "test_run/log_flush_all.txt"
+        character(len=*), parameter :: pw = "test_run/log_flush_warn.txt"
+        character(len=*), parameter :: pn = "test_run/log_flush_never.txt"
+        type(pf_logger) :: lg
+        character(len=512), allocatable :: lines(:)
+        integer :: n
+
+        ! flush_level = ALL: every record visible immediately.
+        call lg%init(console = .false.)
+        call lg%add_file(pa, append = .false., format = "{message}", flush_level = PF_LEVEL_ALL)
+        call lg%info("immediately visible")
+        call read_back(pa, lines, n)
+        call check(error, n == 1 .and. has(lines(1), "immediately visible"), &
+            "flush_level = PF_LEVEL_ALL flushes every record")
+        if (allocated(error)) return
+
+        ! The default (WARNING): a WARNING record pushes itself AND the buffered INFO before it.
+        call lg%init(console = .false.)
+        call lg%add_file(pw, append = .false., format = "{message}")
+        call lg%info("quieter, buffered")
+        call lg%warning("trouble, flushes")
+        call read_back(pw, lines, n)
+        call check(error, n == 2, "a WARNING record's flush pushes the buffered INFO before it")
+        if (allocated(error)) return
+        call check(error, has(lines(1), "quieter") .and. has(lines(2), "trouble"), &
+            "and the records arrive in order")
+        if (allocated(error)) return
+
+        ! flush_level = OFF: nothing flushes per record; %flush recovers everything.
+        call lg%init(console = .false.)
+        call lg%add_file(pn, append = .false., format = "{message}", flush_level = PF_LEVEL_OFF)
+        call lg%critical("even this does not flush")
+        call lg%flush()
+        call read_back(pn, lines, n)
+        call check(error, n == 1 .and. has(lines(1), "even this"), &
+            "flush_level = PF_LEVEL_OFF still delivers through an explicit %flush")
+        if (allocated(error)) return
+        call lg%close()
+    end subroutine test_flush_level
+
+    !> The clock fields are gathered only when some attached sink's template renders them, the
+    !> needs are OR-ed across sinks, and `set_format` refreshes the cache.
+    !!
+    !! Correctness across the mask cannot be asserted by absence (an ungathered field is simply
+    !! never rendered), so the assertions are the two directions that CAN fail: a sink that needs
+    !! the clock still gets a correct timestamp while sharing the logger with one that does not;
+    !! and a template changed AFTER the sink was added still gets one -- which is the assertion
+    !! that fails if set_format forgets to recompute the logger's cached OR.
+    subroutine test_clock_mask_across_sinks(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
+        character(len=*), parameter :: pmsg = "test_run/log_mask_msg.txt"
+        character(len=*), parameter :: pclk = "test_run/log_mask_clk.txt"
+        character(len=*), parameter :: pfmt = "test_run/log_mask_fmt.txt"
+        type(pf_logger) :: lg
+        character(len=512), allocatable :: lines(:)
+        integer :: n, vb(8), va(8)
+        character(len=512) :: d
+
+        call date_and_time(values = vb)
+        call lg%init(console = .false.)
+        call lg%add_file(pmsg, append = .false., format = "{message}")
+        call lg%add_file(pclk, append = .false., format = "D={date}|{message}")
+        call lg%info("shared record")
+        call lg%close()
+        call date_and_time(values = va)
+
+        call read_back(pmsg, lines, n)
+        call check(error, n == 1 .and. trim(lines(1)) == "shared record", &
+            "the clock-free sink renders the bare message")
+        if (allocated(error)) return
+        call read_back(pclk, lines, n)
+        call check(error, n == 1, "the clock-carrying sibling took the same record")
+        if (allocated(error)) return
+        call field_between(lines(1), "D=", "|", d)
+        ! The rendered date must equal the real date -- taken before AND after, so a run crossing
+        ! midnight cannot fail spuriously. This is a VALUE assertion, not a shape one: a
+        ! hand-formatting defect that swapped fields or dropped a digit passes any shape check.
+        call check(error, date_matches(d, vb) .or. date_matches(d, va), &
+            "{date} renders the actual date, got '" // trim(d) // "'")
+        if (allocated(error)) return
+
+        ! A template installed by set_format AFTER add_file must still be served with the clock.
+        call lg%init(console = .false.)
+        call lg%add_file(pfmt, append = .false., format = "{message}")
+        call lg%set_format("T={time}|{message}")
+        call lg%info("late template")
+        call lg%close()
+        call read_back(pfmt, lines, n)
+        call check(error, n == 1, "the record reached the reformatted sink")
+        if (allocated(error)) return
+        call field_between(lines(1), "T=", "|", d)
+        call check(error, len_trim(d) == 12 .and. all_digits(d(1:2)) .and. d(3:3) == ":", &
+            "set_format after add_file still gathers the clock, got '" // trim(d) // "'")
+    end subroutine test_clock_mask_across_sinks
+
+    !> Whether rendered text `d` equals the date in a `date_and_time` values array.
+    logical function date_matches(d, v) result(yes)
+        character(len=*), intent(in) :: d  !! Rendered `YYYY-MM-DD`.
+        integer, intent(in) :: v(8)        !! `date_and_time` values.
+        character(len=10) :: expect
+
+        write (expect, '(i4.4,"-",i2.2,"-",i2.2)') v(1), v(2), v(3)
+        yes = trim(d) == expect
+    end function date_matches
+
+    !> `%print` names every piece of the configuration, and `pf_log_print` says plainly when the
+    !> default logger is still implicit.
+    subroutine test_print_config(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
+        character(len=*), parameter :: path = "test_run/log_print.txt"
+        character(len=*), parameter :: sink_file = "test_run/log_print_sink.txt"
+        type(pf_logger) :: lg
+        character(len=512), allocatable :: lines(:)
+        integer :: u, n, i
+        logical :: seen_level, seen_rule, seen_path, seen_flush, seen_fmt, seen_rank
+
+        call lg%init(level = PF_LEVEL_DEBUG, console = .false., name = "app")
+        call lg%set_rank(3)
+        call lg%add_file(sink_file, append = .false., format = "{level}|{message}")
+        call lg%set_level(PF_LEVEL_TRACE, name = "deep")
+
+        call open_scratch(path, u)
+        call lg%print(unit = u)
+        close (u)
+        call lg%close()
+        call read_back(path, lines, n)
+
+        seen_level = .false.; seen_rule = .false.; seen_path = .false.
+        seen_flush = .false.; seen_fmt = .false.; seen_rank = .false.
+        do i = 1, n
+            if (has(lines(i), "level") .and. has(lines(i), "DEBUG")) seen_level = .true.
+            if (has(lines(i), "deep") .and. has(lines(i), "TRACE")) seen_rule = .true.
+            if (has(lines(i), sink_file)) seen_path = .true.
+            if (has(lines(i), "flush at") .and. has(lines(i), "WARNING")) seen_flush = .true.
+            if (has(lines(i), "{level}|{message}")) seen_fmt = .true.
+            if (has(lines(i), "rank") .and. has(lines(i), "3")) seen_rank = .true.
+        end do
+        call check(error, seen_level, "%print names the logger's level")
+        if (allocated(error)) return
+        call check(error, seen_rule, "%print names the per-name override and its level")
+        if (allocated(error)) return
+        call check(error, seen_path, "%print names the file sink's path")
+        if (allocated(error)) return
+        call check(error, seen_flush, "%print shows the sink's flush level, WARNING by default")
+        if (allocated(error)) return
+        call check(error, seen_fmt, "%print shows the sink's format template")
+        if (allocated(error)) return
+        call check(error, seen_rank, "%print shows the logger's rank")
+        if (allocated(error)) return
+
+        ! The unconfigured default logger describes its implicit console rather than dumping the
+        ! (unconfigured) structure. pf_log_close leaves the default CONFIGURED-and-silent, so this
+        ! arm can only run meaningfully when nothing in this test configured the default -- it did
+        ! not -- but a sibling test may have, so assert only the shape that holds either way: the
+        ! dump opens with the same banner.
+        call open_scratch(path, u)
+        call pf_log_print(unit = u)
+        close (u)
+        call read_back(path, lines, n)
+        call check(error, n >= 1 .and. has(lines(1), "pf_logger configuration"), &
+            "pf_log_print writes the configuration banner")
+    end subroutine test_print_config
+
     !> Registers this suite's tests.
     subroutine collect_tests_logging(testsuite)
         type(unittest_type), allocatable, intent(out) :: testsuite(:)  !! the suite's tests.
@@ -1423,7 +1595,12 @@ contains
             new_unittest("colour policy is honoured in all three arms", test_color_policies), &
             new_unittest("a blank line obeys a sink's rank filter", test_blank_obeys_rank_filter), &
             new_unittest("the built-in templates render and PF_LEVEL_OFF admits nothing", &
-                test_builtin_templates_and_off) &
+                test_builtin_templates_and_off), &
+            new_unittest("flush_level flushes at and above, and a flush carries earlier records", &
+                test_flush_level), &
+            new_unittest("clock fields follow the sinks' templates, set_format included", &
+                test_clock_mask_across_sinks), &
+            new_unittest("print dumps the whole configuration", test_print_config) &
             ]
     end subroutine collect_tests_logging
 

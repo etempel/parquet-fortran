@@ -105,7 +105,7 @@ module parquet_logging
     public :: pf_log_init, pf_log_add_console, pf_log_add_file, pf_log_add_unit
     public :: pf_log_set_level, pf_log_unset_level, pf_log_set_format, pf_log_set_color
     public :: pf_log_set_name
-    public :: pf_log_set_rank, pf_log_set_thread_mode, pf_log_close
+    public :: pf_log_set_rank, pf_log_set_thread_mode, pf_log_close, pf_log_print
     public :: pf_log, pf_log_trace, pf_log_debug, pf_log_info, pf_log_warning
     public :: pf_log_error, pf_log_critical, pf_log_blank, pf_log_fatal
     public :: pf_log_enabled, pf_log_flush, pf_log_reset_dedup
@@ -120,6 +120,14 @@ module parquet_logging
     integer, parameter :: SINK_UNIT    = 3
 
     ! ---- Private template field ids. 0 marks a literal run. ----
+    ! Which clock fields a template renders, as bits: gathered per sink at parse time and OR-ed
+    ! into the logger's own cache, so emission gathers and formats ONLY what some attached sink
+    ! will render. Measured before this existed: date_and_time plus three internal formatted
+    ! WRITEs cost ~2.7 us of a 3.0 us emission whose template was plain "{message}".
+    integer, parameter :: NEED_DATE    = 1
+    integer, parameter :: NEED_TIME    = 2
+    integer, parameter :: NEED_ELAPSED = 4
+
     integer, parameter :: FLD_LITERAL = 0
     integer, parameter :: FLD_DATE    = 1
     integer, parameter :: FLD_TIME    = 2
@@ -157,12 +165,13 @@ module parquet_logging
         integer :: level = PF_LEVEL_ALL           !! This sink's own threshold.
         integer :: color = PF_LOG_COLOR_AUTO    !! Requested colour policy.
         logical :: use_color = .false.          !! Policy resolved once, at configuration time.
-        logical :: do_flush = .true.            !! Whether to `flush` after every record.
+        integer :: flush_level = PF_LEVEL_ALL   !! Flush after a record at or above this level.
         logical :: dead = .false.               !! A console sink dropped after a write failure.
         integer :: only_rank = PF_LOG_RANK_ANY  !! Emit only when the logger's rank matches.
         character(len=PF_LOG_MAX_PATH) :: path = ""    !! For a file sink: the path, for messages.
         character(len=PF_LOG_MAX_FORMAT) :: fmt = ""   !! Layout template source.
         integer :: nops = 0                            !! Parsed steps in `op`.
+        integer :: clock_needs = 0                     !! `NEED_*` bits this template renders.
         type(fmt_op) :: op(PF_LOG_MAX_FORMAT_OPS)      !! The parsed template.
     end type pf_sink
 
@@ -210,6 +219,7 @@ module parquet_logging
         private
         integer :: level = PF_LEVEL_ALL                 !! Logger-wide threshold.
         integer :: min_level = PF_LEVEL_OFF             !! Cheapest threshold any sink accepts; cached.
+        integer :: clock_needs = 0                      !! OR of the live sinks' `NEED_*` bits; cached.
         character(len=PF_LOG_MAX_NAME) :: name = ""   !! This logger's name, rendered as `{name}`.
         integer :: rank = PF_LOG_RANK_ANY             !! Caller-supplied rank, rendered as `{rank}`.
         integer :: thread_mode = PF_LOG_THREAD_DIRECT !! `PF_LOG_THREAD_DIRECT`/`_BUFFERED`.
@@ -231,6 +241,7 @@ module parquet_logging
         procedure :: set_rank => logger_set_rank !! Sets the rank rendered as `{rank}` and tested by a rank filter.
         procedure :: set_thread_mode => logger_set_thread_mode !! Selects direct or buffered emission.
         procedure :: close => logger_close !! Closes units this logger opened and clears every sink.
+        procedure :: print => logger_print !! Writes a readable dump of this logger's configuration.
         ! ---- Emission ----
         procedure :: log => logger_log !! Emits one record at an explicit level.
         procedure :: trace => logger_trace !! Emits one record at `PF_LEVEL_TRACE`.
@@ -299,7 +310,10 @@ module parquet_logging
     !$omp threadprivate(t_context, t_context_len, t_context_depth, t_context_ends)
 
     ! ---- Process-wide once=/every= table. Every access is inside the output critical section. ----
-    character(len=PF_LOG_MAX_DEDUP_KEY), save :: g_dedup_key(PF_LOG_MAX_DEDUP_KEYS) = ""
+    ! Deliberately NO initializer: `= ""` would place 32 KB of literal blanks in the data
+    ! segment of every binary embedding this module. Entries are valid only up to g_dedup_n and
+    ! are always written before they are read, so BSS is correct and free.
+    character(len=PF_LOG_MAX_DEDUP_KEY), save :: g_dedup_key(PF_LOG_MAX_DEDUP_KEYS)
     integer(int64), save :: g_dedup_count(PF_LOG_MAX_DEDUP_KEYS) = 0_int64
     integer, save :: g_dedup_n = 0
 
@@ -477,6 +491,7 @@ contains
         end if
         sk%fmt = template
         sk%nops = 0
+        sk%clock_needs = 0
         n = len(template)
         i = 1
         do while (i <= n)
@@ -499,6 +514,12 @@ contains
                 end if
                 call push_op(sk, fld, 1, 0, merge(i + bar + 1, 1, bar > 0), &
                     merge(close_at - 1, 0, bar > 0))
+                select case (fld)
+                case (FLD_DATE);    sk%clock_needs = ior(sk%clock_needs, NEED_DATE)
+                case (FLD_TIME);    sk%clock_needs = ior(sk%clock_needs, NEED_TIME)
+                case (FLD_STAMP);   sk%clock_needs = ior(sk%clock_needs, ior(NEED_DATE, NEED_TIME))
+                case (FLD_ELAPSED); sk%clock_needs = ior(sk%clock_needs, NEED_ELAPSED)
+                end select
                 i = close_at + 1
             else
                 lo = i
@@ -639,15 +660,14 @@ contains
     !! threshold to the records the override actually admits: without it, a single lowering rule
     !! would make every record above the new floor pay two clock reads and a context assembly
     !! before being dropped for having the wrong name.
-    subroutine fill_record_rest(self, context, rec)
+    subroutine fill_record_rest(self, context, needs, rec)
         type(pf_logger), intent(in) :: self                     !! The logger emitting the record.
         character(len=*), intent(in), optional :: context       !! Per-call context, overriding the ambient one.
+        integer, intent(in) :: needs                            !! `NEED_*` bits some attached sink renders.
         type(rec_fields), intent(inout) :: rec                  !! Receives the remaining fields.
         integer :: v(8), n
-        integer(int64) :: c, rate
-        real(real64) :: secs
-        integer :: hh, mm
-        character(len=16) :: buf
+        integer(int64) :: c, rate, ticks, seconds
+        integer :: hh, hpos
 
         rec%rank = self%rank
         rec%thread = this_thread()
@@ -660,28 +680,90 @@ contains
             call current_context(rec%context, rec%context_len)
         end if
 
-        call date_and_time(values = v)
-        write (rec%date_s, '(i4.4,"-",i2.2,"-",i2.2)') v(1), v(2), v(3)
-        write (rec%time_s, '(i2.2,":",i2.2,":",i2.2,".",i3.3)') v(5), v(6), v(7), v(8)
+        ! Every branch below is gated on `needs` and hand-formats with digit stores. Both halves
+        ! are load-bearing, separately measured: gathering and formatting these three fields with
+        ! date_and_time plus internal formatted WRITEs cost ~2.7 us of a 3.0 us emission whose
+        ! template rendered none of them, and an internal WRITE costs hundreds of ns against
+        ! ~tens for the digit stores. Do not "simplify" either back.
+        if (iand(needs, ior(NEED_DATE, NEED_TIME)) /= 0) then
+            call date_and_time(values = v)
+            if (iand(needs, NEED_DATE) /= 0) then
+                call put_digits(rec%date_s(1:4), v(1))
+                rec%date_s(5:5) = "-"
+                call put_digits(rec%date_s(6:7), v(2))
+                rec%date_s(8:8) = "-"
+                call put_digits(rec%date_s(9:10), v(3))
+            end if
+            if (iand(needs, NEED_TIME) /= 0) then
+                call put_digits(rec%time_s(1:2), v(5))
+                rec%time_s(3:3) = ":"
+                call put_digits(rec%time_s(4:5), v(6))
+                rec%time_s(6:6) = ":"
+                call put_digits(rec%time_s(7:8), v(7))
+                rec%time_s(9:9) = "."
+                call put_digits(rec%time_s(10:12), v(8))
+            end if
+        end if
 
         rec%elapsed_len = 0
-        if (g_clock_set) then
+        if (iand(needs, NEED_ELAPSED) /= 0 .and. g_clock_set) then
             call system_clock(count = c, count_rate = rate)
             if (rate > 0_int64) then
-                secs = real(c - g_clock0, real64) / real(rate, real64)
-                if (secs < 0.0_real64) secs = 0.0_real64
-                hh = int(secs / 3600.0_real64)
-                mm = int((secs - real(hh, real64) * 3600.0_real64) / 60.0_real64)
-                secs = secs - real(hh, real64) * 3600.0_real64 - real(mm, real64) * 60.0_real64
-                write (buf, '(i0,":",i2.2,":",f6.3)') hh, mm, secs
-                do n = 1, len_trim(buf)
-                    if (buf(n:n) == " ") buf(n:n) = "0"
-                end do
-                rec%elapsed_len = len_trim(buf)
-                rec%elapsed_s = buf
+                ticks = c - g_clock0
+                if (ticks < 0_int64) ticks = 0_int64
+                seconds = ticks / rate
+                ! Milliseconds from the sub-second remainder. The remainder is below `rate`, so
+                ! the product stays far inside int64 for any real clock rate.
+                n = int(mod(ticks, rate) * 1000_int64 / rate)
+                hh = int(seconds / 3600_int64)
+                ! Hours are the one variable-width field: H:MM:SS.mmm.
+                call put_int(rec%elapsed_s, hpos, hh)
+                rec%elapsed_s(hpos:hpos) = ":"
+                call put_digits(rec%elapsed_s(hpos + 1:hpos + 2), int(mod(seconds, 3600_int64) / 60_int64))
+                rec%elapsed_s(hpos + 3:hpos + 3) = ":"
+                call put_digits(rec%elapsed_s(hpos + 4:hpos + 5), int(mod(seconds, 60_int64)))
+                rec%elapsed_s(hpos + 6:hpos + 6) = "."
+                call put_digits(rec%elapsed_s(hpos + 7:hpos + 9), n)
+                rec%elapsed_len = hpos + 9
             end if
         end if
     end subroutine fill_record_rest
+
+    !> Writes `value` into `out` right-aligned zero-padded, filling the slot exactly -- the
+    !> hand-formatted substitute for an internal `WRITE` with an `iN.N` descriptor.
+    pure subroutine put_digits(out, value)
+        character(len=*), intent(out) :: out  !! The slot; its length is the field width.
+        integer, intent(in) :: value          !! Non-negative value to render.
+        integer :: k, v
+
+        v = value
+        do k = len(out), 1, -1
+            out(k:k) = achar(48 + mod(v, 10))
+            v = v / 10
+        end do
+    end subroutine put_digits
+
+    !> Writes `value` into `out` from position 1 at its natural width -- the substitute for an
+    !> `i0` descriptor. Reports the position just past the last digit written.
+    pure subroutine put_int(out, next, value)
+        character(len=*), intent(out) :: out  !! The buffer written into.
+        integer, intent(out) :: next          !! First unused position afterwards.
+        integer, intent(in) :: value          !! Non-negative value to render.
+        integer :: k, v, ndig
+
+        v = value
+        ndig = 1
+        do while (v >= 10)
+            ndig = ndig + 1
+            v = v / 10
+        end do
+        v = value
+        do k = ndig, 1, -1
+            out(k:k) = achar(48 + mod(v, 10))
+            v = v / 10
+        end do
+        next = ndig + 1
+    end subroutine put_int
 
     !> Builds the context this thread's records carry: the shared base, then this thread's own
     !> frames. Truncation cannot occur here -- both parts were bounded when they were set.
@@ -865,7 +947,7 @@ contains
         sk%level = PF_LEVEL_INFO
         sk%color = PF_LOG_COLOR_AUTO
         sk%use_color = resolve_color(PF_LOG_COLOR_AUTO, SINK_CONSOLE)
-        sk%do_flush = .true.
+        sk%flush_level = PF_LEVEL_ALL
         call parse_template(sk, PF_LOG_FMT_BRIEF)
     end subroutine default_console_sink
 
@@ -898,14 +980,16 @@ contains
                 if (collector_append(sk%unit, line(1:n))) return
             end if
             !$omp critical (pf_log_output)
-            call deliver(sk%unit, sk%kind == SINK_CONSOLE, sk%path, line(1:n), sk%do_flush, died)
+            call deliver(sk%unit, sk%kind == SINK_CONSOLE, sk%path, line(1:n), &
+                rec%level >= sk%flush_level, died)
             !$omp end critical (pf_log_output)
         else
             allocate (character(len=n) :: big)
             call render_line(sk, rec, msg, m, big)
             if (thread_mode == PF_LOG_THREAD_BUFFERED) call flush_slot(this_thread() + 1)
             !$omp critical (pf_log_output)
-            call deliver(sk%unit, sk%kind == SINK_CONSOLE, sk%path, big, sk%do_flush, died)
+            call deliver(sk%unit, sk%kind == SINK_CONSOLE, sk%path, big, &
+                rec%level >= sk%flush_level, died)
             !$omp end critical (pf_log_output)
             deallocate (big)
         end if
@@ -958,6 +1042,7 @@ contains
 
         if (self%nsinks == 0) then
             self%min_level = PF_LEVEL_OFF
+            self%clock_needs = 0
             return
         end if
         floor_level = self%level
@@ -965,9 +1050,14 @@ contains
             floor_level = min(floor_level, self%rule(i)%level)
         end do
         self%min_level = PF_LEVEL_OFF
+        self%clock_needs = 0
         do i = 1, self%nsinks
             if (self%sink(i)%dead) cycle
             self%min_level = min(self%min_level, max(floor_level, self%sink(i)%level))
+            ! The clock cache rides the same walk: which NEED_* fields any live sink renders,
+            ! so that emission gathers and formats only those. Every configuration change that
+            ! can alter a template or the sink set already ends here.
+            self%clock_needs = ior(self%clock_needs, self%sink(i)%clock_needs)
         end do
     end subroutine recompute_min_level
 
@@ -1027,7 +1117,13 @@ contains
         rec%level = level
         rec%name = rname
         rec%name_len = rlen
-        call fill_record_rest(self, context, rec)
+        ! The implicit console renders PF_LOG_FMT_BRIEF, whose one clock field is {time};
+        ! a configured logger's needs are the cached OR over its live sinks' templates.
+        if (self%nsinks == 0) then
+            call fill_record_rest(self, context, NEED_TIME, rec)
+        else
+            call fill_record_rest(self, context, self%clock_needs, rec)
+        end if
 
         want_once = .false.
         if (present(once)) want_once = once
@@ -1145,13 +1241,14 @@ contains
     !! the run that just failed, which is the log someone is about to want. `append = .false.`
     !! truncates. A file that cannot be opened is a clean `error stop` naming the path and the
     !! runtime's own message.
-    subroutine logger_add_file(self, path, level, format, append, flush, only_rank, sink)
+    subroutine logger_add_file(self, path, level, format, append, flush_level, only_rank, sink)
         class(pf_logger), intent(inout) :: self           !! The logger being configured.
         character(len=*), intent(in) :: path              !! Path to open.
         integer, intent(in), optional :: level            !! This sink's threshold; default `PF_LEVEL_ALL`.
         character(len=*), intent(in), optional :: format  !! Layout template; default `PF_LOG_FMT_FULL`.
         logical, intent(in), optional :: append           !! `.false.` to truncate; default `.true.`.
-        logical, intent(in), optional :: flush            !! Flush after every record; default `.true.`.
+        integer, intent(in), optional :: flush_level      !! Flush after a record at or above this level;
+                                                          !! default `PF_LEVEL_WARNING`. See the doc-comment.
         integer, intent(in), optional :: only_rank        !! Emit only when the logger's rank matches.
         integer, intent(out), optional :: sink            !! Receives this sink's id.
         integer :: s, u, ios
@@ -1178,7 +1275,15 @@ contains
         self%sink(s)%unit = u
         self%sink(s)%path = path
         self%sink(s)%use_color = resolve_color(self%sink(s)%color, SINK_FILE)
-        if (present(flush)) self%sink(s)%do_flush = flush
+        ! A file sink flushes at WARNING and above by default: a flush pushes EVERYTHING buffered
+        ! on the unit, so the records describing trouble -- and every quieter record before them --
+        ! reach the disk the moment trouble is reported, while bulk INFO/DEBUG traffic avoids a
+        ! per-record flush measured at several times the cost of the write itself. `%flush`,
+        ! `%close` and `%fatal` flush unconditionally. `PF_LEVEL_ALL` restores flush-every-record;
+        ! `PF_LEVEL_OFF` means never (only `%flush`/`%close`/`%fatal` and the runtime's own
+        ! buffering discipline apply).
+        self%sink(s)%flush_level = PF_LEVEL_WARNING
+        if (present(flush_level)) self%sink(s)%flush_level = flush_level
         call recompute_min_level(self)
         if (present(sink)) sink = s
     end subroutine logger_add_file
@@ -1190,12 +1295,14 @@ contains
     !! a caller that closes it later while it is still attached is a documented contract violation
     !! with no cheap runtime check -- but not a silent one either, since the next record's write
     !! fails and aborts naming the unit.
-    subroutine logger_add_unit(self, unit, level, format, color, only_rank, sink)
+    subroutine logger_add_unit(self, unit, level, format, color, flush_level, only_rank, sink)
         class(pf_logger), intent(inout) :: self           !! The logger being configured.
         integer, intent(in) :: unit                       !! An open, writable, formatted unit.
         integer, intent(in), optional :: level            !! This sink's threshold; default `PF_LEVEL_ALL`.
         character(len=*), intent(in), optional :: format  !! Layout template; default `PF_LOG_FMT_FULL`.
         integer, intent(in), optional :: color            !! Colour policy; default `PF_LOG_COLOR_AUTO`.
+        integer, intent(in), optional :: flush_level      !! Flush after a record at or above this level;
+                                                          !! default `PF_LEVEL_ALL` (every record).
         integer, intent(in), optional :: only_rank        !! Emit only when the logger's rank matches.
         integer, intent(out), optional :: sink            !! Receives this sink's id.
         integer :: s
@@ -1217,6 +1324,10 @@ contains
         s = new_sink(self, SINK_UNIT, level, format, color, only_rank, PF_LOG_FMT_FULL)
         self%sink(s)%unit = unit
         self%sink(s)%use_color = resolve_color(self%sink(s)%color, SINK_UNIT)
+        ! Default is flush-every-record, unlike a file sink's WARNING: the caller interleaves
+        ! their own writes on this unit, and mixing buffered logger output into that stream is a
+        ! surprise no performance gain justifies as a DEFAULT. Pass flush_level to opt out.
+        if (present(flush_level)) self%sink(s)%flush_level = flush_level
         call recompute_min_level(self)
         if (present(sink)) sink = s
     end subroutine logger_add_unit
@@ -1420,6 +1531,9 @@ contains
                 call parse_template(self%sink(i), template)
             end do
         end if
+        ! A changed template changes which clock fields this sink renders, and the
+        ! logger-level cache has to follow it -- recompute_min_level maintains both caches.
+        call recompute_min_level(self)
     end subroutine logger_set_format
 
     !> Sets the colour policy of one sink, or of every sink currently attached. Same selector rule
@@ -1566,6 +1680,92 @@ contains
         call recompute_min_level(self)
     end subroutine logger_close
 
+    !> Writes a human-readable dump of this logger's configuration: its level, name, rank and
+    !> thread mode, every per-name override, and every sink with its own settings.
+    !!
+    !! The diagnostic for "why did that record (not) appear?". Three thresholds can be in play at
+    !! once -- the logger's, a name rule's, a sink's -- and this is the one call that shows all of
+    !! them side by side, the way `parquet_print_settings` shows the library's own knobs.
+    subroutine logger_print(self, unit)
+        class(pf_logger), intent(in) :: self   !! The logger being described.
+        integer, intent(in), optional :: unit  !! Where to write; default standard output.
+        character(len=16) :: lvl, flv
+        character(len=32) :: kind_s
+        integer :: u, i, ln, fn, kn
+
+        u = output_unit
+        if (present(unit)) u = unit
+        call level_text(self%level, lvl, ln)
+        write (u, '(a)') "pf_logger configuration:"
+        write (u, '(a)') "  level       : " // lvl(1:ln)
+        if (len_trim(self%name) > 0) then
+            write (u, '(a)') "  name        : " // trim(self%name)
+        end if
+        if (self%rank /= PF_LOG_RANK_ANY) then
+            write (u, '(a,i0)') "  rank        : ", self%rank
+        end if
+        if (self%thread_mode == PF_LOG_THREAD_BUFFERED) then
+            write (u, '(a)') "  thread mode : buffered"
+        else
+            write (u, '(a)') "  thread mode : direct"
+        end if
+        do i = 1, self%nrules
+            call level_text(self%rule(i)%level, lvl, ln)
+            write (u, '(a)') "  name rule   : '" // trim(self%rule(i)%name) // "' and its dotted " // &
+                "children log at " // lvl(1:ln)
+        end do
+        if (self%nsinks == 0) then
+            write (u, '(a)') "  sinks       : none (this logger is silent)"
+            return
+        end if
+        do i = 1, self%nsinks
+            associate (sk => self%sink(i))
+                select case (sk%kind)
+                case (SINK_CONSOLE)
+                    if (sk%stream == PF_LOG_STDERR) then
+                        kind_s = "console (stderr)"
+                    else
+                        kind_s = "console (stdout)"
+                    end if
+                    kn = len_trim(kind_s)
+                case (SINK_FILE)
+                    kind_s = "file"
+                    kn = 4
+                case default
+                    write (kind_s, '(a,i0)') "unit ", sk%unit
+                    kn = len_trim(kind_s)
+                end select
+                call level_text(sk%level, lvl, ln)
+                call level_text(sk%flush_level, flv, fn)
+                write (u, '(a,i0,a)') "  sink ", i, "      : " // kind_s(1:kn)
+                if (sk%kind == SINK_FILE) then
+                    write (u, '(a)') "    path      : " // trim(sk%path)
+                end if
+                write (u, '(a)') "    level     : " // lvl(1:ln)
+                write (u, '(a)') "    flush at  : " // flv(1:fn)
+                write (u, '(a)') "    format    : " // trim(sk%fmt)
+                select case (sk%color)
+                case (PF_LOG_COLOR_ALWAYS)
+                    write (u, '(a)') "    color     : always"
+                case (PF_LOG_COLOR_NEVER)
+                    write (u, '(a)') "    color     : never"
+                case default
+                    if (sk%use_color) then
+                        write (u, '(a)') "    color     : auto (on)"
+                    else
+                        write (u, '(a)') "    color     : auto (off)"
+                    end if
+                end select
+                if (sk%only_rank /= PF_LOG_RANK_ANY) then
+                    write (u, '(a,i0)') "    only rank : ", sk%only_rank
+                end if
+                if (sk%dead) then
+                    write (u, '(a)') "    state     : DEAD (dropped after a write failure)"
+                end if
+            end associate
+        end do
+    end subroutine logger_print
+
     !> Flushes every sink, and every collector slot under buffered mode.
     !!
     !! **Under buffered mode this is what recovers every thread's records**, and it must be called
@@ -1631,8 +1831,10 @@ contains
             end if
             do k = 1, count
                 !$omp critical (pf_log_output)
+                ! A blank line has no level for flush_level to compare against; it is cosmetic
+                ! and rare, so flush it unless the sink is set to never flush at all.
                 call deliver(self%sink(i)%unit, self%sink(i)%kind == SINK_CONSOLE, &
-                    self%sink(i)%path, "", self%sink(i)%do_flush, failed)
+                    self%sink(i)%path, "", self%sink(i)%flush_level < PF_LEVEL_OFF, failed)
                 !$omp end critical (pf_log_output)
                 if (failed) self%sink(i)%dead = .true.
             end do
@@ -1947,32 +2149,33 @@ contains
     end subroutine pf_log_add_console
 
     !> Opens a file and attaches it as a sink of the default logger.
-    subroutine pf_log_add_file(path, level, format, append, flush, only_rank, sink)
+    subroutine pf_log_add_file(path, level, format, append, flush_level, only_rank, sink)
         character(len=*), intent(in) :: path              !! Path to open.
         integer, intent(in), optional :: level            !! This sink's threshold.
         character(len=*), intent(in), optional :: format  !! Layout template.
         logical, intent(in), optional :: append           !! `.false.` to truncate; default `.true.`.
-        logical, intent(in), optional :: flush            !! Flush after every record; default `.true.`.
+        integer, intent(in), optional :: flush_level      !! Flush at or above this level; default `PF_LEVEL_WARNING`.
         integer, intent(in), optional :: only_rank        !! Emit only when the rank matches.
         integer, intent(out), optional :: sink            !! Receives this sink's id.
 
         g_default_implicit = .false.
         call g_default%add_file(path, level = level, format = format, append = append, &
-            flush = flush, only_rank = only_rank, sink = sink)
+            flush_level = flush_level, only_rank = only_rank, sink = sink)
     end subroutine pf_log_add_file
 
     !> Attaches a caller-owned unit as a sink of the default logger.
-    subroutine pf_log_add_unit(unit, level, format, color, only_rank, sink)
+    subroutine pf_log_add_unit(unit, level, format, color, flush_level, only_rank, sink)
         integer, intent(in) :: unit                       !! An open, writable, formatted unit.
         integer, intent(in), optional :: level            !! This sink's threshold.
         character(len=*), intent(in), optional :: format  !! Layout template.
         integer, intent(in), optional :: color            !! Colour policy.
+        integer, intent(in), optional :: flush_level      !! Flush at or above this level; default `PF_LEVEL_ALL`.
         integer, intent(in), optional :: only_rank        !! Emit only when the rank matches.
         integer, intent(out), optional :: sink            !! Receives this sink's id.
 
         g_default_implicit = .false.
         call g_default%add_unit(unit, level = level, format = format, color = color, &
-            only_rank = only_rank, sink = sink)
+            flush_level = flush_level, only_rank = only_rank, sink = sink)
     end subroutine pf_log_add_unit
 
     !> Sets the default logger's threshold, one of its sinks', or a per-name override.
@@ -2029,6 +2232,22 @@ contains
 
         call g_default%set_thread_mode(mode, slot_bytes = slot_bytes)
     end subroutine pf_log_set_thread_mode
+
+    !> Writes a readable dump of the default logger's configuration. See `%print`.
+    subroutine pf_log_print(unit)
+        integer, intent(in), optional :: unit  !! Where to write; default standard output.
+        integer :: u
+
+        if (g_default_implicit) then
+            u = output_unit
+            if (present(unit)) u = unit
+            write (u, '(a)') "pf_logger configuration:"
+            write (u, '(a)') "  (default logger, unconfigured: behaves as one stdout console " // &
+                "at INFO with the brief layout)"
+            return
+        end if
+        call g_default%print(unit = unit)
+    end subroutine pf_log_print
 
     !> Closes units the default logger opened and clears every sink, leaving it silent.
     subroutine pf_log_close()

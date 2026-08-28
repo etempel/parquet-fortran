@@ -13,7 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching set of `pf_log_*` procedures on a process-wide default logger: eight ascending severity
   levels using Python's numbers (`PF_LEVEL_DEBUG` = 10, and an arbitrary integer level is accepted
   too), several sinks at once — console, a file the logger opens, or a unit you own — each with its
-  own threshold, layout, colour policy, flush policy and rank filter. The line layout is a template
+  own threshold, layout, colour policy, flush-by-level policy and rank filter, and `%print` to
+  dump the whole configuration. The line layout is a template
   with named placeholders (`{stamp}`, `{level}`, `{name}`, `{thread}`, `{rank}`, `{context}`,
   `{message}`, …) where `{field|sep}` emits its separator only when the field is non-empty; ISO-8601
   timestamps and a monotonic `{elapsed}`. `%enabled` is one integer comparison, for guarding an

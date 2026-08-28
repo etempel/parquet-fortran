@@ -117,9 +117,10 @@ call lg%set_format("{level}: {message}", sink = s_err)
   [Which threshold decides](#which-threshold-decides).
 - **`%add_console([stream], [level], [format], [color], [only_rank], [sink])`**. A second console
   sink on the same stream would double every line, so it is refused.
-- **`%add_file(path, [level], [format], [append], [flush], [only_rank], [sink])`**. `append`
+- **`%add_file(path, [level], [format], [append], [flush_level], [only_rank], [sink])`**. `append`
   defaults to `.true.`, so a restarted program does not destroy the log of the run that just
   failed; pass `append = .false.` to truncate. A file that cannot be opened aborts, naming the path.
+  `flush_level` is described under [When records reach the disk](#when-records-reach-the-disk).
 - **`%add_unit(unit, ...)`** attaches a unit you opened and still own — the logger never closes it.
   This is how a test captures output into a scratch file it can read back, and how a program that
   already manages its own output file adds logging to it.
@@ -131,6 +132,26 @@ call lg%set_format("{level}: {message}", sink = s_err)
   not become a default for later ones.
 - **`%close`** closes units this logger opened and clears every sink, leaving it silent. It never
   aborts, and it is safe to call twice.
+- **`%print([unit])`** writes a readable dump of the whole configuration — the logger's level, name
+  and rank, every per-name override, and every sink with its own threshold, flush level, format and
+  colour. Three thresholds can be in play at once, and this is the call that shows them side by
+  side; reach for it whenever a record appears somewhere you did not expect, or fails to appear
+  where you did.
+
+### When records reach the disk
+
+A file sink flushes after a record **at or above its `flush_level`**, which defaults to
+`PF_LEVEL_WARNING`. A flush pushes *everything* buffered on the unit, so the moment trouble is
+reported, the quieter records leading up to it reach the disk too — while bulk `INFO`/`DEBUG`
+traffic avoids a per-record flush that costs several times the write itself.
+
+- `flush_level = PF_LEVEL_ALL` flushes every record — the right choice when the program may die
+  without ever logging a warning (a segfault, an external kill) and the tail of the log matters.
+- `flush_level = PF_LEVEL_OFF` never flushes per record; only `%flush`, `%close` and `%fatal` do.
+- `%flush`, `%close` and `%fatal` always flush everything, whatever the sinks' levels.
+- A **console** sink always flushes — it is interactive, and output that appears late reads as a
+  hang. A **unit** sink defaults to flushing every record too, because the caller interleaves
+  their own writes on that unit; pass `flush_level` to opt out.
 
 **A freshly declared `type(pf_logger)` owns no sinks and is silent.** That is what makes this module
 usable *inside* a library: log into your own named logger and, until the application configures it,
@@ -550,6 +571,12 @@ variable honoured without an explicit call.
 - **Emission is thread-safe; configuration is not.** Configure a logger before entering a parallel
   region. There is no detection machinery for a violation, deliberately: a documented rule that is
   easy to follow beats a guard that cannot reliably fire.
+- **A record costs only what its sinks render.** A suppressed record is a call and one integer
+  comparison. An emitted one gathers and formats the clock fields only when some attached sink's
+  template actually renders them, so a `{message}`-style sink emits several times faster than a
+  timestamped one — and a suppressed or unconfigured call site is cheap enough to leave in a hot
+  loop. The one cost a sink cannot avoid for you is building the message text itself: guard an
+  expensive construction with `%enabled` (see [Levels](#levels)).
 - **Copying a logger is supported** — that is what `firstprivate` does — and every copy names the
   same units. `%close` is therefore idempotent across copies, but a write to a sink some copy has
   already closed **aborts**, naming the path, rather than going nowhere.

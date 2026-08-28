@@ -1695,6 +1695,14 @@ contains
             new_unittest("a write to a closed sink aborts, naming the path", &
                 test_logging_write_to_closed_sink_aborts), &
             new_unittest("pf_log_fatal aborts after flushing", test_logging_fatal_aborts), &
+            new_unittest("an over-long log path is refused, not truncated", &
+                test_logging_path_too_long_aborts), &
+            new_unittest("a log file that cannot be opened aborts", &
+                test_logging_file_cannot_open_aborts), &
+            new_unittest("the default logger prints to stdout until it is configured", &
+                test_logging_implicit_console), &
+            new_unittest("configuring the default logger retires the implicit console", &
+                test_logging_implicit_console_retires), &
             new_unittest("the same logging calls made correctly do not abort", &
                 test_logging_control_does_not_abort) &
             ]
@@ -3763,6 +3771,52 @@ contains
             failure_message="pf_log_fatal was expected to abort", &
             required_stderr="the run cannot continue")
     end subroutine test_logging_fatal_aborts
+
+    !> A path over PF_LOG_MAX_PATH is refused rather than truncated -- truncation would open a
+    !> different file from the one the caller named, and log to it silently.
+    subroutine test_logging_path_too_long_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "logging_path_too_long", expect_abort=.true., &
+            failure_message="a path longer than PF_LOG_MAX_PATH was expected to abort", &
+            required_stderr="PF_LOG_MAX_PATH")
+    end subroutine test_logging_path_too_long_aborts
+
+    !> A file that cannot be opened aborts at add_file, naming the path -- rather than attaching a
+    !> sink whose every later write fails somewhere else entirely.
+    subroutine test_logging_file_cannot_open_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "logging_file_cannot_open", expect_abort=.true., &
+            failure_message="add_file on an unopenable path was expected to abort", &
+            required_stderr="cannot open")
+    end subroutine test_logging_file_cannot_open_aborts
+
+    !> The default logger writes to STDOUT at INFO before anything configures it.
+    !>
+    !> This is the only test of that contract, and it has to be out of process: the implicit
+    !> console writes to `output_unit`, which no in-process assertion can read back. Asserting the
+    !> stream rather than mere presence is what gives it teeth -- the record must be on stdout and
+    !> NOT on stderr, since a logger that sent everything to stderr would satisfy a presence check.
+    subroutine test_logging_implicit_console(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_streams(error, "logging_implicit_console", "implicit-console-record", &
+            "stdout", "the unconfigured default logger was expected to print to stdout")
+    end subroutine test_logging_implicit_console
+
+    !> Two halves of the same contract, both of which would pass vacuously on their own: a record
+    !> BELOW the implicit INFO threshold never appears, and no record appears at all once
+    !> `pf_log_init(console = .false.)` has retired the implicit console.
+    subroutine test_logging_implicit_console_retires(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_no_output(error, "logging_implicit_console", &
+            expect_abort=.false., &
+            failure_message="the implicit console emitted a record it should not have", &
+            forbidden_text="after-configuration-record")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_no_output(error, "logging_implicit_console", &
+            expect_abort=.false., &
+            failure_message="the implicit console emitted below its INFO threshold", &
+            forbidden_text="implicit-debug-record")
+    end subroutine test_logging_implicit_console_retires
 
     !> The negative control: the same calls made correctly must not abort.
     subroutine test_logging_control_does_not_abort(error)

@@ -1264,6 +1264,59 @@ def check_env_table_matches_the_source():
     return problems
 
 
+def check_log_env_table_matches_the_source():
+    """The logging guide's `<prefix>*` table and `pf_log_configure_from_env` must name the same set.
+
+    The same gap `check_env_table_matches_the_source` closes for `parquet_settings`, one module
+    over. That one exists because two variables shipped applied-by-the-code, printed-by-the-dump,
+    covered-by-a-test and absent from the table a user reads to discover them; nothing about that
+    failure was specific to settings, and `pf_log_configure_from_env` has exactly the same shape --
+    a short list of names read from the environment, mirrored by hand in a Markdown table.
+
+    Both directions, for the same two reasons: a variable in the source and not in the table is
+    undiscoverable, and one in the table and not in the source is a documented knob that silently
+    does nothing.
+
+    The suffixes are compared, not whole names. The source spells each as `trim(pre) // "LEVEL"`
+    because the prefix is the caller's, and the guide writes `<prefix>LEVEL` for the same reason,
+    so the prefix itself is the one part that cannot be cross-checked and the one part that cannot
+    go stale.
+    """
+    problems = []
+    src = SRC / "parquet_logging.f90"
+    doc = REPO_ROOT / "doc" / "pages" / "utilities" / "logging.md"
+    text = src.read_text()
+    body = re.search(r"subroutine pf_log_configure_from_env\b(.*?)end subroutine pf_log_configure_from_env",
+                     text, re.S)
+    if body is None:
+        return ["src/parquet_logging.f90: could not find pf_log_configure_from_env -- this check "
+                "needs updating"]
+    # The suffix each `get_environment_variable(trim(pre) // "NAME", ...)` reads. Matching the call
+    # keeps the abort messages, which name the same variables, out of the set.
+    in_source = set(re.findall(r'get_environment_variable\s*\(\s*trim\(pre\)\s*//\s*"(\w+)"',
+                               body.group(1)))
+    if not in_source:
+        return ['src/parquet_logging.f90: found no `get_environment_variable(trim(pre) // "..."` '
+                "in pf_log_configure_from_env -- this check needs updating"]
+    in_doc = set()
+    for line in doc.read_text().split("\n"):
+        row = re.match(r"\|\s*`<prefix>(\w+)`\s*\|", line.strip())
+        if row:
+            in_doc.add(row.group(1))
+    if not in_doc:
+        return ["doc/pages/utilities/logging.md: found no `| `<prefix>...` |` table row -- either "
+                "the environment table was reshaped or it is gone; this check needs updating"]
+    for var in sorted(in_source - in_doc):
+        problems.append(
+            "doc/pages/utilities/logging.md: pf_log_configure_from_env reads `<prefix>%s` but the "
+            "environment-variable table does not list it -- a user has no way to discover it" % var)
+    for var in sorted(in_doc - in_source):
+        problems.append(
+            "doc/pages/utilities/logging.md: the environment-variable table lists `<prefix>%s` but "
+            "pf_log_configure_from_env never reads it -- the variable would silently do nothing" % var)
+    return problems
+
+
 def check_one_random_number_generator():
     """The library draws every random number from parquet_random -- src/parquet_wrapper.cpp may not
     reach for C++'s own generators.
@@ -3708,6 +3761,8 @@ CHECKS = (
     ("the C++ side draws no random numbers of its own", check_one_random_number_generator),
     ("every setting has an environment variable", check_env_covers_every_setting),
     ("the guide's environment table matches the source", check_env_table_matches_the_source),
+    ("the logging guide's environment table matches the source",
+     check_log_env_table_matches_the_source),
     ("parquet_strings does not reach parquet_bindings", check_parquet_strings_stays_leaf),
     ("parquet_argsort stays Arrow-free", check_parquet_argsort_stays_arrow_free),
     ("parquet_sorting stays Arrow-free", check_parquet_sorting_stays_arrow_free),

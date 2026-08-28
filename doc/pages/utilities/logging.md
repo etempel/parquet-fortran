@@ -275,12 +275,14 @@ call pf_log_configure_from_env("MYAPP_LOG_")           ! MYAPP_LOG_LEVEL, ...
 |---|---|
 | `<prefix>LEVEL` | the default logger's threshold, as a name or a number |
 | `<prefix>FILE` | adds a file sink at that path |
-| `<prefix>FORMAT` | sets the layout of every current sink |
+| `<prefix>FORMAT` | sets the layout of every current sink, `<prefix>FILE`'s included |
 | `<prefix>COLOR` | `auto`, `always` or `never` |
 
 `prefix` is the whole literal prefix including its trailing separator, so a doubled separator cannot
 arise. Reading is **additive and never destructive**: an unset variable changes nothing, a
 set-but-empty one is ignored, and `<prefix>FILE` adds a sink beside whatever is already attached.
+`<prefix>FILE` is applied before `<prefix>FORMAT`, so setting both gives the new file sink the
+layout you asked for rather than the default one.
 It is never applied implicitly — these are `PF_LOG_*` variables, not `PARQUET_FORTRAN_*` ones, and
 they configure your program's logging rather than this library's behaviour. `NO_COLOR` is the one
 variable honoured without an explicit call.

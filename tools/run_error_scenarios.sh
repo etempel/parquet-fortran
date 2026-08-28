@@ -1164,6 +1164,9 @@ scenarios=(
     "logging_unknown_level_name:1"
     "logging_fatal:1"
     "logging_write_to_closed_sink:1"
+    "logging_path_too_long:1"
+    "logging_file_cannot_open:1"
+    "logging_implicit_console:0"
     "logging_control:0"
 )
 

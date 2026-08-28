@@ -14,6 +14,7 @@ module test_logging
     use testdrive, only : new_unittest, unittest_type, error_type, check, skip_test
     use parquet_logging
     use iso_fortran_env, only : int64, real64
+    use iso_c_binding, only : c_null_char, c_int
 #ifdef _OPENMP
     use omp_lib, only : omp_get_max_threads, omp_get_thread_num
 #endif
@@ -31,6 +32,19 @@ contains
 
         open (newunit = unit, file = path, action = "write", form = "formatted", status = "replace")
     end subroutine open_scratch
+
+    !> Truncates a fixture file, so a test whose sink appends starts from a known state.
+    !!
+    !! `add_file` appends by default, which is the right default for a log and the wrong one for a
+    !! fixture read back by assertion: without this the file accumulates across runs and the line
+    !! count a test asserts is a count of every run since the last `git clean`.
+    subroutine truncate_file(path)
+        character(len=*), intent(in) :: path  !! Fixture path to empty.
+        integer :: u
+
+        open (newunit = u, file = path, action = "write", form = "formatted", status = "replace")
+        close (u)
+    end subroutine truncate_file
 
     !> Reads a file back into `lines`, reporting how many were read.
     subroutine read_back(path, lines, n)
@@ -698,6 +712,508 @@ contains
 #endif
     end function can_thread
 
+    ! ==================================================================================
+    ! The module-level default-logger surface
+    !
+    ! Every procedure below is a `pf_log_*` shim over the module's own `g_default`. They are NOT
+    ! thin wrappers over the bindings tested above: each routes through `emit_core`'s
+    ! `implicit` argument, which the bindings always pass as `.false.` and which these pass as
+    ! `g_default_implicit`. That is a separate branch, so it needs separate tests -- and the
+    ! branch it selects when `g_default_implicit` is still `.true.` writes to stdout, which no
+    ! in-process test can read, so THAT half is covered by the `logging_implicit_console`
+    ! error scenario instead.
+    !
+    ! These tests share one process-global logger, so each begins by re-initialising it and ends
+    ! by closing it. `run_tester.f90` excludes this suite from test-drive's parallelism for
+    ! exactly this reason.
+    ! ==================================================================================
+
+    !> Sets an environment variable for the rest of this process, via POSIX `setenv`.
+    !!
+    !! Fortran cannot set one. Declared locally here rather than in `src/`, the same convention
+    !! `test/test_settings.f90` follows, so no library file gains a POSIX dependency.
+    subroutine set_env(name, value)
+        character(len=*), intent(in) :: name   !! Variable to set.
+        character(len=*), intent(in) :: value  !! Its new value.
+        interface
+            function c_setenv(nm, val, overwrite) bind(C, name="setenv") result(rc)
+                use iso_c_binding, only : c_char, c_int
+                character(kind=c_char), intent(in) :: nm(*)   !! NUL-terminated name.
+                character(kind=c_char), intent(in) :: val(*)  !! NUL-terminated value.
+                integer(c_int), value :: overwrite            !! Nonzero replaces an existing value.
+                integer(c_int) :: rc                          !! 0 on success.
+            end function c_setenv
+        end interface
+        integer :: rc
+
+        rc = int(c_setenv(name // c_null_char, value // c_null_char, 1_c_int))
+        ! Checked rather than discarded: a failed setenv leaves the old value in place, so every
+        ! assertion downstream would be made against an environment nobody set.
+        if (rc /= 0) error stop "set_env: setenv failed for '" // name // "'"
+    end subroutine set_env
+
+    !> Removes an environment variable.
+    subroutine unset_env(name)
+        character(len=*), intent(in) :: name  !! Variable to remove.
+        interface
+            function c_unsetenv(nm) bind(C, name="unsetenv") result(rc)
+                use iso_c_binding, only : c_char, c_int
+                character(kind=c_char), intent(in) :: nm(*)  !! NUL-terminated name.
+                integer(c_int) :: rc                         !! 0 on success.
+            end function c_unsetenv
+        end interface
+        integer :: rc
+
+        rc = int(c_unsetenv(name // c_null_char))
+        if (rc /= 0) error stop "unset_env: unsetenv failed for '" // name // "'"
+    end subroutine unset_env
+
+    !> Every emission shim on the default logger reaches a sink, carries the right level tag, and
+    !> obeys the logger-wide threshold -- with the two levels below that threshold as the negative
+    !> control, since a shim wired to the wrong level would still produce a line.
+    subroutine test_default_logger_emission(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
+        character(len=*), parameter :: path = "test_run/log_default_emit.txt"
+        character(len=512), allocatable :: lines(:)
+        integer :: n
+
+        call pf_log_reset_dedup()
+        call pf_log_init(level = PF_LEVEL_DEBUG, console = .false.)
+        call pf_log_add_file(path, format = "{level}|{message}", append = .false.)
+
+        call pf_log_trace("t-record")                       ! below DEBUG: dropped
+        call pf_log_debug("d-record")
+        call pf_log_info("i-record")
+        call pf_log_warning("w-record")
+        call pf_log_error("e-record")
+        call pf_log_critical("c-record")
+        call pf_log(PF_LEVEL_INFO, "explicit-level-record")
+        call pf_log(PF_LEVEL_TRACE, "explicit-below-record")  ! below DEBUG: dropped
+
+        call pf_log_flush()
+        call pf_log_close()
+        call read_back(path, lines, n)
+
+        call check(error, n == 6, "six of the eight records clear the DEBUG threshold")
+        if (allocated(error)) return
+        call check(error, has(lines(1), "DEBUG") .and. has(lines(1), "d-record"), &
+            "pf_log_debug emits at DEBUG")
+        if (allocated(error)) return
+        call check(error, has(lines(2), "INFO") .and. has(lines(2), "i-record"), &
+            "pf_log_info emits at INFO")
+        if (allocated(error)) return
+        call check(error, has(lines(3), "WARNING") .and. has(lines(3), "w-record"), &
+            "pf_log_warning emits at WARNING")
+        if (allocated(error)) return
+        call check(error, has(lines(4), "ERROR") .and. has(lines(4), "e-record"), &
+            "pf_log_error emits at ERROR")
+        if (allocated(error)) return
+        call check(error, has(lines(5), "CRITICAL") .and. has(lines(5), "c-record"), &
+            "pf_log_critical emits at CRITICAL")
+        if (allocated(error)) return
+        call check(error, has(lines(6), "INFO") .and. has(lines(6), "explicit-level-record"), &
+            "pf_log carries the level it was given")
+        if (allocated(error)) return
+        ! The negative control: neither sub-threshold record reached the file under any name.
+        call check(error, .not. has(lines(1), "t-record"), "pf_log_trace was dropped below DEBUG")
+        if (allocated(error)) return
+        call check(error, .not. has(lines(6), "explicit-below-record"), &
+            "pf_log at TRACE was dropped below DEBUG")
+    end subroutine test_default_logger_emission
+
+    !> The configuration shims each change what the default logger writes: name, rank, layout,
+    !> per-sink level, blank lines, and `pf_log_enabled`'s answer. A shim that silently did
+    !> nothing would leave the line unchanged, so every assertion is on rendered output.
+    subroutine test_default_logger_configuration(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
+        character(len=*), parameter :: path = "test_run/log_default_config.txt"
+        character(len=512), allocatable :: lines(:)
+        integer :: n, sk
+        logical :: before, after
+
+        call pf_log_reset_dedup()
+        call pf_log_init(console = .false.)
+        call pf_log_add_file(path, append = .false., sink = sk)
+        call pf_log_set_format("{name}|{rank}|{message}", sink = sk)
+        call pf_log_set_name("shim.app")
+        call pf_log_set_rank(3)
+        call pf_log_set_thread_mode(PF_LOG_THREAD_DIRECT)
+        call pf_log_set_color(PF_LOG_COLOR_NEVER)
+
+        ! pf_log_enabled is read here rather than after %close, which clears every sink and would
+        ! make it answer .false. whatever the threshold had been.
+        before = pf_log_enabled(PF_LEVEL_INFO)
+        call pf_log_info("configured")
+        call pf_log_blank(2)
+        ! A console sink that can never emit, because the logger's rank is 3 and this sink admits
+        ! only rank 99. It exercises pf_log_add_console without writing to the terminal during a
+        ! test run -- and it is added after the blank lines above because %blank honours the rank
+        ! filter but not a level, so nothing else would hold it back.
+        call pf_log_add_console(only_rank = 99)
+        call pf_log_set_level(PF_LEVEL_ERROR)
+        after = pf_log_enabled(PF_LEVEL_INFO)
+        call pf_log_info("suppressed")
+        call pf_log_blank(1)
+        call pf_log_flush()
+        call pf_log_close()
+        call read_back(path, lines, n)
+
+        call check(error, before .and. .not. after, &
+            "pf_log_enabled tracks pf_log_set_level, in both directions")
+        if (allocated(error)) return
+        call check(error, n == 4, "one record, two blank lines, and one more blank after them")
+        if (allocated(error)) return
+        call check(error, has(lines(1), "shim.app") .and. has(lines(1), "configured"), &
+            "pf_log_set_name and pf_log_set_format both took effect")
+        if (allocated(error)) return
+        call check(error, has(lines(1), "|3|"), "pf_log_set_rank renders through {rank}")
+        if (allocated(error)) return
+        call check(error, len_trim(lines(2)) == 0 .and. len_trim(lines(3)) == 0 .and. &
+            len_trim(lines(4)) == 0, "pf_log_blank wrote exactly the blank lines asked for")
+        if (allocated(error)) return
+        call check(error, .not. has(lines(4), "suppressed"), &
+            "the record below the raised threshold never reached the file")
+    end subroutine test_default_logger_configuration
+
+    !> `pf_log_configure_from_env` applies each variable it recognises and leaves the logger
+    !> untouched for one that is unset -- the second half being the control, since a reader that
+    !> applied a default on an unset variable would pass every positive assertion.
+    subroutine test_configure_from_env(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
+        character(len=*), parameter :: path = "test_run/log_env_file.txt"
+        character(len=512), allocatable :: lines(:)
+        integer :: n
+
+        call pf_log_reset_dedup()
+        call pf_log_init(console = .false.)
+        ! PFLOGTEST_FILE reaches pf_log_add_file with no append= argument, so it appends -- the
+        ! documented default. Start from an empty file or this asserts a count across every run.
+        call truncate_file(path)
+        call unset_env("PFLOGTEST_COLOR")            ! deliberately left unset: the control
+        call set_env("PFLOGTEST_LEVEL", "warning")
+        call set_env("PFLOGTEST_FORMAT", "env|{level}|{message}")
+        call set_env("PFLOGTEST_FILE", path)
+        call pf_log_configure_from_env("PFLOGTEST_")
+
+        call pf_log_info("env-below")     ! below WARNING: dropped
+        call pf_log_error("env-above")
+        call pf_log_flush()
+        call pf_log_close()
+        call unset_env("PFLOGTEST_LEVEL")
+        call unset_env("PFLOGTEST_FORMAT")
+        call unset_env("PFLOGTEST_FILE")
+        call read_back(path, lines, n)
+
+        call check(error, n == 1, "PFLOGTEST_FILE added a sink and PFLOGTEST_LEVEL filtered it")
+        if (allocated(error)) return
+        call check(error, has(lines(1), "env|") .and. has(lines(1), "ERROR"), &
+            "PFLOGTEST_FORMAT replaced the layout")
+        if (allocated(error)) return
+        call check(error, has(lines(1), "env-above") .and. .not. has(lines(1), "env-below"), &
+            "the record below the environment's threshold was dropped")
+    end subroutine test_configure_from_env
+
+    !> A caller-owned unit is written to and NOT closed by `%close`, which is the whole difference
+    !> between `add_unit` and `add_file`. Both the binding and the module-level shim are covered,
+    !> since they reach different loggers.
+    subroutine test_add_unit_sink(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
+        character(len=*), parameter :: path = "test_run/log_add_unit.txt"
+        character(len=*), parameter :: dpath = "test_run/log_add_unit_default.txt"
+        character(len=512), allocatable :: lines(:)
+        type(pf_logger) :: lg
+        integer :: u, n, ios
+        logical :: still_open
+
+        call open_scratch(path, u)
+        call lg%init(console = .false.)
+        call lg%add_unit(u, format = "{message}")
+        call lg%info("through-a-unit")
+        call lg%close()
+        ! %close must NOT have closed a unit it did not open. Both halves are the proof: the unit
+        ! still reports as connected, and a further write through it actually lands in the file.
+        inquire (unit = u, opened = still_open)
+        ios = -1
+        if (still_open) write (u, '(a)', iostat = ios) "after-close"
+        close (u)
+        call read_back(path, lines, n)
+
+        call check(error, still_open, "%close left a caller-owned unit open")
+        if (allocated(error)) return
+        call check(error, ios == 0, "a write through the caller's unit still succeeded")
+        if (allocated(error)) return
+        call check(error, n == 2, "the record and the post-close write both reached the file")
+        if (allocated(error)) return
+        call check(error, has(lines(1), "through-a-unit"), "the record reached the caller's unit")
+        if (allocated(error)) return
+        call check(error, has(lines(2), "after-close"), "the caller could still write afterwards")
+        if (allocated(error)) return
+
+        ! The module-level shim, on the default logger.
+        call open_scratch(dpath, u)
+        call pf_log_init(console = .false.)
+        call pf_log_add_unit(u, format = "{message}")
+        call pf_log_info("default-through-a-unit")
+        call pf_log_close()
+        close (u)
+        call read_back(dpath, lines, n)
+        call check(error, n == 1, "pf_log_add_unit attached exactly one sink")
+        if (allocated(error)) return
+        call check(error, has(lines(1), "default-through-a-unit"), &
+            "pf_log_add_unit reached the caller's unit")
+    end subroutine test_add_unit_sink
+
+    !> The four clock fields render in the documented shapes. Every expectation is built from the
+    !> field's own definition rather than from a second render, and each is checked
+    !> character-class by character-class so that a field silently emitting nothing, or emitting
+    !> another field's text, fails.
+    subroutine test_layout_clock_fields(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
+        character(len=*), parameter :: path = "test_run/log_clock_fields.txt"
+        character(len=512), allocatable :: lines(:)
+        type(pf_logger) :: lg
+        integer :: n, p, q
+        character(len=512) :: d, t, s, e
+
+        call lg%init(console = .false.)
+        call lg%add_file(path, append = .false., format = "D={date}|T={time}|S={stamp}|E={elapsed}|M={message}")
+        call lg%info("clock")
+        call lg%close()
+        call read_back(path, lines, n)
+
+        call check(error, n == 1, "one record reached the file")
+        if (allocated(error)) return
+        call field_between(lines(1), "D=", "|T=", d)
+        call field_between(lines(1), "T=", "|S=", t)
+        call field_between(lines(1), "S=", "|E=", s)
+        call field_between(lines(1), "E=", "|M=", e)
+
+        ! {date} is YYYY-MM-DD.
+        call check(error, len_trim(d) == 10 .and. all_digits(d(1:4)) .and. d(5:5) == "-" .and. &
+            all_digits(d(6:7)) .and. d(8:8) == "-" .and. all_digits(d(9:10)), &
+            "{date} renders as YYYY-MM-DD, got '" // trim(d) // "'")
+        if (allocated(error)) return
+        ! {time} is HH:MM:SS.mmm.
+        call check(error, len_trim(t) == 12 .and. all_digits(t(1:2)) .and. t(3:3) == ":" .and. &
+            all_digits(t(4:5)) .and. t(6:6) == ":" .and. all_digits(t(7:8)) .and. &
+            t(9:9) == "." .and. all_digits(t(10:12)), &
+            "{time} renders as HH:MM:SS.mmm, got '" // trim(t) // "'")
+        if (allocated(error)) return
+        ! {stamp} is exactly {date}, one space, {time} -- asserted against the two fields rendered
+        ! on this same line, so a stamp built from a second clock reading would fail.
+        call check(error, trim(s) == trim(d) // " " // trim(t), &
+            "{stamp} is {date} space {time}, got '" // trim(s) // "'")
+        if (allocated(error)) return
+        ! {elapsed} is H:MM:SS.sss, zero-padded, and non-empty because a configuration call has
+        ! established the clock origin.
+        p = index(e, ":")
+        q = index(e, ".")
+        call check(error, len_trim(e) >= 10 .and. p == 2 .and. q == len_trim(e) - 3 .and. &
+            all_digits(e(1:1)) .and. all_digits(e(3:4)) .and. e(5:5) == ":" .and. &
+            all_digits(e(6:7)) .and. all_digits(e(q + 1:q + 3)), &
+            "{elapsed} renders as H:MM:SS.sss with no embedded blank, got '" // trim(e) // "'")
+    end subroutine test_layout_clock_fields
+
+    !> Extracts the text between two markers on a line, so a field assertion names the field it
+    !> failed on rather than the whole rendered record.
+    subroutine field_between(line, open_mark, close_mark, out)
+        character(len=*), intent(in) :: line        !! The rendered record.
+        character(len=*), intent(in) :: open_mark   !! Marker immediately before the field.
+        character(len=*), intent(in) :: close_mark  !! Marker immediately after it.
+        character(len=*), intent(out) :: out        !! Receives the field's text.
+        integer :: a, b
+
+        out = ""
+        a = index(line, open_mark)
+        if (a == 0) return
+        a = a + len(open_mark)
+        b = index(line(a:), close_mark)
+        if (b == 0) then
+            out = line(a:)
+        else
+            out = line(a:a + b - 2)
+        end if
+    end subroutine field_between
+
+    !> Whether every character of `s` is a decimal digit.
+    logical function all_digits(s) result(yes)
+        character(len=*), intent(in) :: s  !! The text to test.
+        integer :: i
+
+        yes = len(s) > 0
+        do i = 1, len(s)
+            if (s(i:i) < "0" .or. s(i:i) > "9") yes = .false.
+        end do
+    end function all_digits
+
+    !> `{thread}` renders the emitting thread's number, and `{rank}` collapses with its separator
+    !> when no rank is set -- the pair that a serial-only test would leave entirely unexercised.
+    subroutine test_layout_thread_and_rank(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
+        character(len=*), parameter :: path = "test_run/log_thread_field.txt"
+        character(len=512), allocatable :: lines(:)
+        type(pf_logger) :: lg
+        integer :: n
+        character(len=512) :: th
+
+        call lg%init(console = .false.)
+        call lg%add_file(path, append = .false., format = "T={thread}|{rank| R=}|M={message}")
+        call lg%info("no-rank")       ! rank unset: {rank} and its separator both collapse
+        call lg%set_rank(7)
+        call lg%info("with-rank")
+        call lg%close()
+        call read_back(path, lines, n)
+
+        call check(error, n == 2, "both records reached the file")
+        if (allocated(error)) return
+        call field_between(lines(1), "T=", "|", th)
+        ! Serially this is thread 0; inside a region it would be that thread's number. Either way
+        ! it is an integer, and asserting the shape rather than the value keeps this test correct
+        ! under every thread count.
+        call check(error, all_digits(trim(th)), &
+            "{thread} renders an integer, got '" // trim(th) // "'")
+        if (allocated(error)) return
+        call check(error, .not. has(lines(1), "R="), &
+            "an unset {rank} collapses its separator with it")
+        if (allocated(error)) return
+        call check(error, has(lines(2), "R=7"), "a set {rank} renders with its separator")
+    end subroutine test_layout_thread_and_rank
+
+    !> Colour is emitted under `_ALWAYS`, absent under `_NEVER`, and absent on a file sink under
+    !> `_AUTO` -- three arms, because a policy that ignored its argument would satisfy any one of
+    !> them. Every level that HAS a colour is checked against its own constant, and the one that
+    !> does not (`INFO`) is the control: a renderer emitting some fixed code for everything would
+    !> otherwise pass every positive assertion here.
+    subroutine test_color_policies(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
+        character(len=*), parameter :: path = "test_run/log_color.txt"
+        character(len=512), allocatable :: lines(:)
+        character(len=1), parameter :: esc = achar(27)
+        type(pf_logger) :: lg
+        character(len=:), allocatable :: wrapped
+        integer :: n, sk
+
+        call lg%init(console = .false.)
+        call lg%add_file(path, append = .false., format = "{level}|{message}", sink = sk)
+        call lg%warning("auto-on-a-file")             ! 1  AUTO: a file is never coloured
+        call lg%set_color(PF_LOG_COLOR_ALWAYS, sink = sk)
+        call lg%warning("always-warning")             ! 2
+        call lg%error("always-error")                 ! 3
+        call lg%info("always-info")                   ! 4  INFO has no colour code at all
+        call lg%critical("always-critical")           ! 5
+        call lg%debug("always-debug")                 ! 6
+        call lg%trace("always-trace")                 ! 7
+        call lg%set_color(PF_LOG_COLOR_NEVER, sink = sk)
+        call lg%warning("never")                      ! 8
+        call lg%close()
+        call read_back(path, lines, n)
+
+        call check(error, n == 8, "all eight records reached the file")
+        if (allocated(error)) return
+        call check(error, .not. has(lines(1), esc), &
+            "PF_LOG_COLOR_AUTO leaves a file sink uncoloured")
+        if (allocated(error)) return
+        call check(error, has(lines(2), esc // "[" // PF_LOG_C_YELLOW // "m"), &
+            "PF_LOG_COLOR_ALWAYS colours WARNING yellow")
+        if (allocated(error)) return
+        call check(error, has(lines(3), esc // "[" // PF_LOG_C_RED // "m"), &
+            "PF_LOG_COLOR_ALWAYS colours ERROR red")
+        if (allocated(error)) return
+        call check(error, .not. has(lines(4), esc), &
+            "INFO carries no colour code even under _ALWAYS")
+        if (allocated(error)) return
+        call check(error, has(lines(5), esc // "[" // PF_LOG_C_BRIGHT_RED // "m"), &
+            "PF_LOG_COLOR_ALWAYS colours CRITICAL bright red")
+        if (allocated(error)) return
+        call check(error, has(lines(6), esc // "[" // PF_LOG_C_CYAN // "m"), &
+            "PF_LOG_COLOR_ALWAYS colours DEBUG cyan")
+        if (allocated(error)) return
+        call check(error, has(lines(7), esc // "[" // PF_LOG_C_DIM // "m"), &
+            "PF_LOG_COLOR_ALWAYS dims TRACE")
+        if (allocated(error)) return
+        call check(error, .not. has(lines(8), esc), &
+            "PF_LOG_COLOR_NEVER turns colour back off")
+        if (allocated(error)) return
+
+        call pf_log_color("hot", PF_LOG_C_RED, wrapped)
+        call check(error, wrapped == esc // "[" // PF_LOG_C_RED // "m" // "hot" // esc // "[0m", &
+            "pf_log_color wraps text in the code it was given")
+    end subroutine test_color_policies
+
+    !> A blank line obeys a sink's rank filter. It has no level for a threshold to act on, so the
+    !> rank filter is the only thing standing between a rank-filtered sink and every rank's blank
+    !> lines -- and the sink that should receive them is the control proving the filter is not
+    !> simply refusing everything.
+    subroutine test_blank_obeys_rank_filter(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
+        character(len=*), parameter :: mine = "test_run/log_blank_rank_mine.txt"
+        character(len=*), parameter :: other = "test_run/log_blank_rank_other.txt"
+        character(len=512), allocatable :: lines(:)
+        type(pf_logger) :: lg
+        integer :: n_mine, n_other
+
+        call lg%init(console = .false.)
+        call lg%set_rank(0)
+        call lg%add_file(mine, append = .false., format = "{message}", only_rank = 0)
+        call lg%add_file(other, append = .false., format = "{message}", only_rank = 1)
+        call lg%blank(3)
+        call lg%close()
+
+        call read_back(mine, lines, n_mine)
+        call read_back(other, lines, n_other)
+        call check(error, n_mine == 3, "the matching sink received every blank line")
+        if (allocated(error)) return
+        call check(error, n_other == 0, "the non-matching sink received none")
+    end subroutine test_blank_obeys_rank_filter
+
+    !> The two built-in templates parse and render, `PF_LEVEL_OFF` admits nothing, and
+    !> `pf_log_elapsed` returns a monotonic time.
+    !!
+    !! The templates are worth their own test because they are the two defaults: a typo in either
+    !! is an `error stop` the first time any program logs anything, and no other test names them
+    !! (every one sets a layout of its own so it can assert on a predictable line).
+    subroutine test_builtin_templates_and_off(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
+        character(len=*), parameter :: path = "test_run/log_builtin_fmt.txt"
+        character(len=512), allocatable :: lines(:)
+        type(pf_logger) :: lg
+        integer :: n
+        real(real64) :: t0, t1
+
+        call lg%init(console = .false., name = "tpl")
+        call lg%add_file(path, append = .false., format = PF_LOG_FMT_BRIEF)
+        call lg%add_file("test_run/log_builtin_fmt_full.txt", append = .false., format = PF_LOG_FMT_FULL)
+        call lg%warning("templated")
+        ! PF_LEVEL_OFF is a threshold, not a level: nothing may clear it, CRITICAL included.
+        call lg%set_level(PF_LEVEL_OFF)
+        call lg%critical("must-not-appear")
+        call lg%close()
+        call read_back(path, lines, n)
+
+        call check(error, n == 1, "PF_LEVEL_OFF admitted nothing, not even CRITICAL")
+        if (allocated(error)) return
+        ! BRIEF is "{time} [{level}] {message}": time, then a bracketed level, then the text.
+        call check(error, has(lines(1), "[WARNING") .and. has(lines(1), "templated") .and. &
+            .not. has(lines(1), "tpl"), &
+            "PF_LOG_FMT_BRIEF renders time, level and message and no name")
+        if (allocated(error)) return
+        call read_back("test_run/log_builtin_fmt_full.txt", lines, n)
+        call check(error, n == 1, "the second sink took the same one record")
+        if (allocated(error)) return
+        ! FULL adds the date and the logger name, which is exactly what distinguishes it.
+        call check(error, has(lines(1), "tpl") .and. has(lines(1), "-") .and. &
+            has(lines(1), "templated"), &
+            "PF_LOG_FMT_FULL renders the date and the logger name as well")
+        if (allocated(error)) return
+
+        call pf_log_elapsed(t0)
+        call lg%init(console = .false.)          ! any work at all between the two readings
+        call pf_log_elapsed(t1)
+        call lg%close()
+        call check(error, t0 >= 0.0_real64 .and. t1 >= t0, &
+            "pf_log_elapsed is non-negative and does not go backwards")
+    end subroutine test_builtin_templates_and_off
+
     !> Registers this suite's tests.
     subroutine collect_tests_logging(testsuite)
         type(unittest_type), allocatable, intent(out) :: testsuite(:)  !! the suite's tests.
@@ -724,7 +1240,18 @@ contains
             new_unittest("buffered mode recovers every thread's records", test_buffered_mode_recovers_every_thread), &
             new_unittest("an oversize buffered record is written whole", test_buffered_oversize_record), &
             new_unittest("concurrent once= emits exactly one line", test_concurrent_once), &
-            new_unittest("a shared logger survives a parallel region", test_shared_logger_in_parallel_region) &
+            new_unittest("a shared logger survives a parallel region", test_shared_logger_in_parallel_region), &
+            new_unittest("every default-logger emission shim reaches a sink", test_default_logger_emission), &
+            new_unittest("every default-logger configuration shim takes effect", &
+                test_default_logger_configuration), &
+            new_unittest("pf_log_configure_from_env applies what is set", test_configure_from_env), &
+            new_unittest("a caller-owned unit is written to and not closed", test_add_unit_sink), &
+            new_unittest("date, time, stamp and elapsed render in shape", test_layout_clock_fields), &
+            new_unittest("thread renders, and an unset rank collapses", test_layout_thread_and_rank), &
+            new_unittest("colour policy is honoured in all three arms", test_color_policies), &
+            new_unittest("a blank line obeys a sink's rank filter", test_blank_obeys_rank_filter), &
+            new_unittest("the built-in templates render and PF_LEVEL_OFF admits nothing", &
+                test_builtin_templates_and_off) &
             ]
     end subroutine collect_tests_logging
 

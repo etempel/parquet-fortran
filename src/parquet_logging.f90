@@ -1488,6 +1488,12 @@ contains
         end if
         do i = 1, self%nsinks
             if (self%sink(i)%dead) cycle
+            ! A blank line has no level, so a sink's threshold cannot apply to it -- but its RANK
+            ! filter must, or the one thing only_rank= exists to prevent (every rank writing to the
+            ! same console) comes back through the one call that has no message to filter on.
+            if (self%sink(i)%only_rank /= PF_LOG_RANK_ANY) then
+                if (self%rank /= self%sink(i)%only_rank) cycle
+            end if
             do k = 1, count
                 !$omp critical (pf_log_output)
                 call deliver(self%sink(i)%unit, self%sink(i)%kind == SINK_CONSOLE, &
@@ -2182,11 +2188,15 @@ contains
             end select
         end if
 
-        call get_environment_variable(trim(pre) // "FORMAT", val, ln, st)
-        if (st == 0 .and. ln > 0) call pf_log_set_format(val(1:ln))
-
+        ! FILE is read BEFORE FORMAT, and the order is load-bearing: FORMAT with no sink argument
+        ! sets the layout of every sink that exists WHEN IT RUNS, so reading it first would leave
+        ! the file sink this call is about to add -- the one sink the caller actually asked for --
+        ! carrying the default layout instead of the requested one.
         call get_environment_variable(trim(pre) // "FILE", val, ln, st)
         if (st == 0 .and. ln > 0) call pf_log_add_file(val(1:ln))
+
+        call get_environment_variable(trim(pre) // "FORMAT", val, ln, st)
+        if (st == 0 .and. ln > 0) call pf_log_set_format(val(1:ln))
     end subroutine pf_log_configure_from_env
 
     !> Renders one `integer(int32)` for concatenation into a message. See `pf_str`.

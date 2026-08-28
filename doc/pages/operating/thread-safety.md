@@ -15,6 +15,8 @@ Concurrent use (e.g. from an OpenMP parallel region) is supported.
   parallel region, and every other change to a shared table, is a hard error — see
   [What a `parquet_table` allows concurrently](#what-a-parquet_table-allows-concurrently) below and
   [Reading a table from several threads](#reading-a-table-from-several-threads).
+- A `pf_logger` may be **emitted through** from many threads at once; **configuring** one may not.
+  See [Logging from several threads](#logging-from-several-threads) below.
 
 ## What a `parquet_table` allows concurrently
 
@@ -300,6 +302,45 @@ The single exception is `pf_random_seed()`, which by design is not a pure functi
 produce a value that has never been produced before. It increments a process-wide counter with a
 lock-free atomic fetch-and-add, so concurrent calls return different seeds; that is its only
 interaction with other threads, and it is handled internally.
+
+## Logging from several threads
+
+`parquet_logging` is safe to **emit** through concurrently and unsafe to **configure**
+concurrently, and the split is deliberate rather than an omission. Emission is what happens
+per record, inside a region; configuration happens once, before one.
+
+- **Emitting is safe from any number of threads**, on a shared logger or a private one. Every
+  write goes through one named critical section, so two threads cannot interleave halves of a
+  line. `once=` and `every=` are decided inside that same section, so a `once=` record concurrent
+  across a whole team emits exactly one line rather than one per thread.
+- **Configuring is not** — `%init`, `%add_console`, `%add_file`, `%add_unit`, `%set_level`,
+  `%set_format`, `%set_color`, `%set_name`, `%set_rank`, `%set_thread_mode` and `%close` all
+  mutate the logger without a lock. Call them before entering a parallel region. This is the same
+  rule the rest of the library follows for a reader or a writer, and for the same reason: paying
+  for a lock on the once-per-run path would mean paying for it on the per-record path too.
+- **A `pf_logger` is safe in a `private()` clause, in a `firstprivate()` clause, and as a
+  block-local variable inside a region.** It has no allocatable components and no finalizer,
+  which is what makes all three legal at once — see
+  [A note on functions returning `character(len=:), allocatable`](#a-note-on-functions-returning-characterlen-allocatable)
+  for the neighbouring hazard, and the type's own documentation for why those two absences are
+  load-bearing rather than incidental.
+- **The context stack is per thread; its base is shared.** `pf_log_push_context`/`_pop_context`
+  act on the calling thread's own stack, so each thread tags its records with its own frames.
+  `pf_log_set_context` sets one shared base rendered ahead of them, and is configuration — set it
+  outside the region. (An OpenMP `threadprivate` copy is undefined in every thread but the initial
+  one at the start of a region, so a per-thread base set *before* a region would reach thread 0 and
+  no other, which reads as a bug rather than as a documented limitation.)
+
+### Buffered mode, when interleaving matters more than immediacy
+
+`%set_thread_mode(PF_LOG_THREAD_BUFFERED)` collects each thread's records into its own slot and
+writes them out at `%flush`, so one thread's records appear together instead of interleaved with
+every other thread's. The cost is that nothing is visible until the flush.
+
+**A buffered record is not on disk until `%flush` runs**, so a program that aborts mid-region
+loses whatever is still in the slots. `%fatal` flushes before it aborts for exactly this reason;
+an `error stop` elsewhere in your own code does not, so call `%flush` before it if the records
+matter. `%close` flushes too.
 
 ## Practical cases
 

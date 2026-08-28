@@ -2195,6 +2195,12 @@ program error_scenarios
         call scenario_logging_fatal()
     case ("logging_write_to_closed_sink")
         call scenario_logging_write_to_closed_sink()
+    case ("logging_path_too_long")
+        call scenario_logging_path_too_long()
+    case ("logging_file_cannot_open")
+        call scenario_logging_file_cannot_open()
+    case ("logging_implicit_console")
+        call scenario_logging_implicit_console()
     case ("logging_control")
         call scenario_logging_control()
     case default
@@ -19121,6 +19127,43 @@ contains
         call b%info("written after the other copy closed the unit")
         print '(a)', "unexpectedly wrote a record to a sink whose unit had been closed"
     end subroutine scenario_logging_write_to_closed_sink
+
+    !> A path longer than `PF_LOG_MAX_PATH` is refused at configuration time rather than
+    !> truncated into a path that names a different file.
+    subroutine scenario_logging_path_too_long()
+        type(pf_logger) :: lg
+        character(len=PF_LOG_MAX_PATH + 8) :: long_path
+
+        long_path = "test_run/" // repeat("p", PF_LOG_MAX_PATH)
+        call lg%init(console=.false.)
+        call lg%add_file(long_path)
+        print '(a)', "unexpectedly accepted a path longer than PF_LOG_MAX_PATH"
+    end subroutine scenario_logging_path_too_long
+
+    !> A file that cannot be opened aborts naming the path and the runtime's own reason, rather
+    !> than attaching a sink whose every write then fails.
+    subroutine scenario_logging_file_cannot_open()
+        type(pf_logger) :: lg
+
+        call lg%init(console=.false.)
+        ! A directory component that is not a directory: portable, needs no permissions, and
+        ! cannot succeed by accident on a machine running the suite as root.
+        call lg%add_file("test_run/es_log_control.txt/inside.log")
+        print '(a)', "unexpectedly opened a file under a non-directory path"
+    end subroutine scenario_logging_file_cannot_open
+
+    !> The default logger writes to stdout at INFO before it is configured, and stops the moment
+    !> it is. Neither half can be asserted in process -- reading stdout back needs a subprocess --
+    !> so this is where D3's central contract is actually tested.
+    subroutine scenario_logging_implicit_console()
+
+        call pf_log_info("implicit-console-record")
+        call pf_log_debug("implicit-debug-record")   ! below INFO: dropped even implicitly
+        ! Configuring the default logger retires the implicit console for good. With no sink
+        ! attached, this record has nowhere to go and must not reappear on stdout.
+        call pf_log_init(console=.false.)
+        call pf_log_info("after-configuration-record")
+    end subroutine scenario_logging_implicit_console
 
     !> The negative control for every scenario above: the same configuration calls, made
     !> correctly, must exit cleanly. Without it each abort test would pass just as happily

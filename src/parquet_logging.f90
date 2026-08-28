@@ -631,34 +631,14 @@ contains
         n = pos - 1
     end subroutine render_line
 
-    !> Resolves the two fields the per-name threshold decision needs: the level, and the name --
-    !> the per-call `name=` when given, else the logger's own. Cheap by construction: a copy and a
-    !> `len_trim`, no clock and no context.
-    subroutine fill_record_name(self, level, name, rec)
-        type(pf_logger), intent(in) :: self               !! The logger emitting the record.
-        integer, intent(in) :: level                      !! The record's severity.
-        character(len=*), intent(in), optional :: name    !! Per-call name, overriding the logger's.
-        type(rec_fields), intent(out) :: rec              !! Receives the level and the name.
-        integer :: n
-
-        rec%level = level
-        if (present(name)) then
-            n = min(len_trim(name), PF_LOG_MAX_NAME)
-            rec%name = name(1:n)
-            rec%name_len = n
-        else
-            rec%name_len = len_trim(self%name)
-            rec%name = self%name
-        end if
-    end subroutine fill_record_name
-
-    !> Fills everything else: rank, thread, context and the clock fields.
+    !> Fills everything a record carries beyond its level and name: rank, thread, context and the
+    !> clock fields.
     !!
-    !! Split from `fill_record_name` above so that `emit_core` can apply the per-name threshold
-    !! **before** paying for any of this. That ordering is what confines the cost of a per-name
-    !! override that LOWERS a threshold to the records the override actually admits: without it, a
-    !! single lowering rule would make every record above the new floor pay two clock reads and a
-    !! context assembly before being dropped for having the wrong name.
+    !! `emit_core` sets the level and the name itself and applies the per-name threshold **before**
+    !! calling this. That ordering is what confines the cost of a per-name override that LOWERS a
+    !! threshold to the records the override actually admits: without it, a single lowering rule
+    !! would make every record above the new floor pay two clock reads and a context assembly
+    !! before being dropped for having the wrong name.
     subroutine fill_record_rest(self, context, rec)
         type(pf_logger), intent(in) :: self                     !! The logger emitting the record.
         character(len=*), intent(in), optional :: context       !! Per-call context, overriding the ambient one.
@@ -994,9 +974,10 @@ contains
     !> The one path every record takes: threshold, name override, gathering, deduplication, then
     !> one rendered line per sink.
     !!
-    !! The level test is first and is one integer comparison, so a record below the threshold
-    !! costs essentially nothing. Rendering happens outside the output critical section; only the
-    !! `write` is inside it.
+    !! The level test is first and is one integer comparison, and the record structures are
+    !! declared in a block entered only after both gates -- so a suppressed record costs a call
+    !! and a compare, a few nanoseconds, and touches no lock and no clock. Rendering happens
+    !! outside the output critical section; only the `write` is inside it.
     subroutine emit_core(self, level, msg, implicit, name, context, once, every)
         class(pf_logger), intent(inout) :: self            !! The logger.
         integer, intent(in) :: level                       !! The record's severity.
@@ -1006,11 +987,20 @@ contains
         character(len=*), intent(in), optional :: context  !! Per-call context, overriding the ambient one.
         logical, intent(in), optional :: once              !! Emit this record once per process.
         integer, intent(in), optional :: every             !! Emit every n-th occurrence of this record.
-        type(rec_fields) :: rec
-        type(pf_sink) :: implicit_sk
+        character(len=PF_LOG_MAX_NAME) :: rname
+        integer :: rlen
         integer :: i, ev
         logical :: want_once, admit, died
 
+        ! NOTHING with a default initializer may be declared in this scope. `rec_fields` and
+        ! `pf_sink` initialize every component, and a local of either type is therefore defined at
+        ! PROCEDURE ENTRY -- roughly 1.8 KB of stores paid before the threshold gate below ever
+        ! runs, on every suppressed call. Measured on the ordinary -fopenmp build (gfortran 15,
+        ! machine A): 50 ns per suppressed call with the locals declared here, 2.6 ns with them in
+        ! the post-gate block, against a 1.3 ns bare-call floor; nagfor 27 -> 3.5 ns. The
+        ! disassembly shows the initializer stores hoisted ahead of the first branch, so this is
+        ! not an -O0 artifact. `rname` is safe here because a bare character local has no
+        ! initializer and costs nothing at entry.
         if (self%nsinks == 0) then
             if (.not. implicit) return
             if (level < max(self%level, PF_LEVEL_INFO)) return
@@ -1018,11 +1008,25 @@ contains
             if (level < self%min_level) return
         end if
 
-        ! The name is resolved first and the per-name threshold applied to it, BEFORE the clock
-        ! reads and the context assembly. A record dropped by a name rule therefore pays a string
-        ! copy and a short prefix scan, not the whole record.
-        call fill_record_name(self, level, name, rec)
-        if (level < effective_level(self, rec%name, rec%name_len)) return
+        ! The name is resolved and the per-name threshold applied to it BEFORE the clock reads and
+        ! the context assembly (and before `rec` exists at all). A record dropped by a name rule
+        ! therefore pays a string copy and a short prefix scan, not the whole record.
+        if (present(name)) then
+            rlen = min(len_trim(name), PF_LOG_MAX_NAME)
+            rname = name(1:rlen)
+        else
+            rlen = len_trim(self%name)
+            rname = self%name
+        end if
+        if (level < effective_level(self, rname, rlen)) return
+
+        block
+        type(rec_fields) :: rec
+        type(pf_sink) :: implicit_sk
+
+        rec%level = level
+        rec%name = rname
+        rec%name_len = rlen
         call fill_record_rest(self, context, rec)
 
         want_once = .false.
@@ -1055,6 +1059,7 @@ contains
                     "for the rest of this run", g_warned_console)
             end if
         end do
+        end block
     end subroutine emit_core
 
     ! ================================================================================
@@ -1595,7 +1600,6 @@ contains
         integer, intent(in), optional :: n       !! How many blank lines; default 1.
         logical, intent(in) :: implicit          !! Whether the implicit console applies.
         integer :: i, k, count
-        type(pf_sink) :: implicit_sk
         logical :: failed
 
         count = 1
@@ -1603,12 +1607,18 @@ contains
         if (count <= 0) return
         if (self%nsinks == 0) then
             if (.not. implicit) return
+            ! Block-scoped for the same reason as emit_core's record structures: a pf_sink local
+            ! carries ~1.4 KB of default initializers, which must not be paid ahead of the
+            ! early returns above.
+            block
+            type(pf_sink) :: implicit_sk
             call default_console_sink(implicit_sk)
             do k = 1, count
                 !$omp critical (pf_log_output)
                 call deliver(implicit_sk%unit, .true., "", "", .true., failed)
                 !$omp end critical (pf_log_output)
             end do
+            end block
             return
         end if
         do i = 1, self%nsinks

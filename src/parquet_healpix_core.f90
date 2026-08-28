@@ -100,7 +100,21 @@ contains
         ! make an infinite angle quiet -- and it should not: unlike a NaN, which is already the
         ! "no answer" value being carried through, an infinity is a real number the caller asked
         ! to take the sine of. The line is between propagating an existing NaN and creating one.
-        if (ieee_is_nan(dl)) then
+        !
+        ! **`dl /= dl` rather than `ieee_is_nan(dl)`, deliberately**, and it is the same knowing
+        ! departure from this project's default that `src/parquet_argsort_engine.f90` makes at
+        ! length in its own header -- read that one for the measurements. In short: on ifx and
+        ! nagfor `ieee_is_nan` is a CALL into the Fortran runtime rather than an instruction
+        ! (measured at +2.479 ns per test on the sort's comparator under ifx, +1.58 ns here under
+        ! nagfor), while gfortran inlines it to a native compare and never sees the cost. `x /= x`
+        ! is free on all of them. This procedure is `pure elemental` and is meant to be broadcast
+        ! over whole catalogues, so a per-call runtime call is exactly the wrong thing to put in
+        ! front of it. The two spellings are equivalent for this guard's purpose: a NaN is the only
+        ! value not equal to itself, and BOTH are quiet on a quiet NaN -- verified, and load-bearing,
+        ! because the entire point of the guard is to raise no flag. The cost is one
+        ! `-Wcompare-reals` warning under gfortran's `--profile debug`, which is accepted here
+        ! exactly as it is in the sort engine.
+        if (dl /= dl) then
             dist = dl
             return
         end if

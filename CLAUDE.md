@@ -3221,15 +3221,51 @@ Compiler-independent rules. Anything specific to one compiler is in its own sect
   removing a finalizer is one way to take a type *out* of this rule.
   **Note ifx forbids exactly the shape this prescribes** for a type with allocatable components;
   see [ifx-specific gotchas](#ifx-specific-gotchas) for the shape that satisfies both.
-- **Test for NaN with `ieee_is_nan`, not `x /= x`**, because the self-comparison idiom triggers
-  `-Wcompare-reals`. See `parquet_metadata_maml.f90`'s `parquet_qc_numeric_bound`. This does not
+- **Test for NaN with `ieee_is_nan` in COLD code and with `x /= x` on a HOT path.** The default is
+  `ieee_is_nan`, because the self-comparison idiom triggers `-Wcompare-reals`; see
+  `parquet_metadata_maml.f90`'s `parquet_qc_numeric_bound`. This does not
   apply to the other `-Wcompare-reals` sites here (`value == anint(value)`, testing whether a float
   is exactly integral) — those are exact-equality checks with no equivalent NaN-style idiom, and
   their warning is an accepted false positive rather than something to "fix" into an epsilon
-  comparison. **`src/parquet_argsort_engine.f90` is a deliberate, measured EXCEPTION and uses
-  `x /= x` throughout — do not "correct" it**: `ieee_is_nan` cost ifx ~2.5 ns per test on the sort's
-  hot comparison path. Its header states the case, and the general lesson with it — **a
-  microbenchmark of an isolated operation does not predict its cost inside a dependency chain**.
+  comparison.
+
+  **The hot-path half is a rule, not a licence, and it exists because `ieee_is_nan` is a
+  RUNTIME CALL on half the fleet.** ifx emits two `ieee_arithmetic_mp_for_ieee_is_nan_k8_` PLT
+  calls per comparison and nagfor likewise does not inline it, while gfortran compiles it to a
+  native compare and never sees the cost — so **a gfortran measurement cannot detect this and will
+  report the two as identical**. Measured, ns per test above no test at all:
+
+  | | ifx (sort comparator) | nagfor (isolated loop) | gfortran |
+  |---|---|---|---|
+  | `ieee_is_nan` | **+2.479** | **+1.58** | inlined, free |
+  | `x /= x` | +0.034 | +0.00 | free |
+
+  The two are exactly equivalent for the purpose — a NaN is the only value not equal to itself,
+  both are correct for both infinities, and **both are QUIET on a quiet NaN**, which matters
+  wherever the test exists to avoid raising a flag (`==` and `/=` are quiet comparisons in IEEE;
+  `<`, `>`, `<=`, `>=` are not and would raise `IEEE_INVALID`). So on a hot path the choice costs
+  nothing but the warning.
+
+  **What counts as a hot path**: anything per-element, per-row or per-comparison, and anything
+  `elemental` that is meant to be broadcast over a whole array. Two sites qualify today and both
+  state the case where they sit — `src/parquet_argsort_engine.f90` (at length in its header, and
+  the place to read first) and `pf_angdist_deg` (`src/parquet_healpix_core.f90`). **Do not
+  "correct" either back**, and do not sweep the cold sites the other way: a validator that runs
+  once per call has nothing to gain and would add a warning for it.
+
+  **`-Wcompare-reals` is on in `--profile debug`** (it comes with `-Wall -Wextra`) and this
+  codebase already carries about forty of them across ten files, so one more from a justified hot
+  path is consistent rather than novel — but it does mean the warning cannot be used as a signal,
+  and a *new* file's worth of them is worth reading rather than assuming.
+
+  **And the general lesson, which is why the engine's header is worth the length: a microbenchmark
+  of an isolated operation does not predict its cost inside a dependency chain.** The same probe
+  that correctly measured `ieee_is_nan` at +2.479 ns ranked an integer bit test best and it was
+  21% WORSE in context. Here, the reverse: `ieee_is_nan` measured +1.58 ns in an isolated nagfor
+  loop, and swapping it inside `pf_angdist_deg` — six transcendentals deep — moved that
+  procedure by 0.74 ns while the untouched CONTROL arm of the same two builds moved 1.08 ns: **the
+  saving is real but below what a two-build comparison can resolve there.** Make the change on
+  the rule; do not claim a figure for it without a control arm.
 - **`-128_int8` trips gfortran's range check** (it parses `128` then negates). Build the high bit
   with `ibset(0_int8, 7)` in constant expressions. Also: an array-constructor implied-do index
   (`[(f(b), b=0,7)]`) has no implicit type under `implicit none` — list the elements explicitly.

@@ -242,14 +242,14 @@ contains
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
         wide = real(values, real64)
-        call sum_f64(wide, s, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok)
+        call sum_f64(wide, s, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok, threads=threads)
     end procedure sum_i32
 
     module procedure mean_i32
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
         wide = real(values, real64)
-        call mean_f64(wide, m, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok)
+        call mean_f64(wide, m, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok, threads=threads)
     end procedure mean_i32
 
     module procedure variance_i32
@@ -257,7 +257,7 @@ contains
         allocate(wide(size(values, kind=int64)))
         wide = real(values, real64)
         call variance_f64(wide, v, is_valid=is_valid, weights=weights, weight_type=weight_type, ddof=ddof, &
-            n_null=n_null, ok=ok)
+            n_null=n_null, ok=ok, threads=threads)
     end procedure variance_i32
 
     module procedure stddev_i32
@@ -265,7 +265,7 @@ contains
         allocate(wide(size(values, kind=int64)))
         wide = real(values, real64)
         call stddev_f64(wide, sd, is_valid=is_valid, weights=weights, weight_type=weight_type, ddof=ddof, &
-            n_null=n_null, ok=ok)
+            n_null=n_null, ok=ok, threads=threads)
     end procedure stddev_i32
 
     module procedure sem_i32
@@ -273,7 +273,7 @@ contains
         allocate(wide(size(values, kind=int64)))
         wide = real(values, real64)
         call sem_f64(wide, se, is_valid=is_valid, weights=weights, weight_type=weight_type, ddof=ddof, &
-            n_null=n_null, ok=ok)
+            n_null=n_null, ok=ok, threads=threads)
     end procedure sem_i32
 
     module procedure skewness_i32
@@ -281,7 +281,7 @@ contains
         allocate(wide(size(values, kind=int64)))
         wide = real(values, real64)
         call skewness_f64(wide, g, is_valid=is_valid, weights=weights, weight_type=weight_type, bias=bias, &
-            n_null=n_null, ok=ok)
+            n_null=n_null, ok=ok, threads=threads)
     end procedure skewness_i32
 
     module procedure kurtosis_i32
@@ -289,7 +289,7 @@ contains
         allocate(wide(size(values, kind=int64)))
         wide = real(values, real64)
         call kurtosis_f64(wide, k, is_valid=is_valid, weights=weights, weight_type=weight_type, bias=bias, &
-            excess=excess, n_null=n_null, ok=ok)
+            excess=excess, n_null=n_null, ok=ok, threads=threads)
     end procedure kurtosis_i32
 
     module procedure moments_i32
@@ -299,21 +299,21 @@ contains
         call moments_f64(wide, n_valid=n_valid, mean=mean, variance=variance, stddev=stddev, sem=sem, &
             skewness=skewness, kurtosis=kurtosis, vsum=vsum, vmin=vmin, vmax=vmax, &
             is_valid=is_valid, weights=weights, weight_type=weight_type, ddof=ddof, bias=bias, &
-            excess=excess, n_null=n_null)
+            excess=excess, n_null=n_null, threads=threads)
     end procedure moments_i32
 
     module procedure sum_i64
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
         wide = real(values, real64)
-        call sum_f64(wide, s, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok)
+        call sum_f64(wide, s, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok, threads=threads)
     end procedure sum_i64
 
     module procedure mean_i64
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
         wide = real(values, real64)
-        call mean_f64(wide, m, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok)
+        call mean_f64(wide, m, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok, threads=threads)
     end procedure mean_i64
 
     module procedure variance_i64
@@ -321,7 +321,7 @@ contains
         allocate(wide(size(values, kind=int64)))
         wide = real(values, real64)
         call variance_f64(wide, v, is_valid=is_valid, weights=weights, weight_type=weight_type, ddof=ddof, &
-            n_null=n_null, ok=ok)
+            n_null=n_null, ok=ok, threads=threads)
     end procedure variance_i64
 
     module procedure stddev_i64
@@ -329,7 +329,7 @@ contains
         allocate(wide(size(values, kind=int64)))
         wide = real(values, real64)
         call stddev_f64(wide, sd, is_valid=is_valid, weights=weights, weight_type=weight_type, ddof=ddof, &
-            n_null=n_null, ok=ok)
+            n_null=n_null, ok=ok, threads=threads)
     end procedure stddev_i64
 
     module procedure sem_i64
@@ -337,7 +337,7 @@ contains
         allocate(wide(size(values, kind=int64)))
         wide = real(values, real64)
         call sem_f64(wide, se, is_valid=is_valid, weights=weights, weight_type=weight_type, ddof=ddof, &
-            n_null=n_null, ok=ok)
+            n_null=n_null, ok=ok, threads=threads)
     end procedure sem_i64
 
     module procedure skewness_i64
@@ -345,7 +345,7 @@ contains
         allocate(wide(size(values, kind=int64)))
         wide = real(values, real64)
         call skewness_f64(wide, g, is_valid=is_valid, weights=weights, weight_type=weight_type, bias=bias, &
-            n_null=n_null, ok=ok)
+            n_null=n_null, ok=ok, threads=threads)
     end procedure skewness_i64
 
     module procedure kurtosis_i64
@@ -353,7 +353,7 @@ contains
         allocate(wide(size(values, kind=int64)))
         wide = real(values, real64)
         call kurtosis_f64(wide, k, is_valid=is_valid, weights=weights, weight_type=weight_type, bias=bias, &
-            excess=excess, n_null=n_null, ok=ok)
+            excess=excess, n_null=n_null, ok=ok, threads=threads)
     end procedure kurtosis_i64
 
     module procedure moments_i64
@@ -363,7 +363,7 @@ contains
         call moments_f64(wide, n_valid=n_valid, mean=mean, variance=variance, stddev=stddev, sem=sem, &
             skewness=skewness, kurtosis=kurtosis, vsum=vsum, vmin=vmin, vmax=vmax, &
             is_valid=is_valid, weights=weights, weight_type=weight_type, ddof=ddof, bias=bias, &
-            excess=excess, n_null=n_null)
+            excess=excess, n_null=n_null, threads=threads)
     end procedure moments_i64
 
     module procedure sum_f32
@@ -371,7 +371,7 @@ contains
         allocate(wide(size(values, kind=int64)))
         wide = real(values, real64)
         call sum_f64(wide, s, is_valid=is_valid, weights=weights, skipnan=skipnan, n_null=n_null, &
-            n_nan=n_nan, ok=ok)
+            n_nan=n_nan, ok=ok, threads=threads)
     end procedure sum_f32
 
     module procedure mean_f32
@@ -379,7 +379,7 @@ contains
         allocate(wide(size(values, kind=int64)))
         wide = real(values, real64)
         call mean_f64(wide, m, is_valid=is_valid, weights=weights, skipnan=skipnan, n_null=n_null, &
-            n_nan=n_nan, ok=ok)
+            n_nan=n_nan, ok=ok, threads=threads)
     end procedure mean_f32
 
     module procedure variance_f32
@@ -387,7 +387,7 @@ contains
         allocate(wide(size(values, kind=int64)))
         wide = real(values, real64)
         call variance_f64(wide, v, is_valid=is_valid, weights=weights, weight_type=weight_type, ddof=ddof, &
-            skipnan=skipnan, n_null=n_null, n_nan=n_nan, ok=ok)
+            skipnan=skipnan, n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
     end procedure variance_f32
 
     module procedure stddev_f32
@@ -395,7 +395,7 @@ contains
         allocate(wide(size(values, kind=int64)))
         wide = real(values, real64)
         call stddev_f64(wide, sd, is_valid=is_valid, weights=weights, weight_type=weight_type, ddof=ddof, &
-            skipnan=skipnan, n_null=n_null, n_nan=n_nan, ok=ok)
+            skipnan=skipnan, n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
     end procedure stddev_f32
 
     module procedure sem_f32
@@ -403,7 +403,7 @@ contains
         allocate(wide(size(values, kind=int64)))
         wide = real(values, real64)
         call sem_f64(wide, se, is_valid=is_valid, weights=weights, weight_type=weight_type, ddof=ddof, &
-            skipnan=skipnan, n_null=n_null, n_nan=n_nan, ok=ok)
+            skipnan=skipnan, n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
     end procedure sem_f32
 
     module procedure skewness_f32
@@ -411,7 +411,7 @@ contains
         allocate(wide(size(values, kind=int64)))
         wide = real(values, real64)
         call skewness_f64(wide, g, is_valid=is_valid, weights=weights, weight_type=weight_type, bias=bias, &
-            skipnan=skipnan, n_null=n_null, n_nan=n_nan, ok=ok)
+            skipnan=skipnan, n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
     end procedure skewness_f32
 
     module procedure kurtosis_f32
@@ -419,7 +419,7 @@ contains
         allocate(wide(size(values, kind=int64)))
         wide = real(values, real64)
         call kurtosis_f64(wide, k, is_valid=is_valid, weights=weights, weight_type=weight_type, bias=bias, &
-            excess=excess, skipnan=skipnan, n_null=n_null, n_nan=n_nan, ok=ok)
+            excess=excess, skipnan=skipnan, n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
     end procedure kurtosis_f32
 
     module procedure moments_f32
@@ -429,21 +429,21 @@ contains
         call moments_f64(wide, n_valid=n_valid, mean=mean, variance=variance, stddev=stddev, sem=sem, &
             skewness=skewness, kurtosis=kurtosis, vsum=vsum, vmin=vmin, vmax=vmax, &
             is_valid=is_valid, weights=weights, weight_type=weight_type, ddof=ddof, bias=bias, &
-            excess=excess, skipnan=skipnan, n_null=n_null, n_nan=n_nan)
+            excess=excess, skipnan=skipnan, n_null=n_null, n_nan=n_nan, threads=threads)
     end procedure moments_f32
 
     module procedure sum_bool
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
         wide = merge(1.0_real64, 0.0_real64, values)
-        call sum_f64(wide, s, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok)
+        call sum_f64(wide, s, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok, threads=threads)
     end procedure sum_bool
 
     module procedure mean_bool
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
         wide = merge(1.0_real64, 0.0_real64, values)
-        call mean_f64(wide, m, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok)
+        call mean_f64(wide, m, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok, threads=threads)
     end procedure mean_bool
 
     module procedure variance_bool
@@ -451,7 +451,7 @@ contains
         allocate(wide(size(values, kind=int64)))
         wide = merge(1.0_real64, 0.0_real64, values)
         call variance_f64(wide, v, is_valid=is_valid, weights=weights, weight_type=weight_type, ddof=ddof, &
-            n_null=n_null, ok=ok)
+            n_null=n_null, ok=ok, threads=threads)
     end procedure variance_bool
 
     module procedure stddev_bool
@@ -459,7 +459,7 @@ contains
         allocate(wide(size(values, kind=int64)))
         wide = merge(1.0_real64, 0.0_real64, values)
         call stddev_f64(wide, sd, is_valid=is_valid, weights=weights, weight_type=weight_type, ddof=ddof, &
-            n_null=n_null, ok=ok)
+            n_null=n_null, ok=ok, threads=threads)
     end procedure stddev_bool
 
     module procedure sem_bool
@@ -467,7 +467,7 @@ contains
         allocate(wide(size(values, kind=int64)))
         wide = merge(1.0_real64, 0.0_real64, values)
         call sem_f64(wide, se, is_valid=is_valid, weights=weights, weight_type=weight_type, ddof=ddof, &
-            n_null=n_null, ok=ok)
+            n_null=n_null, ok=ok, threads=threads)
     end procedure sem_bool
 
     module procedure skewness_bool
@@ -475,7 +475,7 @@ contains
         allocate(wide(size(values, kind=int64)))
         wide = merge(1.0_real64, 0.0_real64, values)
         call skewness_f64(wide, g, is_valid=is_valid, weights=weights, weight_type=weight_type, bias=bias, &
-            n_null=n_null, ok=ok)
+            n_null=n_null, ok=ok, threads=threads)
     end procedure skewness_bool
 
     module procedure kurtosis_bool
@@ -483,7 +483,7 @@ contains
         allocate(wide(size(values, kind=int64)))
         wide = merge(1.0_real64, 0.0_real64, values)
         call kurtosis_f64(wide, k, is_valid=is_valid, weights=weights, weight_type=weight_type, bias=bias, &
-            excess=excess, n_null=n_null, ok=ok)
+            excess=excess, n_null=n_null, ok=ok, threads=threads)
     end procedure kurtosis_bool
 
     module procedure moments_bool
@@ -493,7 +493,7 @@ contains
         call moments_f64(wide, n_valid=n_valid, mean=mean, variance=variance, stddev=stddev, sem=sem, &
             skewness=skewness, kurtosis=kurtosis, vsum=vsum, vmin=vmin, vmax=vmax, &
             is_valid=is_valid, weights=weights, weight_type=weight_type, ddof=ddof, bias=bias, &
-            excess=excess, n_null=n_null)
+            excess=excess, n_null=n_null, threads=threads)
     end procedure moments_bool
 
     module procedure sum_col
@@ -501,7 +501,7 @@ contains
         logical, allocatable :: mask(:)
         call col_to_real64(values, "pf_sum", is_valid, wide, mask)
         call sum_f64(wide, s, is_valid=mask, weights=weights, skipnan=skipnan, n_null=n_null, n_nan=n_nan, &
-            ok=ok)
+            ok=ok, threads=threads)
     end procedure sum_col
 
     module procedure mean_col
@@ -509,7 +509,7 @@ contains
         logical, allocatable :: mask(:)
         call col_to_real64(values, "pf_mean", is_valid, wide, mask)
         call mean_f64(wide, m, is_valid=mask, weights=weights, skipnan=skipnan, n_null=n_null, n_nan=n_nan, &
-            ok=ok)
+            ok=ok, threads=threads)
     end procedure mean_col
 
     module procedure variance_col
@@ -517,7 +517,7 @@ contains
         logical, allocatable :: mask(:)
         call col_to_real64(values, "pf_variance", is_valid, wide, mask)
         call variance_f64(wide, v, is_valid=mask, weights=weights, weight_type=weight_type, ddof=ddof, &
-            skipnan=skipnan, n_null=n_null, n_nan=n_nan, ok=ok)
+            skipnan=skipnan, n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
     end procedure variance_col
 
     module procedure stddev_col
@@ -525,7 +525,7 @@ contains
         logical, allocatable :: mask(:)
         call col_to_real64(values, "pf_stddev", is_valid, wide, mask)
         call stddev_f64(wide, sd, is_valid=mask, weights=weights, weight_type=weight_type, ddof=ddof, &
-            skipnan=skipnan, n_null=n_null, n_nan=n_nan, ok=ok)
+            skipnan=skipnan, n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
     end procedure stddev_col
 
     module procedure sem_col
@@ -533,7 +533,7 @@ contains
         logical, allocatable :: mask(:)
         call col_to_real64(values, "pf_sem", is_valid, wide, mask)
         call sem_f64(wide, se, is_valid=mask, weights=weights, weight_type=weight_type, ddof=ddof, &
-            skipnan=skipnan, n_null=n_null, n_nan=n_nan, ok=ok)
+            skipnan=skipnan, n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
     end procedure sem_col
 
     module procedure skewness_col
@@ -541,7 +541,7 @@ contains
         logical, allocatable :: mask(:)
         call col_to_real64(values, "pf_skewness", is_valid, wide, mask)
         call skewness_f64(wide, g, is_valid=mask, weights=weights, weight_type=weight_type, bias=bias, &
-            skipnan=skipnan, n_null=n_null, n_nan=n_nan, ok=ok)
+            skipnan=skipnan, n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
     end procedure skewness_col
 
     module procedure kurtosis_col
@@ -549,7 +549,7 @@ contains
         logical, allocatable :: mask(:)
         call col_to_real64(values, "pf_kurtosis", is_valid, wide, mask)
         call kurtosis_f64(wide, k, is_valid=mask, weights=weights, weight_type=weight_type, bias=bias, &
-            excess=excess, skipnan=skipnan, n_null=n_null, n_nan=n_nan, ok=ok)
+            excess=excess, skipnan=skipnan, n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
     end procedure kurtosis_col
 
     module procedure moments_col
@@ -559,7 +559,7 @@ contains
         call moments_f64(wide, n_valid=n_valid, mean=mean, variance=variance, stddev=stddev, sem=sem, &
             skewness=skewness, kurtosis=kurtosis, vsum=vsum, vmin=vmin, vmax=vmax, &
             is_valid=mask, weights=weights, weight_type=weight_type, ddof=ddof, bias=bias, &
-            excess=excess, skipnan=skipnan, n_null=n_null, n_nan=n_nan)
+            excess=excess, skipnan=skipnan, n_null=n_null, n_nan=n_nan, threads=threads)
     end procedure moments_col
 
     module procedure obj_compute_i32
@@ -567,7 +567,7 @@ contains
         allocate(wide(size(values, kind=int64)))
         wide = real(values, real64)
         call obj_compute_f64(self, wide, retain=retain, is_valid=is_valid, weights=weights, &
-            weight_type=weight_type)
+            weight_type=weight_type, threads=threads)
     end procedure obj_compute_i32
 
     module procedure obj_update_i32
@@ -582,7 +582,7 @@ contains
         allocate(wide(size(values, kind=int64)))
         wide = real(values, real64)
         call obj_compute_f64(self, wide, retain=retain, is_valid=is_valid, weights=weights, &
-            weight_type=weight_type)
+            weight_type=weight_type, threads=threads)
     end procedure obj_compute_i64
 
     module procedure obj_update_i64
@@ -597,7 +597,7 @@ contains
         allocate(wide(size(values, kind=int64)))
         wide = real(values, real64)
         call obj_compute_f64(self, wide, retain=retain, is_valid=is_valid, weights=weights, &
-            weight_type=weight_type, skipnan=skipnan)
+            weight_type=weight_type, skipnan=skipnan, threads=threads)
     end procedure obj_compute_f32
 
     module procedure obj_update_f32
@@ -612,7 +612,7 @@ contains
         allocate(wide(size(values, kind=int64)))
         wide = merge(1.0_real64, 0.0_real64, values)
         call obj_compute_f64(self, wide, retain=retain, is_valid=is_valid, weights=weights, &
-            weight_type=weight_type)
+            weight_type=weight_type, threads=threads)
     end procedure obj_compute_bool
 
     module procedure obj_update_bool
@@ -627,7 +627,7 @@ contains
         logical, allocatable :: mask(:)
         call col_to_real64(values, "pf_stats%compute", is_valid, wide, mask)
         call obj_compute_f64(self, wide, retain=retain, is_valid=mask, weights=weights, &
-            weight_type=weight_type, skipnan=skipnan)
+            weight_type=weight_type, skipnan=skipnan, threads=threads)
     end procedure obj_compute_col
 
     module procedure obj_update_col

@@ -154,9 +154,9 @@ The testable form of the claim is that `pf_variance(x + c)` equals `pf_variance(
 and it holds to a few ulp rather than approximately. The same is true of the skewness, which needs a
 second correction to get there and has it.
 
-A second consequence of the fixed block tree is worth knowing in advance: **the answer will not
-depend on the thread count** when threading arrives, because the decomposition is a function of the
-population size alone and never of who walks it.
+A second consequence of the fixed block tree is that **the answer does not depend on the thread
+count**: the decomposition is a function of the population size alone and never of who walks it. See
+[Threading](#threading) below.
 
 ### When a statistic is undefined
 
@@ -172,6 +172,44 @@ exactly when the value beside it is not a NaN.
 
 The empty sum is `0` rather than NaN because that is the additive identity and what numpy and pandas
 both return; `n_valid` sits beside it, so nothing is hidden by it.
+
+### Threading
+
+The central-moment pass is threaded on a large population, and `threads=` on any moment procedure
+overrides the automatic count. **It is a speed control and never an accuracy one:**
+
+```fortran
+call pf_variance(x, v)              ! automatic
+call pf_variance(x, v, threads=4)   ! four threads
+call pf_variance(x, v, threads=1)   ! serial
+```
+
+All three return the same bits, and so does a build compiled without OpenMP at all. That is not a
+tolerance — it is exact equality, and it follows from the fixed block tree above: each block is
+reduced by the same serial code and the blocks are combined in index order, so who computed which
+block is not observable in the result.
+
+With no `threads=`, the count comes from the same rule the sorting family uses — the
+`parquet_sort_threads` setting, capped by the processors actually available, and **1 inside a
+caller's own parallel region**, so a per-group loop that is already parallel does not nest teams.
+There is deliberately no separate statistics thread setting; one question has one answer.
+
+Three things worth knowing before reaching for `threads=`:
+
+- **A small population is reduced serially whatever you ask for.** Opening a team costs more than
+  it returns below a measured work floor of tens of thousands of elements per thread — at a few
+  thousand elements a team of eight is a *loss*, not a small gain — so the library declines one.
+  `threads=8` on a short array is not an error and not ignored; it is capped by the work available.
+- **Only the central-moment pass is threaded.** The first pass applies the exclusion rules and
+  compacts the survivors, which is inherently sequential (where an element lands depends on how
+  many earlier ones were removed), so it stays serial. That bounds what threading can return on a
+  whole call to well under the thread count.
+- **The shape of the call matters more than the thread count**, for anything but a plain array.
+  Passing `weights=` roughly doubles the cost of a reduction, and `is_valid=` adds about half
+  again, because both leave the fast path. Threading does not recover that.
+
+`bench/benchmark_stats.sh` measures all of this, and its `--mode=thread` refuses to report a
+timing until it has confirmed the bit-exactness above on the machine it is running on.
 
 ## `pf_stats` — summarise once, query as often as you like
 

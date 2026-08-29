@@ -50,6 +50,13 @@ module parquet_stats
     ! `parquet_sorting` imports these with an `only:` list and does not re-export them, so this
     ! module names them itself. Nothing new enters the dependency graph: `parquet_columns` is
     ! already in it, through `parquet_sorting`'s own `pf_argsort` over a column.
+    ! The thread rule, named directly for the same reason: `parquet_sorting` is private by default
+    ! and re-exports `pf_sort_threads` but not `resolve_thread_count`, which is the procedure that
+    ! honours an explicit `threads=`, refuses a nested team where libgomp would deadlock, and clamps
+    ! to the processors actually available. Reusing it rather than re-deriving the rule here is what
+    ! the design's settings analysis requires -- this module adds no thread knob of its own -- and
+    ! `parquet_argsort` is already in the graph beneath `parquet_sorting`, so nothing new enters it.
+    use parquet_argsort, only : resolve_thread_count
     use parquet_columns, only : parquet_column, parquet_kind_name, parquet_column_data_ptr, &
         PK_INT32, PK_INT64, PK_FLOAT32, PK_FLOAT64, PK_LOGICAL, &
         PK_INT32_VEC, PK_INT64_VEC, PK_FLOAT32_VEC, PK_FLOAT64_VEC, PK_LOGICAL_VEC
@@ -62,6 +69,7 @@ module parquet_stats
     public :: pf_skewness, pf_kurtosis, pf_moments
     public :: pf_stats
     public :: parquet_debug_stats_scans, parquet_debug_reset_stats_scans
+    public :: parquet_debug_stats_team, parquet_debug_set_stats_min_per_thread
     !
     ! ---- The tier-A accumulator, and the object that holds one ----
     !
@@ -291,8 +299,14 @@ module parquet_stats
     !> meets an empty group on real data. It aborts only on misuse -- a mismatched array size, an
     !> unrecognised token, or a negative, NaN or infinite weight.
     !>
-    !> `real(real64)` only for now; P4 adds the other numeric kinds and `type(parquet_column)` to
-    !> this same generic, which is source-compatible for every existing call.
+    !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
+    !> `logical` array, or a scalar numeric `type(parquet_column)`; every one of them widens to
+    !> `real64` and reaches the same engine, so the answer does not depend on which was passed.
+    !>
+    !> The central-moment pass is threaded on a large population, and `threads=` overrides the
+    !> automatic count. **That cannot change an answer**: the population is reduced over a fixed
+    !> block tree determined by its size alone, so one thread, eight threads and a build without
+    !> OpenMP return the identical bits.
     interface pf_sum
         module procedure sum_f64
         module procedure sum_i32
@@ -320,8 +334,14 @@ module parquet_stats
     !> meets an empty group on real data. It aborts only on misuse -- a mismatched array size, an
     !> unrecognised token, or a negative, NaN or infinite weight.
     !>
-    !> `real(real64)` only for now; P4 adds the other numeric kinds and `type(parquet_column)` to
-    !> this same generic, which is source-compatible for every existing call.
+    !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
+    !> `logical` array, or a scalar numeric `type(parquet_column)`; every one of them widens to
+    !> `real64` and reaches the same engine, so the answer does not depend on which was passed.
+    !>
+    !> The central-moment pass is threaded on a large population, and `threads=` overrides the
+    !> automatic count. **That cannot change an answer**: the population is reduced over a fixed
+    !> block tree determined by its size alone, so one thread, eight threads and a build without
+    !> OpenMP return the identical bits.
     interface pf_mean
         module procedure mean_f64
         module procedure mean_i32
@@ -342,8 +362,14 @@ module parquet_stats
     !> meets an empty group on real data. It aborts only on misuse -- a mismatched array size, an
     !> unrecognised token, or a negative, NaN or infinite weight.
     !>
-    !> `real(real64)` only for now; P4 adds the other numeric kinds and `type(parquet_column)` to
-    !> this same generic, which is source-compatible for every existing call.
+    !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
+    !> `logical` array, or a scalar numeric `type(parquet_column)`; every one of them widens to
+    !> `real64` and reaches the same engine, so the answer does not depend on which was passed.
+    !>
+    !> The central-moment pass is threaded on a large population, and `threads=` overrides the
+    !> automatic count. **That cannot change an answer**: the population is reduced over a fixed
+    !> block tree determined by its size alone, so one thread, eight threads and a build without
+    !> OpenMP return the identical bits.
     interface pf_variance
         module procedure variance_f64
         module procedure variance_i32
@@ -361,8 +387,14 @@ module parquet_stats
     !> meets an empty group on real data. It aborts only on misuse -- a mismatched array size, an
     !> unrecognised token, or a negative, NaN or infinite weight.
     !>
-    !> `real(real64)` only for now; P4 adds the other numeric kinds and `type(parquet_column)` to
-    !> this same generic, which is source-compatible for every existing call.
+    !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
+    !> `logical` array, or a scalar numeric `type(parquet_column)`; every one of them widens to
+    !> `real64` and reaches the same engine, so the answer does not depend on which was passed.
+    !>
+    !> The central-moment pass is threaded on a large population, and `threads=` overrides the
+    !> automatic count. **That cannot change an answer**: the population is reduced over a fixed
+    !> block tree determined by its size alone, so one thread, eight threads and a build without
+    !> OpenMP return the identical bits.
     interface pf_stddev
         module procedure stddev_f64
         module procedure stddev_i32
@@ -380,8 +412,14 @@ module parquet_stats
     !> meets an empty group on real data. It aborts only on misuse -- a mismatched array size, an
     !> unrecognised token, or a negative, NaN or infinite weight.
     !>
-    !> `real(real64)` only for now; P4 adds the other numeric kinds and `type(parquet_column)` to
-    !> this same generic, which is source-compatible for every existing call.
+    !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
+    !> `logical` array, or a scalar numeric `type(parquet_column)`; every one of them widens to
+    !> `real64` and reaches the same engine, so the answer does not depend on which was passed.
+    !>
+    !> The central-moment pass is threaded on a large population, and `threads=` overrides the
+    !> automatic count. **That cannot change an answer**: the population is reduced over a fixed
+    !> block tree determined by its size alone, so one thread, eight threads and a build without
+    !> OpenMP return the identical bits.
     interface pf_sem
         module procedure sem_f64
         module procedure sem_i32
@@ -399,8 +437,14 @@ module parquet_stats
     !> meets an empty group on real data. It aborts only on misuse -- a mismatched array size, an
     !> unrecognised token, or a negative, NaN or infinite weight.
     !>
-    !> `real(real64)` only for now; P4 adds the other numeric kinds and `type(parquet_column)` to
-    !> this same generic, which is source-compatible for every existing call.
+    !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
+    !> `logical` array, or a scalar numeric `type(parquet_column)`; every one of them widens to
+    !> `real64` and reaches the same engine, so the answer does not depend on which was passed.
+    !>
+    !> The central-moment pass is threaded on a large population, and `threads=` overrides the
+    !> automatic count. **That cannot change an answer**: the population is reduced over a fixed
+    !> block tree determined by its size alone, so one thread, eight threads and a build without
+    !> OpenMP return the identical bits.
     interface pf_skewness
         module procedure skewness_f64
         module procedure skewness_i32
@@ -418,8 +462,14 @@ module parquet_stats
     !> meets an empty group on real data. It aborts only on misuse -- a mismatched array size, an
     !> unrecognised token, or a negative, NaN or infinite weight.
     !>
-    !> `real(real64)` only for now; P4 adds the other numeric kinds and `type(parquet_column)` to
-    !> this same generic, which is source-compatible for every existing call.
+    !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
+    !> `logical` array, or a scalar numeric `type(parquet_column)`; every one of them widens to
+    !> `real64` and reaches the same engine, so the answer does not depend on which was passed.
+    !>
+    !> The central-moment pass is threaded on a large population, and `threads=` overrides the
+    !> automatic count. **That cannot change an answer**: the population is reduced over a fixed
+    !> block tree determined by its size alone, so one thread, eight threads and a build without
+    !> OpenMP return the identical bits.
     interface pf_kurtosis
         module procedure kurtosis_f64
         module procedure kurtosis_i32
@@ -440,8 +490,14 @@ module parquet_stats
     !> meets an empty group on real data. It aborts only on misuse -- a mismatched array size, an
     !> unrecognised token, or a negative, NaN or infinite weight.
     !>
-    !> `real(real64)` only for now; P4 adds the other numeric kinds and `type(parquet_column)` to
-    !> this same generic, which is source-compatible for every existing call.
+    !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
+    !> `logical` array, or a scalar numeric `type(parquet_column)`; every one of them widens to
+    !> `real64` and reaches the same engine, so the answer does not depend on which was passed.
+    !>
+    !> The central-moment pass is threaded on a large population, and `threads=` overrides the
+    !> automatic count. **That cannot change an answer**: the population is reduced over a fixed
+    !> block tree determined by its size alone, so one thread, eight threads and a build without
+    !> OpenMP return the identical bits.
     interface pf_moments
         module procedure moments_f64
         module procedure moments_i32
@@ -488,7 +544,7 @@ module parquet_stats
         !> Weighted, this is `sum(w*x)`. An empty population sums to exactly `0` with
         !> `ok = .true.`, which is the additive identity and what numpy and pandas return -- it
         !> is the one quantity in this family that an empty population still defines.
-        module subroutine sum_f64(values, s, is_valid, weights, skipnan, n_null, n_nan, ok)
+        module subroutine sum_f64(values, s, is_valid, weights, skipnan, n_null, n_nan, ok, threads)
             real(real64), intent(in) :: values(:) !! the population.
             real(real64), intent(out) :: s !! the sum.
             logical, intent(in), optional :: is_valid(:)
@@ -507,13 +563,20 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine sum_f64
         !> `pf_mean` over a 64-bit real array: `sum(w*x) / sum(w)`, REFINED.
         !>
         !> The quotient is taken first and corrected by `sum(w*(x - mu))/sum(w)`, so the result
         !> can sit one ulp from the naive quotient. See `pf_mean`'s own doc-comment for why that
         !> is the right answer and what it means for a test.
-        module subroutine mean_f64(values, m, is_valid, weights, skipnan, n_null, n_nan, ok)
+        module subroutine mean_f64(values, m, is_valid, weights, skipnan, n_null, n_nan, ok, threads)
             real(real64), intent(in) :: values(:) !! the population.
             real(real64), intent(out) :: m !! the mean; NaN when the population is empty.
             logical, intent(in), optional :: is_valid(:)
@@ -532,13 +595,20 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine mean_f64
         !> `pf_variance` over a 64-bit real array, computed in TWO passes.
         !>
         !> The mean is taken first and the central moment accumulated against it, so the result
         !> is shift-invariant to a few ulp: `pf_variance(x + 1e9)` agrees with `pf_variance(x)`,
         !> which the textbook `sum(x**2) - sum(x)**2/n` does not.
-        module subroutine variance_f64(values, v, is_valid, weights, weight_type, ddof, skipnan, n_null, n_nan, ok)
+        module subroutine variance_f64(values, v, is_valid, weights, weight_type, ddof, skipnan, n_null, n_nan, ok, threads)
             real(real64), intent(in) :: values(:) !! the population.
             real(real64), intent(out) :: v !! the variance; NaN when `n_valid <= ddof`.
             logical, intent(in), optional :: is_valid(:)
@@ -568,9 +638,16 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine variance_f64
         !> `pf_stddev` over a 64-bit real array: the square root of `pf_variance`.
-        module subroutine stddev_f64(values, sd, is_valid, weights, weight_type, ddof, skipnan, n_null, n_nan, ok)
+        module subroutine stddev_f64(values, sd, is_valid, weights, weight_type, ddof, skipnan, n_null, n_nan, ok, threads)
             real(real64), intent(in) :: values(:) !! the population.
             real(real64), intent(out) :: sd !! the standard deviation; NaN when the variance is.
             logical, intent(in), optional :: is_valid(:)
@@ -600,12 +677,19 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine stddev_f64
         !> `pf_sem` over a 64-bit real array: the standard error of the mean.
         !>
         !> `stddev / sqrt(n_eff)`, where `n_eff` is the population size unweighted and the count
         !> named by `weight_type` otherwise. Matches `scipy.stats.sem` at the default `ddof=1`.
-        module subroutine sem_f64(values, se, is_valid, weights, weight_type, ddof, skipnan, n_null, n_nan, ok)
+        module subroutine sem_f64(values, se, is_valid, weights, weight_type, ddof, skipnan, n_null, n_nan, ok, threads)
             real(real64), intent(in) :: values(:) !! the population.
             real(real64), intent(out) :: se !! the standard error; NaN when the standard deviation is.
             logical, intent(in), optional :: is_valid(:)
@@ -635,6 +719,13 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine sem_f64
         !> `pf_skewness` over a 64-bit real array: the third standardised moment.
         !>
@@ -642,7 +733,7 @@ module parquet_stats
         !> takes one, and an argument that can never do anything is worse than an absent one.
         !> `weight_type` is present because the bias correction counts through `n_eff`.
         !> NaN when the variance is zero, or when `n_valid < 3` and `bias` is .false.
-        module subroutine skewness_f64(values, g, is_valid, weights, weight_type, bias, skipnan, n_null, n_nan, ok)
+        module subroutine skewness_f64(values, g, is_valid, weights, weight_type, bias, skipnan, n_null, n_nan, ok, threads)
             real(real64), intent(in) :: values(:) !! the population.
             real(real64), intent(out) :: g !! the skewness.
             logical, intent(in), optional :: is_valid(:)
@@ -670,12 +761,19 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine skewness_f64
         !> `pf_kurtosis` over a 64-bit real array: the fourth standardised moment.
         !>
         !> `ddof` is absent for the same reason as on `pf_skewness`. NaN when the variance is
         !> zero, or when `n_valid < 4` and `bias` is .false.
-        module subroutine kurtosis_f64(values, k, is_valid, weights, weight_type, bias, excess, skipnan, n_null, n_nan, ok)
+        module subroutine kurtosis_f64(values, k, is_valid, weights, weight_type, bias, excess, skipnan, n_null, n_nan, ok, threads)
             real(real64), intent(in) :: values(:) !! the population.
             real(real64), intent(out) :: k !! the kurtosis, excess by default.
             logical, intent(in), optional :: is_valid(:)
@@ -706,6 +804,13 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine kurtosis_f64
         !> `pf_moments` over a 64-bit real array: every tier-A quantity in ONE pair of passes.
         !>
@@ -717,7 +822,7 @@ module parquet_stats
         !> exception to the canonical optional order, and their own order is fixed here.
         module subroutine moments_f64(values, n_valid, mean, variance, stddev, sem, skewness, &
                 kurtosis, vsum, vmin, vmax, is_valid, weights, weight_type, ddof, bias, excess, &
-                skipnan, n_null, n_nan)
+                skipnan, n_null, n_nan, threads)
             real(real64), intent(in) :: values(:) !! the population.
             integer(int64), intent(out), optional :: n_valid !! how many elements were used.
             real(real64), intent(out), optional :: mean !! the mean; NaN when empty.
@@ -759,13 +864,20 @@ module parquet_stats
             !! how many elements `is_valid` excluded.
             integer(int64), intent(out), optional :: n_nan
             !! how many were excluded as NaN and were not already null.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine moments_f64
     end interface
     !
     ! ---- The per-kind entry layer (implemented in parquet_stats_kernel) ----
     interface
         !> `pf_sum` over a 32-bit integer array.
-        module subroutine sum_i32(values, s, is_valid, weights, n_null, ok)
+        module subroutine sum_i32(values, s, is_valid, weights, n_null, ok, threads)
             integer(int32), intent(in) :: values(:) !! the population.
             real(real64), intent(out) :: s !! the sum.
             logical, intent(in), optional :: is_valid(:)
@@ -778,9 +890,16 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine sum_i32
         !> `pf_mean` over a 32-bit integer array.
-        module subroutine mean_i32(values, m, is_valid, weights, n_null, ok)
+        module subroutine mean_i32(values, m, is_valid, weights, n_null, ok, threads)
             integer(int32), intent(in) :: values(:) !! the population.
             real(real64), intent(out) :: m !! the mean; NaN when the population is empty.
             logical, intent(in), optional :: is_valid(:)
@@ -793,9 +912,16 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine mean_i32
         !> `pf_variance` over a 32-bit integer array.
-        module subroutine variance_i32(values, v, is_valid, weights, weight_type, ddof, n_null, ok)
+        module subroutine variance_i32(values, v, is_valid, weights, weight_type, ddof, n_null, ok, threads)
             integer(int32), intent(in) :: values(:) !! the population.
             real(real64), intent(out) :: v !! the variance; NaN when `n_valid <= ddof`.
             logical, intent(in), optional :: is_valid(:)
@@ -819,9 +945,16 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine variance_i32
         !> `pf_stddev` over a 32-bit integer array.
-        module subroutine stddev_i32(values, sd, is_valid, weights, weight_type, ddof, n_null, ok)
+        module subroutine stddev_i32(values, sd, is_valid, weights, weight_type, ddof, n_null, ok, threads)
             integer(int32), intent(in) :: values(:) !! the population.
             real(real64), intent(out) :: sd !! the standard deviation; NaN when the variance is.
             logical, intent(in), optional :: is_valid(:)
@@ -845,9 +978,16 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine stddev_i32
         !> `pf_sem` over a 32-bit integer array.
-        module subroutine sem_i32(values, se, is_valid, weights, weight_type, ddof, n_null, ok)
+        module subroutine sem_i32(values, se, is_valid, weights, weight_type, ddof, n_null, ok, threads)
             integer(int32), intent(in) :: values(:) !! the population.
             real(real64), intent(out) :: se !! the standard error; NaN when the standard deviation is.
             logical, intent(in), optional :: is_valid(:)
@@ -871,9 +1011,16 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine sem_i32
         !> `pf_skewness` over a 32-bit integer array.
-        module subroutine skewness_i32(values, g, is_valid, weights, weight_type, bias, n_null, ok)
+        module subroutine skewness_i32(values, g, is_valid, weights, weight_type, bias, n_null, ok, threads)
             integer(int32), intent(in) :: values(:) !! the population.
             real(real64), intent(out) :: g !! the skewness.
             logical, intent(in), optional :: is_valid(:)
@@ -895,9 +1042,16 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine skewness_i32
         !> `pf_kurtosis` over a 32-bit integer array.
-        module subroutine kurtosis_i32(values, k, is_valid, weights, weight_type, bias, excess, n_null, ok)
+        module subroutine kurtosis_i32(values, k, is_valid, weights, weight_type, bias, excess, n_null, ok, threads)
             integer(int32), intent(in) :: values(:) !! the population.
             real(real64), intent(out) :: k !! the kurtosis, excess by default.
             logical, intent(in), optional :: is_valid(:)
@@ -922,11 +1076,18 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine kurtosis_i32
         !> `pf_moments` over a 32-bit integer array: every tier-A quantity in one pair of passes.
         module subroutine moments_i32(values, n_valid, mean, variance, stddev, sem, skewness, kurtosis, vsum, vmin, &
                 vmax, is_valid, weights, weight_type, ddof, bias, excess, &
-                n_null)
+                n_null, threads)
             integer(int32), intent(in) :: values(:) !! the population.
             integer(int64), intent(out), optional :: n_valid !! how many elements were used.
             real(real64), intent(out), optional :: mean !! the mean; NaN when empty.
@@ -962,6 +1123,13 @@ module parquet_stats
             !! .false. adds 3 back, giving the raw fourth-moment ratio.
             integer(int64), intent(out), optional :: n_null
             !! how many elements `is_valid` excluded.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine moments_i32
         !> `pf_sum` over a 64-bit integer array.
         !>
@@ -969,7 +1137,7 @@ module parquet_stats
         !> every statistic here is computed in. That is unavoidable for a mean and irrelevant for
         !> the workloads this serves -- nobody averages an object ID -- but it is NOT irrelevant
         !> for a median, which `pf_nth_quantile` computes exactly on the original array.
-        module subroutine sum_i64(values, s, is_valid, weights, n_null, ok)
+        module subroutine sum_i64(values, s, is_valid, weights, n_null, ok, threads)
             integer(int64), intent(in) :: values(:) !! the population.
             real(real64), intent(out) :: s !! the sum.
             logical, intent(in), optional :: is_valid(:)
@@ -982,6 +1150,13 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine sum_i64
         !> `pf_mean` over a 64-bit integer array.
         !>
@@ -989,7 +1164,7 @@ module parquet_stats
         !> every statistic here is computed in. That is unavoidable for a mean and irrelevant for
         !> the workloads this serves -- nobody averages an object ID -- but it is NOT irrelevant
         !> for a median, which `pf_nth_quantile` computes exactly on the original array.
-        module subroutine mean_i64(values, m, is_valid, weights, n_null, ok)
+        module subroutine mean_i64(values, m, is_valid, weights, n_null, ok, threads)
             integer(int64), intent(in) :: values(:) !! the population.
             real(real64), intent(out) :: m !! the mean; NaN when the population is empty.
             logical, intent(in), optional :: is_valid(:)
@@ -1002,6 +1177,13 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine mean_i64
         !> `pf_variance` over a 64-bit integer array.
         !>
@@ -1009,7 +1191,7 @@ module parquet_stats
         !> every statistic here is computed in. That is unavoidable for a mean and irrelevant for
         !> the workloads this serves -- nobody averages an object ID -- but it is NOT irrelevant
         !> for a median, which `pf_nth_quantile` computes exactly on the original array.
-        module subroutine variance_i64(values, v, is_valid, weights, weight_type, ddof, n_null, ok)
+        module subroutine variance_i64(values, v, is_valid, weights, weight_type, ddof, n_null, ok, threads)
             integer(int64), intent(in) :: values(:) !! the population.
             real(real64), intent(out) :: v !! the variance; NaN when `n_valid <= ddof`.
             logical, intent(in), optional :: is_valid(:)
@@ -1033,6 +1215,13 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine variance_i64
         !> `pf_stddev` over a 64-bit integer array.
         !>
@@ -1040,7 +1229,7 @@ module parquet_stats
         !> every statistic here is computed in. That is unavoidable for a mean and irrelevant for
         !> the workloads this serves -- nobody averages an object ID -- but it is NOT irrelevant
         !> for a median, which `pf_nth_quantile` computes exactly on the original array.
-        module subroutine stddev_i64(values, sd, is_valid, weights, weight_type, ddof, n_null, ok)
+        module subroutine stddev_i64(values, sd, is_valid, weights, weight_type, ddof, n_null, ok, threads)
             integer(int64), intent(in) :: values(:) !! the population.
             real(real64), intent(out) :: sd !! the standard deviation; NaN when the variance is.
             logical, intent(in), optional :: is_valid(:)
@@ -1064,6 +1253,13 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine stddev_i64
         !> `pf_sem` over a 64-bit integer array.
         !>
@@ -1071,7 +1267,7 @@ module parquet_stats
         !> every statistic here is computed in. That is unavoidable for a mean and irrelevant for
         !> the workloads this serves -- nobody averages an object ID -- but it is NOT irrelevant
         !> for a median, which `pf_nth_quantile` computes exactly on the original array.
-        module subroutine sem_i64(values, se, is_valid, weights, weight_type, ddof, n_null, ok)
+        module subroutine sem_i64(values, se, is_valid, weights, weight_type, ddof, n_null, ok, threads)
             integer(int64), intent(in) :: values(:) !! the population.
             real(real64), intent(out) :: se !! the standard error; NaN when the standard deviation is.
             logical, intent(in), optional :: is_valid(:)
@@ -1095,6 +1291,13 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine sem_i64
         !> `pf_skewness` over a 64-bit integer array.
         !>
@@ -1102,7 +1305,7 @@ module parquet_stats
         !> every statistic here is computed in. That is unavoidable for a mean and irrelevant for
         !> the workloads this serves -- nobody averages an object ID -- but it is NOT irrelevant
         !> for a median, which `pf_nth_quantile` computes exactly on the original array.
-        module subroutine skewness_i64(values, g, is_valid, weights, weight_type, bias, n_null, ok)
+        module subroutine skewness_i64(values, g, is_valid, weights, weight_type, bias, n_null, ok, threads)
             integer(int64), intent(in) :: values(:) !! the population.
             real(real64), intent(out) :: g !! the skewness.
             logical, intent(in), optional :: is_valid(:)
@@ -1124,6 +1327,13 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine skewness_i64
         !> `pf_kurtosis` over a 64-bit integer array.
         !>
@@ -1131,7 +1341,7 @@ module parquet_stats
         !> every statistic here is computed in. That is unavoidable for a mean and irrelevant for
         !> the workloads this serves -- nobody averages an object ID -- but it is NOT irrelevant
         !> for a median, which `pf_nth_quantile` computes exactly on the original array.
-        module subroutine kurtosis_i64(values, k, is_valid, weights, weight_type, bias, excess, n_null, ok)
+        module subroutine kurtosis_i64(values, k, is_valid, weights, weight_type, bias, excess, n_null, ok, threads)
             integer(int64), intent(in) :: values(:) !! the population.
             real(real64), intent(out) :: k !! the kurtosis, excess by default.
             logical, intent(in), optional :: is_valid(:)
@@ -1156,6 +1366,13 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine kurtosis_i64
         !> `pf_moments` over a 64-bit integer array: every tier-A quantity in one pair of passes.
         !>
@@ -1165,7 +1382,7 @@ module parquet_stats
         !> for a median, which `pf_nth_quantile` computes exactly on the original array.
         module subroutine moments_i64(values, n_valid, mean, variance, stddev, sem, skewness, kurtosis, vsum, vmin, &
                 vmax, is_valid, weights, weight_type, ddof, bias, excess, &
-                n_null)
+                n_null, threads)
             integer(int64), intent(in) :: values(:) !! the population.
             integer(int64), intent(out), optional :: n_valid !! how many elements were used.
             real(real64), intent(out), optional :: mean !! the mean; NaN when empty.
@@ -1201,9 +1418,16 @@ module parquet_stats
             !! .false. adds 3 back, giving the raw fourth-moment ratio.
             integer(int64), intent(out), optional :: n_null
             !! how many elements `is_valid` excluded.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine moments_i64
         !> `pf_sum` over a 32-bit real array.
-        module subroutine sum_f32(values, s, is_valid, weights, skipnan, n_null, n_nan, ok)
+        module subroutine sum_f32(values, s, is_valid, weights, skipnan, n_null, n_nan, ok, threads)
             real(real32), intent(in) :: values(:) !! the population.
             real(real64), intent(out) :: s !! the sum.
             logical, intent(in), optional :: is_valid(:)
@@ -1222,9 +1446,16 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine sum_f32
         !> `pf_mean` over a 32-bit real array.
-        module subroutine mean_f32(values, m, is_valid, weights, skipnan, n_null, n_nan, ok)
+        module subroutine mean_f32(values, m, is_valid, weights, skipnan, n_null, n_nan, ok, threads)
             real(real32), intent(in) :: values(:) !! the population.
             real(real64), intent(out) :: m !! the mean; NaN when the population is empty.
             logical, intent(in), optional :: is_valid(:)
@@ -1243,9 +1474,16 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine mean_f32
         !> `pf_variance` over a 32-bit real array.
-        module subroutine variance_f32(values, v, is_valid, weights, weight_type, ddof, skipnan, n_null, n_nan, ok)
+        module subroutine variance_f32(values, v, is_valid, weights, weight_type, ddof, skipnan, n_null, n_nan, ok, threads)
             real(real32), intent(in) :: values(:) !! the population.
             real(real64), intent(out) :: v !! the variance; NaN when `n_valid <= ddof`.
             logical, intent(in), optional :: is_valid(:)
@@ -1275,9 +1513,16 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine variance_f32
         !> `pf_stddev` over a 32-bit real array.
-        module subroutine stddev_f32(values, sd, is_valid, weights, weight_type, ddof, skipnan, n_null, n_nan, ok)
+        module subroutine stddev_f32(values, sd, is_valid, weights, weight_type, ddof, skipnan, n_null, n_nan, ok, threads)
             real(real32), intent(in) :: values(:) !! the population.
             real(real64), intent(out) :: sd !! the standard deviation; NaN when the variance is.
             logical, intent(in), optional :: is_valid(:)
@@ -1307,9 +1552,16 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine stddev_f32
         !> `pf_sem` over a 32-bit real array.
-        module subroutine sem_f32(values, se, is_valid, weights, weight_type, ddof, skipnan, n_null, n_nan, ok)
+        module subroutine sem_f32(values, se, is_valid, weights, weight_type, ddof, skipnan, n_null, n_nan, ok, threads)
             real(real32), intent(in) :: values(:) !! the population.
             real(real64), intent(out) :: se !! the standard error; NaN when the standard deviation is.
             logical, intent(in), optional :: is_valid(:)
@@ -1339,9 +1591,16 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine sem_f32
         !> `pf_skewness` over a 32-bit real array.
-        module subroutine skewness_f32(values, g, is_valid, weights, weight_type, bias, skipnan, n_null, n_nan, ok)
+        module subroutine skewness_f32(values, g, is_valid, weights, weight_type, bias, skipnan, n_null, n_nan, ok, threads)
             real(real32), intent(in) :: values(:) !! the population.
             real(real64), intent(out) :: g !! the skewness.
             logical, intent(in), optional :: is_valid(:)
@@ -1369,9 +1628,16 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine skewness_f32
         !> `pf_kurtosis` over a 32-bit real array.
-        module subroutine kurtosis_f32(values, k, is_valid, weights, weight_type, bias, excess, skipnan, n_null, n_nan, ok)
+        module subroutine kurtosis_f32(values, k, is_valid, weights, weight_type, bias, excess, skipnan, n_null, n_nan, ok, threads)
             real(real32), intent(in) :: values(:) !! the population.
             real(real64), intent(out) :: k !! the kurtosis, excess by default.
             logical, intent(in), optional :: is_valid(:)
@@ -1402,11 +1668,18 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine kurtosis_f32
         !> `pf_moments` over a 32-bit real array: every tier-A quantity in one pair of passes.
         module subroutine moments_f32(values, n_valid, mean, variance, stddev, sem, skewness, kurtosis, vsum, vmin, &
                 vmax, is_valid, weights, weight_type, ddof, bias, excess, &
-                skipnan, n_null, n_nan)
+                skipnan, n_null, n_nan, threads)
             real(real32), intent(in) :: values(:) !! the population.
             integer(int64), intent(out), optional :: n_valid !! how many elements were used.
             real(real64), intent(out), optional :: mean !! the mean; NaN when empty.
@@ -1448,12 +1721,19 @@ module parquet_stats
             !! how many elements `is_valid` excluded.
             integer(int64), intent(out), optional :: n_nan
             !! how many were excluded as NaN and were not already null.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine moments_f32
         !> `pf_sum` over a logical array.
         !>
         !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
         !> fraction that are true.
-        module subroutine sum_bool(values, s, is_valid, weights, n_null, ok)
+        module subroutine sum_bool(values, s, is_valid, weights, n_null, ok, threads)
             logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
             real(real64), intent(out) :: s !! the sum.
             logical, intent(in), optional :: is_valid(:)
@@ -1466,12 +1746,19 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine sum_bool
         !> `pf_mean` over a logical array.
         !>
         !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
         !> fraction that are true.
-        module subroutine mean_bool(values, m, is_valid, weights, n_null, ok)
+        module subroutine mean_bool(values, m, is_valid, weights, n_null, ok, threads)
             logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
             real(real64), intent(out) :: m !! the mean; NaN when the population is empty.
             logical, intent(in), optional :: is_valid(:)
@@ -1484,12 +1771,19 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine mean_bool
         !> `pf_variance` over a logical array.
         !>
         !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
         !> fraction that are true.
-        module subroutine variance_bool(values, v, is_valid, weights, weight_type, ddof, n_null, ok)
+        module subroutine variance_bool(values, v, is_valid, weights, weight_type, ddof, n_null, ok, threads)
             logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
             real(real64), intent(out) :: v !! the variance; NaN when `n_valid <= ddof`.
             logical, intent(in), optional :: is_valid(:)
@@ -1513,12 +1807,19 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine variance_bool
         !> `pf_stddev` over a logical array.
         !>
         !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
         !> fraction that are true.
-        module subroutine stddev_bool(values, sd, is_valid, weights, weight_type, ddof, n_null, ok)
+        module subroutine stddev_bool(values, sd, is_valid, weights, weight_type, ddof, n_null, ok, threads)
             logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
             real(real64), intent(out) :: sd !! the standard deviation; NaN when the variance is.
             logical, intent(in), optional :: is_valid(:)
@@ -1542,12 +1843,19 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine stddev_bool
         !> `pf_sem` over a logical array.
         !>
         !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
         !> fraction that are true.
-        module subroutine sem_bool(values, se, is_valid, weights, weight_type, ddof, n_null, ok)
+        module subroutine sem_bool(values, se, is_valid, weights, weight_type, ddof, n_null, ok, threads)
             logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
             real(real64), intent(out) :: se !! the standard error; NaN when the standard deviation is.
             logical, intent(in), optional :: is_valid(:)
@@ -1571,12 +1879,19 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine sem_bool
         !> `pf_skewness` over a logical array.
         !>
         !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
         !> fraction that are true.
-        module subroutine skewness_bool(values, g, is_valid, weights, weight_type, bias, n_null, ok)
+        module subroutine skewness_bool(values, g, is_valid, weights, weight_type, bias, n_null, ok, threads)
             logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
             real(real64), intent(out) :: g !! the skewness.
             logical, intent(in), optional :: is_valid(:)
@@ -1598,12 +1913,19 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine skewness_bool
         !> `pf_kurtosis` over a logical array.
         !>
         !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
         !> fraction that are true.
-        module subroutine kurtosis_bool(values, k, is_valid, weights, weight_type, bias, excess, n_null, ok)
+        module subroutine kurtosis_bool(values, k, is_valid, weights, weight_type, bias, excess, n_null, ok, threads)
             logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
             real(real64), intent(out) :: k !! the kurtosis, excess by default.
             logical, intent(in), optional :: is_valid(:)
@@ -1628,6 +1950,13 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine kurtosis_bool
         !> `pf_moments` over a logical array: every tier-A quantity in one pair of passes.
         !>
@@ -1635,7 +1964,7 @@ module parquet_stats
         !> fraction that are true.
         module subroutine moments_bool(values, n_valid, mean, variance, stddev, sem, skewness, kurtosis, vsum, vmin, &
                 vmax, is_valid, weights, weight_type, ddof, bias, excess, &
-                n_null)
+                n_null, threads)
             logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
             integer(int64), intent(out), optional :: n_valid !! how many elements were used.
             real(real64), intent(out), optional :: mean !! the mean; NaN when empty.
@@ -1671,6 +2000,13 @@ module parquet_stats
             !! .false. adds 3 back, giving the raw fourth-moment ratio.
             integer(int64), intent(out), optional :: n_null
             !! how many elements `is_valid` excluded.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine moments_bool
         !> `pf_sum` over a scalar numeric `parquet_column`.
         !>
@@ -1680,7 +2016,7 @@ module parquet_stats
         !> a vector column into one population is a different statistic and nobody should get it
         !> by accident. **The column's own validity is the only source of nullness**, so passing
         !> `is_valid=` alongside one aborts rather than silently preferring one of two sources.
-        module subroutine sum_col(values, s, is_valid, weights, skipnan, n_null, n_nan, ok)
+        module subroutine sum_col(values, s, is_valid, weights, skipnan, n_null, n_nan, ok, threads)
             type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
             real(real64), intent(out) :: s !! the sum.
             logical, intent(in), optional :: is_valid(:)
@@ -1699,6 +2035,13 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine sum_col
         !> `pf_mean` over a scalar numeric `parquet_column`.
         !>
@@ -1708,7 +2051,7 @@ module parquet_stats
         !> a vector column into one population is a different statistic and nobody should get it
         !> by accident. **The column's own validity is the only source of nullness**, so passing
         !> `is_valid=` alongside one aborts rather than silently preferring one of two sources.
-        module subroutine mean_col(values, m, is_valid, weights, skipnan, n_null, n_nan, ok)
+        module subroutine mean_col(values, m, is_valid, weights, skipnan, n_null, n_nan, ok, threads)
             type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
             real(real64), intent(out) :: m !! the mean; NaN when the population is empty.
             logical, intent(in), optional :: is_valid(:)
@@ -1727,6 +2070,13 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine mean_col
         !> `pf_variance` over a scalar numeric `parquet_column`.
         !>
@@ -1736,7 +2086,7 @@ module parquet_stats
         !> a vector column into one population is a different statistic and nobody should get it
         !> by accident. **The column's own validity is the only source of nullness**, so passing
         !> `is_valid=` alongside one aborts rather than silently preferring one of two sources.
-        module subroutine variance_col(values, v, is_valid, weights, weight_type, ddof, skipnan, n_null, n_nan, ok)
+        module subroutine variance_col(values, v, is_valid, weights, weight_type, ddof, skipnan, n_null, n_nan, ok, threads)
             type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
             real(real64), intent(out) :: v !! the variance; NaN when `n_valid <= ddof`.
             logical, intent(in), optional :: is_valid(:)
@@ -1766,6 +2116,13 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine variance_col
         !> `pf_stddev` over a scalar numeric `parquet_column`.
         !>
@@ -1775,7 +2132,7 @@ module parquet_stats
         !> a vector column into one population is a different statistic and nobody should get it
         !> by accident. **The column's own validity is the only source of nullness**, so passing
         !> `is_valid=` alongside one aborts rather than silently preferring one of two sources.
-        module subroutine stddev_col(values, sd, is_valid, weights, weight_type, ddof, skipnan, n_null, n_nan, ok)
+        module subroutine stddev_col(values, sd, is_valid, weights, weight_type, ddof, skipnan, n_null, n_nan, ok, threads)
             type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
             real(real64), intent(out) :: sd !! the standard deviation; NaN when the variance is.
             logical, intent(in), optional :: is_valid(:)
@@ -1805,6 +2162,13 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine stddev_col
         !> `pf_sem` over a scalar numeric `parquet_column`.
         !>
@@ -1814,7 +2178,7 @@ module parquet_stats
         !> a vector column into one population is a different statistic and nobody should get it
         !> by accident. **The column's own validity is the only source of nullness**, so passing
         !> `is_valid=` alongside one aborts rather than silently preferring one of two sources.
-        module subroutine sem_col(values, se, is_valid, weights, weight_type, ddof, skipnan, n_null, n_nan, ok)
+        module subroutine sem_col(values, se, is_valid, weights, weight_type, ddof, skipnan, n_null, n_nan, ok, threads)
             type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
             real(real64), intent(out) :: se !! the standard error; NaN when the standard deviation is.
             logical, intent(in), optional :: is_valid(:)
@@ -1844,6 +2208,13 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine sem_col
         !> `pf_skewness` over a scalar numeric `parquet_column`.
         !>
@@ -1853,7 +2224,7 @@ module parquet_stats
         !> a vector column into one population is a different statistic and nobody should get it
         !> by accident. **The column's own validity is the only source of nullness**, so passing
         !> `is_valid=` alongside one aborts rather than silently preferring one of two sources.
-        module subroutine skewness_col(values, g, is_valid, weights, weight_type, bias, skipnan, n_null, n_nan, ok)
+        module subroutine skewness_col(values, g, is_valid, weights, weight_type, bias, skipnan, n_null, n_nan, ok, threads)
             type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
             real(real64), intent(out) :: g !! the skewness.
             logical, intent(in), optional :: is_valid(:)
@@ -1881,6 +2252,13 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine skewness_col
         !> `pf_kurtosis` over a scalar numeric `parquet_column`.
         !>
@@ -1890,7 +2268,7 @@ module parquet_stats
         !> a vector column into one population is a different statistic and nobody should get it
         !> by accident. **The column's own validity is the only source of nullness**, so passing
         !> `is_valid=` alongside one aborts rather than silently preferring one of two sources.
-        module subroutine kurtosis_col(values, k, is_valid, weights, weight_type, bias, excess, skipnan, n_null, n_nan, ok)
+        module subroutine kurtosis_col(values, k, is_valid, weights, weight_type, bias, excess, skipnan, n_null, n_nan, ok, threads)
             type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
             real(real64), intent(out) :: k !! the kurtosis, excess by default.
             logical, intent(in), optional :: is_valid(:)
@@ -1921,6 +2299,13 @@ module parquet_stats
             logical, intent(out), optional :: ok
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine kurtosis_col
         !> `pf_moments` over a scalar numeric `parquet_column`: every tier-A quantity in one pair of passes.
         !>
@@ -1932,7 +2317,7 @@ module parquet_stats
         !> `is_valid=` alongside one aborts rather than silently preferring one of two sources.
         module subroutine moments_col(values, n_valid, mean, variance, stddev, sem, skewness, kurtosis, vsum, vmin, &
                 vmax, is_valid, weights, weight_type, ddof, bias, excess, &
-                skipnan, n_null, n_nan)
+                skipnan, n_null, n_nan, threads)
             type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
             integer(int64), intent(out), optional :: n_valid !! how many elements were used.
             real(real64), intent(out), optional :: mean !! the mean; NaN when empty.
@@ -1974,9 +2359,16 @@ module parquet_stats
             !! how many elements `is_valid` excluded.
             integer(int64), intent(out), optional :: n_nan
             !! how many were excluded as NaN and were not already null.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine moments_col
         !> `%compute` over a 32-bit integer array.
-        module subroutine obj_compute_i32(self, values, retain, is_valid, weights, weight_type)
+        module subroutine obj_compute_i32(self, values, retain, is_valid, weights, weight_type, threads)
             class(pf_stats), intent(inout) :: self
             !! the accumulator; any previous contents are discarded.
             integer(int32), intent(in) :: values(:) !! the population.
@@ -1997,6 +2389,13 @@ module parquet_stats
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
             !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine obj_compute_i32
         !> `%update` over a 32-bit integer array.
         module subroutine obj_update_i32(self, values, is_valid, weights)
@@ -2014,7 +2413,7 @@ module parquet_stats
         !> every statistic here is computed in. That is unavoidable for a mean and irrelevant for
         !> the workloads this serves -- nobody averages an object ID -- but it is NOT irrelevant
         !> for a median, which `pf_nth_quantile` computes exactly on the original array.
-        module subroutine obj_compute_i64(self, values, retain, is_valid, weights, weight_type)
+        module subroutine obj_compute_i64(self, values, retain, is_valid, weights, weight_type, threads)
             class(pf_stats), intent(inout) :: self
             !! the accumulator; any previous contents are discarded.
             integer(int64), intent(in) :: values(:) !! the population.
@@ -2035,6 +2434,13 @@ module parquet_stats
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
             !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine obj_compute_i64
         !> `%update` over a 64-bit integer array.
         module subroutine obj_update_i64(self, values, is_valid, weights)
@@ -2047,7 +2453,7 @@ module parquet_stats
             !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
         end subroutine obj_update_i64
         !> `%compute` over a 32-bit real array.
-        module subroutine obj_compute_f32(self, values, retain, is_valid, weights, weight_type, skipnan)
+        module subroutine obj_compute_f32(self, values, retain, is_valid, weights, weight_type, skipnan, threads)
             class(pf_stats), intent(inout) :: self
             !! the accumulator; any previous contents are discarded.
             real(real32), intent(in) :: values(:) !! the population.
@@ -2072,6 +2478,13 @@ module parquet_stats
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
             !! which one NaN makes every answer NaN.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine obj_compute_f32
         !> `%update` over a 32-bit real array.
         module subroutine obj_update_f32(self, values, is_valid, weights)
@@ -2087,7 +2500,7 @@ module parquet_stats
         !>
         !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
         !> fraction that are true.
-        module subroutine obj_compute_bool(self, values, retain, is_valid, weights, weight_type)
+        module subroutine obj_compute_bool(self, values, retain, is_valid, weights, weight_type, threads)
             class(pf_stats), intent(inout) :: self
             !! the accumulator; any previous contents are discarded.
             logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
@@ -2108,6 +2521,13 @@ module parquet_stats
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
             !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine obj_compute_bool
         !> `%update` over a logical array.
         module subroutine obj_update_bool(self, values, is_valid, weights)
@@ -2127,7 +2547,7 @@ module parquet_stats
         !> a vector column into one population is a different statistic and nobody should get it
         !> by accident. **The column's own validity is the only source of nullness**, so passing
         !> `is_valid=` alongside one aborts rather than silently preferring one of two sources.
-        module subroutine obj_compute_col(self, values, retain, is_valid, weights, weight_type, skipnan)
+        module subroutine obj_compute_col(self, values, retain, is_valid, weights, weight_type, skipnan, threads)
             class(pf_stats), intent(inout) :: self
             !! the accumulator; any previous contents are discarded.
             type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
@@ -2152,6 +2572,13 @@ module parquet_stats
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
             !! which one NaN makes every answer NaN.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine obj_compute_col
         !> `%update` over a scalar numeric `parquet_column`.
         module subroutine obj_update_col(self, values, is_valid, weights)
@@ -2172,7 +2599,8 @@ module parquet_stats
         !! Two traversals, whatever is asked of the result afterwards. Any previous contents of
         !! `self` are discarded, so an object may be reused across a loop of groups without
         !! `%clear` in between.
-        module subroutine obj_compute_f64(self, values, retain, is_valid, weights, weight_type, skipnan)
+        module subroutine obj_compute_f64(self, values, retain, is_valid, weights, weight_type, &
+                skipnan, threads)
             class(pf_stats), intent(inout) :: self
             !! the accumulator; any previous contents are discarded.
             real(real64), intent(in) :: values(:) !! the population, before exclusions.
@@ -2197,6 +2625,13 @@ module parquet_stats
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
             !! which one NaN makes every answer NaN.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
         end subroutine obj_compute_f64
         !> Arms an empty accumulator for a loop of `%update`, or for a `%merge`.
         !!
@@ -2454,6 +2889,29 @@ module parquet_stats
         !! observable with no reset makes every test after the first vacuous.
         module subroutine parquet_debug_reset_stats_scans()
         end subroutine parquet_debug_reset_stats_scans
+        !> The team size pass two last opened; 1 means it ran serially.
+        !!
+        !! Test-only, and the negative control for every threading assertion in this module. An
+        !! A/B comparing `threads=1` against `threads=8` passes just as happily against an engine
+        !! that opened no team at all -- the answers are bit-identical either way, which is the
+        !! whole point of the decomposition -- so an equality test alone proves nothing about
+        !! threading. This is what tells the two apart.
+        !!
+        !! Process-global and unsynchronised, like the traversal counter beside it.
+        module function parquet_debug_stats_team() result(res)
+            integer(int64) :: res !! threads pass two used on the most recent engine call.
+        end function parquet_debug_stats_team
+        !> Overrides the survivors-per-thread floor pass two applies before opening a team.
+        !!
+        !! Test-only. The measured floor is tens of thousands of elements per thread (see
+        !! `STATS_MIN_PER_THREAD` in `src/parquet_stats_core.f90`), which no unit-test fixture
+        !! reaches -- so without this hook every test would take the serial branch and the threaded
+        !! one would ship untested. CLAUDE.md's size-threshold rule requires reaching both sides.
+        !!
+        !! `0` teams up at any size; a negative value restores the measured floor.
+        module subroutine parquet_debug_set_stats_min_per_thread(n)
+            integer(int64), intent(in) :: n !! survivors per thread; 0 forces, negative restores.
+        end subroutine parquet_debug_set_stats_min_per_thread
     end interface
     !
 end module parquet_stats ! GCOVR_EXCL_LINE

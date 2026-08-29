@@ -46,6 +46,12 @@
 !! through `ieee_value`, because building one with `anint`/`int` traps under nagfor's `-ieee=stop`.
 submodule (parquet_stats) parquet_stats_core
     use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_quiet_nan
+#ifdef _OPENMP
+    ! Only for the team observable below, which is written from inside the region so that it
+    ! reports what RAN rather than what was decided. No other OpenMP entry point is called here:
+    ! the thread COUNT comes from `resolve_thread_count`, one tier down.
+    use omp_lib, only : omp_get_num_threads
+#endif
     implicit none
 
     !> Elements per block of the fixed decomposition.
@@ -67,6 +73,50 @@ submodule (parquet_stats) parquet_stats_core
     !!
     !! One level per bit of an `integer(int64)` block count, so it cannot be reached.
     integer, parameter :: STATS_MAXLEV = 63
+
+    !> Survivors each thread must get from pass two before a team is worth opening.
+    !!
+    !! **Measured, on the machine and with the harness named below, not chosen.**
+    !! `bench/benchmark_stats.sh --mode=thread` times pass two over a resident buffer on a thread
+    !! ladder; on machine A (gfortran 15.2, 8 cores) the speedup at 8 threads runs
+    !!
+    !!     n =    16384   32768   65536  131072  262144  524288    1e6    1e7    1e8
+    !!     8t   =  0.55x   0.66x   0.99x   1.23x   1.57x   1.84x  1.91x  2.22x  2.31x
+    !!
+    !! so a team opened below about 32768 survivors PER THREAD is a loss, and at 16384 elements
+    !! with eight threads it is a **1.8x loss** rather than a small one. The rule below therefore
+    !! caps the team at `n / STATS_MIN_PER_THREAD` and runs serially when that leaves fewer than
+    !! two, which admits no measured loss at any size on that ladder.
+    !!
+    !! **It is deliberately NOT `tail_team`'s floor**, though the shape is the same: that one is
+    !! for a memcpy-shaped pass and its own comment says one number cannot be right for both
+    !! profiles. Pass two is compute-bound -- eight flops per element over four independent
+    !! accumulators -- so it wants its own number.
+    !!
+    !! **This is a `parquet_debug_set_*` hook, not a setting**, per the design's settings analysis:
+    !! it changes how fast the module runs and not what it answers, so it would pass the admission
+    !! test, but no user has a reason to tune it and its only job is to let a test reach both sides
+    !! of a size-dependent branch (CLAUDE.md's size-threshold rule).
+    integer(int64), parameter :: STATS_MIN_PER_THREAD = 32768_int64
+
+    !> Test-only override for `STATS_MIN_PER_THREAD`; negative means the measured value applies.
+    integer(int64), save :: dbg_stats_min_per_thread = -1_int64
+
+    !> The team size pass two actually ran on, most recently; 1 means it ran serially.
+    !!
+    !! Read by `parquet_debug_stats_team()` and by nothing else. It exists because **an equality
+    !! test cannot see threading**: comparing `threads=1` against `threads=8` passes identically
+    !! against an engine that never opens a team, which is precisely what the fixed decomposition
+    !! guarantees. Without this, every threading assertion in the suite would be vacuous.
+    !!
+    !! **It is written from INSIDE the region, by `omp_get_num_threads`, and that is the whole
+    !! point.** Recording instead what `stats_pass_two_team` decided would make the observable
+    !! agree with the engine's intention rather than with its behaviour -- a mutation deleting the
+    !! `!$omp` directive outright would leave it still reporting 8, and the negative control it
+    !! exists to be would pass against an engine that had stopped threading entirely. That was not
+    !! hypothetical: the first version of this counter did exactly that, and a mutation round found
+    !! it by surviving.
+    integer(int64), save :: stats_team_used = 1_int64
 
 
 contains
@@ -184,7 +234,7 @@ contains
     !! The unweighted, mask-free, NaN-skipping case gets its own compaction loop. It is the shape
     !! nearly every call has, and giving it a loop with no per-element `present` test or weight
     !! branch is the difference between a tight copy and a predicted branch per element.
-    subroutine stats_engine(values, what, is_valid, weights, skipnan, acc, keep_x, keep_w)
+    subroutine stats_engine(values, what, is_valid, weights, skipnan, acc, keep_x, keep_w, threads)
         real(real64), intent(in) :: values(:)                 !! the population, before exclusions.
         character(len=*), intent(in) :: what                  !! the public procedure's name.
         logical, intent(in), optional :: is_valid(:)          !! per element: .false. marks a null.
@@ -197,11 +247,16 @@ contains
         !! re-deriving it is what lets a retaining `%compute` cost two traversals rather than three.
         real(real64), allocatable, intent(out), optional :: keep_w(:)
         !! likewise their weights, allocated only when `weights` was supplied.
+        integer, intent(in), optional :: threads
+        !! how many threads pass two may use. Absent takes the automatic rule; see
+        !! `stats_pass_two_team`. **The answer does not depend on this argument** -- the block
+        !! decomposition is a function of the population size alone, so every thread count,
+        !! including 1 and including a serial build, returns the identical bits.
 
         real(real64), allocatable :: xb(:), wb(:), pw(:), px(:), q1(:), q2(:), q3(:), q4(:)
-        real(real64) :: x, w, d, dd, sw, sx, s1, s2, s3, s4, mu, delta
-        integer(int64) :: nv, m, nb, i, c, lo, hi, j
-        logical :: skip, weighted, masked
+        real(real64) :: x, w, sw, sx, mu, delta
+        integer(int64) :: nv, m, nb, i, c, j, team
+        logical :: skip, weighted, masked, threaded
 
         nv = size(values, kind=int64)
         call stats_check_sizes(nv, what, is_valid, weights)
@@ -345,38 +400,41 @@ contains
         ! because its derivative there vanishes, and the higher ones are not. `m3` picks the error
         ! up linearly through `3*delta*m2`, which at an offset of 1e9 was measured costing eight
         ! significant digits of the skewness while the variance was still correct to fifteen.
+        !
+        ! **Threaded over blocks, and that cannot move a bit.** Each block writes only its own
+        ! `q1(j)..q4(j)` from values only it reads, and the four `pair_reduce` calls below then walk
+        ! a tree fixed by `nb` alone -- so who computed which block is not observable in the result.
+        ! `bench/benchmark_stats.sh --mode=thread` asserts exactly that before reporting any timing,
+        ! and `test_threading_changes_no_bit` asserts it in the suite.
+        !
+        ! Pass ONE is deliberately left serial. Its compaction is a prefix-dependent scatter -- the
+        ! slot an element lands in depends on how many earlier ones were excluded -- so threading it
+        ! needs a count-then-scatter restructure rather than a directive. It is roughly half the
+        ! call and the restructure is not free; see feature_pandas_S4.md's P5 section.
         allocate(q1(nb), q2(nb), q3(nb), q4(nb))
-        do j = 1_int64, nb
-            lo = (j - 1_int64) * STATS_BLOCK + 1_int64
-            hi = min(j * STATS_BLOCK, m)
-            s1 = 0.0_real64
-            s2 = 0.0_real64
-            s3 = 0.0_real64
-            s4 = 0.0_real64
-            if (weighted) then
-                do i = lo, hi
-                    d = xb(i) - mu
-                    dd = d * d
-                    s1 = s1 + wb(i) * d
-                    s2 = s2 + wb(i) * dd
-                    s3 = s3 + wb(i) * dd * d
-                    s4 = s4 + wb(i) * dd * dd
-                end do
-            else
-                do i = lo, hi
-                    d = xb(i) - mu
-                    dd = d * d
-                    s1 = s1 + d
-                    s2 = s2 + dd
-                    s3 = s3 + dd * d
-                    s4 = s4 + dd * dd
-                end do
-            end if
-            q1(j) = s1
-            q2(j) = s2
-            q3(j) = s3
-            q4(j) = s4
-        end do
+        team = stats_pass_two_team(threads, m)
+        stats_team_used = 1_int64
+        threaded = .false.
+#ifdef _OPENMP
+        if (team > 1_int64) then
+            threaded = .true.
+            !$omp parallel default(shared) private(j) num_threads(int(team))
+            !$omp single
+            stats_team_used = int(omp_get_num_threads(), int64)
+            !$omp end single nowait
+            !$omp do schedule(static)
+            do j = 1_int64, nb
+                call stats_block_moments(xb, wb, mu, j, m, q1(j), q2(j), q3(j), q4(j))
+            end do
+            !$omp end do
+            !$omp end parallel
+        end if
+#endif
+        if (.not. threaded) then
+            do j = 1_int64, nb
+                call stats_block_moments(xb, wb, mu, j, m, q1(j), q2(j), q3(j), q4(j))
+            end do
+        end if
         call pair_reduce(q1, nb)
         call pair_reduce(q2, nb)
         call pair_reduce(q3, nb)
@@ -393,6 +451,114 @@ contains
             - 3.0_real64 * delta**4 * acc%w_sum
         call stats_hand_over(xb, wb, keep_x, keep_w)
     end subroutine stats_engine
+
+    !> One block of pass two: the four weighted central-moment sums about `mu`.
+    !!
+    !! Extracted from `stats_engine` so that the threaded and serial walks share **one** copy of
+    !! the arithmetic rather than two that could drift -- which for this procedure would not be a
+    !! maintenance annoyance but a wrong answer at one thread count and not the other.
+    !!
+    !! `pure` on purpose: it reads `xb`/`wb` and writes nothing but its own four results, which is
+    !! what makes the region above correct by inspection rather than by argument.
+    !!
+    !! **`wb` is OPTIONAL, and that is a conformance requirement rather than a convenience.** The
+    !! engine allocates its weight buffer only for a weighted call, so on the common path the actual
+    !! argument is an unallocated allocatable -- which may not be associated with a non-optional
+    !! dummy at all (F2018 15.5.2.4). Passed to an optional one it is simply ABSENT, which is a
+    !! documented Fortran rule this library already relies on elsewhere, and `present(wb)` then
+    !! *is* the weighted test, so there is no second flag that could disagree with it. gfortran
+    !! accepts the non-conforming form silently; nagfor's `-C=all` is what would not.
+    pure subroutine stats_block_moments(xb, wb, mu, j, m, o1, o2, o3, o4)
+        real(real64), intent(in) :: xb(:)     !! the compacted survivors.
+        real(real64), intent(in), optional :: wb(:)
+        !! their weights. Absent for an unweighted population, which is what an unallocated actual
+        !! argument produces; its presence is the weighted test.
+        real(real64), intent(in) :: mu        !! the mean pass one produced.
+        integer(int64), intent(in) :: j       !! which block, 1-based.
+        integer(int64), intent(in) :: m       !! how many survivors there are in total.
+        real(real64), intent(out) :: o1       !! `sum(w*d)`, the re-centring term.
+        real(real64), intent(out) :: o2       !! `sum(w*d**2)`.
+        real(real64), intent(out) :: o3       !! `sum(w*d**3)`.
+        real(real64), intent(out) :: o4       !! `sum(w*d**4)`.
+        real(real64) :: s1, s2, s3, s4, d, dd
+        integer(int64) :: i, lo, hi
+
+        lo = (j - 1_int64) * STATS_BLOCK + 1_int64
+        hi = min(j * STATS_BLOCK, m)
+        s1 = 0.0_real64
+        s2 = 0.0_real64
+        s3 = 0.0_real64
+        s4 = 0.0_real64
+        if (present(wb)) then
+            do i = lo, hi
+                d = xb(i) - mu
+                dd = d * d
+                s1 = s1 + wb(i) * d
+                s2 = s2 + wb(i) * dd
+                s3 = s3 + wb(i) * dd * d
+                s4 = s4 + wb(i) * dd * dd
+            end do
+        else
+            do i = lo, hi
+                d = xb(i) - mu
+                dd = d * d
+                s1 = s1 + d
+                s2 = s2 + dd
+                s3 = s3 + dd * d
+                s4 = s4 + dd * dd
+            end do
+        end if
+        o1 = s1
+        o2 = s2
+        o3 = s3
+        o4 = s4
+    end subroutine stats_block_moments
+
+    !> How many threads pass two may open, given the caller's request and the work available.
+    !!
+    !! Two rules, and neither is this module's own invention:
+    !!
+    !!   * **the thread count comes from `resolve_thread_count`** (`parquet_argsort`), which is the
+    !!     one place that honours an explicit `threads=`, refuses a nested team where libgomp would
+    !!     deadlock (`feature_risks.md` Risk-104), reads `parquet_sort_threads` for the automatic
+    !!     case and clamps to `omp_get_num_procs()`. The design's settings analysis is explicit that
+    !!     this module adds no thread knob of its own: a `parquet_set_stats_threads` would be a
+    !!     second answer to a question that already has one.
+    !!   * **the work floor is this module's own**, because pass two is compute-bound where the
+    !!     sort's tail pass is memcpy-shaped. See `STATS_MIN_PER_THREAD` for the ladder it was
+    !!     measured from and for why a team opened too early is a 1.8x loss rather than a rounding
+    !!     error.
+    !!
+    !! Returns 1 on a build without OpenMP, so the caller's serial branch is the only live one
+    !! there and the `#ifdef` around the region has nothing to fall through to.
+    function stats_pass_two_team(threads, m) result(team)
+        integer, intent(in), optional :: threads !! the caller's request; absent means automatic.
+        integer(int64), intent(in) :: m          !! survivors pass two will walk.
+        integer(int64) :: team                   !! threads to open; 1 runs serially.
+        integer(int64) :: nt, floor_n
+
+        team = 1_int64
+#ifdef _OPENMP
+        call resolve_thread_count(threads, m, nt)
+        if (nt <= 1_int64) return
+        floor_n = STATS_MIN_PER_THREAD
+        if (dbg_stats_min_per_thread >= 0_int64) floor_n = dbg_stats_min_per_thread
+        ! A floor of 0 is the override saying "team up whatever the size", which is how a test
+        ! reaches the threaded branch on a fixture small enough to check by hand.
+        if (floor_n <= 0_int64) then
+            team = nt
+            return
+        end if
+        team = min(nt, m / floor_n)
+        if (team < 2_int64) team = 1_int64
+#else
+        ! No OpenMP: there is no team to open, whatever was asked for. The two locals are assigned
+        ! so that a serial build does not report them unused, and neither can change the answer.
+        nt = 1_int64
+        floor_n = 1_int64
+        if (present(threads)) team = max(1_int64, nt * floor_n)
+#endif
+    end function stats_pass_two_team
 
     !> Hands pass one's compacted buffers to a caller that asked for them, or lets them go.
     !!
@@ -587,7 +753,7 @@ contains
 
     module procedure sum_f64
         type(stats_acc) :: acc
-        call stats_engine(values, "pf_sum", is_valid, weights, skipnan, acc)
+        call stats_engine(values, "pf_sum", is_valid, weights, skipnan, acc, threads=threads)
         if (present(n_null)) n_null = acc%n_null
         if (present(n_nan)) n_nan = acc%n_nan
         s = acc%vsum
@@ -596,7 +762,7 @@ contains
 
     module procedure mean_f64
         type(stats_acc) :: acc
-        call stats_engine(values, "pf_mean", is_valid, weights, skipnan, acc)
+        call stats_engine(values, "pf_mean", is_valid, weights, skipnan, acc, threads=threads)
         if (present(n_null)) n_null = acc%n_null
         if (present(n_nan)) n_nan = acc%n_nan
         m = acc%mean
@@ -610,7 +776,7 @@ contains
         call stats_weight_kind("pf_variance", weight_type, freq)
         dd = 1
         if (present(ddof)) dd = ddof
-        call stats_engine(values, "pf_variance", is_valid, weights, skipnan, acc)
+        call stats_engine(values, "pf_variance", is_valid, weights, skipnan, acc, threads=threads)
         if (present(n_null)) n_null = acc%n_null
         if (present(n_nan)) n_nan = acc%n_nan
         v = stats_var(acc, dd, freq)
@@ -624,7 +790,7 @@ contains
         call stats_weight_kind("pf_stddev", weight_type, freq)
         dd = 1
         if (present(ddof)) dd = ddof
-        call stats_engine(values, "pf_stddev", is_valid, weights, skipnan, acc)
+        call stats_engine(values, "pf_stddev", is_valid, weights, skipnan, acc, threads=threads)
         if (present(n_null)) n_null = acc%n_null
         if (present(n_nan)) n_nan = acc%n_nan
         sd = stats_sqrt(stats_var(acc, dd, freq))
@@ -638,7 +804,7 @@ contains
         call stats_weight_kind("pf_sem", weight_type, freq)
         dd = 1
         if (present(ddof)) dd = ddof
-        call stats_engine(values, "pf_sem", is_valid, weights, skipnan, acc)
+        call stats_engine(values, "pf_sem", is_valid, weights, skipnan, acc, threads=threads)
         if (present(n_null)) n_null = acc%n_null
         if (present(n_nan)) n_nan = acc%n_nan
         se = stats_sem(acc, dd, freq)
@@ -651,7 +817,7 @@ contains
         call stats_weight_kind("pf_skewness", weight_type, freq)
         bs = .false.
         if (present(bias)) bs = bias
-        call stats_engine(values, "pf_skewness", is_valid, weights, skipnan, acc)
+        call stats_engine(values, "pf_skewness", is_valid, weights, skipnan, acc, threads=threads)
         if (present(n_null)) n_null = acc%n_null
         if (present(n_nan)) n_nan = acc%n_nan
         g = stats_skew(acc, bs, freq)
@@ -666,7 +832,7 @@ contains
         if (present(bias)) bs = bias
         ex = .true.
         if (present(excess)) ex = excess
-        call stats_engine(values, "pf_kurtosis", is_valid, weights, skipnan, acc)
+        call stats_engine(values, "pf_kurtosis", is_valid, weights, skipnan, acc, threads=threads)
         if (present(n_null)) n_null = acc%n_null
         if (present(n_nan)) n_nan = acc%n_nan
         k = stats_kurt(acc, bs, ex, freq)
@@ -685,7 +851,7 @@ contains
         if (present(bias)) bs = bias
         ex = .true.
         if (present(excess)) ex = excess
-        call stats_engine(values, "pf_moments", is_valid, weights, skipnan, acc)
+        call stats_engine(values, "pf_moments", is_valid, weights, skipnan, acc, threads=threads)
 
         if (present(n_null)) n_null = acc%n_null
         if (present(n_nan)) n_nan = acc%n_nan
@@ -1156,10 +1322,11 @@ contains
         self%wtd = present(weights)
         if (self%hold) then
             call stats_engine(values, "pf_stats%compute", is_valid, weights, skipnan, self%acc, &
-                self%keep, self%keep_w)
+                self%keep, self%keep_w, threads=threads)
             self%keep_n = self%acc%n_valid
         else
-            call stats_engine(values, "pf_stats%compute", is_valid, weights, skipnan, self%acc)
+            call stats_engine(values, "pf_stats%compute", is_valid, weights, skipnan, self%acc, &
+                threads=threads)
         end if
         self%n_seen = size(values, kind=int64)
         self%c_valid = self%acc%n_valid
@@ -1331,5 +1498,13 @@ contains
     module procedure parquet_debug_reset_stats_scans
         stats_scan_count = 0_int64
     end procedure parquet_debug_reset_stats_scans
+
+    module procedure parquet_debug_stats_team
+        res = stats_team_used
+    end procedure parquet_debug_stats_team
+
+    module procedure parquet_debug_set_stats_min_per_thread
+        dbg_stats_min_per_thread = n
+    end procedure parquet_debug_set_stats_min_per_thread
 
 end submodule parquet_stats_core ! GCOVR_EXCL_LINE

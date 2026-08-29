@@ -31,7 +31,7 @@ module test_stats
     use test_stats_golden
     use iso_fortran_env, only : int32, int64, real32, real64
     use ieee_arithmetic, only : ieee_value, ieee_quiet_nan
-    use testdrive, only : new_unittest, unittest_type, error_type, check
+    use testdrive, only : new_unittest, unittest_type, error_type, check, skip_test
     implicit none
     private
 
@@ -100,7 +100,13 @@ contains
             new_unittest("pf_stats accepts every kind the one-shot family does", &
                 test_object_accepts_every_kind), &
             new_unittest("a column with spare capacity is read only to its row count", &
-                test_column_capacity_is_not_the_population) &
+                test_column_capacity_is_not_the_population), &
+            new_unittest("the block tree is the documented one on both sides of its size threshold", &
+                test_block_tree_is_the_documented_one), &
+            new_unittest("threading the central-moment pass changes not one bit of any answer", &
+                test_threading_changes_no_bit), &
+            new_unittest("the work floor declines a team that would not pay, and lets one through", &
+                test_the_work_floor_decides) &
             ]
     end subroutine collect_tests_parquet_stats
 
@@ -1445,5 +1451,264 @@ contains
         call pf_count_valid(c, n)
         call check(error, n == 5_int64, "pf_count_valid over a column must count rows, not capacity")
     end subroutine test_column_capacity_is_not_the_population
+
+    !> The fixed block decomposition is a published contract, so it is asserted rather than implied.
+    !!
+    !! Every other test in this suite compares against the 50-digit oracle to a tolerance, and a
+    !! tolerance cannot see the block tree: a naive left-to-right sum agrees with the pairwise one
+    !! to fifteen digits on any ordinary fixture. So this test reconstructs the tree explicitly --
+    !! blocks of `STATS_BLOCK` elements, summed serially, then combined by adjacent pairs low to
+    !! high with an odd tail carried forward -- and compares with `==`.
+    !!
+    !! **`BLK` below duplicates `STATS_BLOCK`, which is private to `parquet_stats_core`, and that is
+    !! the point rather than a compromise**: if the constant changes, this test fails, which is the
+    !! only warning anyone gets that every previously published answer has moved in its last bits.
+    !!
+    !! It reaches **both sides of the size threshold**, per CLAUDE.md's rule that a constant gating
+    !! behaviour on input size needs a test on either side of it. One element of `1e16` beside a
+    !! thousand ones is a population on which the two summation orders visibly disagree -- each `1`
+    !! is lost individually against `1e16`, while a block of them summed first is not -- so:
+    !!
+    !!   * below one block the tree degenerates to a single serial sum, and the naive total is the
+    !!     right answer;
+    !!   * above it the answers differ, and the library must give the pairwise one.
+    !!
+    !! The second assertion is the negative control. Without it the whole test would pass just as
+    !! happily against an engine that had abandoned pairwise summation entirely.
+    subroutine test_block_tree_is_the_documented_one(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        integer(int64), parameter :: BLK = 128_int64        !! STATS_BLOCK; see above.
+        real(real64), allocatable :: x(:)
+        real(real64) :: got, want, naive
+        integer(int64) :: n
+
+        ! ---- Below one block: the tree is one serial sum, so pairwise and naive must agree ----
+        n = 100_int64
+        call spiky(x, n)
+        naive = running_total(x)
+        call pf_sum(x, got)
+        call check(error, got == naive, &
+            "a population shorter than one block is one serial sum, so it must equal the running total")
+        if (allocated(error)) return
+
+        ! ---- Above one block: they must now differ, and the library must take the pairwise side ----
+        n = 1000_int64
+        call spiky(x, n)
+        naive = running_total(x)
+        want = pairwise_by_blocks(x, BLK)
+        call check(error, want /= naive, &
+            "this fixture is only meaningful if the two summation orders disagree; it must span " // &
+            "more than one block and lose the small values under a naive total")
+        if (allocated(error)) return
+        call pf_sum(x, got)
+        call check(error, got == want, &
+            "pf_sum must equal the pairwise combination of its own blocks, bit for bit")
+        if (allocated(error)) return
+        call check(error, got /= naive, &
+            "pf_sum must NOT equal a naive left-to-right total -- that is what pairwise summation buys")
+    end subroutine test_block_tree_is_the_documented_one
+
+    !> One huge value followed by ones: a population whose sum depends on the order of addition.
+    subroutine spiky(x, n)
+        real(real64), allocatable, intent(out) :: x(:) !! the population.
+        integer(int64), intent(in) :: n                !! how many elements.
+
+        allocate(x(n))
+        x = 1.0_real64
+        x(1) = 1.0e16_real64
+    end subroutine spiky
+
+    !> A left-to-right running total: what the engine must NOT be doing.
+    function running_total(x) result(res)
+        real(real64), intent(in) :: x(:) !! the population.
+        real(real64) :: res              !! the naive total.
+        integer(int64) :: i
+
+        res = 0.0_real64
+        do i = 1_int64, size(x, kind=int64)
+            res = res + x(i)
+        end do
+    end function running_total
+
+    !> The engine's own decomposition: serial sums per block, combined by a fixed pairwise tree.
+    function pairwise_by_blocks(x, blk) result(res)
+        real(real64), intent(in) :: x(:) !! the population.
+        integer(int64), intent(in) :: blk !! elements per block.
+        real(real64) :: res               !! the combined total.
+        real(real64), allocatable :: p(:)
+        integer(int64) :: n, nb, j, i, lo, hi, m, k
+        real(real64) :: s
+
+        n = size(x, kind=int64)
+        nb = (n + blk - 1_int64) / blk
+        allocate(p(nb))
+        do j = 1_int64, nb
+            lo = (j - 1_int64) * blk + 1_int64
+            hi = min(j * blk, n)
+            s = 0.0_real64
+            do i = lo, hi
+                s = s + x(i)
+            end do
+            p(j) = s
+        end do
+        m = nb
+        do while (m > 1_int64)
+            k = 0_int64
+            do j = 1_int64, m - 1_int64, 2_int64
+                k = k + 1_int64
+                p(k) = p(j) + p(j + 1_int64)
+            end do
+            if (mod(m, 2_int64) == 1_int64) then
+                k = k + 1_int64
+                p(k) = p(m)
+            end if
+            m = k
+        end do
+        res = p(1)
+    end function pairwise_by_blocks
+
+    !> The reproducibility contract: `pf_*` answers the same bits at every thread count.
+    !!
+    !! This is the assertion the whole block decomposition exists to make possible, and it is the
+    !! one a reader should be most suspicious of, because **an equality test cannot see threading**.
+    !! Every arm below would agree just as exactly against an engine that opened no team at all --
+    !! which is exactly what the engine does at these fixture sizes, since the measured work floor
+    !! is tens of thousands of survivors per thread. So the test does three things rather than one:
+    !!
+    !!   1. drops the floor to `0` so a fixture small enough to reason about actually threads;
+    !!   2. asserts `parquet_debug_stats_team()` reports a team **greater than 1** on the threaded
+    !!      arm and exactly **1** on the serial one -- the negative control, without which the
+    !!      equality proves nothing;
+    !!   3. compares every one of the nine moments with `==`, not a tolerance.
+    !!
+    !! It restores the floor before returning, including on the skip path: the override is
+    !! process-global and the `stats` suite is excluded from test-drive's per-suite parallelism for
+    !! that reason, but a later test in the same run would still see it.
+    subroutine test_threading_changes_no_bit(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: x(:), w(:)
+        real(real64) :: m1, v1, s1, k1, sd1, se1, lo1, hi1, sum1
+        real(real64) :: m8, v8, s8, k8, sd8, se8, lo8, hi8, sum8
+        integer(int64) :: n1, n8, team_serial, team_threaded
+        integer(int64) :: i, n
+
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it no team can be opened at any thread count, " // &
+            "so both arms below would run the identical serial code and the equality would hold " // &
+            "for the wrong reason")
+        return
+#endif
+        n = 5000_int64
+        allocate(x(n), w(n))
+        do i = 1_int64, n
+            x(i) = sin(real(i, real64) * 0.37_real64) * 1000.0_real64 + real(i, real64)
+            w(i) = 1.0_real64 + real(modulo(i, 5_int64), real64)
+        end do
+
+        ! Team up at any size, so the threaded branch is reachable on a fixture this small.
+        call parquet_debug_set_stats_min_per_thread(0_int64)
+
+        call pf_moments(x, weights=w, n_valid=n1, mean=m1, variance=v1, stddev=sd1, sem=se1, &
+            skewness=s1, kurtosis=k1, vsum=sum1, vmin=lo1, vmax=hi1, threads=1)
+        team_serial = parquet_debug_stats_team()
+        call pf_moments(x, weights=w, n_valid=n8, mean=m8, variance=v8, stddev=sd8, sem=se8, &
+            skewness=s8, kurtosis=k8, vsum=sum8, vmin=lo8, vmax=hi8, threads=8)
+        team_threaded = parquet_debug_stats_team()
+
+        call parquet_debug_set_stats_min_per_thread(-1_int64)
+
+        ! ---- The negative control comes FIRST: without it the equalities below are vacuous ----
+        call check(error, team_serial == 1_int64, &
+            "threads=1 must run pass two serially; the team observable says it did not")
+        if (allocated(error)) return
+        call check(error, team_threaded > 1_int64, &
+            "threads=8 must actually open a team, or every equality in this test is comparing the " // &
+            "serial path against itself and asserts nothing about threading")
+        if (allocated(error)) return
+
+        call check(error, n1 == n8, "n_valid must not depend on the thread count")
+        if (allocated(error)) return
+        call check(error, sum1 == sum8, "the sum must be bit-identical at every thread count")
+        if (allocated(error)) return
+        call check(error, m1 == m8, "the mean must be bit-identical at every thread count")
+        if (allocated(error)) return
+        call check(error, v1 == v8, "the variance must be bit-identical at every thread count")
+        if (allocated(error)) return
+        call check(error, sd1 == sd8, "the standard deviation must be bit-identical at every thread count")
+        if (allocated(error)) return
+        call check(error, se1 == se8, "the standard error must be bit-identical at every thread count")
+        if (allocated(error)) return
+        call check(error, s1 == s8, "the skewness must be bit-identical at every thread count")
+        if (allocated(error)) return
+        call check(error, k1 == k8, "the kurtosis must be bit-identical at every thread count")
+        if (allocated(error)) return
+        call check(error, lo1 == lo8 .and. hi1 == hi8, &
+            "the extremes must be bit-identical at every thread count")
+    end subroutine test_threading_changes_no_bit
+
+    !> The work floor is a decision, so it is asserted in BOTH directions.
+    !!
+    !! A floor that never lets a team through and a floor that always does are both wrong, and each
+    !! passes half the obvious tests. This one holds the population fixed and moves only the floor,
+    !! so nothing else can explain the difference:
+    !!
+    !!   * at a floor above the population, `threads=4` must still run serially;
+    !!   * at a floor of `0`, the same call on the same array must open a team;
+    !!   * and the two must return the same bits, which is the contract the floor is allowed to
+    !!     trade against speed and never against accuracy.
+    !!
+    !! The measured default is exercised too: a 5000-element population is far below
+    !! `STATS_MIN_PER_THREAD`, so the shipped rule must decline it with no override in force. That
+    !! is the arm which fails if someone lowers the constant without re-measuring.
+    subroutine test_the_work_floor_decides(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: x(:)
+        real(real64) :: v_serial, v_threaded, v_default
+        integer(int64) :: team_high, team_zero, team_default
+        integer(int64) :: i, n
+
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: the floor decides how many threads to open, and " // &
+            "without OpenMP the answer is 1 whatever the floor says, so both arms would agree " // &
+            "without the floor having decided anything")
+        return
+#endif
+        n = 5000_int64
+        allocate(x(n))
+        do i = 1_int64, n
+            x(i) = cos(real(i, real64) * 0.11_real64) * 250.0_real64
+        end do
+
+        ! ---- The shipped rule, with no override: this population is far below the floor ----
+        call pf_variance(x, v_default, threads=4)
+        team_default = parquet_debug_stats_team()
+
+        ! ---- A floor above the population: the team must be refused ----
+        call parquet_debug_set_stats_min_per_thread(1000000_int64)
+        call pf_variance(x, v_serial, threads=4)
+        team_high = parquet_debug_stats_team()
+
+        ! ---- A floor of zero: the same call on the same array must now thread ----
+        call parquet_debug_set_stats_min_per_thread(0_int64)
+        call pf_variance(x, v_threaded, threads=4)
+        team_zero = parquet_debug_stats_team()
+
+        call parquet_debug_set_stats_min_per_thread(-1_int64)
+
+        call check(error, team_default == 1_int64, &
+            "the SHIPPED floor must decline a team for a population of 5000; if this fails, the " // &
+            "measured constant has been lowered and bench/benchmark_stats.sh --mode=thread should " // &
+            "be re-run before trusting the new value")
+        if (allocated(error)) return
+        call check(error, team_high == 1_int64, &
+            "a floor above the population size must refuse the team")
+        if (allocated(error)) return
+        call check(error, team_zero > 1_int64, &
+            "a floor of zero must let the team through; otherwise this test's threaded arm never " // &
+            "runs and the comparison below is serial against serial")
+        if (allocated(error)) return
+        call check(error, v_serial == v_threaded .and. v_serial == v_default, &
+            "the floor may trade speed and never accuracy: all three arms must agree bit for bit")
+    end subroutine test_the_work_floor_decides
 
 end module test_stats

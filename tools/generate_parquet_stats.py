@@ -130,6 +130,13 @@ module parquet_stats
     ! `parquet_sorting` imports these with an `only:` list and does not re-export them, so this
     ! module names them itself. Nothing new enters the dependency graph: `parquet_columns` is
     ! already in it, through `parquet_sorting`'s own `pf_argsort` over a column.
+    ! The thread rule, named directly for the same reason: `parquet_sorting` is private by default
+    ! and re-exports `pf_sort_threads` but not `resolve_thread_count`, which is the procedure that
+    ! honours an explicit `threads=`, refuses a nested team where libgomp would deadlock, and clamps
+    ! to the processors actually available. Reusing it rather than re-deriving the rule here is what
+    ! the design's settings analysis requires -- this module adds no thread knob of its own -- and
+    ! `parquet_argsort` is already in the graph beneath `parquet_sorting`, so nothing new enters it.
+    use parquet_argsort, only : resolve_thread_count
     use parquet_columns, only : parquet_column, parquet_kind_name, parquet_column_data_ptr, &
         PK_INT32, PK_INT64, PK_FLOAT32, PK_FLOAT64, PK_LOGICAL, &
         PK_INT32_VEC, PK_INT64_VEC, PK_FLOAT32_VEC, PK_FLOAT64_VEC, PK_LOGICAL_VEC
@@ -200,6 +207,13 @@ D["skipnan"] = """            logical, intent(in), optional :: skipnan
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
             !! which one NaN makes every answer NaN."""
+D["threads"] = """            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one."""
 D["n_null"] = """            integer(int64), intent(out), optional :: n_null
             !! how many elements `is_valid` excluded."""
 D["n_nan"] = """            integer(int64), intent(out), optional :: n_nan
@@ -336,7 +350,8 @@ LIFECYCLE_IFACES = """        !> Summarises a resident array: the usual way to b
         !! Two traversals, whatever is asked of the result afterwards. Any previous contents of
         !! `self` are discarded, so an object may be reused across a loop of groups without
         !! `%clear` in between.
-        module subroutine obj_compute_f64(self, values, retain, is_valid, weights, weight_type, skipnan)
+        module subroutine obj_compute_f64(self, values, retain, is_valid, weights, weight_type, &
+                skipnan, threads)
 @@compute@@
         end subroutine obj_compute_f64
         !> Arms an empty accumulator for a loop of `%update`, or for a `%merge`.
@@ -484,7 +499,30 @@ DEBUG_IFACES = """        !> How many full traversals of a population's values t
         !! A counter is only usable as an assertion if a test can re-arm it: a once-per-process
         !! observable with no reset makes every test after the first vacuous.
         module subroutine parquet_debug_reset_stats_scans()
-        end subroutine parquet_debug_reset_stats_scans"""
+        end subroutine parquet_debug_reset_stats_scans
+        !> The team size pass two last opened; 1 means it ran serially.
+        !!
+        !! Test-only, and the negative control for every threading assertion in this module. An
+        !! A/B comparing `threads=1` against `threads=8` passes just as happily against an engine
+        !! that opened no team at all -- the answers are bit-identical either way, which is the
+        !! whole point of the decomposition -- so an equality test alone proves nothing about
+        !! threading. This is what tells the two apart.
+        !!
+        !! Process-global and unsynchronised, like the traversal counter beside it.
+        module function parquet_debug_stats_team() result(res)
+            integer(int64) :: res !! threads pass two used on the most recent engine call.
+        end function parquet_debug_stats_team
+        !> Overrides the survivors-per-thread floor pass two applies before opening a team.
+        !!
+        !! Test-only. The measured floor is tens of thousands of elements per thread (see
+        !! `STATS_MIN_PER_THREAD` in `src/parquet_stats_core.f90`), which no unit-test fixture
+        !! reaches -- so without this hook every test would take the serial branch and the threaded
+        !! one would ship untested. CLAUDE.md's size-threshold rule requires reaching both sides.
+        !!
+        !! `0` teams up at any size; a negative value restores the measured floor.
+        module subroutine parquet_debug_set_stats_min_per_thread(n)
+            integer(int64), intent(in) :: n !! survivors per thread; 0 forces, negative restores.
+        end subroutine parquet_debug_set_stats_min_per_thread"""
 
 
 def query_iface(impl, res_decl, res_doc, opts, doc):
@@ -509,7 +547,7 @@ def object_ifaces():
             "            class(pf_stats), intent(inout) :: self",
             "            !! the accumulator; any previous contents are discarded.",
             "            real(real64), intent(in) :: values(:) !! the population, before exclusions."]
-            + [D[k] for k in ("retain", "is_valid", "weights", "weight_type", "skipnan")]),
+            + [D[k] for k in ("retain", "is_valid", "weights", "weight_type", "skipnan", "threads")]),
         "init": "\n".join([
             "            class(pf_stats), intent(inout) :: self",
             "            !! the accumulator; any previous contents are discarded."]
@@ -578,8 +616,14 @@ _COMMON = """    !>
     !> meets an empty group on real data. It aborts only on misuse -- a mismatched array size, an
     !> unrecognised token, or a negative, NaN or infinite weight.
     !>
-    !> `real(real64)` only for now; P4 adds the other numeric kinds and `type(parquet_column)` to
-    !> this same generic, which is source-compatible for every existing call."""
+    !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
+    !> `logical` array, or a scalar numeric `type(parquet_column)`; every one of them widens to
+    !> `real64` and reaches the same engine, so the answer does not depend on which was passed.
+    !>
+    !> The central-moment pass is threaded on a large population, and `threads=` overrides the
+    !> automatic count. **That cannot change an answer**: the population is reduced over a fixed
+    !> block tree determined by its size alone, so one thread, eight threads and a build without
+    !> OpenMP return the identical bits."""
 
 
 def iface(name, doc, out_decl, opts):
@@ -595,13 +639,15 @@ def iface(name, doc, out_decl, opts):
     return "\n".join(lines)
 
 
-MOMENT_OPTS = ["is_valid", "weights", "weight_type", "ddof", "skipnan", "n_null", "n_nan", "ok"]
-PLAIN_OPTS = ["is_valid", "weights", "skipnan", "n_null", "n_nan", "ok"]
-SKEW_OPTS = ["is_valid", "weights", "weight_type", "bias", "skipnan", "n_null", "n_nan", "ok"]
+MOMENT_OPTS = ["is_valid", "weights", "weight_type", "ddof", "skipnan", "n_null", "n_nan", "ok",
+               "threads"]
+PLAIN_OPTS = ["is_valid", "weights", "skipnan", "n_null", "n_nan", "ok", "threads"]
+SKEW_OPTS = ["is_valid", "weights", "weight_type", "bias", "skipnan", "n_null", "n_nan", "ok",
+             "threads"]
 KURT_OPTS = ["is_valid", "weights", "weight_type", "bias", "excess", "skipnan", "n_null", "n_nan",
-             "ok"]
+             "ok", "threads"]
 MOMENTS_OPTS = ["is_valid", "weights", "weight_type", "ddof", "bias", "excess", "skipnan",
-                "n_null", "n_nan"]
+                "n_null", "n_nan", "threads"]
 
 CORE_IFACES = [
     iface("sum_f64",
@@ -660,7 +706,7 @@ MOMENTS_IFACE = '''        !> `pf_moments` over a 64-bit real array: every tier-
         !> exception to the canonical optional order, and their own order is fixed here.
         module subroutine moments_f64(values, n_valid, mean, variance, stddev, sem, skewness, &
                 kurtosis, vsum, vmin, vmax, is_valid, weights, weight_type, ddof, bias, excess, &
-                skipnan, n_null, n_nan)
+                skipnan, n_null, n_nan, threads)
             real(real64), intent(in) :: values(:) !! the population.
             integer(int64), intent(out), optional :: n_valid !! how many elements were used.
             real(real64), intent(out), optional :: mean !! the mean; NaN when empty.
@@ -679,7 +725,7 @@ MOMENTS_IFACE = '''        !> `pf_moments` over a 64-bit real array: every tier-
 #: `%compute` and `%update` accept the same kinds the one-shot family does, so the object is not
 #: the one place in the module that is real64-only. Each specific widens and delegates to the
 #: real64 form, exactly as `sum_i32` delegates to `sum_f64`.
-OBJ_COMPUTE_OPTS = ["retain", "is_valid", "weights", "weight_type", "skipnan"]
+OBJ_COMPUTE_OPTS = ["retain", "is_valid", "weights", "weight_type", "skipnan", "threads"]
 OBJ_UPDATE_OPTS = ["is_valid", "weights"]
 
 
@@ -1153,6 +1199,7 @@ def gen_spec():
     out.append("    public :: pf_skewness, pf_kurtosis, pf_moments")
     out.append("    public :: pf_stats")
     out.append("    public :: parquet_debug_stats_scans, parquet_debug_reset_stats_scans")
+    out.append("    public :: parquet_debug_stats_team, parquet_debug_set_stats_min_per_thread")
     out.append(type_block())
     out.append("")
     out.append("    !> How many elements of `values` are in the population -- pandas' `Series.count()`.")

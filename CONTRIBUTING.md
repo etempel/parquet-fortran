@@ -333,6 +333,7 @@ drives a `.f90` program of the same name in the same directory.
 | `benchmark_random_kernels.sh` | Times the two route (e) kernels against each other. Its correctness twin is `tools/check_random_kernels.sh`; this one reports, that one asserts. |
 | `benchmark_arrow_release.sh` | Pins the Arrow-release figure `benchmark_table.sh` only reports, as an assertion. |
 | `benchmark_spatial.sh` | `pf_spatial_index`: how good the chosen cell size is, what the probe costs, how a bulk sweep scales, and the 3D grid against the HEALPix backend on the sky. |
+| `benchmark_stats.sh` | `parquet_stats`: the moment engine against the memory floor, where its two passes go, what each pass-one shape costs, and the ceiling on what threading pass two could return (with a bit-exactness gate). |
 | `benchmark_healpix.sh` | `parquet_healpix`: scalar entry-point cost, bulk thread scaling, the array size at which threading first pays, `pf_query_disc` in microseconds per disc, (`--mode=grid`) every `pf_healpix_grid` binding against the free procedure it delegates to, and (`--mode=dist`) the three costs that decide whether to convert RA/Dec to vectors before repeatedly measuring separations, with the break-even printed. Links no HEALPix, so any machine can reproduce it. |
 | `bench_resolve_ladder.py` | Compile-out ladder over `table_resolve` — attributing per-cell cost without timers. |
 | `run_practrand.sh` | Runs the PractRand battery over one axis of `parquet_random`. |

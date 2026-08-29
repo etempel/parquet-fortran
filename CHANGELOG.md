@@ -28,7 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   array, `%init` plus `%update` for one arriving in pieces, and `%merge` — whose array form folds in
   index order — for accumulating in parallel. Everything in the module takes any of six inputs:
   `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` and `logical` arrays, all
-  widened exactly, and a scalar numeric `type(parquet_column)` dispatched on its kind. See
+  widened exactly, and a scalar numeric `type(parquet_column)` dispatched on its kind. The
+  central-moment pass is threaded on a large population, with `threads=` to override the automatic
+  count; the answer is bit-identical at every thread count and without OpenMP. See
   [Array statistics](doc/pages/utilities/statistics.md).
 - **`parquet_logging`: general-purpose logging for the calling program.** A `pf_logger` type and a
   matching set of `pf_log_*` procedures on a process-wide default logger: eight ascending severity

@@ -28,6 +28,7 @@ Read and write parquet files from Fortran, with the table's schema and metadata 
 - Compact string columns (`parquet_string_column`) — append/search/mutate a scalar string column without pre-sizing a fixed-width buffer — see [Reading and writing compact string columns](doc/pages/types/string-columns.md#reading-and-writing-compact-string-columns).
 - Read a file's own stored table metadata back (`parquet_get_metadata`), and prefetch specific columns before reading (`parquet_prefetch_columns`).
 - Whole tables in memory (`parquet_table`): a file's columns as one named object, read on first use, reached by name as ordinary Fortran arrays or as zero-copy typed pointers — or built in memory column by column and written out. Filter, sort, take a top-N, delete or append rows, and slice a file into row ranges. Generated table types give a MAML schema named per-column accessors. See [Whole tables in memory](doc/pages/tables/index.md).
+- Array statistics over plain Fortran arrays (`pf_count_valid`, with the reduction family building on it): null-, NaN- and weight-aware, with one fixed exclusion policy shared by every procedure, and no Arrow. See [Array statistics](doc/pages/utilities/statistics.md).
 - Sorting for plain Fortran arrays and for column types (`pf_sort`, `pf_argsort`, and the partial/selection/search/unique family): stable, null- and NaN-aware, multi-key, threaded, over the six intrinsic element types plus `parquet_column`, `parquet_string_column` and the three temporal types. Nothing about it is parquet-specific, and it imports no Arrow. See [Sorting arrays and columns](doc/pages/utilities/sorting.md).
 - Reproducible random numbers and sampling (`pf_random_at` and friends): counter-based, so element *k* of a stream is a pure function of `(seed, index)` — no state, no locks, identical values in any order and at any thread count. Uniforms, integers, bits, four distributions, permutations, subsets, resampling and weighted draws without replacement. See [Random numbers and sampling](doc/pages/utilities/random.md).
 - Type-erased column storage (`parquet_column`): one whole column's values for any of 18 scalar/vector kinds behind a single `PK_*` kind tag, with per-element validity, so a column can be grown, sorted and handed to the writer without the caller knowing its type at compile time.
@@ -228,6 +229,7 @@ Every layer underneath is importable on its own, and several cost a great deal l
 | `parquet_map` | 11 | no | `parquet_map_column`: string-keyed `key -> value` entries per row |
 | `parquet_logging` | 1 | no | `pf_logger` and `pf_log_*`: leveled logging to several destinations, safe from an OpenMP region |
 | `parquet_sorting` | 21 | no | the whole sorting API, every element type |
+| `parquet_stats` | 23 | no | the `pf_*` array-statistics family over plain Fortran arrays |
 | `parquet_settings` | 3 | **yes** | the process-global knobs, and `parquet_get_arrow_version` |
 | `parquet_io` | 53 | **yes** | reading and writing files, without the table layer |
 | `parquet_tables` | 72 | **yes** | the `parquet_table` container |

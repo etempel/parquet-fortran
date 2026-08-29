@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`parquet_stats`: array statistics over plain Fortran arrays.** A new Arrow-free entry module
+  under `pf_*` names, for reducing arrays a program already has rather than anything about a
+  parquet file. It opens with `pf_count_valid`, which answers how many elements are in the
+  population over `integer(int32)`, `integer(int64)`, `real(real32)`, `real(real64)` and `logical`
+  arrays, and with it the conventions the rest of the family will follow: a null (`is_valid=`), a
+  NaN (`skipnan=`, defaulting to excluded as `pf_minmax` already does) and a zero weight
+  (`weights=`) each leave the population, in that order, so a weight belonging to an excluded
+  element is never examined; an empty or fully excluded population answers zero rather than
+  aborting; and every procedure declares its optional arguments in one fixed order. See
+  [Array statistics](doc/pages/utilities/statistics.md).
 - **`parquet_logging`: general-purpose logging for the calling program.** A `pf_logger` type and a
   matching set of `pf_log_*` procedures on a process-wide default logger: eight ascending severity
   levels using Python's numbers (`PF_LEVEL_DEBUG` = 10, and an arbitrary integer level is accepted

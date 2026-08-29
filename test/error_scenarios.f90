@@ -737,6 +737,16 @@ program error_scenarios
         call scenario_sorting_partial_keys_empty()
     case ("sorting_partial_keys_empty_i64")
         call scenario_sorting_partial_keys_empty_i64()
+    case ("stats_is_valid_length_mismatch")
+        call scenario_stats_is_valid_length_mismatch()
+    case ("stats_weights_length_mismatch")
+        call scenario_stats_weights_length_mismatch()
+    case ("stats_negative_weight")
+        call scenario_stats_negative_weight()
+    case ("stats_nan_weight")
+        call scenario_stats_nan_weight()
+    case ("stats_infinite_weight")
+        call scenario_stats_infinite_weight()
     case ("sorting_column_vector")
         call scenario_sorting_column_vector()
     case ("sorting_search_unsorted")
@@ -16542,6 +16552,63 @@ contains
         call pf_partial_argsort(k, perm, 3)   ! -> aborts (no key added)
         print '(a,i0)', "unexpectedly partial-sorted an empty key list, size=", size(perm)
     end subroutine scenario_sorting_partial_keys_empty_i64
+
+    !> A mask of the wrong length is a MISUSE, not a data condition: the caller believes it is
+    !! describing this array and is describing a different one, so every count that follows is
+    !! silently wrong. parquet_stats returns NaN for a data condition and aborts only for this class.
+    subroutine scenario_stats_is_valid_length_mismatch()
+        real(real64) :: v(4) = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        integer(int64) :: n
+        call pf_count_valid(v, n, is_valid=[.true., .false.])   ! -> aborts (2 vs 4)
+        print '(a,i0)', "unexpectedly accepted a short is_valid, n=", n
+    end subroutine scenario_stats_is_valid_length_mismatch
+
+    !> The same rule for the weight array, checked separately: a guard written for one of the two
+    !! optional arrays and not the other passes every test written for the one it covers.
+    subroutine scenario_stats_weights_length_mismatch()
+        real(real64) :: v(4) = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        integer(int64) :: n
+        call pf_count_valid(v, n, weights=[1.0_real64, 1.0_real64, 1.0_real64])   ! -> aborts (3 vs 4)
+        print '(a,i0)', "unexpectedly accepted a short weights array, n=", n
+    end subroutine scenario_stats_weights_length_mismatch
+
+    !> A negative weight cannot be meant. Zero is legal and drops the element; anything below it is
+    !! a broken weight computation, and failing at the weight names the column that produced it
+    !! rather than leaving a wrong mean to be noticed three steps downstream.
+    subroutine scenario_stats_negative_weight()
+        real(real64) :: v(3) = [1.0_real64, 2.0_real64, 3.0_real64]
+        integer(int64) :: n
+        call pf_count_valid(v, n, weights=[1.0_real64, -1.0_real64, 1.0_real64])   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted a negative weight, n=", n
+    end subroutine scenario_stats_negative_weight
+
+    !> A NaN weight aborts -- and the message must name the INDEX, because the whole value of
+    !! failing here rather than downstream is that it points at the row that produced it.
+    subroutine scenario_stats_nan_weight()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        real(real64) :: v(3) = [1.0_real64, 2.0_real64, 3.0_real64]
+        real(real64) :: w(3)
+        integer(int64) :: n
+        w = [1.0_real64, 1.0_real64, 1.0_real64]
+        w(3) = ieee_value(1.0_real64, ieee_quiet_nan)
+        call pf_count_valid(v, n, weights=w)   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted a NaN weight, n=", n
+    end subroutine scenario_stats_nan_weight
+
+    !> An infinite weight aborts too. It is a separate scenario from the NaN one because the two
+    !! are separate statements in the guard -- Fortran does not short-circuit, so they cannot be
+    !! one test, and a guard covering only NaN would pass the NaN scenario while letting an
+    !! infinity through to make every weighted answer NaN.
+    subroutine scenario_stats_infinite_weight()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_positive_inf
+        real(real64) :: v(3) = [1.0_real64, 2.0_real64, 3.0_real64]
+        real(real64) :: w(3)
+        integer(int64) :: n
+        w = [1.0_real64, 1.0_real64, 1.0_real64]
+        w(2) = ieee_value(1.0_real64, ieee_positive_inf)
+        call pf_count_valid(v, n, weights=w)   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted an infinite weight, n=", n
+    end subroutine scenario_stats_infinite_weight
 
     !> A vector column has no defined order on a whole row, so it cannot be a sort key -- the
     !! same rule parquet_table%sort_by applies, enforced here for a bare parquet_column.

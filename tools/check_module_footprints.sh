@@ -103,7 +103,7 @@ expect_file="$repo/tools/module_footprints.txt"
 # the truth is 62) had never been measured by anything at all.
 ENTRY_MODULES="parquet_version parquet_temporal parquet_strings parquet_random parquet_argsort \
 parquet_sampling parquet_spatial parquet_healpix parquet_columns parquet_list parquet_struct parquet_map \
-parquet_sorting parquet_logging parquet_settings \
+parquet_sorting parquet_stats parquet_logging parquet_settings \
 parquet_io parquet_tables parquet"
 
 mode="check"

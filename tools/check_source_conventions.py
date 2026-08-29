@@ -1739,6 +1739,87 @@ def check_parquet_logging_stays_arrow_free():
         "A logging module must not require the Arrow stack to print a line.")
 
 
+def check_parquet_stats_stays_arrow_free():
+    """`use parquet_stats` must not reach parquet_bindings.
+
+    The statistics tier is advertised as an Arrow-free import: a program that has arrays in hand
+    and wants to summarise them should not compile the C++ wrapper's dependencies to do it. Its one
+    library edge is `parquet_sorting` -- for `pf_argsort`, `pf_nth_element` and, later, the
+    `parquet_column` entry points -- and that tier is itself Arrow-free, which is the whole reason
+    the edge is affordable.
+
+    One check per tier rather than one for the group, per the established pattern: no other checked
+    module imports `parquet_stats`, so nothing else would notice this tier acquiring an edge.
+    """
+    return _check_stays_arrow_free(
+        "parquet_stats",
+        "Summarising an array a caller already has must not require the Arrow stack.")
+
+
+def check_stats_optional_argument_order():
+    """Every `parquet_stats` procedure declares its optionals in one canonical order.
+
+    In Fortran the ORDER of optional dummy arguments is a permanent compatibility contract: a
+    caller may pass them positionally, so inserting one in the middle silently changes what an
+    existing call means. `parquet_stats` therefore fixes one canonical sequence and requires every
+    procedure's optional list to be a SUBSEQUENCE of it, which is one rule rather than a
+    hand-maintained signature table -- and a table of that shape is exactly what this repository
+    has watched go stale in the direction that stops checking.
+
+    Matching is by SHAPE, not by an enumerated procedure list, so a procedure added later is
+    covered without editing this check. Omission is what a subsequence permits, which is what lets
+    the integer and logical specifics carry no `skipnan` (they have no NaN to skip) while still
+    passing.
+
+    **Verify this check by breaking it, not by watching it pass.** It reports success against a
+    module with no procedures at all, so on the day it is written it proves nothing: swap two
+    optionals in one interface body and confirm it fails before trusting a green run.
+    """
+    canonical = ["is_valid", "weights", "weight_type", "ddof", "bias", "excess", "skipnan",
+                 "method", "scale", "center", "out_valid", "converged", "n_null", "n_nan",
+                 "ok", "threads"]
+    rank = {name: i for i, name in enumerate(canonical)}
+    path = SRC / "parquet_stats.f90"
+    if not path.exists():
+        return ["%s: expected file is missing" % path.name]
+
+    bad = []
+    lines = path.read_text().split("\n")
+    i = 0
+    while i < len(lines):
+        m = re.match(r"\s*module (?:subroutine|function) (\w+)\((.*?)\)\s*(?:result\(\w+\))?\s*$",
+                     lines[i])
+        if not m:
+            i += 1
+            continue
+        proc, args = m.group(1), [a.strip() for a in m.group(2).split(",") if a.strip()]
+        optional = []
+        j = i + 1
+        while j < len(lines) and not re.match(r"\s*end (?:subroutine|function) ", lines[j]):
+            if "optional" in lines[j] and "::" in lines[j]:
+                for nm in lines[j].split("::", 1)[1].split("!!")[0].split(","):
+                    nm = nm.strip().split("(")[0].strip()
+                    if nm in args:
+                        optional.append(nm)
+            j += 1
+        i = j + 1
+
+        unknown = [nm for nm in optional if nm not in rank]
+        if unknown:
+            bad.append("%s: optional argument(s) %s are not in the canonical sequence; add them "
+                       "there (and to feature_pandas_S4.md's signature matrix) or rename them"
+                       % (proc, ", ".join(unknown)))
+            continue
+        # Declaration order need not match the argument list, so compare against the dummy order.
+        in_arg_order = [nm for nm in args if nm in optional]
+        ranks = [rank[nm] for nm in in_arg_order]
+        if ranks != sorted(ranks):
+            bad.append("%s: optionals appear as (%s); the canonical order is (%s)"
+                       % (proc, ", ".join(in_arg_order),
+                          ", ".join(sorted(in_arg_order, key=lambda nm: rank[nm]))))
+    return bad
+
+
 def check_facade_inventory_matches_its_use_lines():
     """`src/parquet.f90`'s doc-comment inventory must name every module it bare-`use`s.
 
@@ -3775,6 +3856,8 @@ CHECKS = (
     ("parquet_spatial stays Arrow-free", check_parquet_spatial_stays_arrow_free),
     ("parquet_healpix stays Arrow-free", check_parquet_healpix_stays_arrow_free),
     ("parquet_logging stays Arrow-free", check_parquet_logging_stays_arrow_free),
+    ("parquet_stats stays Arrow-free", check_parquet_stats_stays_arrow_free),
+    ("parquet_stats optionals follow one canonical order", check_stats_optional_argument_order),
     ("the facade inventory names every re-exported module",
      check_facade_inventory_matches_its_use_lines),
     ("parquet_get_version has exactly one home", check_get_version_has_one_home),

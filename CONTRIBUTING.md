@@ -277,6 +277,7 @@ Output is committed; re-run the generator and its `--check` after editing one.
 | `generate_parquet_columns.py` | The `parquet_columns` per-kind blocks. **Owns the kind table** the others import. |
 | `generate_parquet_tables.py` | The `parquet_tables` per-kind blocks. |
 | `generate_parquet_sorting.py` | The `parquet_sorting` per-type blocks. |
+| `generate_parquet_stats.py` | The `parquet_stats` per-kind blocks. |
 | `generate_parquet_ziggurat.py` | `src/parquet_ziggurat.f90`'s 771 layer constants, re-derived rather than pasted. |
 | `generate_parquet_maml.sh` | The built-in MAML module — see [below](#regenerating-the-built-in-maml-module). **Consumer-facing.** |
 | `generate_user_table_code.py` | A Role-A MAML into a named `parquet_table` extension type. **Consumer-facing.** |

@@ -27,6 +27,7 @@
 # `tools/check_bindc_boundary.py`, `tools/check_doc_anchors.py`,
 # `tools/check_source_conventions.py`, the five generated-file `--check` calls
 # (`generate_parquet_columns.py`, `generate_parquet_tables.py`, `generate_parquet_sorting.py`,
+# `generate_parquet_stats.py`,
 # `generate_parquet_ziggurat.py`, `generate_parquet_maml.sh base`), `generate_user_table_code.py`'s
 # own `--self-test` plus the `--check` for this project's committed generated table type, and
 # `generate_random_golden_vectors.py`'s, `generate_random_perm_vectors.py`'s and
@@ -76,6 +77,8 @@ CHECKS=(
     "python3 tools/generate_parquet_tables.py --check"
     "python3 tools/generate_parquet_sorting.py --self-test"
     "python3 tools/generate_parquet_sorting.py --check"
+    "python3 tools/generate_parquet_stats.py --self-test"
+    "python3 tools/generate_parquet_stats.py --check"
     "bash tools/generate_parquet_maml.sh base --check"
     "python3 tools/generate_user_table_code.py --self-test"
     "python3 tools/generate_user_table_code.py --check"

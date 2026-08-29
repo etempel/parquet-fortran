@@ -1712,7 +1712,17 @@ contains
             new_unittest("a composed name over PF_LOG_MAX_NAME aborts, not truncates", &
                 test_logging_composed_name_too_long), &
             new_unittest("the same logging calls made correctly do not abort", &
-                test_logging_control_does_not_abort) &
+                test_logging_control_does_not_abort), &
+            new_unittest("a mismatched is_valid is refused by pf_count_valid", &
+                test_stats_is_valid_length_mismatch_aborts), &
+            new_unittest("a mismatched weights array is refused by pf_count_valid", &
+                test_stats_weights_length_mismatch_aborts), &
+            new_unittest("a negative weight aborts, naming its index", &
+                test_stats_negative_weight_aborts), &
+            new_unittest("a NaN weight aborts, naming its index", &
+                test_stats_nan_weight_aborts), &
+            new_unittest("an infinite weight aborts, naming its index", &
+                test_stats_infinite_weight_aborts) &
             ]
         testsuite = [p1, p2, p3, p4, p5, p6, p7, p8, p9]
     end subroutine collect_tests_parquet_errors
@@ -5872,6 +5882,68 @@ contains
             failure_message="a negative n was expected to abort", &
             required_stderr="n is -1, which is negative")
     end subroutine test_sorting_partial_negative_n_aborts
+
+    !> parquet_stats abort path: see scenario_stats_is_valid_length_mismatch in
+    !> test/error_scenarios.f90. A mask of the wrong length is the one class this module aborts on
+    !> -- misuse. Every DATA condition it meets (an empty population, an all-null column, all-zero
+    !> weights) returns instead, which is what makes a per-group loop usable.
+    subroutine test_stats_is_valid_length_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_is_valid_length_mismatch", &
+            expect_abort=.true., &
+            failure_message="a mismatched is_valid was expected to abort", &
+            required_stderr="pf_count_valid: is_valid has 2 elements but values has 4")
+    end subroutine test_stats_is_valid_length_mismatch_aborts
+
+    !> parquet_stats abort path: see scenario_stats_weights_length_mismatch in
+    !> test/error_scenarios.f90. Asserted separately from the is_valid case, because a guard
+    !> written for one of the two optional arrays and not the other passes every test written
+    !> for the one it covers.
+    subroutine test_stats_weights_length_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_weights_length_mismatch", &
+            expect_abort=.true., &
+            failure_message="a mismatched weights array was expected to abort", &
+            required_stderr="pf_count_valid: weights has 3 elements but values has 4")
+    end subroutine test_stats_weights_length_mismatch_aborts
+
+    !> parquet_stats abort path: see scenario_stats_negative_weight in test/error_scenarios.f90.
+    !> The message must NAME THE INDEX: the entire value of failing at the weight rather than
+    !> downstream is that it points at the row whose weight computation is broken.
+    subroutine test_stats_negative_weight_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_negative_weight", &
+            expect_abort=.true., &
+            failure_message="a negative weight was expected to abort", &
+            required_stderr="pf_count_valid: weight 2 is negative")
+    end subroutine test_stats_negative_weight_aborts
+
+    !> parquet_stats abort path: see scenario_stats_nan_weight in test/error_scenarios.f90.
+    subroutine test_stats_nan_weight_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_nan_weight", &
+            expect_abort=.true., &
+            failure_message="a NaN weight was expected to abort", &
+            required_stderr="pf_count_valid: weight 3 is NaN")
+    end subroutine test_stats_nan_weight_aborts
+
+    !> parquet_stats abort path: see scenario_stats_infinite_weight in test/error_scenarios.f90.
+    !> Separate from the NaN case because the guard's three tests are three STATEMENTS -- Fortran
+    !> does not short-circuit, and a NaN compared with `<` raises IEEE_INVALID, which nagfor's
+    !> default -ieee=stop turns into a dead process. A guard covering only NaN would pass that
+    !> scenario while letting an infinity through to make every weighted answer NaN.
+    subroutine test_stats_infinite_weight_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_infinite_weight", &
+            expect_abort=.true., &
+            failure_message="an infinite weight was expected to abort", &
+            required_stderr="pf_count_valid: weight 2 is infinite")
+    end subroutine test_stats_infinite_weight_aborts
 
     !> pf_nth_quantile abort path: see scenario_sorting_quantile_out_of_range in
     !> test/error_scenarios.f90. The message names the scale, since 50 is exactly what a caller

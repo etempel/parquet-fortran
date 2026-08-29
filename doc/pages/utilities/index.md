@@ -1,6 +1,7 @@
 ---
 title: Utilities and code generation
 ordered_subpage: sorting.md
+ordered_subpage: statistics.md
 ordered_subpage: random.md
 ordered_subpage: spatial.md
 ordered_subpage: healpix.md
@@ -19,6 +20,10 @@ coordinate arrays, the HEALPix sphere pixelisation, and the two generators meant
   selecting without sorting (`pf_partial_sort`, `pf_nth_element`, quantiles), searching a sorted
   array, distinct values and ranks, extremes, merging, and what threading does and does not change.
   Also `parquet_argsort`, the smaller import for `pf_argsort` over the intrinsic types alone.
+- [Array statistics with the `pf_` reduction family](statistics.html) — reductions over plain
+  Fortran arrays: what counts as the population (a null, a NaN and a zero weight all leave it, in
+  that order), what aborts and what quietly returns nothing, and the fixed optional-argument
+  order every procedure in the family shares.
 - [Random numbers](random.html) — `pf_random_at` and friends: draws addressed by seed, stream and
   position, so a value does not depend on how many draws came before it and a parallel loop
   reproduces exactly under any schedule or thread count. Uniforms, raw bits and bounded integers;

@@ -19,6 +19,7 @@ string columns, the date/time/timestamp types, sorting, random numbers and sampl
 neighbour search, sphere pixelisation, logging for your own program, and the process-global settings. Every page below assumes that single import. The
 individual modules (`parquet_io`, `parquet_tables`, `parquet_columns`, `parquet_list`,
 `parquet_struct`, `parquet_map`, `parquet_strings`, `parquet_temporal`, `parquet_sorting`, `parquet_argsort`,
+`parquet_stats`,
 `parquet_sampling`, `parquet_spatial`, `parquet_healpix`, `parquet_random`, `parquet_logging`,
 `parquet_settings`, `parquet_version`,
 `parquet_maml_base`)
@@ -59,7 +60,7 @@ point in the library.
 
 ### Every page at a glance
 
-All 30 pages, in reading order. (This list, each group's own page list and the
+All 31 pages, in reading order. (This list, each group's own page list and the
 `ordered_subpage:` frontmatter are kept consistent by
 `tools/check_source_conventions.py`, which fails the CI lint stage when they drift.)
 
@@ -95,6 +96,7 @@ All 30 pages, in reading order. (This list, each group's own page list and the
 **Utilities and code generation**
 
 - [Sorting arrays and columns with `pf_sort`/`pf_argsort`](utilities/sorting.html)
+- [Array statistics with the `pf_` reduction family](utilities/statistics.html)
 - [Random numbers and sampling with `pf_random_at`](utilities/random.html)
 - [Spatial neighbour search with `pf_spatial_index`](utilities/spatial.html)
 - [Sphere pixelisation with `parquet_healpix`](utilities/healpix.html)

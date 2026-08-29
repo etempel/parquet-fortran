@@ -36,6 +36,7 @@ program tester
     use test_filter_screen, only : collect_tests_filter_screen
     use test_sort, only : collect_tests_sort
     use test_sorting, only : collect_tests_parquet_sorting
+    use test_stats, only : collect_tests_parquet_stats
     use test_temporal, only : collect_tests_parquet_temporal
     use test_table, only : collect_tests_parquet_table
     use test_table_parallel, only : collect_tests_table_parallel
@@ -112,6 +113,7 @@ program tester
         new_testsuite("filter_screen", collect_tests_filter_screen), &
         new_testsuite("sort", collect_tests_sort), &
         new_testsuite("sorting", collect_tests_parquet_sorting), &
+        new_testsuite("stats", collect_tests_parquet_stats), &
         new_testsuite("table", collect_tests_parquet_table), &
         new_testsuite("table_parallel", collect_tests_table_parallel), &
         new_testsuite("string_parallel", collect_tests_string_parallel), &
@@ -364,7 +366,7 @@ contains
             .or. name == "filter_screen" .or. name == "sorting" .or. name == "sort" .or. name == "settings" &
             .or. name == "table_parallel" .or. name == "string_parallel" .or. name == "diagnostics" &
             .or. name == "random_omp" .or. name == "random_perm" .or. name == "module_surface" &
-            .or. name == "spatial" .or. name == "logging")
+            .or. name == "spatial" .or. name == "logging" .or. name == "stats")
     end function suite_is_safe_to_parallelize
 
     !> Whether running just this suite is worth pre-running the whole scenario set for. Purely a

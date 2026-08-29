@@ -124,6 +124,43 @@ contains
 
 end module test_module_surface_sorting
 
+!> `parquet_stats` alone: the array-statistics tier reduces an array through one `use`.
+!!
+!! **It re-exports no setting, and that is the assertion, not an omission.** The rule this file
+!! exists for is that a module re-exports every knob its OWN code reads; this tier reads none yet,
+!! so what a single import has to deliver is the capability itself. When a threaded reduction or
+!! `%print` arrives, the knobs it then reads join this module and this check grows with them.
+!!
+!! **One library import, and it must stay that way.**
+module test_module_surface_stats
+    use parquet_stats                  ! THE ONLY library import.
+    use iso_fortran_env, only : int64, real64
+    implicit none
+    private
+    public :: check_stats_surface
+
+contains
+
+    !> Reduces an array through `use parquet_stats` alone, exercising each exclusion class.
+    subroutine check_stats_surface(what)
+        character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
+        real(real64) :: v(5), w(5)
+        integer(int64) :: n
+
+        what = ""
+        v = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64]
+        w = [1.0_real64, 1.0_real64, 0.0_real64, 1.0_real64, 1.0_real64]
+
+        call pf_count_valid(v, n)
+        if (n /= 5_int64) what = "pf_count_valid"
+        call pf_count_valid(v, n, is_valid=[.true., .false., .true., .true., .false.])
+        if (what == "" .and. n /= 3_int64) what = "pf_count_valid(is_valid=)"
+        call pf_count_valid(v, n, weights=w)
+        if (what == "" .and. n /= 4_int64) what = "pf_count_valid(weights=)"
+    end subroutine check_stats_surface
+
+end module test_module_surface_stats
+
 !> `parquet_strings` alone: its thread cap and the output pair it consults.
 module test_module_surface_strings
     use parquet_strings                ! THE ONLY library import.
@@ -880,6 +917,7 @@ module test_module_surface
     use test_module_surface_io, only : check_io_surface
     use test_module_surface_argsort, only : check_argsort_surface
     use test_module_surface_sorting, only : check_sorting_surface
+    use test_module_surface_stats, only : check_stats_surface
     use test_module_surface_strings, only : check_strings_surface
     use test_module_surface_sampling, only : check_sampling_surface
     use test_module_surface_version, only : check_version_surface
@@ -984,6 +1022,8 @@ contains
                 test_argsort_surface), &
             new_unittest("parquet_sorting alone exposes every sorting knob it reads", &
                 test_sorting_surface), &
+            new_unittest("parquet_stats alone reduces an array", &
+                test_stats_surface), &
             new_unittest("parquet_strings alone exposes every knob it reads", &
                 test_strings_surface), &
             new_unittest("parquet_sampling alone exposes every knob it reads", &
@@ -1118,6 +1158,15 @@ contains
         call check_sorting_surface(what)
         call check(error, what == "", "a knob was not round-trippable through `use parquet_sorting` alone: " // what)
     end subroutine test_sorting_surface
+
+    !> The test-drive wrapper over check_stats_surface.
+    subroutine test_stats_surface(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: what
+
+        call check_stats_surface(what)
+        call check(error, what == "", "a capability was not reachable through `use parquet_stats` alone: " // what)
+    end subroutine test_stats_surface
 
     !> The test-drive wrapper over check_strings_surface.
     subroutine test_strings_surface(error)

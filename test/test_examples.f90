@@ -304,6 +304,15 @@ contains
             "pf_argsort must be reachable from use parquet alone and order the values")
         if (allocated(error)) return
 
+        ! parquet_stats: the array-statistics layer, whose public names are pf_*, not parquet_*.
+        block
+            integer(int64) :: n_pop
+            call pf_count_valid(mass, n_pop, is_valid=[.true., .false., .true., .true.])
+            call check(error, n_pop == 3_int64, &
+                "pf_count_valid must be reachable from use parquet alone and exclude the null")
+            if (allocated(error)) return
+        end block
+
         ! parquet_healpix: the sphere pixelisation, whose public names are pf_*, not parquet_*.
         block
             integer(int64) :: hp_pix, hp_grid_pix

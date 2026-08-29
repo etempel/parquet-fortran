@@ -22,6 +22,8 @@
 !>   * `parquet_map`     -- `parquet_map_column`/`parquet_map_row`.
 !>   * `parquet_sorting` -- `pf_sort`/`pf_argsort`/`pf_permute`/`pf_is_sorted`
 !>                          and the `pf_sort_keys` multi-key builder.
+!>   * `parquet_stats`   -- array statistics over plain Fortran arrays:
+!>                          the `pf_*` reduction family.
 !>   * `parquet_random` -- counter-based random numbers: `pf_random_at` and
 !>                          friends, reproducible under any OpenMP schedule.
 !>   * `parquet_sampling`-- permutations, subsets, resampling and weighted draws.
@@ -61,6 +63,7 @@ module parquet
     use parquet_strings
     use parquet_temporal
     use parquet_sorting
+    use parquet_stats
     use parquet_random
     use parquet_sampling
     use parquet_spatial

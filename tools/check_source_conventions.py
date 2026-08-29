@@ -3819,6 +3819,95 @@ def check_contributing_is_an_index():
     return problems
 
 
+#: The column types whose `%view`/`%view_all` hand back a handle holding a pointer to the passed
+#: object. F2018 15.5.2.4 leaves that pointer UNDEFINED on return unless the actual argument has
+#: the TARGET attribute, so every call site must declare its column `target`.
+VIEWED_COLUMN_TYPES = (
+    "parquet_list_column",
+    "parquet_map_column",
+    "parquet_struct_column",
+    "parquet_string_column",
+)
+
+
+def _procedure_scopes(lines):
+    """Yield `(first, last)` 0-based line index pairs, one per procedure body in `lines`."""
+    opener = re.compile(r"^\s*(?:(?:pure|impure|elemental|recursive|module)\s+)*"
+                        r"(?:[\w()=:,*\s]+?\s)??(?:subroutine|function)\s+\w+\s*\(", re.I)
+    closer = re.compile(r"^\s*end\s*(?:subroutine|function)\b", re.I)
+    stack, scopes = [], []
+    for i, raw in enumerate(lines):
+        code = strip_comment(raw)
+        if opener.match(code):
+            stack.append(i)
+        elif closer.match(code) and stack:
+            scopes.append((stack.pop(), i))
+    return scopes
+
+
+def check_view_call_sites_declare_target():
+    """CLAUDE.md -- a `%view` call site must declare its column `target`.
+
+    `parquet_list_column%view`, its map/struct twins and `parquet_string_column%view`/`%view_all`
+    return a handle whose stored pointer is associated with the passed-object dummy. F2018
+    15.5.2.4 leaves such a pointer UNDEFINED on return whenever the actual argument does not have
+    the TARGET attribute -- so the handle is unusable, and the `associated(self%col)` guard inside
+    every handle binding is itself non-conforming.
+
+    **gfortran, ifx and flang all execute the non-conforming form perfectly happily**, so nothing
+    in CI, in an ordinary `fpm test` or in a coverage run can see this. Only nagfor's `-C=dangling`
+    reports it, as an abort naming the handle binding rather than the call that produced the
+    handle. That is what makes it worth a static check: the failure mode is a silent one on every
+    compiler the project builds with by default.
+
+    The check is scope-aware -- a declaration is only reported when `%view` is called on that name
+    inside the same procedure -- so a column merely declared beside an unrelated handle costs
+    nothing.
+    """
+    problems = []
+    call = re.compile(r"(?<![\w%])([A-Za-z_]\w*)%view(?:_all)?\s*\(")
+    decl = re.compile(r"^\s*(?:type|class)\s*\(\s*(%s)\s*\)(.*?)::(.*)$"
+                      % "|".join(VIEWED_COLUMN_TYPES), re.I)
+    roots = [SRC, TEST, REPO_ROOT / "app", REPO_ROOT / "bench"]
+    paths = sorted(p for root in roots if root.is_dir() for p in root.glob("*.f90"))
+    seen_any_call = False
+    for path in paths:
+        lines = path.read_text().split("\n")
+        for first, last in _procedure_scopes(lines):
+            body = lines[first:last + 1]
+            viewed = set()
+            for raw in body:
+                for m in call.finditer(strip_comment(raw)):
+                    viewed.add(m.group(1).lower())
+            if not viewed:
+                continue
+            seen_any_call = True
+            for offset, raw in enumerate(body):
+                m = decl.match(strip_comment(raw))
+                if not m:
+                    continue
+                attrs = m.group(2).lower()
+                if "target" in attrs or "pointer" in attrs:
+                    continue
+                names = [re.sub(r"\(.*", "", n).strip().lower() for n in m.group(3).split(",")]
+                hit = sorted(n for n in names if n in viewed)
+                if not hit:
+                    continue
+                problems.append(
+                    "%s:%d: `%s` is a %s that `%%view` is called on in this procedure, but it is "
+                    "not declared `target`. F2018 15.5.2.4 leaves the returned handle's pointer "
+                    "undefined; gfortran, ifx and flang run it anyway and only nagfor's "
+                    "`-C=dangling` reports it. Add `, target` to the declaration:\n    %s"
+                    % (path.relative_to(REPO_ROOT), first + offset + 1, ", ".join(hit),
+                       m.group(1), raw.strip()))
+    if not seen_any_call:
+        problems.append(
+            "no `%view`/`%view_all` call site found under src/, test/, app/ or bench/ -- the "
+            "handle API has been renamed, or this check's scope detection has gone stale and it "
+            "is passing vacuously")
+    return problems
+
+
 CHECKS = (
     ("threads= is forwarded to every callee that takes it", check_threads_are_forwarded),
     ("omp_* references are guarded by #ifdef _OPENMP", check_openmp_calls_are_guarded),
@@ -3882,6 +3971,8 @@ CHECKS = (
     ("noinline directives carry both spellings", check_noinline_directives_are_paired),
     ("CONTRIBUTING.md names each tool once, in its index", check_contributing_is_an_index),
     ("no statement exceeds 255 continuation lines", check_statement_continuation_lines),
+    ("every %view call site declares its column target",
+     check_view_call_sites_declare_target),
 )
 
 

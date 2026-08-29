@@ -18235,7 +18235,7 @@ contains
     !! invisible here.
     subroutine scenario_map_read_nested_value()
         type(parquet_reader) :: reader
-        type(parquet_map_column) :: mc
+        type(parquet_map_column), target :: mc
         character(len=:), allocatable :: kt, k1
         type(parquet_map_row) :: h
         call parquet_open_reader(reader, "test/fixtures/map_list_types.parquet")

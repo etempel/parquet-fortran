@@ -255,7 +255,7 @@ contains
     subroutine test_nested_copy_is_independent(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
         type(parquet_struct_column) :: sc
-        type(parquet_list_column) :: lc, copy
+        type(parquet_list_column), target :: lc, copy
         type(parquet_column) :: pay
         class(parquet_container_column), pointer :: inner
         type(parquet_list_row) :: h
@@ -373,7 +373,7 @@ contains
     subroutine test_read_struct_of_list(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
         type(parquet_reader) :: r
-        type(parquet_struct_column) :: sc
+        type(parquet_struct_column), target :: sc
         type(parquet_struct_row) :: h, f
         class(parquet_container_column), pointer :: inner
         type(parquet_list_row) :: lr
@@ -422,7 +422,7 @@ contains
     subroutine test_read_struct_of_map(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
         type(parquet_reader) :: r
-        type(parquet_struct_column) :: sc
+        type(parquet_struct_column), target :: sc
         type(parquet_struct_row) :: h, f
         class(parquet_container_column), pointer :: inner
         type(parquet_map_row) :: mr
@@ -457,7 +457,7 @@ contains
     subroutine test_read_list_of_struct(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
         type(parquet_reader) :: r
-        type(parquet_list_column) :: lc
+        type(parquet_list_column), target :: lc
         type(parquet_list_row) :: h
         type(parquet_struct_row) :: sr
         class(parquet_container_column), pointer :: inner
@@ -543,7 +543,7 @@ contains
     subroutine test_read_deep_nested(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
         type(parquet_reader) :: r
-        type(parquet_list_column) :: lc
+        type(parquet_list_column), target :: lc
         type(parquet_list_row) :: h
         class(parquet_container_column), pointer :: inner
         type(parquet_struct_row) :: sr

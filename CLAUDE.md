@@ -3964,6 +3964,21 @@ benchmarks, which the suite never runs); gfortran, ifx and flang all execute the
 `view_all`'s doc-comment already said "must be a target" — the contract was written down and simply
 not honoured, which is exactly the class a runtime check exists for.
 
+**It recurred, in the container handles, which is why the audit is now a lint check.** The same
+violation reappeared at six `%view` call sites across `test/error_scenarios.f90` and
+`test/test_container_nested.f90` — a `parquet_map_column`/`parquet_list_column`/
+`parquet_struct_column` declared without `target` and then viewed — long after the string instance
+was fixed, because nothing but a nagfor run can see it and a nagfor run is not what anyone reaches
+for while adding a test. `check_view_call_sites_declare_target`
+(`tools/check_source_conventions.py`) now scans `src/`, `test/`, `app/` and `bench/` and reports
+any declaration of one of the four viewed column types that is used as `%view`/`%view_all`'s
+passed object **within the same procedure** without `target`. Two things about reading a failure
+here: the abort names the **handle binding** (`associated(self%col)` inside `check_handle`), never
+the `%view` call that produced the handle, so grep for `%view` in the scenario rather than reading
+the line the message points at; and under test-drive's per-suite parallelism the abort belongs to
+whichever test was on the faulting thread, not to the last `Starting` line — one run reported a
+`parquet_list` dangling pointer under a failing *map* test, and the two were unrelated sites.
+
 **What the remaining checks found is worth the trouble: three real standard violations, all the
 same shape — a ZERO-SIZED thing referenced where the standard forbids it.** Each was invisible under
 gfortran, which no-ops all three:

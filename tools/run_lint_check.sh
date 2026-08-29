@@ -31,7 +31,18 @@
 # `generate_parquet_ziggurat.py`, `generate_parquet_maml.sh base`), `generate_user_table_code.py`'s
 # own `--self-test` plus the `--check` for this project's committed generated table type, and
 # `generate_random_golden_vectors.py`'s, `generate_random_perm_vectors.py`'s and
-# `generate_parquet_ziggurat.py`'s `--self-test` and `--check`. It needs nothing but `python3` and
+# `generate_parquet_ziggurat.py`'s `--self-test` and `--check`.
+#
+# ONE ENTRY IS DELIBERATELY NOT IN CI: `generate_stats_vectors.py --check`, which needs `mpmath`
+# to re-derive `parquet_stats`' golden expectations at 50 digits. The CI lint job has no such
+# dependency and adding one is the maintainer's call, so this runner carries the check and the
+# pipeline does not -- which means a hand-edit to test/test_stats_golden.f90 is caught HERE and
+# nowhere else. That is the only exception to the "keep the two lists in step" rule above, and it
+# is written down rather than left to be inferred. Its `--self-test`, which validates the model
+# against numpy/pandas/scipy, is heavier still and is a step to run when the MODEL changes, not on
+# every push.
+#
+# Apart from that one check it needs nothing but `python3` and
 # `bash` -- no fpm, no gfortran, no Arrow -- and takes about ten seconds, so it is worth running
 # before every push. Most of that is three checks doing real arithmetic rather than pattern
 # matching: `check_source_conventions.py` walks every source file, and the ziggurat and golden-
@@ -88,6 +99,7 @@ CHECKS=(
     "python3 tools/generate_random_golden_vectors.py --check"
     "python3 tools/generate_random_perm_vectors.py --self-test"
     "python3 tools/generate_random_perm_vectors.py --check"
+    "python3 tools/generate_stats_vectors.py --check"
 )
 
 if ! command -v python3 >/dev/null 2>&1; then

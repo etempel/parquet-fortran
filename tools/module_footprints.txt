@@ -190,6 +190,7 @@ parquet_sorting_search.f90
 parquet_sorting_select.f90
 parquet_sorting_unique.f90
 parquet_stats.f90
+parquet_stats_core.f90
 parquet_stats_kernel.f90
 parquet_strings.f90
 parquet_temporal.f90
@@ -393,6 +394,9 @@ parquet_spatial_build.f90
 parquet_spatial_bulk.f90
 parquet_spatial_query.f90
 parquet_spatial_tune.f90
+parquet_stats.f90
+parquet_stats_core.f90
+parquet_stats_kernel.f90
 parquet_strings.f90
 parquet_struct.f90
 parquet_tables.f90
@@ -426,4 +430,3 @@ parquet_write_string.f90
 parquet_write_struct.f90
 parquet_write_temporal.f90
 parquet_ziggurat.f90
-

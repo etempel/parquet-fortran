@@ -285,6 +285,7 @@ Output is committed; re-run the generator and its `--check` after editing one.
 | `generate_healpix_reference.py` | The reference vectors pinning `parquet_healpix` against an independent model. |
 | `check_healpix_fptrap.sh` | Runs `parquet_healpix` in a build where an FP exception is fatal. |
 | `generate_random_perm_vectors.py` | The same for the permutation contract. |
+| `generate_stats_vectors.py` | `parquet_stats`' golden expectations, from a 50-digit `mpmath` oracle. |
 | `generate_fixtures.cpp` | The hand-built Arrow fixtures — see [above](#regenerating-the-test-fixtures). |
 | `run_generate_fixtures.sh` | Builds and runs that generator. |
 | `generate_logo_svg.py` | Regenerates `doc/media/logo.*`. |

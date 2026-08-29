@@ -1722,7 +1722,9 @@ contains
             new_unittest("a NaN weight aborts, naming its index", &
                 test_stats_nan_weight_aborts), &
             new_unittest("an infinite weight aborts, naming its index", &
-                test_stats_infinite_weight_aborts) &
+                test_stats_infinite_weight_aborts), &
+            new_unittest("an unrecognised weight_type aborts, listing both accepted tokens", &
+                test_stats_unknown_weight_type_aborts) &
             ]
         testsuite = [p1, p2, p3, p4, p5, p6, p7, p8, p9]
     end subroutine collect_tests_parquet_errors
@@ -5944,6 +5946,19 @@ contains
             failure_message="an infinite weight was expected to abort", &
             required_stderr="pf_count_valid: weight 2 is infinite")
     end subroutine test_stats_infinite_weight_aborts
+
+    !> parquet_stats abort path: see scenario_stats_unknown_weight_type in
+    !> test/error_scenarios.f90. The message must LIST the accepted tokens rather than only reject
+    !> the one supplied: the two conventions differ in what they divide by, so a caller who reached
+    !> for a third spelling needs to be told which of the two they meant.
+    subroutine test_stats_unknown_weight_type_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_unknown_weight_type", &
+            expect_abort=.true., &
+            failure_message="an unrecognised weight_type was expected to abort", &
+            required_stderr="pf_variance: weight_type ""inverse-variance"" is not recognised")
+    end subroutine test_stats_unknown_weight_type_aborts
 
     !> pf_nth_quantile abort path: see scenario_sorting_quantile_out_of_range in
     !> test/error_scenarios.f90. The message names the scale, since 50 is exactly what a caller

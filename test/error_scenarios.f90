@@ -747,6 +747,8 @@ program error_scenarios
         call scenario_stats_nan_weight()
     case ("stats_infinite_weight")
         call scenario_stats_infinite_weight()
+    case ("stats_unknown_weight_type")
+        call scenario_stats_unknown_weight_type()
     case ("sorting_column_vector")
         call scenario_sorting_column_vector()
     case ("sorting_search_unsorted")
@@ -16609,6 +16611,21 @@ contains
         call pf_count_valid(v, n, weights=w)   ! -> aborts
         print '(a,i0)', "unexpectedly accepted an infinite weight, n=", n
     end subroutine scenario_stats_infinite_weight
+
+    !> An unrecognised `weight_type` token aborts, listing both accepted spellings.
+    !!
+    !! This is a misuse rather than a data condition, and the reason it cannot be waved through
+    !! with a default is that the two conventions give DIFFERENT variances for the same weights --
+    !! silently picking one would hand a caller who asked for the other a plausible wrong number.
+    !! The message caps the echoed token, because ifx's ERROR STOP runtime corrupts the heap once
+    !! the composed message reaches 8192 bytes and the caller controls this string's length.
+    subroutine scenario_stats_unknown_weight_type()
+        real(real64) :: v(3) = [1.0_real64, 2.0_real64, 3.0_real64]
+        real(real64) :: w(3) = [1.0_real64, 2.0_real64, 3.0_real64]
+        real(real64) :: var
+        call pf_variance(v, var, weights=w, weight_type="inverse-variance")   ! -> aborts
+        print '(a,es12.5)', "unexpectedly accepted an unknown weight_type, var=", var
+    end subroutine scenario_stats_unknown_weight_type
 
     !> A vector column has no defined order on a whole row, so it cannot be a sort key -- the
     !! same rule parquet_table%sort_by applies, enforced here for a bare parquet_column.

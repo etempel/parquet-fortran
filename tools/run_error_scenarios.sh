@@ -761,6 +761,7 @@ scenarios=(
     "stats_negative_weight:1"
     "stats_nan_weight:1"
     "stats_infinite_weight:1"
+    "stats_unknown_weight_type:1"
     "sorting_column_vector:1"
     "sorting_search_unsorted:1"
     "sorting_search_target_too_long:1"

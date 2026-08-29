@@ -6,64 +6,19 @@
 ! Regenerate with:  tools/generate_parquet_stats.py
 ! The kind table lives in tools/generate_parquet_columns.py; edit it there, not here.
 !
-!> The per-kind entry points of `parquet_stats`, and the argument guards they share.
+!> The per-kind entry points of `parquet_stats`.
 !!
 !! Each specific is the same shape: check the optional arguments against `values`, then walk the
-!! array applying the family's exclusion order -- nullness, then NaN, then weight. The guards live
-!! here, once, rather than being emitted into every body.
+!! array applying the family's exclusion order -- nullness, then NaN, then weight.
+!!
+!! **The guards these bodies call live in `parquet_stats_core`, not here**, because that submodule
+!! needs them too and two sibling submodules cannot reach each other's contained procedures. Their
+!! interfaces are declared in the module spec for exactly that reason; a private helper contained
+!! directly in the module would compile and then fail to link (CLAUDE.md).
 submodule (parquet_stats) parquet_stats_kernel
     implicit none
 
 contains
-
-    !> Renders an index for an error message without a deferred-length result.
-    !!
-    !! A fixed-length function result is fine; a `character(len=:), allocatable` one is the shape
-    !! this project forbids outright, because gfortran's hidden length temporary for it is not
-    !! reliably thread-local.
-    pure function stats_i2s(v) result(res)
-        integer(int64), intent(in) :: v !! the value to render.
-        character(len=24) :: res !! `v` in decimal, blank-padded.
-        write(res, '(i0)') v
-    end function stats_i2s
-
-    !> Aborts unless every present optional array matches `values` in size.
-    subroutine stats_check_sizes(nv, what, is_valid, weights)
-        integer(int64), intent(in) :: nv !! the number of elements in `values`.
-        character(len=*), intent(in) :: what !! the public procedure's name, for the message.
-        logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
-        real(real64), intent(in), optional :: weights(:) !! per element weight.
-
-        if (present(is_valid)) then
-            if (size(is_valid, kind=int64) /= nv) &
-                error stop what // ": is_valid has " // trim(stats_i2s(size(is_valid, kind=int64))) // &
-                    " elements but values has " // trim(stats_i2s(nv))
-        end if
-        if (present(weights)) then
-            if (size(weights, kind=int64) /= nv) &
-                error stop what // ": weights has " // trim(stats_i2s(size(weights, kind=int64))) // &
-                    " elements but values has " // trim(stats_i2s(nv))
-        end if
-    end subroutine stats_check_sizes
-
-    !> Aborts unless `w` is a usable weight: finite and non-negative.
-    !!
-    !! **The three tests are separate statements on purpose.** Fortran does not short-circuit, so
-    !! `w /= w .or. w < 0` would evaluate the `<` on a NaN -- and a NaN comparison with `<` raises
-    !! `IEEE_INVALID`, which nagfor's default `-ieee=stop` turns into a dead process. Only `==` and
-    !! `/=` are quiet, so the NaN test has to run first and alone.
-    subroutine stats_check_weight(w, i, what)
-        real(real64), intent(in) :: w !! the weight to validate.
-        integer(int64), intent(in) :: i !! its index, for the message.
-        character(len=*), intent(in) :: what !! the public procedure's name, for the message.
-
-        if (w /= w) error stop what // ": weight " // trim(stats_i2s(i)) // &
-            " is NaN; weights must be finite and non-negative"
-        if (w < 0.0_real64) error stop what // ": weight " // trim(stats_i2s(i)) // &
-            " is negative; weights must be finite and non-negative"
-        if (w > huge(0.0_real64)) error stop what // ": weight " // trim(stats_i2s(i)) // &
-            " is infinite; weights must be finite and non-negative"
-    end subroutine stats_check_weight
 
     module procedure count_valid_i32
         integer(int64) :: i, nv

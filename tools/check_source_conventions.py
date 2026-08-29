@@ -1775,7 +1775,13 @@ def check_stats_optional_argument_order():
     module with no procedures at all, so on the day it is written it proves nothing: swap two
     optionals in one interface body and confirm it fails before trusting a green run.
     """
-    canonical = ["is_valid", "weights", "weight_type", "ddof", "bias", "excess", "skipnan",
+    # The tier-A OUTPUT prefix, which `pf_moments` and anything shaped like it declares before the
+    # input block. It is a fixed order of its own, so the subsequence rule still generates the
+    # whole signature -- see feature_pandas_S4.md's signature matrix, which names this as the one
+    # documented exception.
+    canonical = ["n_valid", "mean", "variance", "stddev", "sem", "skewness", "kurtosis",
+                 "vsum", "vmin", "vmax",
+                 "is_valid", "weights", "weight_type", "ddof", "bias", "excess", "skipnan",
                  "method", "scale", "center", "out_valid", "converged", "n_null", "n_nan",
                  "ok", "threads"]
     rank = {name: i for i, name in enumerate(canonical)}
@@ -1784,14 +1790,27 @@ def check_stats_optional_argument_order():
         return ["%s: expected file is missing" % path.name]
 
     bad = []
-    lines = path.read_text().split("\n")
+    # Continuation lines are JOINED first. Without this the check matches only single-line
+    # declarations and silently skips every procedure whose argument list wraps -- which is every
+    # procedure long enough for the order to matter, and is exactly how a check of this shape goes
+    # blind: it keeps reporting [ok] against a file it can no longer read.
+    lines, buf = [], ""
+    for raw in path.read_text().split("\n"):
+        code = raw.split("!")[0].rstrip()
+        if code.endswith("&"):
+            buf += code[:-1]
+            continue
+        lines.append((buf + raw) if buf else raw)
+        buf = ""
+    seen = 0
     i = 0
     while i < len(lines):
         m = re.match(r"\s*module (?:subroutine|function) (\w+)\((.*?)\)\s*(?:result\(\w+\))?\s*$",
-                     lines[i])
+                     lines[i].split("!")[0].rstrip())
         if not m:
             i += 1
             continue
+        seen += 1
         proc, args = m.group(1), [a.strip() for a in m.group(2).split(",") if a.strip()]
         optional = []
         j = i + 1
@@ -1817,6 +1836,9 @@ def check_stats_optional_argument_order():
             bad.append("%s: optionals appear as (%s); the canonical order is (%s)"
                        % (proc, ", ".join(in_arg_order),
                           ", ".join(sorted(in_arg_order, key=lambda nm: rank[nm]))))
+    if seen == 0:
+        bad.append("src/parquet_stats.f90: no `module subroutine`/`module function` declaration "
+                   "was recognised -- this check has gone blind and is passing vacuously")
     return bad
 
 

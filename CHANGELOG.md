@@ -13,11 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under `pf_*` names, for reducing arrays a program already has rather than anything about a
   parquet file. It opens with `pf_count_valid`, which answers how many elements are in the
   population over `integer(int32)`, `integer(int64)`, `real(real32)`, `real(real64)` and `logical`
-  arrays, and with it the conventions the rest of the family will follow: a null (`is_valid=`), a
+  arrays, and with it the conventions the rest of the family follows: a null (`is_valid=`), a
   NaN (`skipnan=`, defaulting to excluded as `pf_minmax` already does) and a zero weight
   (`weights=`) each leave the population, in that order, so a weight belonging to an excluded
   element is never examined; an empty or fully excluded population answers zero rather than
-  aborting; and every procedure declares its optional arguments in one fixed order. See
+  aborting; and every procedure declares its optional arguments in one fixed order. The moment
+  family follows over `real(real64)` arrays: `pf_sum`, `pf_mean`, `pf_variance`, `pf_stddev`,
+  `pf_sem`, `pf_skewness`, `pf_kurtosis`, and `pf_moments`, which produces all of them plus the
+  counts, the sum and the extremes in one pair of passes. They are weighted (`weights=`,
+  `weight_type=`), take `ddof=`/`bias=`/`excess=` with pandas' defaults rather than numpy's, are
+  computed two-pass over a fixed pairwise block tree so that the variance is shift-invariant, and
+  return a quiet NaN with `ok=.false.` wherever a statistic is undefined. See
   [Array statistics](doc/pages/utilities/statistics.md).
 - **`parquet_logging`: general-purpose logging for the calling program.** A `pf_logger` type and a
   matching set of `pf_log_*` procedures on a process-wide default logger: eight ascending severity

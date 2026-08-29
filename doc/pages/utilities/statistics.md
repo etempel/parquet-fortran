@@ -8,9 +8,12 @@ it, without compiling the C++ wrapper's dependencies into its build. `use parque
 so nothing here needs a second import.
 
 **This page describes what is implemented today, which is the module's foundation rather than its
-whole surface.** The reduction family it is being built for — means, variances, quantiles, robust
-estimators — arrives in stages; what is here now is the one procedure that fixes the conventions
-every later one inherits.
+whole surface.** The reduction family it is being built for arrives in stages: the moment family is
+here, the order statistics — quantiles, the median absolute deviation, the robust estimators — are
+not yet.
+
+Today the arrays must be `real(real64)` for everything but `pf_count_valid`; the other numeric kinds
+join the same generics later, which is source-compatible for every call written now.
 
 ## `pf_count_valid` — how many elements are in the population
 
@@ -36,6 +39,88 @@ how many elements of `values` are in the population. `n` is an `integer(int64)`.
 
 `skipnan` is offered only on the two real kinds. An integer or logical array has no NaN to skip, and
 an argument that can never do anything is worse than an absent one.
+
+## The moment family
+
+```fortran
+real(real64) :: mag(1000), w(1000), m, sd, g
+integer(int64) :: nv
+
+call pf_mean(mag, m)                             ! the mean
+call pf_stddev(mag, sd, ddof=0)                  ! numpy's default; the library's is ddof=1
+call pf_skewness(mag, g, bias=.true.)            ! scipy's g1; the library's default is pandas' G1
+call pf_mean(mag, m, weights=w)                  ! weighted
+
+call pf_moments(mag, n_valid=nv, mean=m, stddev=sd, skewness=g)   ! all of it, in one pair of passes
+```
+
+**`pf_moments` is the form to reach for in a per-group loop.** Asking for eight statistics costs
+exactly what asking for one costs: the population is traversed twice however many outputs are
+requested — once for the mean, once for the central moments — and nothing is computed that was not
+asked for. Its outputs come before the common argument block and are, in order, `n_valid`, `mean`,
+`variance`, `stddev`, `sem`, `skewness`, `kurtosis`, `vsum`, `vmin`, `vmax`.
+
+The one-shot forms are `pf_sum`, `pf_mean`, `pf_variance`, `pf_stddev`, `pf_sem`, `pf_skewness` and
+`pf_kurtosis`. Each is that same engine with one output, so they agree with `pf_moments` bit for bit.
+
+### Four defaults that differ from numpy or scipy
+
+Each is chosen to match pandas, which is the library whose semantics a per-group workflow already
+assumes — but a reader cross-checking a number against numpy needs to know all four, because every
+one of them changes a digit rather than raising an error.
+
+| argument | this library | reproduce numpy/scipy with |
+|---|---|---|
+| `ddof` on the variance family | `1` (the sample variance, as pandas) | `ddof=0` |
+| `bias` on skewness and kurtosis | `.false.` — the corrected `G1`/`G2`, as pandas | `bias=.true.` |
+| `excess` on the kurtosis | `.true.` — 0 for a normal population | `excess=.false.` |
+| `skipnan` | `.true.` — a NaN leaves the population | `skipnan=.false.`, matching `np.mean` rather than `np.nanmean` |
+
+### Weights, and the one choice they force
+
+`weights` is accepted by every reduction from the start, and a **zero weight removes the element**.
+Where the weights are unequal the variance has a genuine ambiguity, because the degrees of freedom
+can be charged against two different counts, so `weight_type` names which you mean:
+
+- **`"reliability"`** (the default) — a weight says the value is that much more precise, as an
+  inverse-variance weight or a membership probability does. `ddof` is charged against Kish's
+  effective size `sum(w)**2 / sum(w**2)`.
+- **`"frequency"`** — a weight of 3 says the value occurred three times. `ddof` is charged against
+  `sum(w)`, and the answer is exactly what you would get by writing the value out three times.
+
+With every weight equal the two agree with each other and with the unweighted answer, which is why
+this only has to be decided once, for data that is actually weighted. An unrecognised token aborts.
+
+### Accuracy is a documented property, not an implementation detail
+
+The variance and the higher moments are computed in **two passes** — the mean first, then the
+central moments about it — and the sums are **pairwise**, over a fixed block tree. Both matter for
+the data this library is usually pointed at: an MJD around 60000 with a millisecond scatter, or a
+magnitude around 20 with a millimagnitude scatter, is exactly the input on which the textbook
+`sum(x**2) - sum(x)**2/n` cancels away every significant digit.
+
+The testable form of the claim is that `pf_variance(x + c)` equals `pf_variance(x)` for a large `c`,
+and it holds to a few ulp rather than approximately. The same is true of the skewness, which needs a
+second correction to get there and has it.
+
+A second consequence of the fixed block tree is worth knowing in advance: **the answer will not
+depend on the thread count** when threading arrives, because the decomposition is a function of the
+population size alone and never of who walks it.
+
+### When a statistic is undefined
+
+An undefined answer is a **quiet NaN**, and `ok=` reports it — never an abort. `ok` is `.true.`
+exactly when the value beside it is not a NaN.
+
+| population | what comes back |
+|---|---|
+| empty, or every element excluded | `vsum` is exactly `0`; everything else is NaN |
+| `ddof >= n_valid` — including one element at the default `ddof=1` | variance, stddev and sem are NaN |
+| every value identical | variance exactly `0`; skewness and kurtosis NaN |
+| fewer than 3 (skewness) or 4 (kurtosis) elements, bias-corrected | that statistic is NaN |
+
+The empty sum is `0` rather than NaN because that is the additive identity and what numpy and pandas
+both return; `n_valid` sits beside it, so nothing is hidden by it.
 
 ## What "in the population" means, and why it is worth reading once
 

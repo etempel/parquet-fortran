@@ -236,6 +236,7 @@ something a reader is expected to have.
 | [Risk-168](#risk-168--a-once-decision-that-is-not-taken-inside-the-write-lock-emits-a-once-only-record-twice) | A `once=` decision that is not taken inside the write lock emits a once-only record twice | 4 — covered |
 | [Risk-169](#risk-169--a-saturating-context-budget-must-drop-the-frames-text-and-never-its-depth) | A saturating context budget must drop the frame's TEXT and never its DEPTH | 4 — covered |
 | [Risk-170](#risk-170--a-write-to-a-log-sink-a-copy-has-closed-must-abort-not-go-nowhere) | A write to a log sink a copy has closed must ABORT, not go nowhere | 4 — covered |
+| [Risk-171](#risk-171--every-tier-of-parquet_stats-must-test-saw_nan-not-only-the-moments) | Every tier of `parquet_stats` must test `saw_nan`, not only the moments | 4 — covered |
 
 ---
 
@@ -6869,6 +6870,36 @@ budget is reached, which looks like the same thing and is not.
 the depth budget and asserts `pf_log_context_depth()` counts all of them, then pops exactly those
 three and asserts the rendered text is **identical** to what it was at the budget. Asserting the
 depth is the point: the rendered text alone cannot tell saturation from a shifted stack.
+
+### Risk-171 — Every tier of `parquet_stats` must test `saw_nan`, not only the moments
+
+`skipnan = .false.` asks the library to propagate a NaN: one NaN in the population and every answer
+is NaN. `stats_engine` implements that by setting `acc%saw_nan` and answering NaN from it, and every
+moment inherits it for free. **No other tier does, and the reason is that a NaN behaves differently
+once the values are ordered.** It sorts to one END of the buffer rather than poisoning anything, so
+an order statistic computed from a poisoned population comes back as a perfectly ordinary number —
+`pf_trim_mean` is the sharpest case, because the NaN is *trimmed away* and the answer is then a mean
+of clean data that the caller asked to be told was unusable.
+
+This shipped in P6 and was invisible: `pf_mean` returned NaN with `ok = .false.` while `pf_median`
+over the identical arguments returned a number with `ok = .true.`, no test asserted it, nothing
+aborted, and the two answers were each individually plausible. It was found while building `pf_mad`
+on top of the same helper, not by anything in the suite.
+
+**What it forbids.** `stats_compact` reports `saw_nan` as an out-argument, and every consumer of it
+must test the flag before answering — one-shot and object alike. There are six today: the four
+one-shot procedures reached through `one_shot_quantiles`, `trim_mean_f64` and
+`percentile_of_score_f64`, plus `mad_f64`; the object side goes through the single `obj_undefined`
+predicate, which is where a seventh binding should reach rather than testing `keep_n == 0` itself.
+**A new order or deviation statistic that tests only for an empty population has this defect**, and
+it will pass every assertion anyone writes about its own arithmetic.
+
+**Test.** `test_propagating_nan_reaches_every_tier` (`test/test_stats.f90`) asserts NaN and
+`ok = .false.` from `pf_mean` (the control, which was always right), then from `pf_median`,
+`pf_quantile`, `pf_iqr`, `pf_trim_mean`, `pf_percentile_of_score`, `pf_mad`, `%median` and `%mad` —
+and then asserts the **opposite** at the default `skipnan = .true.`, where every one of them must
+answer a number. Copy that shape rather than only the first half: without the second, a `pf_mad`
+that returned NaN unconditionally would pass.
 
 ### Risk-170 — A write to a log sink a copy has closed must ABORT, not go nowhere
 

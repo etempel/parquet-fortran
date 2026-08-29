@@ -1750,7 +1750,13 @@ contains
             new_unittest("an unrecognised percentile-of-score kind aborts", &
                 test_stats_score_bad_kind_aborts), &
             new_unittest("an order statistic on a streaming accumulator aborts", &
-                test_stats_median_on_streaming_aborts) &
+                test_stats_median_on_streaming_aborts), &
+            new_unittest("an unrecognised MAD scale token aborts", &
+                test_stats_mad_bad_scale_aborts), &
+            new_unittest("a NaN MAD centre aborts, unlike a NaN in the population", &
+                test_stats_mad_center_not_finite_aborts), &
+            new_unittest("is_valid= beside a string column aborts in pf_mode", &
+                test_stats_mode_string_column_is_valid_aborts) &
             ]
         testsuite = [p1, p2, p3, p4, p5, p6, p7, p8, p9]
     end subroutine collect_tests_parquet_errors
@@ -6139,6 +6145,42 @@ contains
             failure_message="an order statistic on a streaming accumulator was expected to abort", &
             required_stderr="was created with retain=.false.")
     end subroutine test_stats_median_on_streaming_aborts
+
+    !> parquet_stats abort path: see scenario_stats_mad_bad_scale in test/error_scenarios.f90.
+    !> The two tokens are named in the message, because "mad_std" -- astropy's name for exactly
+    !> this quantity -- is the token a reader of that library would try first.
+    subroutine test_stats_mad_bad_scale_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_mad_bad_scale", &
+            expect_abort=.true., &
+            failure_message="an unrecognised MAD scale token was expected to abort", &
+            required_stderr="unrecognised scale")
+    end subroutine test_stats_mad_bad_scale_aborts
+
+    !> parquet_stats abort path: see scenario_stats_mad_center_not_finite in
+    !> test/error_scenarios.f90. This is the one place the module treats a NaN as MISUSE rather
+    !> than as data, and the message says which of the two it is looking at.
+    subroutine test_stats_mad_center_not_finite_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_mad_center_not_finite", &
+            expect_abort=.true., &
+            failure_message="a NaN MAD centre was expected to abort", &
+            required_stderr="center must be finite")
+    end subroutine test_stats_mad_center_not_finite_aborts
+
+    !> parquet_stats abort path: see scenario_stats_mode_string_column_is_valid in
+    !> test/error_scenarios.f90. Same rule the numeric `parquet_column` entry points apply: two
+    !> sources of nullness that can disagree is the shape this repository has been bitten by.
+    subroutine test_stats_mode_string_column_is_valid_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_mode_string_column_is_valid", &
+            expect_abort=.true., &
+            failure_message="is_valid= beside a string column was expected to abort", &
+            required_stderr="carries its own validity")
+    end subroutine test_stats_mode_string_column_is_valid_aborts
 
     !> pf_nth_quantile abort path: see scenario_sorting_quantile_out_of_range in
     !> test/error_scenarios.f90. The message names the scale, since 50 is exactly what a caller

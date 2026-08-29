@@ -75,6 +75,17 @@ submodule (parquet_stats) parquet_stats_order
     !> Test-only override for `QUANTILE_SORT_MIN`; negative means the shipped value applies.
     integer(int64), save :: dbg_quantile_sort_min = -1_int64
 
+    !> `Phi^-1(3/4)`, the third quartile of the standard normal. `pf_mad`'s "normal" scale DIVIDES
+    !! by it, which is what makes the median absolute deviation a consistent estimator of the
+    !! standard deviation for Gaussian data.
+    !!
+    !! **Spelled as scipy spells it -- a division by this, not a multiplication by 1.4826.** The
+    !! rounded 1.4826 that every textbook quotes differs from `1/Phi^-1(3/4)` by 1.5e-06 relative,
+    !! which is four million times the double-precision noise floor and showed up immediately as a
+    !! cross-check failure against `scipy.stats.median_abs_deviation`. Matching scipy exactly is
+    !! the whole reason this token is called "normal".
+    real(real64), parameter :: MAD_NORMAL_DENOM = 0.6744897501960817_real64
+
 contains
 
     ! ==================================================================================
@@ -527,7 +538,7 @@ contains
         real(real64), allocatable :: keep(:), keep_w(:)
         integer(int64) :: m, nnull, nnan, k, i
         integer :: code
-        logical :: freq
+        logical :: freq, poisoned
 
         if (size(out, kind=int64) /= size(probs, kind=int64)) &
             error stop what // ": out has " // trim(stats_i2s(size(out, kind=int64))) // &
@@ -535,12 +546,18 @@ contains
         call check_probs(what, probs)
         call stats_weight_kind(what, weight_type, freq)
         call method_code(what, method, freq .and. present(weights), code)
-        call stats_compact(values, what, is_valid, weights, skipnan, keep, keep_w, m, nnull, nnan)
+        call stats_compact(values, what, is_valid, weights, skipnan, keep, keep_w, m, nnull, &
+            nnan, poisoned)
         if (present(n_null)) n_null = nnull
         if (present(n_nan)) n_nan = nnan
 
         k = size(probs, kind=int64)
-        if (m == 0_int64) then
+        ! `skipnan = .false.` and a NaN is in the population: the caller asked for propagation and
+        ! every answer is NaN, exactly as the moments give. This has to be TESTED rather than
+        ! inherited -- a NaN sorts to one end of the buffer instead of poisoning the interpolation,
+        ! so without this an ordinary-looking median comes back from a population the caller asked
+        ! to have poisoned. Grouped with the empty case because the answer is the same one.
+        if (m == 0_int64 .or. poisoned) then
             do i = 1_int64, k
                 out(i) = stats_nan()
             end do
@@ -598,6 +615,7 @@ contains
         real(real64), allocatable :: keep(:), keep_w(:)
         real(real64) :: sw, sx
         integer(int64) :: nv, nnull, nnan, cut, lo, hi, i
+        logical :: poisoned
 
         ! Note the output dummy is `m`, so the survivor count is `nv` here -- the one place in this
         ! file where the usual name is taken.
@@ -605,12 +623,15 @@ contains
             error stop "pf_trim_mean: prop must satisfy 0 <= prop < 0.5; trimming half or more " // &
                 "from each tail would leave nothing to average"
         call stats_compact(values, "pf_trim_mean", is_valid, weights, skipnan, keep, keep_w, &
-            nv, nnull, nnan)
+            nv, nnull, nnan, poisoned)
         if (present(n_null)) n_null = nnull
         if (present(n_nan)) n_nan = nnan
         m = stats_nan()
         if (present(ok)) ok = .false.
-        if (nv == 0_int64) return
+        ! A surviving NaN under `skipnan = .false.` poisons this as it poisons every other answer
+        ! -- and here it would otherwise be TRIMMED AWAY, since a NaN sorts to one end, which is
+        ! the most misleading form the defect can take.
+        if (nv == 0_int64 .or. poisoned) return
 
         ! Ordering is unavoidable here even at `prop = 0`: WHICH elements the trim removes is a
         ! statement about the order, so there is no selection shortcut as there is for a quantile.
@@ -644,16 +665,19 @@ contains
         real(real64), allocatable :: keep(:), keep_w(:)
         integer(int64) :: m, nnull, nnan
         integer :: code
+        logical :: poisoned
 
         if (score /= score .or. abs(score) > huge(0.0_real64)) &
             error stop "pf_percentile_of_score: score must be finite; a NaN or infinite score " // &
                 "can only come from the caller's own arithmetic, unlike a NaN in the population"
         call score_kind_code("pf_percentile_of_score", kind, code)
         call stats_compact(values, "pf_percentile_of_score", is_valid, weights, skipnan, keep, &
-            keep_w, m, nnull, nnan)
+            keep_w, m, nnull, nnan, poisoned)
         if (present(n_null)) n_null = nnull
         if (present(n_nan)) n_nan = nnan
-        if (m == 0_int64) then
+        ! As above: a NaN in the population under `skipnan = .false.` makes every answer NaN, and
+        ! here it would otherwise merely fail every comparison and quietly shrink the denominator.
+        if (m == 0_int64 .or. poisoned) then
             p = stats_nan()
             if (present(ok)) ok = .false.
             return
@@ -666,6 +690,456 @@ contains
         end if
         if (present(ok)) ok = (p == p)
     end procedure percentile_of_score_f64
+
+
+    ! ==================================================================================
+    ! Tier C: the median absolute deviation
+    ! ==================================================================================
+
+    !> Resolves a `scale=` token to the factor the raw deviation is multiplied by.
+    subroutine scale_factor(what, scale, factor)
+        character(len=*), intent(in) :: what               !! the public procedure's name.
+        character(len=*), intent(in), optional :: scale    !! the caller's token, if any.
+        real(real64), intent(out) :: factor                !! 1.4826 or 1.
+        character(len=16) :: tok
+        integer :: i, c
+
+        ! Set ONCE, before the token is even looked at, so the default and an explicit
+        ! `scale="normal"` cannot come to differ -- which is exactly what happened when the two
+        ! carried their own copies of the constant: a mutation to one of them survived the whole
+        ! suite, because no test passed the token explicitly.
+        factor = 1.0_real64 / MAD_NORMAL_DENOM
+        if (.not. present(scale)) return
+        tok = ""
+        do i = 1, min(len(scale), len(tok))
+            c = iachar(scale(i:i))
+            if (c >= iachar("A") .and. c <= iachar("Z")) c = c + 32
+            tok(i:i) = achar(c)
+        end do
+        select case (trim(tok))
+        case ("normal")
+            continue      ! the default, already set above
+        case ("raw")
+            factor = 1.0_real64
+        case default
+            error stop what // ': unrecognised scale "' // trim(scale) // &
+                '"; the tokens are "normal" (the default, x1.4826) and "raw"'
+        end select
+    end subroutine scale_factor
+
+    !> Aborts unless a caller-supplied centre is a finite number.
+    subroutine check_center(what, center)
+        character(len=*), intent(in) :: what            !! the public procedure's name.
+        real(real64), intent(in), optional :: center    !! the caller's centre, if any.
+
+        if (.not. present(center)) return
+        ! `x /= x` rather than `ieee_is_nan`, per this module's standing rule -- and tested before
+        ! `abs`, which is quiet on a NaN but whose RESULT would then compare false against `huge`
+        ! and let the NaN through.
+        if (center /= center .or. abs(center) > huge(0.0_real64)) &
+            error stop what // ": center must be finite; a NaN or infinite centre can only come " // &
+                "from the caller's own arithmetic, unlike a NaN in the population"
+    end subroutine check_center
+
+    !> The UNSCALED median absolute deviation of `x(1:m)` about `c`.
+    !!
+    !! The deviations are a derived population: `|x - c|` is not monotone in `x`, so tier B's
+    !! ordering of the values says nothing about the order of the deviations and they have to be
+    !! ordered (or selected over) in their own right. That is why supplying `center` skips one
+    !! selection rather than the whole traversal.
+    subroutine raw_mad(x, w, m, c, threads, res)
+        real(real64), intent(in) :: x(:)                  !! the survivors, in any order.
+        real(real64), allocatable, intent(in) :: w(:)     !! their weights, or unallocated.
+        integer(int64), intent(in) :: m                   !! how many are live.
+        real(real64), intent(in) :: c                     !! the centre.
+        integer, intent(in), optional :: threads          !! passed to the sort or the selection.
+        real(real64), intent(out) :: res                  !! the raw deviation.
+        real(real64), allocatable :: dev(:), devw(:)
+        integer(int64) :: i
+
+        allocate(dev(m))
+        do i = 1_int64, m
+            dev(i) = abs(x(i) - c)
+        end do
+        if (allocated(w)) then
+            ! A weight belongs to its ELEMENT, so it travels with that element's deviation.
+            allocate(devw(m))
+            do i = 1_int64, m
+                devw(i) = w(i)
+            end do
+            call order_in_place(dev, devw, m, threads)
+            call quantile_sorted(dev(1:m), devw(1:m), 0.5_real64, QM_LINEAR, res)
+        else
+            call quantile_by_selection(dev, m, 0.5_real64, QM_LINEAR, threads, res)
+        end if
+    end subroutine raw_mad
+
+    module procedure mad_f64
+        real(real64), allocatable :: keep(:), keep_w(:)
+        real(real64) :: factor, c, raw
+        integer(int64) :: nv, nnull, nnan
+        logical :: poisoned
+
+        call scale_factor("pf_mad", scale, factor)
+        call check_center("pf_mad", center)
+        call stats_compact(values, "pf_mad", is_valid, weights, skipnan, keep, keep_w, &
+            nv, nnull, nnan, poisoned)
+        if (present(n_null)) n_null = nnull
+        if (present(n_nan)) n_nan = nnan
+        m = stats_nan()
+        if (present(ok)) ok = .false.
+        if (nv == 0_int64 .or. poisoned) return
+
+        if (present(center)) then
+            c = center
+        else
+            ! The population's own median, which is what scipy's `median_abs_deviation` uses.
+            ! Selected rather than sorted when unweighted: this is one probe, and the deviations
+            ! that follow are a different population anyway, so an ordering here buys nothing.
+            if (allocated(keep_w)) then
+                call order_in_place(keep, keep_w, nv, threads)
+                call quantile_sorted(keep(1:nv), keep_w(1:nv), 0.5_real64, QM_LINEAR, c)
+            else
+                call quantile_by_selection(keep, nv, 0.5_real64, QM_LINEAR, threads, c)
+            end if
+        end if
+        call raw_mad(keep, keep_w, nv, c, threads, raw)
+        m = factor * raw
+        if (present(ok)) ok = (m == m)
+    end procedure mad_f64
+
+    module procedure describe_f64
+        ! `%compute` then the ordering, which is the whole of it -- and the ordering goes through
+        ! `ensure_ordered` rather than through `s%prepare_order()`, because nagfor binds a separate
+        ! module procedure's name to an external at the first call site and would then reject the
+        ! `module procedure obj_prepare_order` further down this same file (CLAUDE.md). The
+        ! contained procedure is reached by host association and has no such rule.
+        call s%compute(values, is_valid=is_valid, weights=weights, weight_type=weight_type, &
+            skipnan=skipnan, threads=threads)
+        call ensure_ordered(s, "pf_describe")
+    end procedure describe_f64
+
+
+    ! ==================================================================================
+    ! pf_mode -- the most common value
+    !
+    ! Every specific is the same three steps: survive the exclusions, order the survivors, then
+    ! pick the heaviest RUN of equal values. The steps are shared and only the comparison and the
+    ! result type differ per kind, which is what keeps five specifics from drifting on the tie
+    ! rule -- the one thing about a mode that is easy to get subtly, silently wrong.
+    ! ==================================================================================
+
+    !> The indices of the elements that survive `pf_mode`'s exclusions, and their weights.
+    !!
+    !! Indices rather than values, because the values have five different types and the exclusion
+    !! rules have none: nullness and weight decide this and the value never does. No NaN clause,
+    !! because no kind `pf_mode` accepts can hold one.
+    subroutine mode_survivors(n, what, is_valid, weights, idx, w, m, n_null)
+        integer(int64), intent(in) :: n                     !! how many elements were offered.
+        character(len=*), intent(in) :: what                !! the public procedure's name.
+        logical, intent(in), optional :: is_valid(:)        !! per element: .false. marks a null.
+        real(real64), intent(in), optional :: weights(:)    !! per element weight.
+        integer(int64), allocatable, intent(out) :: idx(:)  !! surviving indices, ascending.
+        real(real64), allocatable, intent(out) :: w(:)
+        !! the surviving elements' weights, indexed the same way as `idx` -- allocated only when
+        !! `weights` was supplied, which is the convention the rest of this module uses to mean
+        !! "unweighted" rather than carrying a separate flag.
+        integer(int64), intent(out) :: m                    !! how many survived.
+        integer(int64), intent(out) :: n_null               !! how many `is_valid` excluded.
+        integer(int64) :: i
+
+        call stats_check_sizes(n, what, is_valid, weights)
+        allocate(idx(n))
+        if (present(weights)) allocate(w(n))
+        m = 0_int64
+        n_null = 0_int64
+        do i = 1_int64, n
+            if (present(is_valid)) then
+                if (.not. is_valid(i)) then
+                    n_null = n_null + 1_int64
+                    cycle
+                end if
+            end if
+            ! Nullness first, then weight -- the family's exclusion ORDER, so a weight column that
+            ! is garbage exactly where the value column is null costs nothing and aborts nothing.
+            if (present(weights)) then
+                call stats_check_weight(weights(i), i, what)
+                if (weights(i) <= 0.0_real64) cycle
+            end if
+            m = m + 1_int64
+            idx(m) = i
+            if (present(weights)) w(m) = weights(i)
+        end do
+    end subroutine mode_survivors
+
+    !> Picks the winning run from a sorted population's run-start flags.
+    !!
+    !! **The tie rule lives here and nowhere else.** Runs are visited in ascending value order and
+    !! the comparison is a strict `>`, so the FIRST run to reach the maximum keeps it -- which is
+    !! the smallest tied value, matching `scipy.stats.mode`. A `>=` would silently hand ties to the
+    !! largest value instead, and every count in every test would still be right.
+    subroutine best_run(starts, order, w, m, at, cnt)
+        logical, intent(in) :: starts(:)
+        !! `starts(i)`: sorted position `i` holds a different value from position `i-1`.
+        integer(int64), intent(in) :: order(:)          !! the ascending permutation.
+        real(real64), allocatable, intent(in) :: w(:)   !! weights indexed as `order` is, or none.
+        integer(int64), intent(in) :: m                 !! how many survivors there are.
+        integer(int64), intent(out) :: at               !! sorted position of the winner's first element.
+        integer(int64), intent(out) :: cnt              !! how many elements the winner holds.
+        integer(int64) :: i, run_lo, run_n
+        real(real64) :: run_w, best_w
+
+        at = 1_int64
+        cnt = 0_int64
+        best_w = -1.0_real64
+        run_lo = 1_int64
+        run_n = 0_int64
+        run_w = 0.0_real64
+        do i = 1_int64, m
+            if (i > 1_int64) then
+                if (starts(i)) then
+                    if (run_w > best_w) then
+                        best_w = run_w
+                        at = run_lo
+                        cnt = run_n
+                    end if
+                    run_lo = i
+                    run_n = 0_int64
+                    run_w = 0.0_real64
+                end if
+            end if
+            run_n = run_n + 1_int64
+            if (allocated(w)) then
+                run_w = run_w + w(i)
+            else
+                run_w = run_w + 1.0_real64
+            end if
+        end do
+        if (run_w > best_w) then
+            best_w = run_w
+            at = run_lo
+            cnt = run_n
+        end if
+    end subroutine best_run
+
+    !> Reports `count`, `n_null` and `ok` for a `pf_mode` specific, so five bodies cannot disagree.
+    pure subroutine mode_report(cnt, nnull, count, n_null, ok)
+        integer(int64), intent(in) :: cnt                  !! how many elements the winner holds.
+        integer(int64), intent(in) :: nnull                !! how many were null.
+        integer(int64), intent(out), optional :: count     !! the caller's count, if wanted.
+        integer(int64), intent(out), optional :: n_null    !! the caller's null count, if wanted.
+        logical, intent(out), optional :: ok                !! .false. for an empty population.
+
+        if (present(count)) count = cnt
+        if (present(n_null)) n_null = nnull
+        if (present(ok)) ok = (cnt > 0_int64)
+    end subroutine mode_report
+
+    module procedure mode_i32
+        integer(int32), allocatable :: kept(:)
+        integer(int64), allocatable :: idx(:), perm(:)
+        real(real64), allocatable :: w(:), sw(:)
+        logical, allocatable :: starts(:)
+        integer(int64) :: nv, nnull, i, at, cnt
+
+        call mode_survivors(size(values, kind=int64), "pf_mode", is_valid, weights, idx, w, &
+            nv, nnull)
+        if (nv == 0_int64) then
+            call mode_report(0_int64, nnull, count, n_null, ok)
+            return
+        end if
+        kept = values(idx(1:nv))
+        call pf_argsort(kept, perm)
+        allocate(starts(nv))
+        starts(1) = .true.
+        do i = 2_int64, nv
+            starts(i) = (kept(perm(i)) /= kept(perm(i - 1_int64)))
+        end do
+        ! `w` is indexed by SURVIVOR, and `perm` permutes survivors, so the weight of sorted
+        ! position i is `w(perm(i))` -- which is what the reindexed copy below hands `best_run`.
+        ! `w` is indexed by SURVIVOR and `perm` permutes survivors, so sorted position i carries
+        ! weight `w(perm(i))`. Reindexed into its own array rather than gathered onto itself: an
+        ! array-section assignment whose two sides are the same array is a heap temporary the
+        ! compiler cannot elide (CLAUDE.md), and a weight that lost its value would be a silent
+        ! wrong answer with nothing to report it.
+        if (allocated(w)) then
+            allocate(sw(nv))
+            do i = 1_int64, nv
+                sw(i) = w(perm(i))
+            end do
+        end if
+        call best_run(starts, perm, sw, nv, at, cnt)
+        m = kept(perm(at))
+        call mode_report(cnt, nnull, count, n_null, ok)
+    end procedure mode_i32
+
+    module procedure mode_i64
+        integer(int64), allocatable :: kept(:)
+        integer(int64), allocatable :: idx(:), perm(:)
+        real(real64), allocatable :: w(:), sw(:)
+        logical, allocatable :: starts(:)
+        integer(int64) :: nv, nnull, i, at, cnt
+
+        call mode_survivors(size(values, kind=int64), "pf_mode", is_valid, weights, idx, w, &
+            nv, nnull)
+        if (nv == 0_int64) then
+            call mode_report(0_int64, nnull, count, n_null, ok)
+            return
+        end if
+        kept = values(idx(1:nv))
+        call pf_argsort(kept, perm)
+        allocate(starts(nv))
+        starts(1) = .true.
+        do i = 2_int64, nv
+            starts(i) = (kept(perm(i)) /= kept(perm(i - 1_int64)))
+        end do
+        ! `w` is indexed by SURVIVOR and `perm` permutes survivors, so sorted position i carries
+        ! weight `w(perm(i))`. Reindexed into its own array rather than gathered onto itself: an
+        ! array-section assignment whose two sides are the same array is a heap temporary the
+        ! compiler cannot elide (CLAUDE.md), and a weight that lost its value would be a silent
+        ! wrong answer with nothing to report it.
+        if (allocated(w)) then
+            allocate(sw(nv))
+            do i = 1_int64, nv
+                sw(i) = w(perm(i))
+            end do
+        end if
+        call best_run(starts, perm, sw, nv, at, cnt)
+        m = kept(perm(at))
+        call mode_report(cnt, nnull, count, n_null, ok)
+    end procedure mode_i64
+
+    module procedure mode_bool
+        logical, allocatable :: kept(:)
+        integer(int64), allocatable :: idx(:), perm(:)
+        real(real64), allocatable :: w(:), sw(:)
+        logical, allocatable :: starts(:)
+        integer(int64) :: nv, nnull, i, at, cnt
+
+        call mode_survivors(size(values, kind=int64), "pf_mode", is_valid, weights, idx, w, &
+            nv, nnull)
+        if (nv == 0_int64) then
+            call mode_report(0_int64, nnull, count, n_null, ok)
+            return
+        end if
+        kept = values(idx(1:nv))
+        call pf_argsort(kept, perm)
+        allocate(starts(nv))
+        starts(1) = .true.
+        do i = 2_int64, nv
+            ! `.neqv.` rather than `/=`, which is not defined for LOGICAL.
+            starts(i) = (kept(perm(i)) .neqv. kept(perm(i - 1_int64)))
+        end do
+        ! `w` is indexed by SURVIVOR and `perm` permutes survivors, so sorted position i carries
+        ! weight `w(perm(i))`. Reindexed into its own array rather than gathered onto itself: an
+        ! array-section assignment whose two sides are the same array is a heap temporary the
+        ! compiler cannot elide (CLAUDE.md), and a weight that lost its value would be a silent
+        ! wrong answer with nothing to report it.
+        if (allocated(w)) then
+            allocate(sw(nv))
+            do i = 1_int64, nv
+                sw(i) = w(perm(i))
+            end do
+        end if
+        call best_run(starts, perm, sw, nv, at, cnt)
+        m = kept(perm(at))
+        call mode_report(cnt, nnull, count, n_null, ok)
+    end procedure mode_bool
+
+    module procedure mode_chr
+        character(len=len(values)), allocatable :: kept(:)
+        integer(int64), allocatable :: idx(:), perm(:)
+        real(real64), allocatable :: w(:), sw(:)
+        logical, allocatable :: starts(:)
+        integer(int64) :: nv, nnull, i, at, cnt
+
+        call mode_survivors(size(values, kind=int64), "pf_mode", is_valid, weights, idx, w, &
+            nv, nnull)
+        if (nv == 0_int64) then
+            call mode_report(0_int64, nnull, count, n_null, ok)
+            return
+        end if
+        allocate(kept(nv))
+        do i = 1_int64, nv
+            kept(i) = values(idx(i))
+        end do
+        call pf_argsort(kept, perm)
+        allocate(starts(nv))
+        starts(1) = .true.
+        do i = 2_int64, nv
+            starts(i) = (kept(perm(i)) /= kept(perm(i - 1_int64)))
+        end do
+        ! `w` is indexed by SURVIVOR and `perm` permutes survivors, so sorted position i carries
+        ! weight `w(perm(i))`. Reindexed into its own array rather than gathered onto itself: an
+        ! array-section assignment whose two sides are the same array is a heap temporary the
+        ! compiler cannot elide (CLAUDE.md), and a weight that lost its value would be a silent
+        ! wrong answer with nothing to report it.
+        if (allocated(w)) then
+            allocate(sw(nv))
+            do i = 1_int64, nv
+                sw(i) = w(perm(i))
+            end do
+        end if
+        call best_run(starts, perm, sw, nv, at, cnt)
+        ! Trimmed, so the result is as long as the value rather than as long as whatever width the
+        ! caller happened to declare -- the same rule a character array meets on its way into a
+        ! `parquet_column`. Every element of `values` shares one declared length, so the padding
+        ! cannot be anything the caller meant.
+        m = trim(kept(perm(at)))
+        call mode_report(cnt, nnull, count, n_null, ok)
+    end procedure mode_chr
+
+    module procedure mode_str
+        integer(int64), allocatable :: perm(:), order(:)
+        real(real64), allocatable :: w(:)
+        logical, allocatable :: starts(:)
+        character(len=:), allocatable :: a, b
+        integer(int64) :: n, nv, nnull, i, at, cnt
+
+        if (present(is_valid)) &
+            error stop "pf_mode: a parquet_string_column carries its own validity, so passing " // &
+                "is_valid= alongside one gives two sources of truth that can disagree; drop it"
+        n = parquet_string_column_size(values)
+        if (present(weights)) call stats_check_sizes(n, "pf_mode", weights=weights)
+        ! The WHOLE column is ordered and the survivors are filtered out of the permutation
+        ! afterwards, rather than the other way round: `pf_argsort` orders a packed string column
+        ! without unpacking it, and copying the survivors into a `character` array first would
+        ! need a common declared length this column need not have.
+        call pf_argsort(values, perm)
+        allocate(order(n))
+        if (present(weights)) allocate(w(n))
+        nv = 0_int64
+        nnull = 0_int64
+        do i = 1_int64, n
+            if (parquet_string_column_is_null(values, perm(i))) cycle
+            if (present(weights)) then
+                call stats_check_weight(weights(perm(i)), perm(i), "pf_mode")
+                if (weights(perm(i)) <= 0.0_real64) cycle
+            end if
+            nv = nv + 1_int64
+            order(nv) = perm(i)
+            if (present(weights)) w(nv) = weights(perm(i))
+        end do
+        ! Counted over the column rather than over the filtered permutation, so the count does not
+        ! depend on the order the survivors were visited in.
+        nnull = parquet_string_column_null_count(values)
+        if (nv == 0_int64) then
+            call mode_report(0_int64, nnull, count, n_null, ok)
+            return
+        end if
+        allocate(starts(nv))
+        starts(1) = .true.
+        do i = 2_int64, nv
+            call parquet_string_column_get(values, order(i), a)
+            call parquet_string_column_get(values, order(i - 1_int64), b)
+            starts(i) = (a /= b)
+        end do
+        ! `w` was filled in survivor order as the permutation was filtered, so it already lines up
+        ! with `order` and needs none of the array kinds' reindexing.
+        call best_run(starts, order, w, nv, at, cnt)
+        call parquet_string_column_get(values, order(at), m)
+        call mode_report(cnt, nnull, count, n_null, ok)
+    end procedure mode_str
 
     ! ==================================================================================
     ! Tier B on the object: the cache, and every statistic read off it
@@ -700,6 +1174,20 @@ contains
         stats_sort_count = stats_sort_count + 1_int64
     end subroutine ensure_ordered
 
+    !> Whether every order statistic of this object is undefined, before any of them is computed.
+    !!
+    !! Two causes with one answer. An EMPTY population has nothing to take an order statistic of.
+    !! And a population holding a NaN under `skipnan = .false.` was poisoned deliberately by the
+    !! caller, so every answer is NaN -- which the order tier has to test for rather than inherit,
+    !! since a NaN sorts to one END of the buffer instead of poisoning the interpolation. The
+    !! moments already answer NaN in the same state, so this is what keeps `%mean()` and
+    !! `%median()` from disagreeing about whether the population has an answer at all.
+    pure function obj_undefined(self) result(res)
+        class(pf_stats), intent(in) :: self !! the accumulator.
+        logical :: res                      !! .true. when every order statistic is NaN.
+        res = (self%keep_n == 0_int64) .or. self%acc%saw_nan
+    end function obj_undefined
+
     !> One quantile off the object's ordered buffer, shared by every tier-B binding.
     subroutine obj_quantile_at(self, p, method, res)
         class(pf_stats), intent(inout) :: self             !! the accumulator, already ordered.
@@ -709,7 +1197,7 @@ contains
         integer :: code
 
         call method_code("pf_stats%quantile", method, self%freq .and. self%wtd, code)
-        if (self%keep_n == 0_int64) then
+        if (obj_undefined(self)) then
             res = stats_nan()
             return
         end if
@@ -763,7 +1251,7 @@ contains
                 "more from each tail would leave nothing to average"
         call ensure_ordered(self, "pf_stats%trim_mean")
         res = stats_nan()
-        if (self%keep_n == 0_int64) return
+        if (obj_undefined(self)) return
         cut = int(prop * real(self%keep_n, real64), int64)
         lo = cut + 1_int64
         hi = self%keep_n - cut
@@ -797,7 +1285,7 @@ contains
         ! read. The ordering it may perform is not wasted, since anything else the caller asks of
         ! this object will want it.
         call ensure_ordered(self, "pf_stats%percentile_of_score")
-        if (self%keep_n == 0_int64) then
+        if (obj_undefined(self)) then
             res = stats_nan()
             return
         end if
@@ -814,13 +1302,110 @@ contains
 
     module procedure obj_release_order
         ! The VALUES stay -- they are what makes tier A exact across %update and %merge. Only the
-        ! claim that they are ordered is dropped, so the next order statistic sorts again.
+        ! claim that they are ordered is dropped, so the next order statistic sorts again. Tier C
+        ! goes with it: `%release_order` is documented as freeing both, and a cached deviation
+        ! that outlived the ordering it was built from would be the one piece of state a
+        ! `%release_order` did not release.
         self%ordered = .false.
+        self%mad_ready = .false.
     end procedure obj_release_order
 
     module procedure obj_is_ordered
         res = self%ordered
     end procedure obj_is_ordered
+
+    ! ==================================================================================
+    ! Tier C on the object, and the descriptive dump
+    ! ==================================================================================
+
+    module procedure obj_has_deviation
+        res = self%mad_ready
+    end procedure obj_has_deviation
+
+    module procedure obj_mad
+        real(real64) :: factor, c
+
+        call scale_factor("pf_stats%mad", scale, factor)
+        call check_center("pf_stats%mad", center)
+        ! Tier B first, for three separate reasons: the streaming and uncomputed guards live in
+        ! `ensure_ordered`, a deferred tier-A recomputation has to land before `keep_n` is read,
+        ! and the default centre IS the median.
+        call ensure_ordered(self, "pf_stats%mad")
+        res = stats_nan()
+        if (obj_undefined(self)) return
+
+        if (present(center)) then
+            c = center
+        else
+            call obj_quantile_at(self, 0.5_real64, res=c)
+        end if
+        ! The cache is keyed on the RESOLVED centre, not on whether `center` was supplied: that
+        ! makes repeated default calls hit, makes a `center=` equal to the median hit too, and
+        ! makes a different centre rebuild rather than answer the wrong population's deviation.
+        ! Bit equality is the right test because `mad_c` is a stored copy of a value this
+        ! procedure computed, not two independent derivations of one quantity.
+        if (.not. (self%mad_ready .and. self%mad_c == c)) then
+            call raw_mad(self%keep, self%keep_w, self%keep_n, c, res=self%mad_raw)
+            self%mad_c = c
+            self%mad_ready = .true.
+        end if
+        res = factor * self%mad_raw
+    end procedure obj_mad
+
+    module procedure obj_print
+        integer :: u
+        real(real64) :: q1, q2, q3
+        character(len=:), allocatable :: head, stream
+
+        ! Solicited output, so `verbosity = "silent"` governs it exactly as it governs every other
+        ! printer in this library: the call returns having written nothing.
+        if (parquet_output_is_suppressed()) return
+        if (present(unit)) then
+            u = unit
+        else
+            ! Resolved from the setting's own token rather than from its private integer, so this
+            ! reaches `parquet_settings_base` through the same public surface a caller would.
+            call parquet_get_message_stream(stream)
+            if (stream == "stderr") then
+                u = error_unit
+            else
+                u = output_unit
+            end if
+        end if
+        head = "pf_stats"
+        if (present(name)) head = "pf_stats " // trim(name)
+        if (.not. self%live) then
+            write(u, '(a)') trim(head) // ": no population (call %compute or %init first)"
+            return
+        end if
+        ! A deferred tier-A recomputation must land before any count is read.
+        call stats_ensure(self)
+        write(u, '(a)') trim(head)
+        write(u, '(2x,a,i0)') "n         ", self%n()
+        write(u, '(2x,a,i0)') "n_valid   ", self%n_valid()
+        write(u, '(2x,a,i0)') "n_null    ", self%n_null()
+        ! Shown unconditionally, and this is the mitigation that makes `skipnan = .true.` safe:
+        ! a silently skipped NaN is visible here rather than nowhere.
+        write(u, '(2x,a,i0)') "n_nan     ", self%n_nan()
+        write(u, '(2x,a,g0)') "mean      ", self%mean()
+        write(u, '(2x,a,g0)') "stddev    ", self%stddev()
+        write(u, '(2x,a,g0)') "min       ", self%vmin()
+        write(u, '(2x,a,g0)') "max       ", self%vmax()
+        if (.not. self%hold) then
+            ! A streaming accumulator kept no values, so the quartiles do not exist. Saying so is
+            ! the whole point: a printer that aborted here would be a poor way to find out what an
+            ! object holds, and one that silently printed six rows instead of nine would be worse.
+            write(u, '(2x,a)') "25% 50% 75%  (not available: retain=.false.)"
+            return
+        end if
+        call ensure_ordered(self, "pf_stats%print")
+        call obj_quantile_at(self, 0.25_real64, res=q1)
+        call obj_quantile_at(self, 0.50_real64, res=q2)
+        call obj_quantile_at(self, 0.75_real64, res=q3)
+        write(u, '(2x,a,g0)') "25%       ", q1
+        write(u, '(2x,a,g0)') "50%       ", q2
+        write(u, '(2x,a,g0)') "75%       ", q3
+    end procedure obj_print
 
     module procedure parquet_debug_stats_sorts
         res = stats_sort_count

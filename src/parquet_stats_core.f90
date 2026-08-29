@@ -1135,9 +1135,12 @@ contains
         self%skip = .true.
         self%stale = .false.
         self%ordered = .false.
+        self%mad_ready = .false.
+        self%mad_raw = 0.0_real64
+        self%mad_c = 0.0_real64
     end subroutine stats_reset
 
-    !> Drops tier B: the retained values may no longer be in order.
+    !> Drops tiers B and C: the retained values may no longer be in order.
     !!
     !! **Called by every mutation, unconditionally, and before it mutates anything.** The
     !! unconditional part is the point: writing `if (self%hold) self%ordered = .false.` inside a
@@ -1151,6 +1154,11 @@ contains
     pure subroutine stats_invalidate_order(self)
         class(pf_stats), intent(inout) :: self !! the accumulator being mutated.
         self%ordered = .false.
+        ! Tier C goes with tier B, and it is the more dangerous of the two to leave behind: a
+        ! cached deviation is a bare `real(real64)` with nothing about it to suggest which
+        ! population it describes, where a stale ORDERING is at least still an ordering of values
+        ! the object holds. One flag, dropped in the one place every mutation passes through.
+        self%mad_ready = .false.
     end subroutine stats_invalidate_order
 
     !> Aborts unless `%compute` or `%init` has run.
@@ -1530,6 +1538,12 @@ contains
         n_valid = acc%n_valid
         n_null = acc%n_null
         n_nan = acc%n_nan
+        ! `skipnan = .false.` and a NaN survived. The engine already answers NaN for every moment
+        ! in this state; the order tier cannot inherit that for free, because a NaN sorts to one
+        ! END of the buffer rather than poisoning it, so a median would come back as a perfectly
+        ! ordinary number from a population the caller asked to have poisoned. Every order
+        ! statistic therefore has to test this flag itself.
+        saw_nan = acc%saw_nan
         ! An unweighted population leaves `keep_w` unallocated, and the order tier reads that as
         ! "unweighted" rather than carrying a separate flag -- the same convention `pf_stats` uses.
     end procedure stats_compact

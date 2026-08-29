@@ -35,8 +35,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pf_percentile_of_score`, over the same six inputs, with numpy's six `method=` tokens and
   weighted quantiles whose rule reduces exactly to the unweighted one at equal weights. A
   `pf_stats` orders its retained values once and answers every later order statistic off that
-  ordering, dropping it whenever `%update` or `%merge` changes the population. See
-  [Array statistics](doc/pages/utilities/statistics.md).
+  ordering, dropping it whenever `%update` or `%merge` changes the population. `pf_mad` gives the
+  median absolute deviation, scaled by default so that it estimates the standard deviation of clean
+  Gaussian data, with `scale=` and `center=`; `pf_mode` gives the most common value over the
+  integer, logical and string kinds, breaking ties to the smallest value. `pf_describe` fills a
+  `pf_stats` in one pair of passes and one ordering, and `%print` renders the summary block pandas'
+  `describe()` prints. See [Array statistics](doc/pages/utilities/statistics.md).
 - **`parquet_logging`: general-purpose logging for the calling program.** A `pf_logger` type and a
   matching set of `pf_log_*` procedures on a process-wide default logger: eight ascending severity
   levels using Python's numbers (`PF_LEVEL_DEBUG` = 10, and an arbitrary integer level is accepted

@@ -307,6 +307,50 @@ def self_test():
             ok &= close(g, np.quantile(np.array(expanded, dtype=float), p, method="inverted_cdf"),
                         "weighted inverted_cdf at p=%g" % p)
 
+    # ---- pf_mad against scipy, on the half scipy implements ----
+    #
+    # `median_abs_deviation` has no weighted form, so only the unweighted cases can be compared;
+    # the weighted rows are pinned the way the weighted quantiles are, by the equal-weight
+    # reduction asserted on the Fortran side.
+    for name, _, case in MADCASES:
+        if case.get("weights") is not None:
+            continue
+        kwargs = dict(case)
+        vals = kwargs.pop("values")
+        keep = [v for i, v in enumerate(vals)
+                if kwargs.get("is_valid") is None or kwargs["is_valid"][i]]
+        arr = np.array([float(v) for v in keep], dtype=np.float64)
+        got = mad_model(vals, **kwargs)
+        if kwargs.get("center") is None:
+            ok &= close(got[1], sps.median_abs_deviation(arr), "mad %s raw" % name)
+            ok &= close(got[0], sps.median_abs_deviation(arr, scale="normal"),
+                        "mad %s normal" % name)
+        else:
+            # scipy takes `center` as a CALLABLE, so an explicit centre is expressed as a
+            # constant function -- which is also a check that this model reads `center` the way
+            # scipy does, rather than as an offset or a shift.
+            c = float(kwargs["center"])
+            ok &= close(got[1], sps.median_abs_deviation(arr, center=lambda a, axis=None, c=c: c),
+                        "mad %s raw (explicit centre)" % name)
+    # The factor itself, against scipy's own definition of it rather than against the literal.
+    ok &= close(MAD_NORMAL_DENOM, sps.norm.ppf(0.75), "the normal scale denominator Phi^-1(3/4)")
+
+    # ---- pf_mode's tie rule against scipy.stats.mode ----
+    #
+    # No golden vectors: the answer is an exact integer, so the Fortran tests assert it directly.
+    # What is worth cross-checking is the TIE rule -- that the smallest tied value wins, which is
+    # the one thing about a mode that is silently wrong rather than loudly wrong.
+    for pop in ([3, 1, 3, 2, 2, 7, 2, 1, 1],          # 1 and 2 tie at three each
+                [5, 5, 4, 4, 3, 3],                    # a three-way tie
+                [9], [2, 2, 2], [-1, -1, 0, 0]):       # single, unanimous, tie across zero
+        want = int(sps.mode(np.array(pop), keepdims=False).mode)
+        got = min(v for v in set(pop) if pop.count(v) == max(pop.count(u) for u in set(pop)))
+        checks += 1
+        if got != want:
+            print("--self-test: mode tie rule on %r: model %d vs scipy %d" % (pop, got, want),
+                  file=sys.stderr)
+            ok = False
+
     if not ok:
         return 1
     print("generate_stats_vectors.py --self-test: %d model/library comparisons agree "
@@ -421,6 +465,56 @@ QCASES = [
     ("NULLS_LINEAR", "one element in three null: the quantiles are of what survives",
      dict(values=fixture(32), is_valid=[(i % 3) != 0 for i in range(1, 33)], method="linear")),
 ]
+
+
+#: `pf_mad`'s cases. Each emits the pair `[normal, raw]`, so the normal scale factor is pinned by
+#: the RATIO of two committed numbers rather than by a literal a test could copy from the source.
+MADCASES = [
+    ("U32", "the default: centre is the population's own median, scale is \"normal\"",
+     dict(values=fixture(32))),
+    ("U33", "odd length, so the centre is an element rather than an interpolation",
+     dict(values=fixture(33))),
+    ("CTR", "an explicit centre, which skips one selection and changes the deviations",
+     dict(values=fixture(32), center=0.5)),
+    ("WVAR", "unequal weights: both medians are weighted, values and deviations alike",
+     dict(values=fixture(32), weights=weights_mod5(32))),
+    ("NULLS", "one element in three null: the deviations are of what survives",
+     dict(values=fixture(32), is_valid=[(i % 3) != 0 for i in range(1, 33)])),
+    ("OUT", "four wild points in thirty-six: this is the case pf_stddev gets wrong and MAD does not",
+     dict(values=fixture(32) + [1.0e6, -1.0e6, 2.0e6, -2.0e6])),
+]
+
+#: The "normal" scale, spelled as scipy spells it: a DIVISION by `Phi^-1(3/4)`. The rounded
+#: 1.4826 of every textbook is 1.5e-06 away from it, which is four million times the double
+#: precision noise floor -- large enough that using it made the scipy cross-check below fail.
+MAD_NORMAL_DENOM = mpf("0.6744897501960817")
+
+
+def mad_model(values, is_valid=None, weights=None, skipnan=True, center=None):
+    """`[scale="normal", scale="raw"]` for one population, at 50 digits.
+
+    Written from the definition rather than from scipy, per this file's premise -- and then
+    cross-checked against `scipy.stats.median_abs_deviation` in `--self-test` for the unweighted
+    cases, which is the only half scipy implements.
+    """
+    keep, _, _ = select(values, is_valid, weights, skipnan)
+    if not keep:
+        return [None, None]
+    pairs = sorted(keep, key=lambda t: t[0])
+    xs = [x for x, _ in pairs]
+    ws = [w for _, w in pairs]
+    weighted = weights is not None
+    if center is None:
+        c = quantile_at(xs, ws, mpf("0.5"), "linear", weighted)
+    else:
+        c = mpf(repr(center))
+    # The deviations are a DIFFERENT population: |x - c| is not monotone in x, so they carry their
+    # own order and each keeps the weight of the element it came from.
+    dev = sorted(zip([abs(x - c) for x in xs], ws), key=lambda t: t[0])
+    dxs = [d for d, _ in dev]
+    dws = [w for _, w in dev]
+    raw = quantile_at(dxs, dws, mpf("0.5"), "linear", weighted)
+    return [raw / MAD_NORMAL_DENOM, raw]
 
 
 def quantile_model(values, is_valid=None, weights=None, skipnan=True, method="linear"):
@@ -605,6 +699,16 @@ def emit():
         vals = quantile_model(kwargs.pop("values"), **kwargs)
         out.append("    !> %s" % doc)
         out += wrap_array("    real(real64), parameter :: Q_%s(NQP) =" % name,
+                          [fortran_real(v) for v in vals])
+        out.append("")
+
+    out.append("    !> Each M_* row is `[scale=\"normal\", scale=\"raw\"]`, so their ratio pins the "
+               "normal scale factor.")
+    for name, doc, case in MADCASES:
+        kwargs = dict(case)
+        vals = mad_model(kwargs.pop("values"), **kwargs)
+        out.append("    !> %s" % doc)
+        out += wrap_array("    real(real64), parameter :: M_%s(2) =" % name,
                           [fortran_real(v) for v in vals])
         out.append("")
 

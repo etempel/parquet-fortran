@@ -350,6 +350,22 @@ contains
             n_null=n_null, ok=ok, threads=threads)
     end procedure percentile_of_score_i32
 
+    module procedure mad_i32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call mad_f64(wide, m, is_valid=is_valid, weights=weights, scale=scale, center=center, n_null=n_null, &
+            ok=ok, threads=threads)
+    end procedure mad_i32
+
+    module procedure describe_i32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call describe_f64(wide, s, is_valid=is_valid, weights=weights, weight_type=weight_type, &
+            threads=threads)
+    end procedure describe_i32
+
     module procedure sum_i64
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
@@ -461,6 +477,22 @@ contains
         call percentile_of_score_f64(wide, score, p, is_valid=is_valid, weights=weights, kind=kind, &
             n_null=n_null, ok=ok, threads=threads)
     end procedure percentile_of_score_i64
+
+    module procedure mad_i64
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call mad_f64(wide, m, is_valid=is_valid, weights=weights, scale=scale, center=center, n_null=n_null, &
+            ok=ok, threads=threads)
+    end procedure mad_i64
+
+    module procedure describe_i64
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call describe_f64(wide, s, is_valid=is_valid, weights=weights, weight_type=weight_type, &
+            threads=threads)
+    end procedure describe_i64
 
     module procedure sum_f32
         real(real64), allocatable :: wide(:)
@@ -576,6 +608,22 @@ contains
             kind=kind, n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
     end procedure percentile_of_score_f32
 
+    module procedure mad_f32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call mad_f64(wide, m, is_valid=is_valid, weights=weights, skipnan=skipnan, scale=scale, &
+            center=center, n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
+    end procedure mad_f32
+
+    module procedure describe_f32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call describe_f64(wide, s, is_valid=is_valid, weights=weights, weight_type=weight_type, &
+            skipnan=skipnan, threads=threads)
+    end procedure describe_f32
+
     module procedure sum_bool
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
@@ -687,6 +735,22 @@ contains
         call percentile_of_score_f64(wide, score, p, is_valid=is_valid, weights=weights, kind=kind, &
             n_null=n_null, ok=ok, threads=threads)
     end procedure percentile_of_score_bool
+
+    module procedure mad_bool
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = merge(1.0_real64, 0.0_real64, values)
+        call mad_f64(wide, m, is_valid=is_valid, weights=weights, scale=scale, center=center, n_null=n_null, &
+            ok=ok, threads=threads)
+    end procedure mad_bool
+
+    module procedure describe_bool
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = merge(1.0_real64, 0.0_real64, values)
+        call describe_f64(wide, s, is_valid=is_valid, weights=weights, weight_type=weight_type, &
+            threads=threads)
+    end procedure describe_bool
 
     module procedure sum_col
         real(real64), allocatable :: wide(:)
@@ -801,6 +865,22 @@ contains
         call percentile_of_score_f64(wide, score, p, is_valid=mask, weights=weights, skipnan=skipnan, &
             kind=kind, n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
     end procedure percentile_of_score_col
+
+    module procedure mad_col
+        real(real64), allocatable :: wide(:)
+        logical, allocatable :: mask(:)
+        call col_to_real64(values, "pf_mad", is_valid, wide, mask)
+        call mad_f64(wide, m, is_valid=mask, weights=weights, skipnan=skipnan, scale=scale, center=center, &
+            n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
+    end procedure mad_col
+
+    module procedure describe_col
+        real(real64), allocatable :: wide(:)
+        logical, allocatable :: mask(:)
+        call col_to_real64(values, "pf_describe", is_valid, wide, mask)
+        call describe_f64(wide, s, is_valid=mask, weights=weights, weight_type=weight_type, skipnan=skipnan, &
+            threads=threads)
+    end procedure describe_col
 
     module procedure obj_compute_i32
         real(real64), allocatable :: wide(:)

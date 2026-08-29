@@ -225,4 +225,23 @@ module test_stats_golden
         -307.302734375_real64, -138.56201171875_real64, 156.029541015625_real64, 359.86367187500002_real64,  &
         459.5146484375_real64]
 
+    !> Each M_* row is `[scale="normal", scale="raw"]`, so their ratio pins the normal scale factor.
+    !> the default: centre is the population's own median, scale is "normal"
+    real(real64), parameter :: M_U32(2) = [349.69938724077031_real64, 235.86865234375_real64]
+
+    !> odd length, so the centre is an element rather than an interpolation
+    real(real64), parameter :: M_U33(2) = [358.63047296816467_real64, 241.892578125_real64]
+
+    !> an explicit centre, which skips one selection and changes the deviations
+    real(real64), parameter :: M_CTR(2) = [422.6263317172436_real64, 285.05712890625_real64]
+
+    !> unequal weights: both medians are weighted, values and deviations alike
+    real(real64), parameter :: M_WVAR(2) = [306.97171108786517_real64, 207.04927272891794_real64]
+
+    !> one element in three null: the deviations are of what survives
+    real(real64), parameter :: M_NULLS(2) = [329.96658876810153_real64, 222.55908203125_real64]
+
+    !> four wild points in thirty-six: this is the case pf_stddev gets wrong and MAD does not
+    real(real64), parameter :: M_OUT(2) = [365.96240425186812_real64, 246.837890625_real64]
+
 end module test_stats_golden ! GCOVR_EXCL_LINE

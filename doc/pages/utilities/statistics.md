@@ -318,6 +318,117 @@ equal to `score` counts — `"rank"` (the default, scipy's too), `"weak"`, `"str
 NaN or infinite `score` **aborts**: unlike a NaN in the population, which is an ordinary data
 condition, a NaN score can only come from the caller's own arithmetic.
 
+## `pf_mad` — the median absolute deviation
+
+`pf_mad` is what to reach for when the population may contain a few wild points and `pf_stddev`
+would be wrecked by them. It is `median(|x - center|)`, scaled by default so that it estimates the
+same quantity `pf_stddev` does for clean Gaussian data:
+
+```fortran
+call pf_mad(mag, spread)                    ! scaled: comparable with pf_stddev
+call pf_mad(mag, spread, scale="raw")       ! the unscaled median deviation
+call pf_mad(mag, spread, center=0.0_real64) ! deviations about a centre you supply
+```
+
+`scale="normal"` (the default) divides by `Phi^-1(3/4)`, which is scipy's
+`median_abs_deviation(scale='normal')` and what an astronomy script means by "the MAD". Note the
+constant: it is a division by `0.6744897501960817`, and **not** a multiplication by the rounded
+`1.4826` most textbooks quote — those differ by about 1.5e-06 relative, which is far above the
+double-precision noise floor and is enough to fail a comparison against scipy.
+
+Three rules to know:
+
+- **`center=` skips one selection, not the ordering.** The median of `|x - center|` still has to be
+  found, so supplying a centre is a small saving rather than a different algorithm. With `center`
+  absent the centre is the population's own median.
+- **A NaN or infinite `center` aborts.** This is the one place in the module where a NaN is treated
+  as misuse rather than as data, and the asymmetry is deliberate: a NaN *value* is an ordinary thing
+  to meet in a catalogue, while a NaN *centre* can only come from the caller's own arithmetic.
+- **There is no `method=`.** Both medians use linear interpolation, because scipy reaches
+  `np.median`; a token that let this disagree with scipy would be worse than no token.
+
+On the object, `%mad([scale], [center])` caches the **raw** deviation with the centre it was taken
+about, so rescaling it is free and a repeated default call costs nothing. `%has_deviation()` reports
+whether that cache is built; `%update`, `%merge` and `%release_order()` all drop it.
+
+## `pf_mode` — the most common value
+
+```fortran
+integer(int32) :: filter_id, m
+integer(int64) :: n
+logical :: ok
+
+call pf_mode(filter_ids, m, count=n, ok=ok)
+```
+
+**Integer, logical and string kinds only.** `integer(int32)`, `integer(int64)`, `logical`,
+`character(len=*)` and `parquet_string_column` reach the generic; the real kinds do not, so
+`pf_mode` over a real array does not compile. That is not an oversight — the mode of a continuous
+variable is not a statistic, and floating-point equality is a trap rather than an answer. Use
+`pf_bucketize` or `pf_histogram` for the question a caller reaching for it is usually asking.
+
+- **Ties go to the smallest value**, matching `scipy.stats.mode`, and never to the first occurrence:
+  an answer that depended on input order would differ between an array and its own permutation.
+- **`count` reports occurrences.** Under weights, the mode is the value carrying the greatest total
+  weight, ties still broken by the smallest value — and `count` still counts elements rather than
+  weight.
+- **Nulls are excluded and counted** through `n_null`, as everywhere. No kind here can hold a NaN,
+  so there is deliberately no `skipnan` and no `n_nan`.
+- **An empty population gives `ok = .false.` and `count = 0`,** and `m` must not be read. For the
+  two character forms `m` is then left *unallocated*, which is the one place in this module where
+  `ok = .false.` and an unallocated result coincide.
+
+The result has the type of `values`, so the character forms return a `character(len=:), allocatable`
+through an `intent(out)` argument. A `character(len=*)` array's answer is **trimmed**, so it comes
+back as long as the value rather than as wide as the array was declared.
+
+A `type(parquet_column)` is deliberately **not** accepted. A column's kind is not known until run
+time, so such a specific could only be disambiguated by the type of the *result* argument — which
+would turn a kind mismatch from a compile error into a runtime abort, and would make `pf_mode` the
+one procedure here that does not resolve on `values` alone.
+
+## `pf_describe` and `%print` — the whole summary at once
+
+```fortran
+type(pf_stats) :: s
+
+call pf_describe(mag, s)
+call s%print(name="mag")
+```
+
+`pf_describe` is `%compute` followed by `%prepare_order`: **one pair of traversals and one
+ordering**, after which the count, the mean, the standard deviation, the extremes and every quantile
+are reads. `%print` renders the block pandas' `describe()` prints:
+
+```
+pf_stats mag
+  n         200000
+  n_valid   199981
+  n_null    12
+  n_nan     7
+  mean      18.4429...
+  stddev    1.2201...
+  min       11.7314...
+  max       24.9982...
+  25%       17.5544...
+  50%       18.4381...
+  75%       19.3327...
+```
+
+- **`n_nan` is always shown**, and that is the mitigation that makes `skipnan = .true.` a safe
+  default: a silently skipped NaN is visible in that row rather than nowhere.
+- **`%print` never aborts.** On a streaming accumulator (`retain = .false.`) it prints the moment
+  rows and one line saying the quartiles are not available; on an object that has not been computed
+  at all it prints one line saying so. A printer is what someone reaches for to find out what state
+  an object is in, so killing the process would be a poor way to answer.
+- **`verbosity = "silent"` silences it entirely**, like every other solicited printer in this
+  library. `unit=` overrides the destination; absent, it follows the `message_stream` setting.
+  `parquet_stats` re-exports `parquet_set_verbosity` and `parquet_set_message_stream` so that a
+  program importing nothing else can reach both.
+
+Reach for `%compute` rather than `pf_describe` when the order statistics are not wanted:
+`pf_describe` pays for the ordering whether or not anything asks for it, which is the point of it.
+
 ## `pf_stats` — summarise once, query as often as you like
 
 The one-shot procedures above each traverse the population. When a group needs more than one or two
@@ -400,7 +511,10 @@ population is a no-op — which is what lets a threaded fold run over slots a sh
 | counts | `%n()`, `%n_valid()`, `%n_null()`, `%n_nan()`, `%sum_weights()` |
 | moments | `%sum()`, `%mean()`, `%variance([ddof])`, `%stddev([ddof])`, `%sem([ddof])`, `%skewness([bias])`, `%kurtosis([bias], [excess])` |
 | extremes | `%vmin()`, `%vmax()`, `%range()` |
-| state | `%is_computed()`, `%retains()`, `%clear()` |
+| order | `%median([method])`, `%quantile(p, [method])`, `%quantiles(probs, out, [method])`, `%iqr([method])`, `%trim_mean(prop)`, `%percentile_of_score(score, [kind])` |
+| deviation | `%mad([scale], [center])` |
+| output | `%print([unit], [name])` |
+| state | `%is_computed()`, `%retains()`, `%is_ordered()`, `%has_deviation()`, `%prepare_order()`, `%release_order()`, `%clear()` |
 
 The arguments mean exactly what they mean on the one-shot procedures, including every default in
 the table above, and the exclusion rules are the same ones. `weight_type` and `skipnan` are fixed at
@@ -448,7 +562,14 @@ What does abort is a call that cannot be honoured:
 
 - `is_valid` or `weights` whose size does not match `values`;
 - a weight that is negative, NaN or infinite — a weight can be zero, but none of those three can be
-  meant, and failing at the weight is far more useful than a NaN appearing three steps downstream.
+  meant, and failing at the weight is far more useful than a NaN appearing three steps downstream;
+- an unrecognised token: a `method=`, a `kind=` or a `scale=` this module does not know, each
+  aborting with the accepted set named;
+- a probability outside `[0, 1]`, a `prop` outside `[0, 0.5)`, or a `probs`/`out` size mismatch;
+- a NaN or infinite `score` or `center` — the two arguments a caller computes rather than measures;
+- an order statistic asked of a `retain = .false.` accumulator, which kept no values to order;
+- `is_valid=` passed beside a `parquet_column` or a `parquet_string_column`, both of which carry
+  their own validity: two sources of truth that can disagree is not something to resolve silently.
 
 ## Optional arguments are in one fixed order
 
@@ -457,8 +578,12 @@ sequence, so a signature you have seen once you have seen everywhere:
 
 ```
 is_valid, weights, weight_type, ddof, bias, excess, skipnan,
-method, scale, center, out_valid, converged, n_null, n_nan, ok, threads
+method, kind, scale, center, out_valid, converged, n_null, n_nan, ok, threads
 ```
+
+Two short blocks sit either side of it and are part of the same sequence: an *output* prefix, which
+`pf_moments` and `pf_mode` declare before the inputs (`pf_mode`'s `count` is one of these), and the
+`unit`/`name` pair, which only `%print` takes.
 
 A procedure omits the ones it has no use for and never reorders the rest. In Fortran the order of
 optional arguments is part of the public contract — a caller may pass them positionally — so this is

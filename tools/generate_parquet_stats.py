@@ -140,7 +140,21 @@ module parquet_stats
     use parquet_columns, only : parquet_column, parquet_kind_name, parquet_column_data_ptr, &
         PK_INT32, PK_INT64, PK_FLOAT32, PK_FLOAT64, PK_LOGICAL, &
         PK_INT32_VEC, PK_INT64_VEC, PK_FLOAT32_VEC, PK_FLOAT64_VEC, PK_LOGICAL_VEC
-    use iso_fortran_env, only : int32, int64, real32, real64
+    ! `pf_mode` accepts a packed string column, and reaches it through the TYPED tier
+    ! (`parquet_string_column_get` and friends) rather than through a type-bound procedure --
+    ! CLAUDE.md's ifx descriptor rule, which costs 24 static stores per call on a shared `.bss`
+    ! line and so gets worse rather than better under threads. `parquet_strings` is already in
+    ! this module's closure, beneath `parquet_columns`, so nothing new enters the graph.
+    use parquet_strings, only : parquet_string_column, parquet_string_column_get, &
+        parquet_string_column_is_null, parquet_string_column_size, &
+        parquet_string_column_null_count
+    ! `%print` writes solicited output, and `verbosity = "silent"` governs solicited output
+    ! wherever it lives. `parquet_sorting` re-exports the getters and setters but not this
+    ! predicate, so it is named directly; `parquet_settings_base` is already in the closure.
+    use parquet_settings_base, only : parquet_output_is_suppressed
+    ! `output_unit`/`error_unit` are for `%print`, which resolves the `message_stream` setting's
+    ! token to a unit the same way the library's own emitters do.
+    use iso_fortran_env, only : int32, int64, real32, real64, output_unit, error_unit
     implicit none
     private
 
@@ -220,6 +234,24 @@ D["kind"] = """            character(len=*), intent(in), optional :: kind
             !! default; ties count half), "weak" (a value <= score counts), "strict" (only < score)
             !! or "mean" (the average of weak and strict). Any other token aborts, listing all
             !! four. Matched case-insensitively."""
+D["scale"] = """            character(len=*), intent(in), optional :: scale
+            !! "normal" (the default) divides the raw deviation by `Phi^-1(3/4)`, which makes the
+            !! result a consistent estimator of the standard deviation for Gaussian data --
+            !! scipy's `median_abs_deviation(scale='normal')`, and what an astronomy script means
+            !! by "the MAD". That is a multiplication by 1.482602218505602, and **not** by the
+            !! rounded 1.4826 the textbooks quote, which differs by 1.5e-06 relative. "raw" is the
+            !! unscaled median of |x - center|. Any other token aborts, naming both. Matched
+            !! case-insensitively."""
+D["center"] = """            real(real64), intent(in), optional :: center
+            !! the centre the deviations are taken about. Absent uses the population's own median,
+            !! which is what scipy does. Supplying one skips ONE selection and not the ordering:
+            !! the median of |x - center| still has to be found. A NaN or infinite centre ABORTS
+            !! -- unlike a NaN value, which is an ordinary data condition, a NaN centre can only
+            !! come from the caller's own arithmetic."""
+D["count"] = """            integer(int64), intent(out), optional :: count
+            !! how many elements hold the modal value. `0` when the population is empty. Counts
+            !! ELEMENTS even when weights decided which value won, so a weighted mode reports the
+            !! occurrences of the value carrying the greatest total weight."""
 D["threads"] = """            integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
             !! the `parquet_sort_threads` setting, capped by the processors actually available and
@@ -318,12 +350,20 @@ TYPE_BLOCK = """    !
         logical :: freq = .false.                !! frequency rather than reliability weights.
         logical :: wtd = .false.                 !! any weights have been supplied.
         logical :: skip = .true.                 !! `skipnan`, fixed at %init/%compute.
-        logical :: stale = .false.
+        logical :: stale = .false.  !! retained moments need recomputing.
         logical :: ordered = .false.
         !! tier B is built: `keep` (and `keep_w` with it) is in ascending order. **The retained
         !! buffer is sorted IN PLACE**, so tier B costs no memory of its own -- which is also why
         !! nothing in the public API ever hands the retained values back in their original order,
-        !! and why no binding should be added that does.               !! retained moments need recomputing.
+        !! and why no binding should be added that does.
+        real(real64) :: mad_raw = 0.0_real64 !! tier C: the UNSCALED median absolute deviation.
+        real(real64) :: mad_c = 0.0_real64   !! the centre `mad_raw` was taken about.
+        logical :: mad_ready = .false.
+        !! tier C is built for centre `mad_c`. **The cache is a scalar, not the deviation buffer**:
+        !! once the median of |x - c| is known the buffer has no further use, so tier C costs
+        !! O(1) to hold and O(n) only while it is being built. A `%mad(center=)` whose centre
+        !! differs from `mad_c` rebuilds rather than answering the wrong population's deviation --
+        !! the equality is on the RESOLVED centre, so repeated default calls hit.
     contains
         procedure :: init => obj_init !! Arms an empty accumulator for a loop of `%update`.
         procedure :: clear => obj_clear !! Returns the object to its default-initialised state.
@@ -363,9 +403,12 @@ TYPE_BLOCK = """    !
         procedure :: iqr => obj_iqr !! The interquartile range.
         procedure :: trim_mean => obj_trim_mean !! The mean with a share trimmed from each tail.
         procedure :: percentile_of_score => obj_percentile_of_score !! Where a value sits, 0-1.
+        procedure :: mad => obj_mad !! The median absolute deviation, scaled by default.
+        procedure :: print => obj_print !! Writes the describe() block to a unit.
         procedure :: prepare_order => obj_prepare_order !! Builds tier B now rather than lazily.
         procedure :: release_order => obj_release_order !! Frees tier B, keeping tier A.
         procedure :: is_ordered => obj_is_ordered !! Whether tier B is currently built.
+        procedure :: has_deviation => obj_has_deviation !! Whether tier C is currently built.
     end type pf_stats"""
 
 
@@ -626,6 +669,8 @@ def object_ifaces():
     tierb = OBJ_ORDER_IFACES
     tierb = tierb.replace("@@method@@", D["method"])
     tierb = tierb.replace("@@kind@@", D["kind"])
+    tierb = tierb.replace("@@scale@@", D["scale"])
+    tierb = tierb.replace("@@center@@", D["center"])
     out.append(tierb.rstrip("\n"))
     out.append("    end interface")
     return "\n".join(out)
@@ -721,7 +766,52 @@ OBJ_ORDER_IFACES = """        !> The interpolating median of the population.
         module function obj_is_ordered(self) result(res)
             class(pf_stats), intent(in) :: self !! the accumulator.
             logical :: res !! .true. when the retained values are in ascending order.
-        end function obj_is_ordered"""
+        end function obj_is_ordered
+        !> The median absolute deviation of the population -- tier C.
+        !!
+        !! `median(|x - center|)`, divided by `Phi^-1(3/4)` unless `scale="raw"`. The RAW deviation is
+        !! cached with the centre it was taken about, so a second `%mad()` at the same centre --
+        !! including a second call at the default centre -- is a scalar multiply. Changing the
+        !! centre rebuilds it.
+        !!
+        !! Builds tier B first (the default centre is the population's median, and the deviations
+        !! have to be ordered too), so this aborts on a streaming accumulator exactly as the
+        !! tier-B bindings do.
+        module function obj_mad(self, scale, center) result(res)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; the first `%mad` builds tiers B and C.
+@@scale@@
+@@center@@
+            real(real64) :: res !! the deviation, or NaN for an empty population.
+        end function obj_mad
+        !> Whether tier C is currently built.
+        !!
+        !! Test-facing, like `%is_ordered`: it is how `%update` dropping the cached deviation is
+        !! asserted without reading a counter.
+        module function obj_has_deviation(self) result(res)
+            class(pf_stats), intent(in) :: self !! the accumulator.
+            logical :: res !! .true. when a raw deviation is cached.
+        end function obj_has_deviation
+        !> Writes the population's summary block to a unit -- pandas' `describe()`, formatted.
+        !!
+        !! Eight rows: the counts, the mean, the standard deviation, the extremes and the three
+        !! quartiles. Reading them costs nothing that has already been paid for, so this is the
+        !! natural partner of `pf_describe`; on an object that has not been ordered it builds
+        !! tier B, and on a streaming one it prints the tier-A rows and says why the rest are
+        !! absent rather than aborting -- a printer that killed the process would be a poor way
+        !! to find out what an object holds.
+        !!
+        !! **Silenced by `verbosity = "silent"`**, like every other solicited printer in this
+        !! library: the call returns having written nothing.
+        module subroutine obj_print(self, unit, name)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; printing may build tier B.
+            integer, intent(in), optional :: unit
+            !! where to write; the default is the `message_stream` setting's unit, so a program
+            !! that has redirected the library's output gets this with it.
+            character(len=*), intent(in), optional :: name
+            !! a label for the block's heading. Absent prints an unnamed heading.
+        end subroutine obj_print"""
 
 
 #: The shared argument guards. They are separate module procedures, implemented once in
@@ -809,6 +899,17 @@ ORDER_OPTS = ["is_valid", "weights", "weight_type", "skipnan", "method", "n_null
               "threads"]
 TRIM_OPTS = ["is_valid", "weights", "skipnan", "n_null", "n_nan", "ok", "threads"]
 PCTS_OPTS = ["is_valid", "weights", "skipnan", "kind", "n_null", "n_nan", "ok", "threads"]
+#: `pf_mad` -- the tier-C pair `scale`/`center` in their canonical slots, and no `method`: the
+#: deviation median is numpy's linear interpolation because scipy's `median_abs_deviation` reaches
+#: `np.median`, and offering a token that would silently disagree with scipy is worse than none.
+MAD_OPTS = ["is_valid", "weights", "skipnan", "scale", "center", "n_null", "n_nan", "ok", "threads"]
+#: `pf_describe` -- it FILLS an object rather than answering, so `n_null`/`n_nan`/`ok` are absent:
+#: the object carries all three and answering them twice would let the two copies disagree.
+DESCRIBE_OPTS = ["is_valid", "weights", "weight_type", "skipnan", "threads"]
+#: `pf_mode` -- no `skipnan`/`n_nan` on ANY specific, because no kind it accepts can hold a NaN,
+#: and no `threads`, because the ordering it does is `pf_argsort`'s own and takes the same
+#: automatic rule every other unthreaded caller does.
+MODE_OPTS = ["count", "is_valid", "weights", "n_null", "ok"]
 
 CORE_IFACES = [
     iface("sum_f64",
@@ -1174,7 +1275,7 @@ ORDER_HELPER_IFACES = """        !> Applies the exclusion rules and hands back t
         !! their weights, and computing four central moments it will discard would roughly double
         !! the cost of every `pf_median`.
         module subroutine stats_compact(values, what, is_valid, weights, skipnan, keep_x, keep_w, &
-                n_valid, n_null, n_nan)
+                n_valid, n_null, n_nan, saw_nan)
             real(real64), intent(in) :: values(:) !! the population, before exclusions.
             character(len=*), intent(in) :: what !! the public procedure's name, for messages.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
@@ -1188,6 +1289,12 @@ ORDER_HELPER_IFACES = """        !> Applies the exclusion rules and hands back t
             integer(int64), intent(out) :: n_valid !! how many survived.
             integer(int64), intent(out) :: n_null !! how many `is_valid` excluded.
             integer(int64), intent(out) :: n_nan !! how many were excluded as NaN.
+            logical, intent(out) :: saw_nan
+            !! .true. when `skipnan = .false.` and a NaN is still in `keep_x`. **Every order
+            !! statistic must answer NaN when this is set**, exactly as the moments do: a NaN
+            !! sorts to one end rather than poisoning the interpolation, so an order tier that
+            !! ignored this flag would return a plausible number from a population the caller
+            !! asked to have poisoned.
         end subroutine stats_compact
         !> A quiet NaN, the value every undefined statistic in this module returns.
         !!
@@ -1237,7 +1344,113 @@ ORDER_FAMILY = [
      "p", "real(real64), intent(out) :: p",
      "the share of the population at or below `score`, on a 0-1 scale; NaN when empty.",
      PCTS_OPTS),
+    ("mad", [], "m", "real(real64), intent(out) :: m",
+     "the median absolute deviation, scaled unless `scale=\"raw\"`; NaN when the population is "
+     "empty.", MAD_OPTS),
+    ("describe", [], "s", "type(pf_stats), intent(out) :: s",
+     "the filled summary object: tier A computed and tier B already ordered, so every query on "
+     "it afterwards is a read.", DESCRIBE_OPTS),
 ]
+
+
+#: `pf_describe`'s own doc tail. Short, because the object it fills documents itself.
+_DESCRIBE_COMMON = """    !>
+    !> Nulls, NaNs and zero-weight elements leave the population exactly as they do for the
+    !> moments, and the object reports how many through `%n_null()` and `%n_nan()`. An empty
+    !> population is not an error: every statistic on the result is then a quiet NaN and
+    !> `%n_valid()` is 0.
+    !>
+    !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
+    !> `logical` array, or a scalar numeric `type(parquet_column)`."""
+
+#: `pf_mode`'s kinds: (tag, `values` declaration, result declaration, its doc, the kind in prose).
+#:
+#: **The real kinds are absent on purpose and the omission is the specification.** The mode of a
+#: continuous variable is not a statistic -- equality on floats is a trap rather than an answer --
+#: so a real array does not merely go unsupported, it fails to compile against this generic, which
+#: is the earliest and cheapest place to say so. `pf_bucketize`/`pf_histogram` (P9) are the answer
+#: to the question a caller reaching for it is actually asking.
+#:
+#: `type(parquet_column)` is absent too, and for a different reason -- see feature_pandas_S4.md's
+#: P7 open questions. A column's kind is not known until run time, so a `parquet_column` specific
+#: could only be disambiguated by the type of the RESULT argument, which turns a kind mismatch
+#: from a compile error into a runtime abort. Every other family in this module resolves on
+#: `values` alone, and one that did not would be the odd one out for the sake of one call shape.
+MODE_KINDS = [
+    ("i32", "integer(int32), intent(in) :: values(:) !! the population.",
+     "integer(int32), intent(out) :: m", "the modal value; unchanged when the population is empty.",
+     "a 32-bit integer array"),
+    ("i64", "integer(int64), intent(in) :: values(:) !! the population.",
+     "integer(int64), intent(out) :: m", "the modal value; unchanged when the population is empty.",
+     "a 64-bit integer array"),
+    ("bool", "logical, intent(in) :: values(:) !! the population.",
+     "logical, intent(out) :: m",
+     "the modal value; unchanged when the population is empty. `.false.` sorts below `.true.`, "
+     "so an even split answers `.false.`.",
+     "a logical array"),
+    ("chr", "character(len=*), intent(in) :: values(:) !! the population; each element is trimmed.",
+     "character(len=:), allocatable, intent(out) :: m",
+     "the modal value, allocated to its own trimmed length. **Left unallocated when the "
+     "population is empty**, which is the one shape in this module where `ok = .false.` and an "
+     "unallocated result coincide -- test `ok`, or `allocated(m)`, before reading it.",
+     "a character array"),
+    ("str", "type(parquet_string_column), intent(in) :: values !! the population.",
+     "character(len=:), allocatable, intent(out) :: m",
+     "the modal value, allocated to its own length. Left unallocated when the population is "
+     "empty.",
+     "a `parquet_string_column`"),
+]
+
+#: `pf_mode`'s generic doc-comment. Not shared with `_ORDER_COMMON`: this generic accepts a
+#: different set of kinds, cannot meet a NaN, and returns something other than a `real(real64)`.
+MODE_DOC = [
+    "The most common value of a population -- pandas' `mode()`, scipy's `stats.mode`.",
+    "",
+    "**Integer, logical and string kinds only.** The real kinds are not overloads that abort at",
+    "run time; they are absent from the generic, so `pf_mode` over a real array does not",
+    "compile. The mode of a continuous variable is not a statistic, and floating-point equality",
+    "is a trap rather than an answer -- `pf_bucketize` and `pf_histogram` are what that question",
+    "actually wants.",
+    "",
+    "**Ties go to the SMALLEST value**, matching `scipy.stats.mode`, and never to the first",
+    "occurrence: an answer that depended on input order would differ between an array and its",
+    "own permutation, which is a reproducibility defect rather than a preference.",
+    "",
+    "`count` reports how many elements hold the modal value. Nulls are excluded and counted",
+    "through `n_null`, as everywhere in this module; no kind here can hold a NaN, so there is",
+    "deliberately no `skipnan` or `n_nan`.",
+    "",
+    "**Weights are supported**: the mode is then the value carrying the greatest total weight,",
+    "ties still broken by the smallest value, and `count` still counts elements rather than",
+    "weight. A zero weight removes the element, as everywhere else.",
+    "",
+    "An empty population gives `ok = .false.` and `count = 0`, and `m` must not be read.",
+]
+
+
+#: `ok`'s doc for `pf_mode`, whose result is not a `real(real64)` and so cannot be a quiet NaN.
+#: An override rather than a second entry in the canonical sequence: the DUMMY is still `ok` in
+#: the same slot, which is what `check_stats_optional_argument_order` reads.
+MODE_D = dict(D)
+MODE_D["ok"] = """            logical, intent(out), optional :: ok
+            !! .false. when the population is empty, and there is therefore no modal value. `m`
+            !! is then untouched -- unallocated, for the two character forms -- and must not be
+            !! read; `count` is 0."""
+
+
+def mode_iface(tag, decl, res_decl, res_doc, kindword):
+    """One interface body for a `pf_mode` specific."""
+    args = wrap_args(["values", "m"] + MODE_OPTS)
+    lines = ["        !> `pf_mode` over %s." % kindword]
+    lines.append("        module subroutine mode_%s(%s)" % (tag, args))
+    lines.append("            " + decl.strip())
+    lines.append("            %s" % res_decl)
+    for line in _wrap_doc(res_doc):
+        lines.append("            !! " + line)
+    for key in MODE_OPTS:
+        lines.append(MODE_D[key])
+    lines.append("        end subroutine mode_%s" % tag)
+    return "\n".join(lines)
 
 
 def order_extra_decls(extra):
@@ -1360,7 +1573,9 @@ def order_core_iface(base, extra, out_name, out_decl, out_doc, opts, doc):
     lines.append("        module subroutine %s_f64(%s)" % (base, wrap_args(args)))
     lines.append("            real(real64), intent(in) :: values(:) !! the population.")
     lines.extend(order_extra_decls(extra))
-    lines.append("            %s !! %s" % (out_decl, out_doc))
+    lines.append("            " + out_decl)
+    for line in _wrap_doc(out_doc):
+        lines.append("            !! " + line)
     for key in opts:
         lines.append(D[key])
     lines.append("        end subroutine %s_f64" % base)
@@ -1377,7 +1592,9 @@ def order_entry_iface(base, extra, out_name, out_decl, out_doc, opts, tag, decl,
     lines.append("        module subroutine %s_%s(%s)" % (base, tag, wrap_args(args)))
     lines.append("            " + decl.strip())
     lines.extend(order_extra_decls(extra))
-    lines.append("            %s !! %s" % (out_decl, out_doc))
+    lines.append("            " + out_decl)
+    for line in _wrap_doc(out_doc):
+        lines.append("            !! " + line)
     for key in mine:
         lines.append(D[key])
     lines.append("        end subroutine %s_%s" % (base, tag))
@@ -1515,6 +1732,33 @@ ORDER_DOC = {
         "",
         "A NaN or infinite `score` aborts: unlike a NaN in the population, which is an ordinary",
         "data condition this module excludes, a NaN score can only be the caller's own mistake."],
+    "pf_mad": [
+        "The median absolute deviation -- scipy's `median_abs_deviation`, scaled by default.",
+        "",
+        "`median(|x - center|)`, where `center` is the population's own median unless one is",
+        "supplied. `scale=\"normal\"` (the default) divides by `Phi^-1(3/4)`, which makes the result",
+        "a consistent estimator of the standard deviation for Gaussian data -- so on a large",
+        "Gaussian sample `pf_mad` and `pf_stddev` agree to within sampling error, and on a sample",
+        "with a few wild points they do not, which is the whole reason to reach for it.",
+        "`scale=\"raw\"` is the unscaled median.",
+        "",
+        "**Supplying `center` skips one selection, not the ordering.** The median of the",
+        "deviations still has to be found, so this is a small saving rather than a different",
+        "algorithm. A NaN or infinite `center` aborts.",
+        "",
+        "Both medians are taken with `linear` interpolation, because scipy reaches `np.median`;",
+        "there is deliberately no `method=` here, since a token that made this disagree with",
+        "scipy would be worse than no token at all."],
+    "pf_describe": [
+        "Summarises a population into a `pf_stats`, ordered and ready -- pandas' `describe()`.",
+        "",
+        "Exactly `s%compute(values, ...)` followed by `s%prepare_order()`, which is the pairing",
+        "worth a name: it is ONE pair of traversals and ONE ordering, after which the count, the",
+        "mean, the standard deviation, the extremes and every quantile are reads. `s%print()`",
+        "renders the usual eight-row block from it.",
+        "",
+        "Reach for `%compute` instead when the order statistics are not wanted -- this procedure",
+        "pays for the ordering whether or not anything asks for it, which is the point."],
 }
 
 #: The order family's members, derived the same way the moment family's are.
@@ -1614,6 +1858,16 @@ def gen_spec():
     out.append("    public :: pf_skewness, pf_kurtosis, pf_moments")
     out.append("    public :: pf_median, pf_quantile, pf_quantiles")
     out.append("    public :: pf_iqr, pf_trim_mean, pf_percentile_of_score")
+    out.append("    public :: pf_mad, pf_mode, pf_describe")
+    # `%print` writes solicited output, so this module READS `verbosity` and `message_stream` --
+    # and CLAUDE.md's standing rule is that a module re-exports, getter and setter both, every
+    # knob its own code reads, so that a narrow `use parquet_stats` program can silence it
+    # without also importing `parquet_settings` and putting the C++ boundary back in its build.
+    # They arrive through `parquet_sorting`, which already re-exports them; nothing new enters
+    # the dependency graph. FORD 7.0.13 cannot resolve a use-association accessibility statement
+    # and reports each of these as an `Unknown entity`, which is expected (CLAUDE.md).
+    out.append("    public :: parquet_set_verbosity, parquet_get_verbosity")
+    out.append("    public :: parquet_set_message_stream, parquet_get_message_stream")
     out.append("    public :: pf_stats")
     out.append("    public :: parquet_debug_stats_scans, parquet_debug_reset_stats_scans")
     out.append("    public :: parquet_debug_stats_team, parquet_debug_set_stats_min_per_thread")
@@ -1654,7 +1908,7 @@ def gen_spec():
             out.append("        module procedure %s" % spec)
         out.append("    end interface %s" % name)
     for name in ("pf_median", "pf_quantile", "pf_quantiles", "pf_iqr", "pf_trim_mean",
-                 "pf_percentile_of_score"):
+                 "pf_percentile_of_score", "pf_mad"):
         out.append("    !")
         for line in ORDER_DOC[name]:
             out.append(("    !> " + line).rstrip())
@@ -1664,6 +1918,24 @@ def gen_spec():
         for spec in GENERIC_SPECIFICS_ORDER[name]:
             out.append("        module procedure %s" % spec)
         out.append("    end interface %s" % name)
+    # `pf_describe` gets its own tail rather than `_ORDER_COMMON`'s: it answers nothing, so a
+    # paragraph about quiet NaNs and `ok = .false.` would describe arguments it does not have.
+    out.append("    !")
+    for line in ORDER_DOC["pf_describe"]:
+        out.append(("    !> " + line).rstrip())
+    for line in _DESCRIBE_COMMON.split("\n"):
+        out.append(line.rstrip())
+    out.append("    interface pf_describe")
+    for spec in GENERIC_SPECIFICS_ORDER["pf_describe"]:
+        out.append("        module procedure %s" % spec)
+    out.append("    end interface pf_describe")
+    out.append("    !")
+    for line in MODE_DOC:
+        out.append(("    !> " + line).rstrip())
+    out.append("    interface pf_mode")
+    for tag, _, _, _, _ in MODE_KINDS:
+        out.append("        module procedure mode_%s" % tag)
+    out.append("    end interface pf_mode")
     out.append(GUARD_SPEC.rstrip("\n"))
     out.append("    !")
     out.append("    ! ---- The real64 moment core (implemented in parquet_stats_core) ----")
@@ -1679,6 +1951,11 @@ def gen_spec():
         out.append(order_core_iface(base, extra, out_name, out_decl, out_doc, opts,
                                     ORDER_DOC["pf_" + base]))
     out.append(ORDER_HELPER_IFACES.rstrip("\n"))
+    out.append("    end interface")
+    out.append("    !")
+    out.append("    ! ---- pf_mode, one specific per kind (implemented in parquet_stats_order) ----")
+    out.append("    interface")
+    out.append("\n".join(mode_iface(*k) for k in MODE_KINDS))
     out.append("    end interface")
     out.append("    !")
     out.append("    ! ---- The per-kind entry layer (implemented in parquet_stats_kernel) ----")

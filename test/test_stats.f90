@@ -130,7 +130,29 @@ contains
             new_unittest("q(0) and q(1) are exactly the extremes, weighted or not", &
                 test_extreme_quantiles_are_the_extremes), &
             new_unittest("weight_type=frequency defaults the quantile to inverted_cdf", &
-                test_frequency_weights_default_to_inverted_cdf) &
+                test_frequency_weights_default_to_inverted_cdf), &
+            new_unittest("every pf_mad case matches the 50-digit oracle on both scales", &
+                test_mad_matches_the_oracle), &
+            new_unittest("pf_mad estimates a Gaussian sigma and survives contamination", &
+                test_mad_estimates_the_gaussian_sigma), &
+            new_unittest("%mad caches the raw deviation and rescaling it is free", &
+                test_mad_cache_costs_one_build), &
+            new_unittest("%update and %release_order both drop the deviation cache", &
+                test_mutation_drops_the_deviation_cache), &
+            new_unittest("the one-shot pf_mad and %mad agree over every kind", &
+                test_mad_forms_agree), &
+            new_unittest("pf_mode breaks a tie to the smallest value, whatever the input order", &
+                test_mode_ties_go_to_the_smallest), &
+            new_unittest("pf_mode over a character array and a packed string column", &
+                test_mode_over_strings), &
+            new_unittest("nulls and weights change pf_mode as they change every reduction", &
+                test_mode_nulls_and_weights), &
+            new_unittest("pf_describe costs one pair of passes and one ordering", &
+                test_describe_costs_one_pass_and_one_sort), &
+            new_unittest("%print writes the block, can be silenced, and never aborts", &
+                test_print_writes_and_can_be_silenced), &
+            new_unittest("skipnan=.false. propagates a NaN through every order statistic", &
+                test_propagating_nan_reaches_every_tier) &
             ]
     end subroutine collect_tests_parquet_stats
 
@@ -2198,6 +2220,536 @@ contains
             method="linear")
         call check(error, q_default == q_linear, "an explicit method= must still win")
     end subroutine test_frequency_weights_default_to_inverted_cdf
+
+    !> Every `pf_mad` case matches the 50-digit oracle, on both scales.
+    !!
+    !! The two scales are asserted as a PAIR from committed numbers rather than against a literal
+    !! factor, so a `scale_factor` that lost its constant fails here rather than silently agreeing
+    !! with a test that copied the same constant out of the source.
+    subroutine test_mad_matches_the_oracle(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: x(:), w(:), big(:)
+        logical, allocatable :: mask(:)
+        real(real64) :: got(2)
+        integer(int64) :: i
+
+        call golden_fixture(32_int64, x)
+        call pf_mad(x, got(1))
+        call pf_mad(x, got(2), scale="raw")
+        call check(error, all_close(got, M_U32), "pf_mad over the n=32 fixture")
+        if (allocated(error)) return
+        ! The EXPLICIT token must give the default's answer. Without this assertion the two carry
+        ! separate paths that nothing compares, and a mutation to the explicit one survives the
+        ! whole suite -- which is how this assertion came to be written.
+        call pf_mad(x, got(2), scale="normal")
+        call check(error, got(2) == got(1), &
+            'scale="normal" must be exactly what the default gives')
+        if (allocated(error)) return
+        call pf_mad(x, got(2), scale="NORMAL")
+        call check(error, got(2) == got(1), "the token must be matched case-insensitively")
+        if (allocated(error)) return
+        call pf_mad(x, got(2), scale="raw")
+
+        call golden_fixture(33_int64, x)
+        call pf_mad(x, got(1))
+        call pf_mad(x, got(2), scale="raw")
+        call check(error, all_close(got, M_U33), "pf_mad over the odd-length fixture")
+        if (allocated(error)) return
+
+        call golden_fixture(32_int64, x)
+        call pf_mad(x, got(1), center=0.5_real64)
+        call pf_mad(x, got(2), scale="raw", center=0.5_real64)
+        call check(error, all_close(got, M_CTR), "pf_mad about an explicit centre")
+        if (allocated(error)) return
+
+        call golden_weights_mod5(32_int64, w)
+        call pf_mad(x, got(1), weights=w)
+        call pf_mad(x, got(2), weights=w, scale="raw")
+        call check(error, all_close(got, M_WVAR), "pf_mad with unequal weights")
+        if (allocated(error)) return
+
+        allocate(mask(32))
+        do i = 1_int64, 32_int64
+            mask(i) = (mod(i, 3_int64) /= 0_int64)
+        end do
+        call pf_mad(x, got(1), is_valid=mask)
+        call pf_mad(x, got(2), is_valid=mask, scale="raw")
+        call check(error, all_close(got, M_NULLS), "pf_mad over a partly null population")
+        if (allocated(error)) return
+
+        ! The case the statistic exists for: four points far outside the rest.
+        allocate(big(36))
+        big(1:32) = x
+        big(33:36) = [1.0e6_real64, -1.0e6_real64, 2.0e6_real64, -2.0e6_real64]
+        call pf_mad(big, got(1))
+        call pf_mad(big, got(2), scale="raw")
+        call check(error, all_close(got, M_OUT), "pf_mad is barely moved by four wild points")
+    end subroutine test_mad_matches_the_oracle
+
+    !> `pf_mad(scale="normal")` tracks `pf_stddev` on Gaussian data and does not on contaminated data.
+    !!
+    !! **This is P7's own acceptance gate**, and it is written as a PAIR: agreeing on the clean
+    !! sample is what makes "consistent estimator of the standard deviation" a claim rather than a
+    !! coincidence, and disagreeing on the contaminated one is why anybody reaches for the MAD at
+    !! all. Either half alone passes against a `pf_mad` that simply returned `pf_stddev`.
+    !!
+    !! The sample is built from `pf_random`'s normal draws at a fixed seed, so the tolerances below
+    !! are properties of a specific reproducible sample rather than of a distribution -- there is
+    !! nothing statistical about this test's pass condition.
+    subroutine test_mad_estimates_the_gaussian_sigma(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        integer(int64), parameter :: N = 200000_int64
+        real(real64), allocatable :: g(:)
+        real(real64) :: sd, mad, sd2, mad2
+        integer(int64) :: i
+
+        allocate(g(N))
+        ! Stream 1 of a fixed seed. Counter-based, so this is the same sample on every machine
+        ! and every thread count -- there is nothing statistical about this test's pass condition.
+        call pf_random_fill_normal(20260829_int64, 1_int64, g)
+        call pf_stddev(g, sd)
+        call pf_mad(g, mad)
+        ! 1% of each other on 200000 draws. The MAD's asymptotic efficiency is 37%, so its standard
+        ! error is about 1.6x the standard deviation's -- roughly 0.4% here, and 1% is comfortably
+        ! outside the sampling noise while being far tighter than anything a broken scale factor
+        ! could sneak through (the unscaled MAD would be 33% low).
+        call check(error, abs(mad - sd) <= 0.01_real64 * sd, &
+            "pf_mad(scale=normal) must track pf_stddev on a clean Gaussian sample")
+        if (allocated(error)) return
+
+        ! Contaminate one draw in a thousand with a value 100 sigma out. The standard deviation
+        ! moves by more than a factor of three; the MAD must barely notice.
+        do i = 1000_int64, N, 1000_int64
+            g(i) = 100.0_real64
+        end do
+        call pf_stddev(g, sd2)
+        call pf_mad(g, mad2)
+        call check(error, sd2 > 3.0_real64 * sd, &
+            "the control: pf_stddev must be wrecked by 0.1% contamination")
+        if (allocated(error)) return
+        call check(error, abs(mad2 - mad) <= 0.01_real64 * mad, &
+            "pf_mad must be almost unmoved by the same contamination")
+    end subroutine test_mad_estimates_the_gaussian_sigma
+
+    !> `%mad` caches the RAW deviation, and rescaling it costs no second traversal.
+    !!
+    !! The negative control is the second half: a `%mad` whose cache ignored the centre would pass
+    !! the first two assertions and fail the third, and one that never cached at all fails the
+    !! `has_deviation` assertions while every number stays right.
+    subroutine test_mad_cache_costs_one_build(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        type(pf_stats) :: s
+        real(real64), allocatable :: x(:)
+        real(real64) :: a, b, c, d
+
+        call golden_fixture(64_int64, x)
+        call s%compute(x)
+        call check(error, .not. s%has_deviation(), "tier C must not exist before the first %mad")
+        if (allocated(error)) return
+        a = s%mad()
+        call check(error, s%has_deviation(), "the first %mad must build tier C")
+        if (allocated(error)) return
+        b = s%mad(scale="raw")
+        call check(error, close_to(a, b / 0.6744897501960817_real64), &
+            "the scaled and raw answers must be the same cached deviation")
+        if (allocated(error)) return
+        ! A DIFFERENT centre must rebuild rather than rescale the cached one.
+        c = s%mad(center=0.0_real64, scale="raw")
+        call check(error, .not. close_to(c, b), &
+            "a different centre must give a different raw deviation, not the cached one")
+        if (allocated(error)) return
+        ! And going back to the default centre must give the original answer again, which is what
+        ! fails if the cache is keyed on anything but the resolved centre.
+        d = s%mad(scale="raw")
+        call check(error, d == b, "returning to the default centre must reproduce its deviation")
+    end subroutine test_mad_cache_costs_one_build
+
+    !> `%update` and `%release_order` both drop tier C, and the next `%mad` rebuilds it.
+    !!
+    !! Written as the P6 invalidation tests were, and for the same reason: a cached deviation that
+    !! outlives the population it describes is a plausible number, not a wrong-looking one, so
+    !! nothing else in the suite can tell the difference.
+    subroutine test_mutation_drops_the_deviation_cache(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        type(pf_stats) :: s
+        real(real64), allocatable :: x(:)
+        real(real64) :: before, after, fresh
+        type(pf_stats) :: whole
+
+        call golden_fixture(64_int64, x)
+        call s%compute(x(1:32))
+        before = s%mad()
+        call check(error, s%has_deviation(), "tier C must be built after the first %mad")
+        if (allocated(error)) return
+
+        call s%update(x(33:64))
+        call check(error, .not. s%has_deviation(), "%update must drop tier C")
+        if (allocated(error)) return
+        after = s%mad()
+        call whole%compute(x)
+        fresh = whole%mad()
+        call check(error, after == fresh, &
+            "the %mad after an %update must equal a fresh %compute over the whole population")
+        if (allocated(error)) return
+        call check(error, after /= before, &
+            "the control: the two populations must actually have different deviations")
+        if (allocated(error)) return
+
+        call s%release_order()
+        call check(error, .not. s%has_deviation(), "%release_order must drop tier C with tier B")
+        if (allocated(error)) return
+        call check(error, s%mad() == after, "the rebuilt deviation must be the same number")
+    end subroutine test_mutation_drops_the_deviation_cache
+
+    !> The one-shot `pf_mad` and `%mad` agree, over every kind and both scales.
+    subroutine test_mad_forms_agree(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        type(pf_stats) :: s
+        real(real64), allocatable :: x(:)
+        real(real64) :: one, obj
+        integer(int32), allocatable :: iv(:)
+        real(real32), allocatable :: rv(:)
+        integer(int64) :: i
+
+        call golden_fixture(48_int64, x)
+        call pf_mad(x, one)
+        call s%compute(x)
+        obj = s%mad()
+        call check(error, one == obj, "pf_mad and %mad must agree bit for bit")
+        if (allocated(error)) return
+        call pf_mad(x, one, scale="raw")
+        call check(error, one == s%mad(scale="raw"), "and on the raw scale too")
+        if (allocated(error)) return
+
+        ! The widened kinds reach the same core, so their answers must equal the real64 one's over
+        ! the same values -- which is what a widening loop that dropped or duplicated an element
+        ! would break.
+        allocate(iv(48), rv(48))
+        do i = 1_int64, 48_int64
+            iv(i) = int(mod(i * 37_int64, 101_int64), int32)
+            rv(i) = real(iv(i), real32)
+        end do
+        call pf_mad(iv, one)
+        call pf_mad(rv, obj)
+        call check(error, one == obj, "the int32 and real32 entry points must agree")
+        if (allocated(error)) return
+        call pf_mad(real(iv, real64), obj)
+        call check(error, one == obj, "and both must equal the real64 core over the same values")
+    end subroutine test_mad_forms_agree
+
+    !> `pf_mode` answers scipy's mode, and breaks ties to the SMALLEST value.
+    subroutine test_mode_ties_go_to_the_smallest(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        integer(int32) :: pop(9), m32
+        integer(int64) :: m64, cnt
+        logical :: lv(6), mb, ok
+
+        ! 1 and 2 each appear three times; 3 twice; 7 once. scipy.stats.mode answers 1.
+        pop = [3_int32, 1_int32, 3_int32, 2_int32, 2_int32, 7_int32, 2_int32, 1_int32, 1_int32]
+        call pf_mode(pop, m32, count=cnt, ok=ok)
+        call check(error, m32 == 1_int32, "a tie must go to the smallest value, not the first seen")
+        if (allocated(error)) return
+        call check(error, cnt == 3_int64, "count must be the modal value's occurrences")
+        if (allocated(error)) return
+        call check(error, ok, "a non-empty population must report ok")
+        if (allocated(error)) return
+
+        ! The same population reversed: a first-occurrence rule would now answer 2, which is
+        ! exactly the reproducibility defect the smallest-value rule exists to prevent.
+        call pf_mode(pop(9:1:-1), m32, count=cnt)
+        call check(error, m32 == 1_int32, "the answer must not depend on the input order")
+        if (allocated(error)) return
+
+        call pf_mode(int(pop, int64), m64, count=cnt)
+        call check(error, m64 == 1_int64 .and. cnt == 3_int64, "the int64 form must agree")
+        if (allocated(error)) return
+
+        ! .false. sorts below .true., so an even split answers .false.
+        lv = [.true., .false., .true., .false., .true., .false.]
+        call pf_mode(lv, mb, count=cnt)
+        call check(error, (.not. mb) .and. cnt == 3_int64, &
+            "an evenly split logical population must answer .false.")
+    end subroutine test_mode_ties_go_to_the_smallest
+
+    !> `pf_mode` over the two string kinds, including the trimming and empty rules.
+    subroutine test_mode_over_strings(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        character(len=6) :: fruit(7)
+        character(len=:), allocatable :: m
+        type(parquet_string_column) :: col
+        integer(int64) :: cnt, nnull
+        logical :: ok
+
+        ! "fig" and "pear" tie at three each; "fig" sorts first.
+        fruit = ["pear  ", "fig   ", "pear  ", "fig   ", "kiwi  ", "fig   ", "pear  "]
+        call pf_mode(fruit, m, count=cnt, ok=ok)
+        call check(error, ok, "a non-empty character population must report ok")
+        if (allocated(error)) return
+        call check(error, m == "fig", "the alphabetically smaller of two tied strings must win")
+        if (allocated(error)) return
+        ! Trimmed, so the result is as long as the VALUE and not as long as the declared width --
+        ! which `m == "fig"` alone cannot see, because comparison blank-pads.
+        call check(error, len(m) == 3, "the result must be trimmed to its own length")
+        if (allocated(error)) return
+        call check(error, cnt == 3_int64, "count must be the modal string's occurrences")
+        if (allocated(error)) return
+
+        call col%append_string("delta")
+        call col%append_string("alpha")
+        call col%append_string("delta")
+        call col%append_null()
+        call col%append_string("alpha")
+        call col%append_string("delta")
+        call pf_mode(col, m, count=cnt, n_null=nnull, ok=ok)
+        call check(error, ok .and. m == "delta", "the string column form must find its mode")
+        if (allocated(error)) return
+        call check(error, cnt == 3_int64, "delta occurs three times")
+        if (allocated(error)) return
+        call check(error, nnull == 1_int64, "the column's own null must be reported through n_null")
+    end subroutine test_mode_over_strings
+
+    !> Nulls and weights change `pf_mode`'s answer exactly as they change every other reduction's.
+    subroutine test_mode_nulls_and_weights(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        integer(int32) :: pop(6), m
+        real(real64) :: w(6)
+        logical :: mask(6), ok
+        integer(int64) :: cnt, nnull
+
+        pop = [5_int32, 5_int32, 5_int32, 8_int32, 8_int32, 8_int32]
+        ! Unweighted this is a tie at three each, so the smaller wins.
+        call pf_mode(pop, m, count=cnt)
+        call check(error, m == 5_int32 .and. cnt == 3_int64, "the tie must go to 5")
+        if (allocated(error)) return
+
+        ! Weight tips it: 8 carries more total weight, though both still occur three times -- and
+        ! `count` must still report OCCURRENCES rather than weight.
+        w = [1.0_real64, 1.0_real64, 1.0_real64, 2.0_real64, 2.0_real64, 2.0_real64]
+        call pf_mode(pop, m, count=cnt, weights=w)
+        call check(error, m == 8_int32, "the greatest total weight must decide a weighted mode")
+        if (allocated(error)) return
+        call check(error, cnt == 3_int64, "count must stay an element count under weights")
+        if (allocated(error)) return
+
+        ! A zero weight removes the element, exactly as it does everywhere else in this module.
+        w = [1.0_real64, 1.0_real64, 1.0_real64, 0.0_real64, 0.0_real64, 2.0_real64]
+        call pf_mode(pop, m, count=cnt, weights=w)
+        call check(error, m == 5_int32 .and. cnt == 3_int64, &
+            "a zero weight must remove its element from the population")
+        if (allocated(error)) return
+
+        mask = [.false., .false., .true., .true., .true., .true.]
+        call pf_mode(pop, m, count=cnt, is_valid=mask, n_null=nnull)
+        call check(error, m == 8_int32 .and. cnt == 3_int64, "nulls must leave the population")
+        if (allocated(error)) return
+        call check(error, nnull == 2_int64, "n_null must report how many were excluded")
+        if (allocated(error)) return
+
+        ! Every element excluded: ok=.false., count=0, and `m` untouched.
+        m = -99_int32
+        mask = .false.
+        call pf_mode(pop, m, count=cnt, is_valid=mask, ok=ok, n_null=nnull)
+        call check(error, (.not. ok) .and. cnt == 0_int64, "an empty population must not be ok")
+        if (allocated(error)) return
+        call check(error, m == -99_int32, "m must be left untouched when there is no mode")
+        if (allocated(error)) return
+        call check(error, nnull == 6_int64, "and every element must be counted as null")
+    end subroutine test_mode_nulls_and_weights
+
+    !> `pf_describe` fills an object that is computed AND ordered, in one pass and one sort.
+    subroutine test_describe_costs_one_pass_and_one_sort(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        type(pf_stats) :: s, t
+        real(real64), allocatable :: x(:)
+
+        call golden_fixture(200_int64, x)
+        call parquet_debug_reset_stats_scans()
+        call parquet_debug_reset_stats_sorts()
+        call pf_describe(x, s)
+        call check(error, parquet_debug_stats_scans() == 2_int64, &
+            "pf_describe must traverse the values exactly twice")
+        if (allocated(error)) return
+        call check(error, parquet_debug_stats_sorts() == 1_int64, &
+            "pf_describe must order the population exactly once")
+        if (allocated(error)) return
+        call check(error, s%is_ordered(), "and must leave the object ordered")
+        if (allocated(error)) return
+
+        ! Reading eight statistics off it costs neither another traversal nor another ordering.
+        call check(error, close_to(s%mean(), s%mean()) .and. s%n_valid() == 200_int64, &
+            "the filled object must answer its counts")
+        if (allocated(error)) return
+        block
+            real(real64) :: junk
+            junk = s%stddev() + s%median() + s%iqr() + s%vmin() + s%vmax() + s%skewness()
+            call check(error, junk == junk, "eight queries must all return numbers")
+        end block
+        if (allocated(error)) return
+        call check(error, parquet_debug_stats_scans() == 2_int64, &
+            "the queries must cost no further traversal")
+        if (allocated(error)) return
+        call check(error, parquet_debug_stats_sorts() == 1_int64, &
+            "and no further ordering")
+        if (allocated(error)) return
+
+        ! It must equal %compute plus %prepare_order, which is what it claims to be.
+        call t%compute(x)
+        call t%prepare_order()
+        call check(error, t%mean() == s%mean() .and. t%median() == s%median(), &
+            "pf_describe must equal %compute followed by %prepare_order")
+    end subroutine test_describe_costs_one_pass_and_one_sort
+
+    !> `%print` writes the block, honours `verbosity="silent"`, and never aborts.
+    subroutine test_print_writes_and_can_be_silenced(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        type(pf_stats) :: s, stream
+        real(real64), allocatable :: x(:)
+        integer :: u, ios, nlines
+        character(len=256) :: line
+        character(len=:), allocatable :: saved
+        character(len=*), parameter :: PATH = "test_run/stats_print_p7.txt"
+        logical :: seen_nan, seen_q3
+
+        call golden_fixture(40_int64, x)
+        call pf_describe(x, s)
+        open(newunit=u, file=PATH, status="replace", action="write")
+        call s%print(unit=u, name="demo")
+        close(u)
+
+        nlines = 0
+        seen_nan = .false.
+        seen_q3 = .false.
+        open(newunit=u, file=PATH, status="old", action="read")
+        do
+            read(u, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            nlines = nlines + 1
+            if (index(line, "n_nan") > 0) seen_nan = .true.
+            if (index(line, "75%") > 0) seen_q3 = .true.
+        end do
+        close(u)
+        ! Eleven rows plus the heading. The COUNT is asserted rather than the exact text, so that
+        ! a reworded label is not a test failure while a dropped row is.
+        call check(error, nlines == 12, "%print must write a heading and eleven rows")
+        if (allocated(error)) return
+        call check(error, seen_nan, "the n_nan row must always be shown -- it is what makes " // &
+            "skipnan=.true. safe to have as a default")
+        if (allocated(error)) return
+        call check(error, seen_q3, "the quartile rows must be present on a retained accumulator")
+        if (allocated(error)) return
+
+        ! A streaming accumulator has no quartiles. Saying so beats aborting, and beats printing
+        ! six rows as though nothing were missing.
+        call stream%init(retain=.false.)
+        call stream%update(x)
+        open(newunit=u, file=PATH, status="replace", action="write")
+        call stream%print(unit=u)
+        close(u)
+        nlines = 0
+        open(newunit=u, file=PATH, status="old", action="read")
+        do
+            read(u, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            nlines = nlines + 1
+        end do
+        close(u)
+        call check(error, nlines == 10, &
+            "a streaming %print must write the eight tier-A rows and one line saying why the " // &
+            "quartiles are missing")
+        if (allocated(error)) return
+
+        ! Silenced. The negative control is the run above, which wrote ten lines to the same unit.
+        call parquet_get_verbosity(saved)
+        call parquet_set_verbosity("silent")
+        open(newunit=u, file=PATH, status="replace", action="write")
+        call s%print(unit=u)
+        close(u)
+        call parquet_set_verbosity(saved)
+        nlines = 0
+        open(newunit=u, file=PATH, status="old", action="read")
+        do
+            read(u, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            nlines = nlines + 1
+        end do
+        close(u)
+        call check(error, nlines == 0, 'verbosity="silent" must silence %print entirely')
+        if (allocated(error)) return
+
+        ! An object holding nothing must say so rather than abort: a printer is what someone
+        ! reaches for to find out what state an object is in.
+        block
+            type(pf_stats) :: empty
+            open(newunit=u, file=PATH, status="replace", action="write")
+            call empty%print(unit=u)
+            close(u)
+        end block
+        open(newunit=u, file=PATH, status="old", action="read")
+        read(u, '(a)', iostat=ios) line
+        close(u, status="delete")
+        call check(error, ios == 0 .and. index(line, "no population") > 0, &
+            "an uncomputed accumulator must print a line saying so")
+    end subroutine test_print_writes_and_can_be_silenced
+
+    !> Under `skipnan=.false.` an order statistic is NaN, exactly as a moment is.
+    !!
+    !! **The defect this closes was shipped and was silent.** A NaN sorts to one END of the buffer
+    !! rather than poisoning the interpolation, so `pf_median` returned an ordinary number from a
+    !! population the caller had asked to have poisoned, while `pf_mean` over the identical
+    !! arguments correctly returned NaN. Every assertion in the suite passed. The negative control
+    !! is the `skipnan=.true.` half below, which must still answer a number.
+    subroutine test_propagating_nan_reaches_every_tier(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: v(9), r
+        type(pf_stats) :: s
+        integer :: k
+        logical :: ok
+
+        do k = 1, 9
+            v(k) = real(k, real64)
+        end do
+        v(4) = ieee_value(1.0_real64, ieee_quiet_nan)
+
+        ! The moments, which have always been right, as the reference for what the tier must match.
+        call pf_mean(v, r, skipnan=.false., ok=ok)
+        call check(error, r /= r .and. .not. ok, "the control: pf_mean must propagate the NaN")
+        if (allocated(error)) return
+
+        call pf_median(v, r, skipnan=.false., ok=ok)
+        call check(error, r /= r .and. .not. ok, "pf_median must propagate it too")
+        if (allocated(error)) return
+        call pf_quantile(v, 0.25_real64, r, skipnan=.false., ok=ok)
+        call check(error, r /= r .and. .not. ok, "and pf_quantile")
+        if (allocated(error)) return
+        call pf_iqr(v, r, skipnan=.false., ok=ok)
+        call check(error, r /= r .and. .not. ok, "and pf_iqr")
+        if (allocated(error)) return
+        call pf_trim_mean(v, 0.1_real64, r, skipnan=.false., ok=ok)
+        call check(error, r /= r .and. .not. ok, &
+            "and pf_trim_mean, where the NaN would otherwise be TRIMMED AWAY")
+        if (allocated(error)) return
+        call pf_percentile_of_score(v, 5.0_real64, r, skipnan=.false., ok=ok)
+        call check(error, r /= r .and. .not. ok, "and pf_percentile_of_score")
+        if (allocated(error)) return
+        call pf_mad(v, r, skipnan=.false., ok=ok)
+        call check(error, r /= r .and. .not. ok, "and pf_mad")
+        if (allocated(error)) return
+
+        ! The object side takes the same route through its own guard.
+        call s%compute(v, skipnan=.false.)
+        call check(error, s%median() /= s%median(), "%median must propagate it")
+        if (allocated(error)) return
+        call check(error, s%mad() /= s%mad(), "%mad must propagate it")
+        if (allocated(error)) return
+
+        ! The negative control: at the default `skipnan=.true.` every one of these is a number.
+        call pf_median(v, r, ok=ok)
+        call check(error, r == r .and. ok, &
+            "the control: at the default skipnan the NaN is merely excluded")
+        if (allocated(error)) return
+        call pf_mad(v, r, ok=ok)
+        call check(error, r == r .and. ok, "and pf_mad answers a number too")
+    end subroutine test_propagating_nan_reaches_every_tier
 
     !> Whether two reals agree to the golden tolerance.
     logical function close_to(got, want)

@@ -775,6 +775,12 @@ program error_scenarios
         call scenario_stats_score_bad_kind()
     case ("stats_median_on_streaming")
         call scenario_stats_median_on_streaming()
+    case ("stats_mad_bad_scale")
+        call scenario_stats_mad_bad_scale()
+    case ("stats_mad_center_not_finite")
+        call scenario_stats_mad_center_not_finite()
+    case ("stats_mode_string_column_is_valid")
+        call scenario_stats_mode_string_column_is_valid()
     case ("sorting_column_vector")
         call scenario_sorting_column_vector()
     case ("sorting_search_unsorted")
@@ -16836,6 +16842,45 @@ contains
         m = s%median()                         ! -> aborts (nothing was retained to order)
         print '(a,es12.5)', "unexpectedly took a median of a streaming accumulator, m=", m
     end subroutine scenario_stats_median_on_streaming
+
+    !> An unrecognised scale token aborts naming both, rather than silently leaving it unscaled.
+    subroutine scenario_stats_mad_bad_scale()
+        real(real64) :: x(4) = [1.0_real64, 2.0_real64, 3.0_real64, 8.0_real64]
+        real(real64) :: m
+
+        call pf_mad(x, m, scale="raw")        ! a real token: accepted
+        if (m /= 1.0_real64) print '(a)', "the raw MAD of 1,2,3,8 was expected to be 1"
+        call pf_mad(x, m, scale="mad_std")    ! -> aborts (unknown token)
+        print '(a,es12.5)', "unexpectedly accepted scale=mad_std, m=", m
+    end subroutine scenario_stats_mad_bad_scale
+
+    !> A NaN centre can only come from the caller's own arithmetic, unlike a NaN in the population.
+    subroutine scenario_stats_mad_center_not_finite()
+        use ieee_arithmetic, only : ieee_value, ieee_quiet_nan
+        real(real64) :: x(4) = [1.0_real64, 2.0_real64, 3.0_real64, 8.0_real64]
+        real(real64) :: m
+
+        call pf_mad(x, m, scale="raw", center=2.0_real64)   ! finite: accepted
+        if (m /= 1.0_real64) print '(a)', "the raw MAD about 2 was expected to be 1"
+        call pf_mad(x, m, center=ieee_value(1.0_real64, ieee_quiet_nan))   ! -> aborts
+        print '(a,es12.5)', "unexpectedly accepted a NaN centre, m=", m
+    end subroutine scenario_stats_mad_center_not_finite
+
+    !> A string column carries its own validity, so `is_valid=` beside one is two sources of truth.
+    subroutine scenario_stats_mode_string_column_is_valid()
+        type(parquet_string_column) :: col
+        character(len=:), allocatable :: m
+        logical :: mask(3)
+
+        call col%append_string("b")
+        call col%append_string("a")
+        call col%append_string("a")
+        call pf_mode(col, m)                          ! without is_valid=: accepted
+        if (m /= "a") print '(a)', "the mode of b,a,a was expected to be a"
+        mask = [.true., .true., .false.]
+        call pf_mode(col, m, is_valid=mask)           ! -> aborts (two sources of nullness)
+        print '(a,a)', "unexpectedly accepted is_valid= beside a string column, m=", m
+    end subroutine scenario_stats_mode_string_column_is_valid
 
     !> A vector column has no defined order on a whole row, so it cannot be a sort key -- the
     !! same rule parquet_table%sort_by applies, enforced here for a bare parquet_column.

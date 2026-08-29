@@ -3,7 +3,7 @@ title: Choosing a module: what each entry module costs to import
 ---
 
 `use parquet` brings the whole library into scope and is the right answer for most programs. It is
-also the largest: a project that imports it compiles **92** of this library's Fortran files.
+also the largest: a project that imports it compiles **93** of this library's Fortran files.
 
 Every layer underneath is importable on its own, and several of them cost a great deal less. This
 page says what each entry module gives you, what it costs, and — the part that is easy to get wrong
@@ -54,11 +54,11 @@ in every one of them.
 | `parquet_map` | 11 | no | `parquet_map_column` / `parquet_map_row`: string-keyed `key -> value` entries per row |
 | `parquet_logging` | 1 | no | `pf_logger` and the `pf_log_*` procedures: leveled logging to several destinations at once, with a layout you choose and correct behaviour inside an OpenMP parallel region |
 | `parquet_sorting` | 21 | no | the whole sorting API, every element type, including `pf_sort_keys` |
-| `parquet_stats` | 25 | no | the `pf_*` array-statistics family: reductions over plain Fortran arrays |
+| `parquet_stats` | 26 | no | the `pf_*` array-statistics family: reductions over plain Fortran arrays |
 | `parquet_settings` | 3 | **yes** | the process-global knobs, and `parquet_get_arrow_version` |
 | `parquet_io` | 53 | **yes** | reading and writing Parquet files, and nothing else |
 | `parquet_tables` | 72 | **yes** | the `parquet_table` container |
-| `parquet` | 92 | **yes** | everything above, through one `use` |
+| `parquet` | 93 | **yes** | everything above, through one `use` |
 
 Four rows deserve a note.
 
@@ -132,7 +132,7 @@ anything else.
 | `parquet_healpix` | `verbosity` and `message_stream` -- it can warn from a thread clamp |
 | `parquet_argsort` | `sort_threads`, `sort_radix_path`, `sort_counting_path`, `sort_counting_bucket_limit`, plus `verbosity` and `message_stream` |
 | `parquet_sorting` | the same six as `parquet_argsort` |
-| `parquet_stats` | none yet — it reads none; the knobs arrive with the threaded and printing paths |
+| `parquet_stats` | `verbosity` and `message_stream` -- `pf_stats%print` writes solicited output |
 | `parquet_settings`, and so `parquet_io`, `parquet_tables`, `parquet` | all of them |
 
 The output pair (`verbosity`, `message_stream`) appears wherever a module can print something: a

@@ -1780,13 +1780,18 @@ def check_stats_optional_argument_order():
     # `consume`, which only `pf_stats`' own bindings take; then the population arguments every
     # reduction shares.
     #
-    # Five blocks, in this order, and each is a fixed order of its own -- so the subsequence rule
+    # Six blocks, in this order, and each is a fixed order of its own -- so the subsequence rule
     # still generates every signature. The tier-A OUTPUT prefix, which `pf_moments` and anything
     # shaped like it declares before the input block (`count` joins it as `pf_mode`'s own such
     # output); then the OBJECT-LIFECYCLE pair `retain` and `consume`, which only `pf_stats`' own
-    # bindings take; then the population arguments every reduction shares; and finally the OUTPUT
-    # DESTINATION pair `unit`/`name`, which only `%print` takes and which describes where the
-    # answer goes rather than what it is.
+    # bindings take; then the SIGMA-CLIP block, which only `pf_sigma_clipped_stats` takes -- its
+    # rule arguments first and its own outputs after them, so that the tuning a caller reaches for
+    # comes before the population plumbing; then the population arguments every reduction shares;
+    # and finally the OUTPUT DESTINATION pair `unit`/`name`, which only `%print` takes and which
+    # describes where the answer goes rather than what it is.
+    #
+    # A block used by ONE procedure is not a contradiction of "one sequence": every other
+    # procedure omits it, and omission is exactly what a subsequence permits.
     #
     # `kind` sits immediately after `method` because the two are the same kind of argument -- a
     # token naming a rule -- and no procedure takes both, so their relative order is never
@@ -1796,8 +1801,10 @@ def check_stats_optional_argument_order():
     canonical = ["n_valid", "mean", "variance", "stddev", "sem", "skewness", "kurtosis",
                  "vsum", "vmin", "vmax", "count",
                  "retain", "consume",
+                 "sigma", "sigma_lower", "sigma_upper", "maxiters", "cenfunc", "stdfunc",
+                 "n_clipped", "keep", "converged",
                  "is_valid", "weights", "weight_type", "ddof", "bias", "excess", "skipnan",
-                 "method", "kind", "scale", "center", "out_valid", "converged", "n_null", "n_nan",
+                 "method", "kind", "scale", "center", "out_valid", "n_null", "n_nan",
                  "ok", "threads",
                  "unit", "name"]
     rank = {name: i for i, name in enumerate(canonical)}

@@ -429,6 +429,119 @@ pf_stats mag
 Reach for `%compute` rather than `pf_describe` when the order statistics are not wanted:
 `pf_describe` pays for the ordering whether or not anything asks for it, which is the point of it.
 
+## `pf_gmean` and `pf_hmean` — the other two means
+
+```fortran
+call pf_gmean(flux, g)      ! exp(sum(w*log(x)) / sum(w))
+call pf_hmean(flux, h)      ! sum(w) / sum(w/x)
+```
+
+`scipy.stats.gmean` and `scipy.stats.hmean`. The geometric mean is computed in log space rather than
+as a product, because the product of a few thousand fluxes overflows a `real(real64)` and its
+logarithm does not.
+
+**Two values outside the domain are answered rather than refused**, matching scipy:
+
+- a value **exactly 0** gives exactly `0` — the limit of both means — with `ok = .true.`, because
+  that is a defined answer;
+- any **negative** value gives a quiet NaN with `ok = .false.`, since neither mean is defined for a
+  sign-changing population. A population holding both a zero and a negative is undefined too, not
+  zero.
+
+Both branches are taken **before** the logarithm or the reciprocal is reached, and that is a
+correctness requirement rather than tidiness: `log(0)` and `1/0` raise IEEE exceptions, and a
+compiler that unmasks the traps would terminate the process rather than return the answer.
+
+## `pf_cov` and `pf_corr` — two samples
+
+```fortran
+call pf_cov(mag, redshift, c)                         ! ddof = 1, as pandas
+call pf_corr(mag, redshift, r)                        ! Pearson
+call pf_corr(mag, redshift, r, method="spearman")     ! Pearson over midranks
+```
+
+**Pairwise-complete, and that is the only defensible rule.** A pair enters the population only when
+both of its elements are usable: neither null, neither NaN, and the pair's weight non-zero. Handling
+nullness independently per array would leave a covariance between vectors of different lengths, which
+is not a number. `n_null` and `n_nan` therefore count **pairs** here, not elements.
+
+`is_valid=` is one mask over both samples. A caller holding a separate mask per column passes
+`mask_x .and. mask_y`, which says what it does at the call site.
+
+Two identities hold **exactly**, and the test suite asserts them with `==` rather than a tolerance:
+
+- `pf_cov(x, x)` is `pf_variance(x)` bit for bit, at any `ddof`. That is why the covariance is
+  accumulated by the same block tree the variance is, rather than by a loop of its own.
+- `pf_corr(x, x)` is exactly `1`, and `pf_corr(x, -x)` exactly `-1`.
+
+**`pf_corr` has no `ddof`** — the one in the covariance and the two in the standard deviations cancel
+exactly, so the argument could never change the answer. Spearman is Pearson over **midranks**: each
+run of equal values receives the mean of the sorted positions it spans, so it measures any monotone
+relationship rather than a linear one. `weights` with `method="spearman"` **aborts**: a weighted
+midrank is a further definitional choice that no reference library makes.
+
+**Both arrays must be the same kind.** Six specifics rather than thirty-six; a caller mixing kinds
+writes `real(x, real64)`.
+
+## `pf_zscore` — standardise a whole array
+
+```fortran
+call pf_zscore(mag, z)                         ! ddof = 1
+call pf_zscore(mag, z, is_valid=mask, out_valid=ok_out, n_null=nn, ok=fine)
+```
+
+`z(i) = (values(i) - mean) / stddev` over the elements that survive the exclusion rules. `z` is the
+same size as `values`, and the result has mean 0 and standard deviation 1 to a few ulp.
+
+An **excluded** element has no standardised value, and there are two ways to learn which:
+`out_valid(:)` marks them exactly, and without it they are written as quiet NaNs — which is loud in
+practice, since a NaN propagates through whatever the caller does next.
+
+`ok = .false.` has **two** causes and deliberately does not distinguish them: a null was written out
+as a NaN, or the population's variance was zero and *every* output is NaN. `n_null` separates them at
+no cost — it is `0` in the second case — so a second flag would be another thing to document and
+reset for no new information.
+
+## `pf_sigma_clipped_stats` — the robust summary
+
+```fortran
+call pf_sigma_clipped_stats(mag, mean, median, stddev)
+call pf_sigma_clipped_stats(mag, mean, median, stddev, sigma=2.5_real64, &
+                            stdfunc="mad_std", keep=survivors, n_clipped=nc)
+```
+
+astropy's `sigma_clipped_stats`. Each round computes a centre and a scale over the values still
+surviving and keeps `centre - sigma_lower*scale <= x <= centre + sigma_upper*scale`, inclusive at
+both ends. `sigma = 3.0` and `maxiters = 5` are astropy's defaults; `cenfunc=` is `"median"` (the
+default) or `"mean"`, and `stdfunc=` is `"std"` (the default) or `"mad_std"`, which is far less
+disturbed by the outliers being clipped.
+
+**A whole run costs one ordering.** The keep condition is an interval, so the survivors of every
+round are a contiguous sub-range of the sorted order and each later round only moves two indices
+inward — O(n log n + k·n) rather than O(k·n log n). That is asserted with a counter rather than by
+inspection, because sorting once per round returns identical numbers and differs only in cost.
+(`stdfunc="mad_std"` does order the *deviations* once per round as well: those are a different
+population and their order is not implied by the values'.)
+
+Five rules worth knowing:
+
+- **`maxiters <= 0` iterates until a round removes nothing**, which is astropy's `maxiters=None`,
+  capped at 100 rounds. Reaching that cap **stops and reports** through `converged = .false.`; it
+  does not abort. Each non-terminating round removes at least one point, so a large catalogue can
+  honestly want more rounds than any small constant.
+- **A round that would leave fewer than two values stops instead**, and the previous round's
+  survivors are what is reported.
+- **`stddev` is the population standard deviation (`ddof = 0`)**, which is what astropy returns —
+  note this differs from `pf_stddev`'s own default of 1.
+- **`keep(:)` returns the surviving mask over the original array**, which is what a caller needs in
+  order to apply the same clip to a second column.
+- **There is no `weights` argument.** A weighted scale estimator is a further definitional choice
+  that no workload in evidence asks for, and its absence makes passing one a compile error rather
+  than a runtime abort.
+
+An empty population gives three NaNs with `ok = .false.` and `n_clipped = 0`; a constant one is
+reported unchanged, converged, with nothing clipped.
+
 ## `pf_stats` — summarise once, query as often as you like
 
 The one-shot procedures above each traverse the population. When a group needs more than one or two
@@ -578,12 +691,15 @@ sequence, so a signature you have seen once you have seen everywhere:
 
 ```
 is_valid, weights, weight_type, ddof, bias, excess, skipnan,
-method, kind, scale, center, out_valid, converged, n_null, n_nan, ok, threads
+method, kind, scale, center, out_valid, n_null, n_nan, ok, threads
 ```
 
-Two short blocks sit either side of it and are part of the same sequence: an *output* prefix, which
-`pf_moments` and `pf_mode` declare before the inputs (`pf_mode`'s `count` is one of these), and the
-`unit`/`name` pair, which only `%print` takes.
+Three short blocks sit either side of it and are part of the same sequence: an *output* prefix,
+which `pf_moments` and `pf_mode` declare before the inputs (`pf_mode`'s `count` is one of these);
+the sigma-clip block `sigma, sigma_lower, sigma_upper, maxiters, cenfunc, stdfunc, n_clipped, keep,
+converged`, which only `pf_sigma_clipped_stats` takes; and the `unit`/`name` pair, which only
+`%print` takes. A block used by one procedure is not a contradiction — every other procedure omits
+it, and omission is exactly what a subsequence permits.
 
 A procedure omits the ones it has no use for and never reorders the rest. In Fortran the order of
 optional arguments is part of the public contract — a caller may pass them positionally — so this is

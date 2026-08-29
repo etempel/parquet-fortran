@@ -1756,7 +1756,19 @@ contains
             new_unittest("a NaN MAD centre aborts, unlike a NaN in the population", &
                 test_stats_mad_center_not_finite_aborts), &
             new_unittest("is_valid= beside a string column aborts in pf_mode", &
-                test_stats_mode_string_column_is_valid_aborts) &
+                test_stats_mode_string_column_is_valid_aborts), &
+            new_unittest("an unrecognised correlation method aborts", &
+                test_stats_corr_bad_method_aborts), &
+            new_unittest("a weighted Spearman correlation aborts", &
+                test_stats_spearman_with_weights_aborts), &
+            new_unittest("two samples of different size abort", &
+                test_stats_pair_size_mismatch_aborts), &
+            new_unittest("an unrecognised sigma-clip cenfunc aborts", &
+                test_stats_clip_bad_cenfunc_aborts), &
+            new_unittest("a negative sigma-clip width aborts", &
+                test_stats_clip_bad_sigma_aborts), &
+            new_unittest("a short pf_zscore output array aborts", &
+                test_stats_zscore_size_mismatch_aborts) &
             ]
         testsuite = [p1, p2, p3, p4, p5, p6, p7, p8, p9]
     end subroutine collect_tests_parquet_errors
@@ -6181,6 +6193,75 @@ contains
             failure_message="is_valid= beside a string column was expected to abort", &
             required_stderr="carries its own validity")
     end subroutine test_stats_mode_string_column_is_valid_aborts
+
+    !> parquet_stats abort path: see scenario_stats_corr_bad_method in test/error_scenarios.f90.
+    !> Both tokens are named, because "kendall" is the third correlation a reader of scipy would
+    !> reach for and this library does not have it.
+    subroutine test_stats_corr_bad_method_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_corr_bad_method", &
+            expect_abort=.true., &
+            failure_message="an unrecognised correlation method was expected to abort", &
+            required_stderr="unrecognised method")
+    end subroutine test_stats_corr_bad_method_aborts
+
+    !> parquet_stats abort path: see scenario_stats_spearman_with_weights in
+    !> test/error_scenarios.f90. The scenario's own negative control is the weighted PEARSON call
+    !> above it, so a guard that refused every weighted correlation would fail there instead.
+    subroutine test_stats_spearman_with_weights_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_spearman_with_weights", &
+            expect_abort=.true., &
+            failure_message="a weighted Spearman correlation was expected to abort", &
+            required_stderr="does not accept weights")
+    end subroutine test_stats_spearman_with_weights_aborts
+
+    !> parquet_stats abort path: see scenario_stats_pair_size_mismatch in
+    !> test/error_scenarios.f90. A two-sample statistic over vectors of different lengths is not a
+    !> number, so this is the one size check in the module that is about meaning rather than memory.
+    subroutine test_stats_pair_size_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_pair_size_mismatch", &
+            expect_abort=.true., &
+            failure_message="two samples of different size were expected to abort", &
+            required_stderr="must be the same size")
+    end subroutine test_stats_pair_size_mismatch_aborts
+
+    !> parquet_stats abort path: see scenario_stats_clip_bad_cenfunc in test/error_scenarios.f90.
+    subroutine test_stats_clip_bad_cenfunc_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_clip_bad_cenfunc", &
+            expect_abort=.true., &
+            failure_message="an unrecognised sigma-clip cenfunc was expected to abort", &
+            required_stderr="unrecognised cenfunc")
+    end subroutine test_stats_clip_bad_cenfunc_aborts
+
+    !> parquet_stats abort path: see scenario_stats_clip_bad_sigma in test/error_scenarios.f90.
+    !> A negative clip width would keep nothing, which is never what a caller means -- so this is
+    !> misuse and aborts, where an empty RESULT would have been an ordinary data condition.
+    subroutine test_stats_clip_bad_sigma_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_clip_bad_sigma", &
+            expect_abort=.true., &
+            failure_message="a negative sigma-clip width was expected to abort", &
+            required_stderr="must be non-negative numbers")
+    end subroutine test_stats_clip_bad_sigma_aborts
+
+    !> parquet_stats abort path: see scenario_stats_zscore_size_mismatch in
+    !> test/error_scenarios.f90.
+    subroutine test_stats_zscore_size_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_zscore_size_mismatch", &
+            expect_abort=.true., &
+            failure_message="a short pf_zscore output array was expected to abort", &
+            required_stderr="elements but values has")
+    end subroutine test_stats_zscore_size_mismatch_aborts
 
     !> pf_nth_quantile abort path: see scenario_sorting_quantile_out_of_range in
     !> test/error_scenarios.f90. The message names the scale, since 50 is exactly what a caller

@@ -80,10 +80,12 @@ module parquet_stats
 
     public :: pf_count_valid
     public :: pf_sum, pf_mean, pf_variance, pf_stddev, pf_sem
+    public :: pf_gmean, pf_hmean
     public :: pf_skewness, pf_kurtosis, pf_moments
     public :: pf_median, pf_quantile, pf_quantiles
     public :: pf_iqr, pf_trim_mean, pf_percentile_of_score
     public :: pf_mad, pf_mode, pf_describe
+    public :: pf_cov, pf_corr, pf_zscore, pf_sigma_clipped_stats
     public :: parquet_set_verbosity, parquet_get_verbosity
     public :: parquet_set_message_stream, parquet_get_message_stream
     public :: pf_stats
@@ -396,6 +398,69 @@ module parquet_stats
         module procedure mean_bool
         module procedure mean_col
     end interface pf_mean
+    !
+    !> The geometric mean -- `scipy.stats.gmean`, computed in log space.
+    !>
+    !> `exp(sum(w*log(x))/sum(w))`. In log space rather than as a product, because the
+    !> product of a few thousand fluxes overflows a `real64` and its logarithm does
+    !> not.
+    !>
+    !> **Two values outside the domain are answered rather than refused.** A value
+    !> exactly `0` gives exactly `0`, which is the limit and is what scipy returns;
+    !> any negative value gives a quiet NaN with `ok = .false.`, since the geometric
+    !> mean of a sign-changing population is not defined. Neither aborts: both are
+    !> data conditions.
+    !>
+    !> Nulls, NaNs and zero-weight elements are excluded from the population, in that order, and
+    !> `n_null`/`n_nan` report how many. An undefined answer is a **quiet NaN** with
+    !> `ok = .false.`: this module never aborts on a data condition, because a per-group loop
+    !> meets an empty group on real data. It aborts only on misuse -- a mismatched array size, an
+    !> unrecognised token, or a negative, NaN or infinite weight.
+    !>
+    !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
+    !> `logical` array, or a scalar numeric `type(parquet_column)`; every one of them widens to
+    !> `real64` and reaches the same engine, so the answer does not depend on which was passed.
+    !>
+    !> The central-moment pass is threaded on a large population, and `threads=` overrides the
+    !> automatic count. **That cannot change an answer**: the population is reduced over a fixed
+    !> block tree determined by its size alone, so one thread, eight threads and a build without
+    !> OpenMP return the identical bits.
+    interface pf_gmean
+        module procedure gmean_f64
+        module procedure gmean_i32
+        module procedure gmean_i64
+        module procedure gmean_f32
+        module procedure gmean_bool
+        module procedure gmean_col
+    end interface pf_gmean
+    !
+    !> The harmonic mean -- `scipy.stats.hmean`.
+    !>
+    !> `sum(w)/sum(w/x)`, with the same domain rules as `pf_gmean`: a zero gives
+    !> exactly `0`, a negative gives a quiet NaN.
+    !>
+    !> Nulls, NaNs and zero-weight elements are excluded from the population, in that order, and
+    !> `n_null`/`n_nan` report how many. An undefined answer is a **quiet NaN** with
+    !> `ok = .false.`: this module never aborts on a data condition, because a per-group loop
+    !> meets an empty group on real data. It aborts only on misuse -- a mismatched array size, an
+    !> unrecognised token, or a negative, NaN or infinite weight.
+    !>
+    !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
+    !> `logical` array, or a scalar numeric `type(parquet_column)`; every one of them widens to
+    !> `real64` and reaches the same engine, so the answer does not depend on which was passed.
+    !>
+    !> The central-moment pass is threaded on a large population, and `threads=` overrides the
+    !> automatic count. **That cannot change an answer**: the population is reduced over a fixed
+    !> block tree determined by its size alone, so one thread, eight threads and a build without
+    !> OpenMP return the identical bits.
+    interface pf_hmean
+        module procedure hmean_f64
+        module procedure hmean_i32
+        module procedure hmean_i64
+        module procedure hmean_f32
+        module procedure hmean_bool
+        module procedure hmean_col
+    end interface pf_hmean
     !
     !> The variance of a population, in two passes so that it is shift-invariant.
     !>
@@ -808,6 +873,136 @@ module parquet_stats
         module procedure describe_col
     end interface pf_describe
     !
+    !> The covariance of two samples -- pairwise-complete, as pandas is.
+    !>
+    !> A pair enters the population only when BOTH elements are usable: neither null, neither
+    !> NaN, and the pair's weight non-zero. `n_null` counts pairs dropped because either side
+    !> was null and `n_nan` those dropped for a NaN and not already null, so the two counts
+    !> describe pairs rather than elements -- which is the only thing they could describe, since
+    !> a covariance between vectors of different lengths is not a number.
+    !>
+    !> `ddof = 1` by default (the sample covariance, as pandas returns); pass `ddof = 0` for
+    !> numpy's. `pf_cov(x, x)` is exactly `pf_variance(x)` at the same `ddof`, and the test
+    !> suite asserts it.
+    !>
+    !> **Both arrays must be the same kind.** Six specifics rather than thirty-six: a caller
+    !> mixing kinds writes `real(x, real64)`, which is one call and says what it does.
+    !>
+    !> Nulls, NaNs and zero-weight elements leave the population exactly as they do for the
+    !> moments. An undefined answer is a **quiet NaN** with `ok = .false.`, never an abort: this
+    !> module aborts on misuse and never on a data condition.
+    !>
+    !> Every argument may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)`
+    !> or `logical` array, or a scalar numeric `type(parquet_column)`.
+    interface pf_cov
+        module procedure cov_f64
+        module procedure cov_i32
+        module procedure cov_i64
+        module procedure cov_f32
+        module procedure cov_bool
+        module procedure cov_col
+    end interface pf_cov
+    !
+    !> The correlation of two samples: Pearson by default, Spearman on request.
+    !>
+    !> `method="pearson"` is `cov(x, y) / (sd(x) sd(y))`. `method="spearman"` is the same
+    !> formula over MIDRANKS -- each run of equal values receives the mean of the sorted
+    !> positions it spans -- so it measures any monotone relationship rather than a linear one.
+    !>
+    !> Pairwise-complete, exactly as `pf_cov` is, and with the same pair-counting rule. There is
+    !> deliberately **no `ddof`**: the one in the covariance and the two in the standard
+    !> deviations cancel exactly, so the argument could never change the answer.
+    !>
+    !> `pf_corr(x, x)` is exactly `1` for any non-constant sample, under either method. A
+    !> constant sample has zero variance and gives a quiet NaN with `ok = .false.`.
+    !>
+    !> Nulls, NaNs and zero-weight elements leave the population exactly as they do for the
+    !> moments. An undefined answer is a **quiet NaN** with `ok = .false.`, never an abort: this
+    !> module aborts on misuse and never on a data condition.
+    !>
+    !> Every argument may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)`
+    !> or `logical` array, or a scalar numeric `type(parquet_column)`.
+    interface pf_corr
+        module procedure corr_f64
+        module procedure corr_i32
+        module procedure corr_i64
+        module procedure corr_f32
+        module procedure corr_bool
+        module procedure corr_col
+    end interface pf_corr
+    !
+    !> Standardises a population in place of the caller's own loop -- `scipy.stats.zscore`.
+    !>
+    !> `z(i) = (values(i) - mean) / stddev`, with `ddof = 1` by default. `z` is the same size as
+    !> `values` and the mean and standard deviation are taken over the elements that survive the
+    !> exclusion rules.
+    !>
+    !> **An excluded element has no standardised value**, and there are two ways to learn which:
+    !> `out_valid(:)` marks them exactly, and without it they are written as quiet NaNs. `ok`
+    !> comes back `.false.` in either case, and also when the population's variance is zero --
+    !> in which case EVERY output is NaN. `n_null` separates the two: it is `0` for the second.
+    !>
+    !> The result has mean 0 and standard deviation 1 over the surviving elements, to a few ulp.
+    !>
+    !> Nulls, NaNs and zero-weight elements leave the population exactly as they do for the
+    !> moments. An undefined answer is a **quiet NaN** with `ok = .false.`, never an abort: this
+    !> module aborts on misuse and never on a data condition.
+    !>
+    !> Every argument may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)`
+    !> or `logical` array, or a scalar numeric `type(parquet_column)`.
+    interface pf_zscore
+        module procedure zscore_f64
+        module procedure zscore_i32
+        module procedure zscore_i64
+        module procedure zscore_f32
+        module procedure zscore_bool
+        module procedure zscore_col
+    end interface pf_zscore
+    !
+    !> astropy's `sigma_clipped_stats`: iteratively drop the outliers, then summarise the rest.
+    !>
+    !> Each round computes a centre and a scale over the values still surviving and keeps
+    !> `centre - sigma_lower*scale <= x <= centre + sigma_upper*scale`, inclusive at both ends,
+    !> as astropy does. `cenfunc=` chooses the centre (`"median"` by default, or `"mean"`)
+    !> and `stdfunc=` the scale (`"std"` by default, or `"mad_std"`, which is far less
+    !> disturbed by the outliers being clipped). `sigma = 3.0` and `maxiters = 5` are astropy's
+    !> defaults.
+    !>
+    !> **The whole run costs ONE ordering.** The keep condition is an interval, so the survivors
+    !> are always a contiguous sub-range of the sorted order and each round only moves two
+    !> indices inward.
+    !>
+    !> `maxiters <= 0` iterates until a round removes nothing, capped at 100 rounds. Reaching
+    !> that cap stops and reports through `converged = .false.`; it does NOT abort, because each
+    !> non-terminating round removes at least one point and a large catalogue can honestly want
+    !> more rounds than any small constant.
+    !>
+    !> **A round that would leave fewer than two values stops instead**, and the previous round's
+    !> survivors are what is reported. An empty population gives three NaNs with `ok = .false.`
+    !> and `n_clipped = 0`.
+    !>
+    !> `keep(:)` optionally returns the surviving mask over the ORIGINAL array, which is what a
+    !> caller needs in order to apply the same clip to a second column.
+    !>
+    !> **There is no `weights` argument**, which is stronger than refusing one at run time: a
+    !> weighted scale estimator is a further definitional choice that no workload in evidence
+    !> asks for, and its absence makes passing one a compile error.
+    !>
+    !> Nulls, NaNs and zero-weight elements leave the population exactly as they do for the
+    !> moments. An undefined answer is a **quiet NaN** with `ok = .false.`, never an abort: this
+    !> module aborts on misuse and never on a data condition.
+    !>
+    !> Every argument may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)`
+    !> or `logical` array, or a scalar numeric `type(parquet_column)`.
+    interface pf_sigma_clipped_stats
+        module procedure sigma_clipped_stats_f64
+        module procedure sigma_clipped_stats_i32
+        module procedure sigma_clipped_stats_i64
+        module procedure sigma_clipped_stats_f32
+        module procedure sigma_clipped_stats_bool
+        module procedure sigma_clipped_stats_col
+    end interface pf_sigma_clipped_stats
+    !
     !> The most common value of a population -- pandas' `mode()`, scipy's `stats.mode`.
     !>
     !> **Integer, logical and string kinds only.** The real kinds are not overloads that abort at
@@ -933,6 +1128,79 @@ module parquet_stats
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
             !! bits. It is a speed control and never an accuracy one.
         end subroutine mean_f64
+        !> `pf_gmean` over a 64-bit real array: the geometric mean.
+        !>
+        !> `exp(sum(w*log(x)) / sum(w))`, which is `scipy.stats.gmean`. Computed in log space
+        !> rather than as a product, because the product of a few thousand magnitudes overflows
+        !> and its logarithm does not.
+        !>
+        !> Two values outside the domain are answered rather than refused: a value **exactly 0**
+        !> gives exactly `0` (the limit, and scipy's answer), and any **negative** value gives a
+        !> quiet NaN with `ok = .false.`. Both are branched on BEFORE the logarithm is reached,
+        !> which is a correctness requirement rather than tidiness -- `log(0)` raises
+        !> `IEEE_DIVIDE_BY_ZERO` and nagfor unmasks the IEEE traps by default, so reaching it
+        !> would terminate the process on that compiler while returning a plausible answer on
+        !> every other one.
+        module subroutine gmean_f64(values, g, is_valid, weights, skipnan, n_null, n_nan, ok, threads)
+            real(real64), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: g !! the geometric mean; 0 for a zero, NaN for a negative or empty population.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine gmean_f64
+        !> `pf_hmean` over a 64-bit real array: the harmonic mean.
+        !>
+        !> `sum(w) / sum(w/x)`, which is `scipy.stats.hmean`. Same domain rules as `pf_gmean`
+        !> and for the same reason: a value exactly 0 gives exactly `0`, a negative one gives a
+        !> quiet NaN, and both are branched on before the reciprocal, since `1/0` raises under
+        !> nagfor's default trap policy.
+        module subroutine hmean_f64(values, h, is_valid, weights, skipnan, n_null, n_nan, ok, threads)
+            real(real64), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: h !! the harmonic mean; 0 for a zero, NaN for a negative or empty population.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine hmean_f64
         !> `pf_variance` over a 64-bit real array, computed in TWO passes.
         !>
         !> The mean is taken first and the central moment accumulated against it, so the result
@@ -1646,10 +1914,216 @@ module parquet_stats
             character(len=*), intent(in), optional :: weight_type !! the caller's token, if any.
             logical, intent(out) :: freq !! .true. for frequency weights.
         end subroutine stats_weight_kind
+        !> The two-sample two-pass, over pairs the caller has already compacted.
+        !!
+        !! **It exists so that `pf_cov(x, x)` is EXACTLY `pf_variance(x)`**, which it could not be
+        !! if the covariance had its own accumulation loop: it is written here, in the same
+        !! submodule as `stats_engine`, so that both reach the same `STATS_BLOCK` block tree, the
+        !! same `pair_reduce`, the same refined mean and the same re-centring correction. A second
+        !! loop elsewhere would agree to fifteen digits and differ in the sixteenth, and the
+        !! identity is worth more than the duplication costs.
+        module subroutine stats_pair_moments(kx, ky, kw, m, mean_x, mean_y, sxx, sxy, syy, &
+                w_sum, w_sq)
+            real(real64), intent(in) :: kx(:) !! the surviving first-sample values.
+            real(real64), intent(in) :: ky(:) !! the surviving second-sample values, paired.
+            real(real64), allocatable, intent(in) :: kw(:) !! their weights, or unallocated.
+            integer(int64), intent(in) :: m !! how many pairs survived.
+            real(real64), intent(out) :: mean_x !! the first sample's weighted mean.
+            real(real64), intent(out) :: mean_y !! the second's.
+            real(real64), intent(out) :: sxx !! `sum(w*(x-mx)**2)`, re-centred.
+            real(real64), intent(out) :: sxy !! `sum(w*(x-mx)*(y-my))`, re-centred.
+            real(real64), intent(out) :: syy !! `sum(w*(y-my)**2)`, re-centred.
+            real(real64), intent(out) :: w_sum !! `sum(w)`.
+            real(real64), intent(out) :: w_sq !! `sum(w**2)`, which the reliability `ddof` needs.
+        end subroutine stats_pair_moments
+        !> The mean and standard deviation of one population, from ONE engine run.
+        !!
+        !! `pf_zscore` needs both and would otherwise pay four traversals for two. Also reports
+        !! `saw_nan`, so a vector-valued caller can answer all-NaN under `skipnan = .false.`
+        !! exactly as the scalar family does.
+        module subroutine stats_mean_sd(values, what, is_valid, ddof, skipnan, mean, sd, &
+                n_valid, n_null, n_nan, saw_nan)
+            real(real64), intent(in) :: values(:) !! the population, before exclusions.
+            character(len=*), intent(in) :: what !! the public procedure's name, for messages.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: ddof !! delta degrees of freedom; 1 by default.
+            logical, intent(in), optional :: skipnan !! .true. (default) excludes a NaN.
+            real(real64), intent(out) :: mean !! the mean, or NaN.
+            real(real64), intent(out) :: sd !! the standard deviation, or NaN.
+            integer(int64), intent(out) :: n_valid !! how many survived.
+            integer(int64), intent(out) :: n_null !! how many `is_valid` excluded.
+            integer(int64), intent(out) :: n_nan !! how many were excluded as NaN.
+            logical, intent(out) :: saw_nan !! .true. when a NaN survived under skipnan=.false.
+        end subroutine stats_mean_sd
         !> Completes a deferred tier-A recomputation, if one is pending.
         module subroutine stats_ensure(self)
             class(pf_stats), intent(inout) :: self !! the accumulator.
         end subroutine stats_ensure
+    end interface
+    !
+    ! ---- The real64 cores of the relational and robust families ----
+    interface
+        !> `pf_cov` over two 64-bit real arrays: the PAIRWISE-COMPLETE covariance.
+        !!
+        !! A pair enters the population only when both elements are usable -- neither null, neither
+        !! NaN, and the pair's weight non-zero. That is the only defensible rule for a two-sample
+        !! statistic and it is what pandas does; handling nulls independently per array would
+        !! produce a covariance between vectors of different lengths, which is not a number.
+        module subroutine cov_f64(x, y, c, is_valid, weights, ddof, n_null, n_nan, ok)
+            real(real64), intent(in) :: x(:) !! the first sample.
+            real(real64), intent(in) :: y(:) !! the second sample, element for element.
+            real(real64), intent(out) :: c !! the covariance; NaN when `n_valid <= ddof`.
+            logical, intent(in), optional :: is_valid(:)
+            !! per PAIR: .false. marks the pair as unusable. One mask over both arrays, because a
+            !! two-sample statistic is taken over pairs; a caller holding a separate mask for each
+            !! column passes `mask_x .and. mask_y`, which says what it does. A NaN on either side
+            !! drops the pair as well, and is counted through `n_nan` rather than here.
+            real(real64), intent(in), optional :: weights(:)
+            !! per PAIR weight, non-negative. A ZERO weight removes the pair from the population;
+            !! a negative, NaN or infinite one aborts. Absent means every weight is 1. Pearson
+            !! only -- see `method`.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine cov_f64
+        !> `pf_corr` over two 64-bit real arrays.
+        !!
+        !! `cov(x, y) / (sd(x) * sd(y))` for Pearson, and the same over MIDRANKS for Spearman. The
+        !! `ddof` in the covariance and the two in the standard deviations cancel exactly, which is
+        !! why this procedure has no `ddof` argument to offer.
+        module subroutine corr_f64(x, y, r, is_valid, weights, method, n_null, n_nan, ok)
+            real(real64), intent(in) :: x(:) !! the first sample.
+            real(real64), intent(in) :: y(:) !! the second sample, element for element.
+            real(real64), intent(out) :: r !! the correlation in [-1, 1]; NaN when either sample is constant.
+            logical, intent(in), optional :: is_valid(:)
+            !! per PAIR: .false. marks the pair as unusable. One mask over both arrays, because a
+            !! two-sample statistic is taken over pairs; a caller holding a separate mask for each
+            !! column passes `mask_x .and. mask_y`, which says what it does. A NaN on either side
+            !! drops the pair as well, and is counted through `n_nan` rather than here.
+            real(real64), intent(in), optional :: weights(:)
+            !! per PAIR weight, non-negative. A ZERO weight removes the pair from the population;
+            !! a negative, NaN or infinite one aborts. Absent means every weight is 1. Pearson
+            !! only -- see `method`.
+            character(len=*), intent(in), optional :: method
+            !! "pearson" (the default) or "spearman". Spearman is Pearson over MIDRANKS: each run
+            !! of equal values receives the mean of the sorted positions it spans, so it measures
+            !! any monotone relationship rather than a linear one. Any other token aborts, naming
+            !! both. Matched case-insensitively. **`weights` with "spearman" aborts** -- a
+            !! weighted midrank is a further definitional choice and no reference library makes
+            !! it.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine corr_f64
+        !> `pf_zscore` over a 64-bit real array: `(x - mean) / stddev`, element by element.
+        module subroutine zscore_f64(values, z, is_valid, ddof, skipnan, out_valid, n_null, ok)
+            real(real64), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: z(:)
+            !! the standardised values, same size as `values`.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the result is
+            !! therefore undefined. Same size as `values`. **Absent, such an element is written as
+            !! a quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine zscore_f64
+        !> `pf_sigma_clipped_stats` over a 64-bit real array: astropy's iterative clip.
+        !!
+        !! **One ordering serves the whole run**, and that is a property rather than an
+        !! optimisation: the keep condition is an INTERVAL, so the survivors of every round are a
+        !! contiguous sub-range of the sorted order and each later round only moves two indices
+        !! inward. That is what turns an O(k n log n) routine into O(n log n + k n).
+        module subroutine sigma_clipped_stats_f64(values, mean, median, stddev, sigma, &
+                sigma_lower, sigma_upper, maxiters, cenfunc, stdfunc, n_clipped, keep, &
+                converged, is_valid, skipnan, n_null, n_nan, ok, threads)
+            real(real64), intent(in) :: values(:) !! the population, before exclusions.
+            real(real64), intent(out) :: mean !! the mean of the surviving values; NaN when none survive.
+            real(real64), intent(out) :: median !! their median.
+            real(real64), intent(out) :: stddev !! their POPULATION standard deviation (`ddof = 0`), as astropy reports.
+            real(real64), intent(in), optional :: sigma
+            !! how many scale units a value may sit from the centre and still be kept. 3.0 by
+            !! default, as astropy does. `sigma_lower` and `sigma_upper` each default to this, so
+            !! setting it alone gives a symmetric clip.
+            real(real64), intent(in), optional :: sigma_lower
+            !! the lower half of the clip, overriding `sigma` below the centre.
+            real(real64), intent(in), optional :: sigma_upper
+            !! the upper half of the clip, overriding `sigma` above the centre.
+            integer, intent(in), optional :: maxiters
+            !! how many clipping rounds to run; 5 by default, as astropy does. **A non-positive
+            !! value means iterate until nothing more is removed**, which is astropy's
+            !! `maxiters=None` -- capped at a hard internal 100 rounds, and reaching that cap
+            !! STOPS and reports through `converged` rather than aborting. Each non-terminating
+            !! round removes at least one point, so a large catalogue can honestly want more
+            !! rounds than any small constant.
+            character(len=*), intent(in), optional :: cenfunc
+            !! which centre each round clips about: "median" (the default, as astropy) or "mean".
+            !! Any other token aborts, naming both. Matched case-insensitively.
+            character(len=*), intent(in), optional :: stdfunc
+            !! which scale each round measures: "std" (the default, as astropy -- the sample
+            !! standard deviation at `ddof = 1`) or "mad_std", the normal-scaled median absolute
+            !! deviation, which is far less disturbed by the outliers being clipped. Any other
+            !! token aborts, naming both. Matched case-insensitively.
+            integer(int64), intent(out), optional :: n_clipped
+            !! how many elements of the population the clipping removed. `0` for an empty
+            !! population, and `0` when the first round removes nothing.
+            logical, intent(out), optional :: keep(:)
+            !! per element of `values`: .true. for one that survived both the exclusion rules and
+            !! every clipping round. Same size as `values`. This is what a caller needs in order
+            !! to apply the same clip to a SECOND column.
+            logical, intent(out), optional :: converged
+            !! .false. when the iteration stopped at its round limit with points still being
+            !! removed, rather than because a round removed nothing. The answer is still usable
+            !! -- it is the last completed round's -- so `ok` stays .true. and this is the only
+            !! way to tell the two endings apart.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine sigma_clipped_stats_f64
     end interface
     !
     ! ---- pf_mode, one specific per kind (implemented in parquet_stats_order) ----
@@ -1810,6 +2284,50 @@ module parquet_stats
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
             !! bits. It is a speed control and never an accuracy one.
         end subroutine mean_i32
+        !> `pf_gmean` over a 32-bit integer array.
+        module subroutine gmean_i32(values, g, is_valid, weights, n_null, ok, threads)
+            integer(int32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: g !! the geometric mean; 0 for a zero, NaN for a negative or empty population.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine gmean_i32
+        !> `pf_hmean` over a 32-bit integer array.
+        module subroutine hmean_i32(values, h, is_valid, weights, n_null, ok, threads)
+            integer(int32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: h !! the harmonic mean; 0 for a zero, NaN for a negative or empty population.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine hmean_i32
         !> `pf_variance` over a 32-bit integer array.
         module subroutine variance_i32(values, v, is_valid, weights, weight_type, ddof, n_null, ok, threads)
             integer(int32), intent(in) :: values(:) !! the population.
@@ -2295,6 +2813,144 @@ module parquet_stats
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
             !! bits. It is a speed control and never an accuracy one.
         end subroutine describe_i32
+        !> `pf_cov` over a 32-bit integer array.
+        module subroutine cov_i32(x, y, c, is_valid, weights, ddof, n_null, n_nan, ok)
+            integer(int32), intent(in) :: x(:) !! the first sample.
+            integer(int32), intent(in) :: y(:) !! the second sample, element for element.
+            real(real64), intent(out) :: c !! the covariance; NaN when `n_valid <= ddof`.
+            logical, intent(in), optional :: is_valid(:)
+            !! per PAIR: .false. marks the pair as unusable. One mask over both arrays, because a
+            !! two-sample statistic is taken over pairs; a caller holding a separate mask for each
+            !! column passes `mask_x .and. mask_y`, which says what it does. A NaN on either side
+            !! drops the pair as well, and is counted through `n_nan` rather than here.
+            real(real64), intent(in), optional :: weights(:)
+            !! per PAIR weight, non-negative. A ZERO weight removes the pair from the population;
+            !! a negative, NaN or infinite one aborts. Absent means every weight is 1. Pearson
+            !! only -- see `method`.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine cov_i32
+        !> `pf_corr` over a 32-bit integer array.
+        module subroutine corr_i32(x, y, r, is_valid, weights, method, n_null, n_nan, ok)
+            integer(int32), intent(in) :: x(:) !! the first sample.
+            integer(int32), intent(in) :: y(:) !! the second sample, element for element.
+            real(real64), intent(out) :: r !! the correlation in [-1, 1]; NaN when either sample is constant.
+            logical, intent(in), optional :: is_valid(:)
+            !! per PAIR: .false. marks the pair as unusable. One mask over both arrays, because a
+            !! two-sample statistic is taken over pairs; a caller holding a separate mask for each
+            !! column passes `mask_x .and. mask_y`, which says what it does. A NaN on either side
+            !! drops the pair as well, and is counted through `n_nan` rather than here.
+            real(real64), intent(in), optional :: weights(:)
+            !! per PAIR weight, non-negative. A ZERO weight removes the pair from the population;
+            !! a negative, NaN or infinite one aborts. Absent means every weight is 1. Pearson
+            !! only -- see `method`.
+            character(len=*), intent(in), optional :: method
+            !! "pearson" (the default) or "spearman". Spearman is Pearson over MIDRANKS: each run
+            !! of equal values receives the mean of the sorted positions it spans, so it measures
+            !! any monotone relationship rather than a linear one. Any other token aborts, naming
+            !! both. Matched case-insensitively. **`weights` with "spearman" aborts** -- a
+            !! weighted midrank is a further definitional choice and no reference library makes
+            !! it.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine corr_i32
+        !> `pf_zscore` over a 32-bit integer array.
+        module subroutine zscore_i32(values, z, is_valid, ddof, out_valid, n_null, ok)
+            integer(int32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: z(:)
+            !! the standardised values, same size as `values`. An excluded
+            !! element is a quiet NaN unless `out_valid` is present.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the result is
+            !! therefore undefined. Same size as `values`. **Absent, such an element is written as
+            !! a quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine zscore_i32
+        !> `pf_sigma_clipped_stats` over a 32-bit integer array.
+        module subroutine sigma_clipped_stats_i32(values, mean, median, stddev, sigma, sigma_lower, sigma_upper, maxiters, &
+                cenfunc, stdfunc, n_clipped, keep, converged, is_valid, &
+                n_null, ok, threads)
+            integer(int32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: mean !! the mean of the surviving values; NaN when none survive.
+            real(real64), intent(out) :: median !! their median.
+            real(real64), intent(out) :: stddev !! their POPULATION standard deviation (`ddof = 0`), as astropy reports.
+            real(real64), intent(in), optional :: sigma
+            !! how many scale units a value may sit from the centre and still be kept. 3.0 by
+            !! default, as astropy does. `sigma_lower` and `sigma_upper` each default to this, so
+            !! setting it alone gives a symmetric clip.
+            real(real64), intent(in), optional :: sigma_lower
+            !! the lower half of the clip, overriding `sigma` below the centre.
+            real(real64), intent(in), optional :: sigma_upper
+            !! the upper half of the clip, overriding `sigma` above the centre.
+            integer, intent(in), optional :: maxiters
+            !! how many clipping rounds to run; 5 by default, as astropy does. **A non-positive
+            !! value means iterate until nothing more is removed**, which is astropy's
+            !! `maxiters=None` -- capped at a hard internal 100 rounds, and reaching that cap
+            !! STOPS and reports through `converged` rather than aborting. Each non-terminating
+            !! round removes at least one point, so a large catalogue can honestly want more
+            !! rounds than any small constant.
+            character(len=*), intent(in), optional :: cenfunc
+            !! which centre each round clips about: "median" (the default, as astropy) or "mean".
+            !! Any other token aborts, naming both. Matched case-insensitively.
+            character(len=*), intent(in), optional :: stdfunc
+            !! which scale each round measures: "std" (the default, as astropy -- the sample
+            !! standard deviation at `ddof = 1`) or "mad_std", the normal-scaled median absolute
+            !! deviation, which is far less disturbed by the outliers being clipped. Any other
+            !! token aborts, naming both. Matched case-insensitively.
+            integer(int64), intent(out), optional :: n_clipped
+            !! how many elements of the population the clipping removed. `0` for an empty
+            !! population, and `0` when the first round removes nothing.
+            logical, intent(out), optional :: keep(:)
+            !! per element of `values`: .true. for one that survived both the exclusion rules and
+            !! every clipping round. Same size as `values`. This is what a caller needs in order
+            !! to apply the same clip to a SECOND column.
+            logical, intent(out), optional :: converged
+            !! .false. when the iteration stopped at its round limit with points still being
+            !! removed, rather than because a round removed nothing. The answer is still usable
+            !! -- it is the last completed round's -- so `ok` stays .true. and this is the only
+            !! way to tell the two endings apart.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine sigma_clipped_stats_i32
         !> `pf_sum` over a 64-bit integer array.
         !>
         !> **An `integer(int64)` above 2**53 loses exactness** on the way into the real64 buffer
@@ -2349,6 +3005,60 @@ module parquet_stats
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
             !! bits. It is a speed control and never an accuracy one.
         end subroutine mean_i64
+        !> `pf_gmean` over a 64-bit integer array.
+        !>
+        !> **An `integer(int64)` above 2**53 loses exactness** on the way into the real64 buffer
+        !> every statistic here is computed in. That is unavoidable for a mean and irrelevant for
+        !> the workloads this serves -- nobody averages an object ID -- but it is NOT irrelevant
+        !> for a median, which `pf_nth_quantile` computes exactly on the original array.
+        module subroutine gmean_i64(values, g, is_valid, weights, n_null, ok, threads)
+            integer(int64), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: g !! the geometric mean; 0 for a zero, NaN for a negative or empty population.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine gmean_i64
+        !> `pf_hmean` over a 64-bit integer array.
+        !>
+        !> **An `integer(int64)` above 2**53 loses exactness** on the way into the real64 buffer
+        !> every statistic here is computed in. That is unavoidable for a mean and irrelevant for
+        !> the workloads this serves -- nobody averages an object ID -- but it is NOT irrelevant
+        !> for a median, which `pf_nth_quantile` computes exactly on the original array.
+        module subroutine hmean_i64(values, h, is_valid, weights, n_null, ok, threads)
+            integer(int64), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: h !! the harmonic mean; 0 for a zero, NaN for a negative or empty population.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine hmean_i64
         !> `pf_variance` over a 64-bit integer array.
         !>
         !> **An `integer(int64)` above 2**53 loses exactness** on the way into the real64 buffer
@@ -2904,6 +3614,144 @@ module parquet_stats
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
             !! bits. It is a speed control and never an accuracy one.
         end subroutine describe_i64
+        !> `pf_cov` over a 64-bit integer array.
+        module subroutine cov_i64(x, y, c, is_valid, weights, ddof, n_null, n_nan, ok)
+            integer(int64), intent(in) :: x(:) !! the first sample.
+            integer(int64), intent(in) :: y(:) !! the second sample, element for element.
+            real(real64), intent(out) :: c !! the covariance; NaN when `n_valid <= ddof`.
+            logical, intent(in), optional :: is_valid(:)
+            !! per PAIR: .false. marks the pair as unusable. One mask over both arrays, because a
+            !! two-sample statistic is taken over pairs; a caller holding a separate mask for each
+            !! column passes `mask_x .and. mask_y`, which says what it does. A NaN on either side
+            !! drops the pair as well, and is counted through `n_nan` rather than here.
+            real(real64), intent(in), optional :: weights(:)
+            !! per PAIR weight, non-negative. A ZERO weight removes the pair from the population;
+            !! a negative, NaN or infinite one aborts. Absent means every weight is 1. Pearson
+            !! only -- see `method`.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine cov_i64
+        !> `pf_corr` over a 64-bit integer array.
+        module subroutine corr_i64(x, y, r, is_valid, weights, method, n_null, n_nan, ok)
+            integer(int64), intent(in) :: x(:) !! the first sample.
+            integer(int64), intent(in) :: y(:) !! the second sample, element for element.
+            real(real64), intent(out) :: r !! the correlation in [-1, 1]; NaN when either sample is constant.
+            logical, intent(in), optional :: is_valid(:)
+            !! per PAIR: .false. marks the pair as unusable. One mask over both arrays, because a
+            !! two-sample statistic is taken over pairs; a caller holding a separate mask for each
+            !! column passes `mask_x .and. mask_y`, which says what it does. A NaN on either side
+            !! drops the pair as well, and is counted through `n_nan` rather than here.
+            real(real64), intent(in), optional :: weights(:)
+            !! per PAIR weight, non-negative. A ZERO weight removes the pair from the population;
+            !! a negative, NaN or infinite one aborts. Absent means every weight is 1. Pearson
+            !! only -- see `method`.
+            character(len=*), intent(in), optional :: method
+            !! "pearson" (the default) or "spearman". Spearman is Pearson over MIDRANKS: each run
+            !! of equal values receives the mean of the sorted positions it spans, so it measures
+            !! any monotone relationship rather than a linear one. Any other token aborts, naming
+            !! both. Matched case-insensitively. **`weights` with "spearman" aborts** -- a
+            !! weighted midrank is a further definitional choice and no reference library makes
+            !! it.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine corr_i64
+        !> `pf_zscore` over a 64-bit integer array.
+        module subroutine zscore_i64(values, z, is_valid, ddof, out_valid, n_null, ok)
+            integer(int64), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: z(:)
+            !! the standardised values, same size as `values`. An excluded
+            !! element is a quiet NaN unless `out_valid` is present.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the result is
+            !! therefore undefined. Same size as `values`. **Absent, such an element is written as
+            !! a quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine zscore_i64
+        !> `pf_sigma_clipped_stats` over a 64-bit integer array.
+        module subroutine sigma_clipped_stats_i64(values, mean, median, stddev, sigma, sigma_lower, sigma_upper, maxiters, &
+                cenfunc, stdfunc, n_clipped, keep, converged, is_valid, &
+                n_null, ok, threads)
+            integer(int64), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: mean !! the mean of the surviving values; NaN when none survive.
+            real(real64), intent(out) :: median !! their median.
+            real(real64), intent(out) :: stddev !! their POPULATION standard deviation (`ddof = 0`), as astropy reports.
+            real(real64), intent(in), optional :: sigma
+            !! how many scale units a value may sit from the centre and still be kept. 3.0 by
+            !! default, as astropy does. `sigma_lower` and `sigma_upper` each default to this, so
+            !! setting it alone gives a symmetric clip.
+            real(real64), intent(in), optional :: sigma_lower
+            !! the lower half of the clip, overriding `sigma` below the centre.
+            real(real64), intent(in), optional :: sigma_upper
+            !! the upper half of the clip, overriding `sigma` above the centre.
+            integer, intent(in), optional :: maxiters
+            !! how many clipping rounds to run; 5 by default, as astropy does. **A non-positive
+            !! value means iterate until nothing more is removed**, which is astropy's
+            !! `maxiters=None` -- capped at a hard internal 100 rounds, and reaching that cap
+            !! STOPS and reports through `converged` rather than aborting. Each non-terminating
+            !! round removes at least one point, so a large catalogue can honestly want more
+            !! rounds than any small constant.
+            character(len=*), intent(in), optional :: cenfunc
+            !! which centre each round clips about: "median" (the default, as astropy) or "mean".
+            !! Any other token aborts, naming both. Matched case-insensitively.
+            character(len=*), intent(in), optional :: stdfunc
+            !! which scale each round measures: "std" (the default, as astropy -- the sample
+            !! standard deviation at `ddof = 1`) or "mad_std", the normal-scaled median absolute
+            !! deviation, which is far less disturbed by the outliers being clipped. Any other
+            !! token aborts, naming both. Matched case-insensitively.
+            integer(int64), intent(out), optional :: n_clipped
+            !! how many elements of the population the clipping removed. `0` for an empty
+            !! population, and `0` when the first round removes nothing.
+            logical, intent(out), optional :: keep(:)
+            !! per element of `values`: .true. for one that survived both the exclusion rules and
+            !! every clipping round. Same size as `values`. This is what a caller needs in order
+            !! to apply the same clip to a SECOND column.
+            logical, intent(out), optional :: converged
+            !! .false. when the iteration stopped at its round limit with points still being
+            !! removed, rather than because a round removed nothing. The answer is still usable
+            !! -- it is the last completed round's -- so `ok` stays .true. and this is the only
+            !! way to tell the two endings apart.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine sigma_clipped_stats_i64
         !> `pf_sum` over a 32-bit real array.
         module subroutine sum_f32(values, s, is_valid, weights, skipnan, n_null, n_nan, ok, threads)
             real(real32), intent(in) :: values(:) !! the population.
@@ -2960,6 +3808,62 @@ module parquet_stats
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
             !! bits. It is a speed control and never an accuracy one.
         end subroutine mean_f32
+        !> `pf_gmean` over a 32-bit real array.
+        module subroutine gmean_f32(values, g, is_valid, weights, skipnan, n_null, n_nan, ok, threads)
+            real(real32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: g !! the geometric mean; 0 for a zero, NaN for a negative or empty population.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine gmean_f32
+        !> `pf_hmean` over a 32-bit real array.
+        module subroutine hmean_f32(values, h, is_valid, weights, skipnan, n_null, n_nan, ok, threads)
+            real(real32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: h !! the harmonic mean; 0 for a zero, NaN for a negative or empty population.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine hmean_f32
         !> `pf_variance` over a 32-bit real array.
         module subroutine variance_f32(values, v, is_valid, weights, weight_type, ddof, skipnan, n_null, n_nan, ok, threads)
             real(real32), intent(in) :: values(:) !! the population.
@@ -3531,6 +4435,154 @@ module parquet_stats
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
             !! bits. It is a speed control and never an accuracy one.
         end subroutine describe_f32
+        !> `pf_cov` over a 32-bit real array.
+        module subroutine cov_f32(x, y, c, is_valid, weights, ddof, n_null, n_nan, ok)
+            real(real32), intent(in) :: x(:) !! the first sample.
+            real(real32), intent(in) :: y(:) !! the second sample, element for element.
+            real(real64), intent(out) :: c !! the covariance; NaN when `n_valid <= ddof`.
+            logical, intent(in), optional :: is_valid(:)
+            !! per PAIR: .false. marks the pair as unusable. One mask over both arrays, because a
+            !! two-sample statistic is taken over pairs; a caller holding a separate mask for each
+            !! column passes `mask_x .and. mask_y`, which says what it does. A NaN on either side
+            !! drops the pair as well, and is counted through `n_nan` rather than here.
+            real(real64), intent(in), optional :: weights(:)
+            !! per PAIR weight, non-negative. A ZERO weight removes the pair from the population;
+            !! a negative, NaN or infinite one aborts. Absent means every weight is 1. Pearson
+            !! only -- see `method`.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine cov_f32
+        !> `pf_corr` over a 32-bit real array.
+        module subroutine corr_f32(x, y, r, is_valid, weights, method, n_null, n_nan, ok)
+            real(real32), intent(in) :: x(:) !! the first sample.
+            real(real32), intent(in) :: y(:) !! the second sample, element for element.
+            real(real64), intent(out) :: r !! the correlation in [-1, 1]; NaN when either sample is constant.
+            logical, intent(in), optional :: is_valid(:)
+            !! per PAIR: .false. marks the pair as unusable. One mask over both arrays, because a
+            !! two-sample statistic is taken over pairs; a caller holding a separate mask for each
+            !! column passes `mask_x .and. mask_y`, which says what it does. A NaN on either side
+            !! drops the pair as well, and is counted through `n_nan` rather than here.
+            real(real64), intent(in), optional :: weights(:)
+            !! per PAIR weight, non-negative. A ZERO weight removes the pair from the population;
+            !! a negative, NaN or infinite one aborts. Absent means every weight is 1. Pearson
+            !! only -- see `method`.
+            character(len=*), intent(in), optional :: method
+            !! "pearson" (the default) or "spearman". Spearman is Pearson over MIDRANKS: each run
+            !! of equal values receives the mean of the sorted positions it spans, so it measures
+            !! any monotone relationship rather than a linear one. Any other token aborts, naming
+            !! both. Matched case-insensitively. **`weights` with "spearman" aborts** -- a
+            !! weighted midrank is a further definitional choice and no reference library makes
+            !! it.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine corr_f32
+        !> `pf_zscore` over a 32-bit real array.
+        module subroutine zscore_f32(values, z, is_valid, ddof, skipnan, out_valid, n_null, ok)
+            real(real32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: z(:)
+            !! the standardised values, same size as `values`. An excluded
+            !! element is a quiet NaN unless `out_valid` is present.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the result is
+            !! therefore undefined. Same size as `values`. **Absent, such an element is written as
+            !! a quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine zscore_f32
+        !> `pf_sigma_clipped_stats` over a 32-bit real array.
+        module subroutine sigma_clipped_stats_f32(values, mean, median, stddev, sigma, sigma_lower, sigma_upper, maxiters, &
+                cenfunc, stdfunc, n_clipped, keep, converged, is_valid, &
+                skipnan, n_null, n_nan, ok, threads)
+            real(real32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: mean !! the mean of the surviving values; NaN when none survive.
+            real(real64), intent(out) :: median !! their median.
+            real(real64), intent(out) :: stddev !! their POPULATION standard deviation (`ddof = 0`), as astropy reports.
+            real(real64), intent(in), optional :: sigma
+            !! how many scale units a value may sit from the centre and still be kept. 3.0 by
+            !! default, as astropy does. `sigma_lower` and `sigma_upper` each default to this, so
+            !! setting it alone gives a symmetric clip.
+            real(real64), intent(in), optional :: sigma_lower
+            !! the lower half of the clip, overriding `sigma` below the centre.
+            real(real64), intent(in), optional :: sigma_upper
+            !! the upper half of the clip, overriding `sigma` above the centre.
+            integer, intent(in), optional :: maxiters
+            !! how many clipping rounds to run; 5 by default, as astropy does. **A non-positive
+            !! value means iterate until nothing more is removed**, which is astropy's
+            !! `maxiters=None` -- capped at a hard internal 100 rounds, and reaching that cap
+            !! STOPS and reports through `converged` rather than aborting. Each non-terminating
+            !! round removes at least one point, so a large catalogue can honestly want more
+            !! rounds than any small constant.
+            character(len=*), intent(in), optional :: cenfunc
+            !! which centre each round clips about: "median" (the default, as astropy) or "mean".
+            !! Any other token aborts, naming both. Matched case-insensitively.
+            character(len=*), intent(in), optional :: stdfunc
+            !! which scale each round measures: "std" (the default, as astropy -- the sample
+            !! standard deviation at `ddof = 1`) or "mad_std", the normal-scaled median absolute
+            !! deviation, which is far less disturbed by the outliers being clipped. Any other
+            !! token aborts, naming both. Matched case-insensitively.
+            integer(int64), intent(out), optional :: n_clipped
+            !! how many elements of the population the clipping removed. `0` for an empty
+            !! population, and `0` when the first round removes nothing.
+            logical, intent(out), optional :: keep(:)
+            !! per element of `values`: .true. for one that survived both the exclusion rules and
+            !! every clipping round. Same size as `values`. This is what a caller needs in order
+            !! to apply the same clip to a SECOND column.
+            logical, intent(out), optional :: converged
+            !! .false. when the iteration stopped at its round limit with points still being
+            !! removed, rather than because a round removed nothing. The answer is still usable
+            !! -- it is the last completed round's -- so `ok` stays .true. and this is the only
+            !! way to tell the two endings apart.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine sigma_clipped_stats_f32
         !> `pf_sum` over a logical array.
         !>
         !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
@@ -3581,6 +4633,56 @@ module parquet_stats
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
             !! bits. It is a speed control and never an accuracy one.
         end subroutine mean_bool
+        !> `pf_gmean` over a logical array.
+        !>
+        !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
+        !> fraction that are true.
+        module subroutine gmean_bool(values, g, is_valid, weights, n_null, ok, threads)
+            logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
+            real(real64), intent(out) :: g !! the geometric mean; 0 for a zero, NaN for a negative or empty population.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine gmean_bool
+        !> `pf_hmean` over a logical array.
+        !>
+        !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
+        !> fraction that are true.
+        module subroutine hmean_bool(values, h, is_valid, weights, n_null, ok, threads)
+            logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
+            real(real64), intent(out) :: h !! the harmonic mean; 0 for a zero, NaN for a negative or empty population.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine hmean_bool
         !> `pf_variance` over a logical array.
         !>
         !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
@@ -4108,6 +5210,144 @@ module parquet_stats
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
             !! bits. It is a speed control and never an accuracy one.
         end subroutine describe_bool
+        !> `pf_cov` over a logical array.
+        module subroutine cov_bool(x, y, c, is_valid, weights, ddof, n_null, n_nan, ok)
+            logical, intent(in) :: x(:) !! the first sample.
+            logical, intent(in) :: y(:) !! the second sample, element for element.
+            real(real64), intent(out) :: c !! the covariance; NaN when `n_valid <= ddof`.
+            logical, intent(in), optional :: is_valid(:)
+            !! per PAIR: .false. marks the pair as unusable. One mask over both arrays, because a
+            !! two-sample statistic is taken over pairs; a caller holding a separate mask for each
+            !! column passes `mask_x .and. mask_y`, which says what it does. A NaN on either side
+            !! drops the pair as well, and is counted through `n_nan` rather than here.
+            real(real64), intent(in), optional :: weights(:)
+            !! per PAIR weight, non-negative. A ZERO weight removes the pair from the population;
+            !! a negative, NaN or infinite one aborts. Absent means every weight is 1. Pearson
+            !! only -- see `method`.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine cov_bool
+        !> `pf_corr` over a logical array.
+        module subroutine corr_bool(x, y, r, is_valid, weights, method, n_null, n_nan, ok)
+            logical, intent(in) :: x(:) !! the first sample.
+            logical, intent(in) :: y(:) !! the second sample, element for element.
+            real(real64), intent(out) :: r !! the correlation in [-1, 1]; NaN when either sample is constant.
+            logical, intent(in), optional :: is_valid(:)
+            !! per PAIR: .false. marks the pair as unusable. One mask over both arrays, because a
+            !! two-sample statistic is taken over pairs; a caller holding a separate mask for each
+            !! column passes `mask_x .and. mask_y`, which says what it does. A NaN on either side
+            !! drops the pair as well, and is counted through `n_nan` rather than here.
+            real(real64), intent(in), optional :: weights(:)
+            !! per PAIR weight, non-negative. A ZERO weight removes the pair from the population;
+            !! a negative, NaN or infinite one aborts. Absent means every weight is 1. Pearson
+            !! only -- see `method`.
+            character(len=*), intent(in), optional :: method
+            !! "pearson" (the default) or "spearman". Spearman is Pearson over MIDRANKS: each run
+            !! of equal values receives the mean of the sorted positions it spans, so it measures
+            !! any monotone relationship rather than a linear one. Any other token aborts, naming
+            !! both. Matched case-insensitively. **`weights` with "spearman" aborts** -- a
+            !! weighted midrank is a further definitional choice and no reference library makes
+            !! it.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine corr_bool
+        !> `pf_zscore` over a logical array.
+        module subroutine zscore_bool(values, z, is_valid, ddof, out_valid, n_null, ok)
+            logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
+            real(real64), intent(out) :: z(:)
+            !! the standardised values, same size as `values`. An excluded
+            !! element is a quiet NaN unless `out_valid` is present.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the result is
+            !! therefore undefined. Same size as `values`. **Absent, such an element is written as
+            !! a quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine zscore_bool
+        !> `pf_sigma_clipped_stats` over a logical array.
+        module subroutine sigma_clipped_stats_bool(values, mean, median, stddev, sigma, sigma_lower, sigma_upper, maxiters, &
+                cenfunc, stdfunc, n_clipped, keep, converged, is_valid, &
+                n_null, ok, threads)
+            logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
+            real(real64), intent(out) :: mean !! the mean of the surviving values; NaN when none survive.
+            real(real64), intent(out) :: median !! their median.
+            real(real64), intent(out) :: stddev !! their POPULATION standard deviation (`ddof = 0`), as astropy reports.
+            real(real64), intent(in), optional :: sigma
+            !! how many scale units a value may sit from the centre and still be kept. 3.0 by
+            !! default, as astropy does. `sigma_lower` and `sigma_upper` each default to this, so
+            !! setting it alone gives a symmetric clip.
+            real(real64), intent(in), optional :: sigma_lower
+            !! the lower half of the clip, overriding `sigma` below the centre.
+            real(real64), intent(in), optional :: sigma_upper
+            !! the upper half of the clip, overriding `sigma` above the centre.
+            integer, intent(in), optional :: maxiters
+            !! how many clipping rounds to run; 5 by default, as astropy does. **A non-positive
+            !! value means iterate until nothing more is removed**, which is astropy's
+            !! `maxiters=None` -- capped at a hard internal 100 rounds, and reaching that cap
+            !! STOPS and reports through `converged` rather than aborting. Each non-terminating
+            !! round removes at least one point, so a large catalogue can honestly want more
+            !! rounds than any small constant.
+            character(len=*), intent(in), optional :: cenfunc
+            !! which centre each round clips about: "median" (the default, as astropy) or "mean".
+            !! Any other token aborts, naming both. Matched case-insensitively.
+            character(len=*), intent(in), optional :: stdfunc
+            !! which scale each round measures: "std" (the default, as astropy -- the sample
+            !! standard deviation at `ddof = 1`) or "mad_std", the normal-scaled median absolute
+            !! deviation, which is far less disturbed by the outliers being clipped. Any other
+            !! token aborts, naming both. Matched case-insensitively.
+            integer(int64), intent(out), optional :: n_clipped
+            !! how many elements of the population the clipping removed. `0` for an empty
+            !! population, and `0` when the first round removes nothing.
+            logical, intent(out), optional :: keep(:)
+            !! per element of `values`: .true. for one that survived both the exclusion rules and
+            !! every clipping round. Same size as `values`. This is what a caller needs in order
+            !! to apply the same clip to a SECOND column.
+            logical, intent(out), optional :: converged
+            !! .false. when the iteration stopped at its round limit with points still being
+            !! removed, rather than because a round removed nothing. The answer is still usable
+            !! -- it is the last completed round's -- so `ok` stays .true. and this is the only
+            !! way to tell the two endings apart.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine sigma_clipped_stats_bool
         !> `pf_sum` over a scalar numeric `parquet_column`.
         !>
         !> Dispatched on the column's kind at run time, and **scalar numeric columns only**:
@@ -4178,6 +5418,76 @@ module parquet_stats
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
             !! bits. It is a speed control and never an accuracy one.
         end subroutine mean_col
+        !> `pf_gmean` over a scalar numeric `parquet_column`.
+        !>
+        !> Dispatched on the column's kind at run time, and **scalar numeric columns only**:
+        !> int32, int64, float32, float64 and logical. A string, temporal or container column
+        !> aborts naming its kind, and so does a column more than one element wide -- flattening
+        !> a vector column into one population is a different statistic and nobody should get it
+        !> by accident. **The column's own validity is the only source of nullness**, so passing
+        !> `is_valid=` alongside one aborts rather than silently preferring one of two sources.
+        module subroutine gmean_col(values, g, is_valid, weights, skipnan, n_null, n_nan, ok, threads)
+            type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
+            real(real64), intent(out) :: g !! the geometric mean; 0 for a zero, NaN for a negative or empty population.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine gmean_col
+        !> `pf_hmean` over a scalar numeric `parquet_column`.
+        !>
+        !> Dispatched on the column's kind at run time, and **scalar numeric columns only**:
+        !> int32, int64, float32, float64 and logical. A string, temporal or container column
+        !> aborts naming its kind, and so does a column more than one element wide -- flattening
+        !> a vector column into one population is a different statistic and nobody should get it
+        !> by accident. **The column's own validity is the only source of nullness**, so passing
+        !> `is_valid=` alongside one aborts rather than silently preferring one of two sources.
+        module subroutine hmean_col(values, h, is_valid, weights, skipnan, n_null, n_nan, ok, threads)
+            type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
+            real(real64), intent(out) :: h !! the harmonic mean; 0 for a zero, NaN for a negative or empty population.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine hmean_col
         !> `pf_variance` over a scalar numeric `parquet_column`.
         !>
         !> Dispatched on the column's kind at run time, and **scalar numeric columns only**:
@@ -4847,6 +6157,154 @@ module parquet_stats
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
             !! bits. It is a speed control and never an accuracy one.
         end subroutine describe_col
+        !> `pf_cov` over a scalar numeric `parquet_column`.
+        module subroutine cov_col(x, y, c, is_valid, weights, ddof, n_null, n_nan, ok)
+            type(parquet_column), intent(in) :: x !! the first sample.
+            type(parquet_column), intent(in) :: y !! the second sample, element for element.
+            real(real64), intent(out) :: c !! the covariance; NaN when `n_valid <= ddof`.
+            logical, intent(in), optional :: is_valid(:)
+            !! per PAIR: .false. marks the pair as unusable. One mask over both arrays, because a
+            !! two-sample statistic is taken over pairs; a caller holding a separate mask for each
+            !! column passes `mask_x .and. mask_y`, which says what it does. A NaN on either side
+            !! drops the pair as well, and is counted through `n_nan` rather than here.
+            real(real64), intent(in), optional :: weights(:)
+            !! per PAIR weight, non-negative. A ZERO weight removes the pair from the population;
+            !! a negative, NaN or infinite one aborts. Absent means every weight is 1. Pearson
+            !! only -- see `method`.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine cov_col
+        !> `pf_corr` over a scalar numeric `parquet_column`.
+        module subroutine corr_col(x, y, r, is_valid, weights, method, n_null, n_nan, ok)
+            type(parquet_column), intent(in) :: x !! the first sample.
+            type(parquet_column), intent(in) :: y !! the second sample, element for element.
+            real(real64), intent(out) :: r !! the correlation in [-1, 1]; NaN when either sample is constant.
+            logical, intent(in), optional :: is_valid(:)
+            !! per PAIR: .false. marks the pair as unusable. One mask over both arrays, because a
+            !! two-sample statistic is taken over pairs; a caller holding a separate mask for each
+            !! column passes `mask_x .and. mask_y`, which says what it does. A NaN on either side
+            !! drops the pair as well, and is counted through `n_nan` rather than here.
+            real(real64), intent(in), optional :: weights(:)
+            !! per PAIR weight, non-negative. A ZERO weight removes the pair from the population;
+            !! a negative, NaN or infinite one aborts. Absent means every weight is 1. Pearson
+            !! only -- see `method`.
+            character(len=*), intent(in), optional :: method
+            !! "pearson" (the default) or "spearman". Spearman is Pearson over MIDRANKS: each run
+            !! of equal values receives the mean of the sorted positions it spans, so it measures
+            !! any monotone relationship rather than a linear one. Any other token aborts, naming
+            !! both. Matched case-insensitively. **`weights` with "spearman" aborts** -- a
+            !! weighted midrank is a further definitional choice and no reference library makes
+            !! it.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine corr_col
+        !> `pf_zscore` over a scalar numeric `parquet_column`.
+        module subroutine zscore_col(values, z, is_valid, ddof, skipnan, out_valid, n_null, ok)
+            type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
+            real(real64), intent(out) :: z(:)
+            !! the standardised values, same size as `values`. An excluded
+            !! element is a quiet NaN unless `out_valid` is present.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the result is
+            !! therefore undefined. Same size as `values`. **Absent, such an element is written as
+            !! a quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine zscore_col
+        !> `pf_sigma_clipped_stats` over a scalar numeric `parquet_column`.
+        module subroutine sigma_clipped_stats_col(values, mean, median, stddev, sigma, sigma_lower, sigma_upper, maxiters, &
+                cenfunc, stdfunc, n_clipped, keep, converged, is_valid, &
+                skipnan, n_null, n_nan, ok, threads)
+            type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
+            real(real64), intent(out) :: mean !! the mean of the surviving values; NaN when none survive.
+            real(real64), intent(out) :: median !! their median.
+            real(real64), intent(out) :: stddev !! their POPULATION standard deviation (`ddof = 0`), as astropy reports.
+            real(real64), intent(in), optional :: sigma
+            !! how many scale units a value may sit from the centre and still be kept. 3.0 by
+            !! default, as astropy does. `sigma_lower` and `sigma_upper` each default to this, so
+            !! setting it alone gives a symmetric clip.
+            real(real64), intent(in), optional :: sigma_lower
+            !! the lower half of the clip, overriding `sigma` below the centre.
+            real(real64), intent(in), optional :: sigma_upper
+            !! the upper half of the clip, overriding `sigma` above the centre.
+            integer, intent(in), optional :: maxiters
+            !! how many clipping rounds to run; 5 by default, as astropy does. **A non-positive
+            !! value means iterate until nothing more is removed**, which is astropy's
+            !! `maxiters=None` -- capped at a hard internal 100 rounds, and reaching that cap
+            !! STOPS and reports through `converged` rather than aborting. Each non-terminating
+            !! round removes at least one point, so a large catalogue can honestly want more
+            !! rounds than any small constant.
+            character(len=*), intent(in), optional :: cenfunc
+            !! which centre each round clips about: "median" (the default, as astropy) or "mean".
+            !! Any other token aborts, naming both. Matched case-insensitively.
+            character(len=*), intent(in), optional :: stdfunc
+            !! which scale each round measures: "std" (the default, as astropy -- the sample
+            !! standard deviation at `ddof = 1`) or "mad_std", the normal-scaled median absolute
+            !! deviation, which is far less disturbed by the outliers being clipped. Any other
+            !! token aborts, naming both. Matched case-insensitively.
+            integer(int64), intent(out), optional :: n_clipped
+            !! how many elements of the population the clipping removed. `0` for an empty
+            !! population, and `0` when the first round removes nothing.
+            logical, intent(out), optional :: keep(:)
+            !! per element of `values`: .true. for one that survived both the exclusion rules and
+            !! every clipping round. Same size as `values`. This is what a caller needs in order
+            !! to apply the same clip to a SECOND column.
+            logical, intent(out), optional :: converged
+            !! .false. when the iteration stopped at its round limit with points still being
+            !! removed, rather than because a round removed nothing. The answer is still usable
+            !! -- it is the last completed round's -- so `ok` stays .true. and this is the only
+            !! way to tell the two endings apart.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine sigma_clipped_stats_col
         !> `%compute` over a 32-bit integer array.
         module subroutine obj_compute_i32(self, values, retain, is_valid, weights, weight_type, threads)
             class(pf_stats), intent(inout) :: self
@@ -5392,20 +6850,28 @@ module parquet_stats
         module subroutine parquet_debug_set_stats_min_per_thread(n)
             integer(int64), intent(in) :: n !! survivors per thread; 0 forces, negative restores.
         end subroutine parquet_debug_set_stats_min_per_thread
-        !> How many times any `pf_stats` has built its sorted buffer.
+        !> How many times this module has ORDERED a population.
         !!
-        !! Test-only, and the **only** observable that can tell a working order cache from one
-        !! that never invalidates. Every equality assertion about a median passes just as happily
-        !! against a stale answer -- a stale median is a plausible number -- so `sorts == 1` across
-        !! four different order statistics, and `sorts == 2` after an intervening `%update`, is
-        !! what the caching contract is actually pinned by.
+        !! Test-only, and counted at the one choke point every ordering passes through -- so it
+        !! covers a `pf_stats` building its sorted buffer AND a one-shot procedure sorting for
+        !! itself. Those are the two things it has to distinguish costs for:
+        !!
+        !! * for the object it is the **only** observable that can tell a working order cache from
+        !!   one that never invalidates. Every equality assertion about a median passes just as
+        !!   happily against a stale answer -- a stale median is a plausible number -- so
+        !!   `sorts == 1` across four order statistics, and `sorts == 2` after an intervening
+        !!   `%update`, is what the caching contract is actually pinned by.
+        !! * for `pf_sigma_clipped_stats` it is the only observable at all. Sorting once per round
+        !!   returns the identical numbers and differs solely in cost, so `sorts == 1` for a whole
+        !!   clipping run is what makes "one ordering serves every round" a claim rather than a
+        !!   comment.
         !!
         !! Process-global and unsynchronised, which is why the `stats` suite is excluded from the
         !! per-suite parallelism in `test/run_tester.f90`.
         module function parquet_debug_stats_sorts() result(res)
-            integer(int64) :: res !! sorted-buffer builds since the last reset.
+            integer(int64) :: res !! orderings performed since the last reset.
         end function parquet_debug_stats_sorts
-        !> Resets the sorted-buffer counter to zero.
+        !> Resets the ordering counter to zero.
         module subroutine parquet_debug_reset_stats_sorts()
         end subroutine parquet_debug_reset_stats_sorts
         !> Overrides the probability count at which `pf_quantiles` sorts instead of selecting.

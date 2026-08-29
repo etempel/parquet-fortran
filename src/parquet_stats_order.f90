@@ -381,6 +381,12 @@ contains
         integer(int64), allocatable :: perm(:)
 
         if (m <= 1_int64) return
+        ! **The counter lives HERE, at the one choke point every ordering in this submodule passes
+        ! through** -- not in `ensure_ordered`, which is only the object's route to it. Counting at
+        ! the choke point is what lets a ONE-SHOT procedure's cost be asserted: without it,
+        ! `pf_sigma_clipped_stats` could sort once per round and no test could tell, because every
+        ! number it returns would be identical.
+        stats_sort_count = stats_sort_count + 1_int64
         call pf_argsort(x(1:m), perm, threads=threads)
         call pf_permute(x(1:m), perm)
         if (allocated(w)) call pf_permute(w(1:m), perm)
@@ -821,6 +827,263 @@ contains
 
 
     ! ==================================================================================
+    ! pf_sigma_clipped_stats -- astropy's iterative clip, on ONE ordering
+    !
+    ! The keep condition is an INTERVAL, so the survivors of every round are a contiguous
+    ! sub-range of the sorted order and each later round only moves two indices inward. That is
+    ! what turns an O(k n log n) routine into O(n log n + k n), and it is why the ordering happens
+    ! once, above the loop, rather than inside it.
+    ! ==================================================================================
+
+    !> Resolves `cenfunc=`/`stdfunc=` tokens, or aborts naming the pair that was expected.
+    subroutine clip_token(what, arg, given, a, b, second)
+        character(len=*), intent(in) :: what             !! the public procedure's name.
+        character(len=*), intent(in) :: arg              !! which argument, for the message.
+        character(len=*), intent(in), optional :: given  !! the caller's token, if any.
+        character(len=*), intent(in) :: a                !! the default token.
+        character(len=*), intent(in) :: b                !! the alternative.
+        logical, intent(out) :: second                   !! .true. when the caller asked for `b`.
+        character(len=16) :: tok
+        integer :: i, c
+
+        second = .false.
+        if (.not. present(given)) return
+        tok = ""
+        do i = 1, min(len(given), len(tok))
+            c = iachar(given(i:i))
+            if (c >= iachar("A") .and. c <= iachar("Z")) c = c + 32
+            tok(i:i) = achar(c)
+        end do
+        if (trim(tok) == a) return
+        if (trim(tok) == b) then
+            second = .true.
+            return
+        end if
+        error stop what // ": unrecognised " // arg // ' "' // trim(given) // &
+            '"; the tokens are "' // a // '" (the default) and "' // b // '"'
+    end subroutine clip_token
+
+    !> The mean and POPULATION standard deviation of one contiguous slice of the sorted buffer.
+    !!
+    !! **`ddof = 0`, not this module's usual 1, and that is a deliberate match rather than an
+    !! oversight.** astropy's `sigma_clipped_stats` reaches `np.nanstd` for both the per-round
+    !! scale and the standard deviation it reports, and `np.nanstd` is `ddof = 0`. Using the
+    !! sample form here instead would put the reported spread 0.13% out on a 400-element
+    !! population and would move the clip boundaries as well -- a difference with nothing at the
+    !! call site to explain it, for a procedure whose whole purpose is to reproduce astropy's.
+    pure subroutine slice_mean_sd(xs, lo, hi, mean, sd)
+        real(real64), intent(in) :: xs(:)      !! the sorted survivors.
+        integer(int64), intent(in) :: lo       !! first index of the slice.
+        integer(int64), intent(in) :: hi       !! last index of the slice.
+        real(real64), intent(out) :: mean      !! the slice's mean.
+        real(real64), intent(out) :: sd        !! its standard deviation at ddof=0, or NaN.
+        real(real64) :: s, d
+        integer(int64) :: i, n
+
+        n = hi - lo + 1_int64
+        mean = stats_nan()
+        sd = stats_nan()
+        if (n <= 0_int64) return
+        s = 0.0_real64
+        do i = lo, hi
+            s = s + xs(i)
+        end do
+        mean = s / real(n, real64)
+        ! Two-pass, as everywhere else in this module: the mean first, the central moment against
+        ! it. The slice is contiguous and typically small by the time this matters, so the fixed
+        ! block tree the whole-population engine uses would buy nothing here.
+        s = 0.0_real64
+        do i = lo, hi
+            d = xs(i) - mean
+            s = s + d * d
+        end do
+        sd = sqrt(s / real(n, real64))
+    end subroutine slice_mean_sd
+
+    !> The median of one contiguous slice of an already-sorted buffer, interpolating.
+    pure subroutine slice_median(xs, lo, hi, res)
+        real(real64), intent(in) :: xs(:)      !! the sorted survivors.
+        integer(int64), intent(in) :: lo       !! first index of the slice.
+        integer(int64), intent(in) :: hi       !! last index of the slice.
+        real(real64), intent(out) :: res       !! the median, or NaN for an empty slice.
+        integer(int64) :: n, k
+
+        n = hi - lo + 1_int64
+        if (n <= 0_int64) then
+            res = stats_nan()
+            return
+        end if
+        k = lo + (n - 1_int64) / 2_int64
+        if (mod(n, 2_int64) == 1_int64) then
+            res = xs(k)
+        else
+            ! The mean of the two middle values -- `linear` interpolation at p = 0.5, which is what
+            ! `pf_median` gives and what numpy, pandas and astropy all mean by "median".
+            res = 0.5_real64 * (xs(k) + xs(k + 1_int64))
+        end if
+    end subroutine slice_median
+
+    !> The normal-scaled median absolute deviation of one sorted slice, about its own median.
+    subroutine slice_mad_std(xs, lo, hi, res)
+        real(real64), intent(in) :: xs(:)      !! the sorted survivors.
+        integer(int64), intent(in) :: lo       !! first index of the slice.
+        integer(int64), intent(in) :: hi       !! last index of the slice.
+        real(real64), intent(out) :: res       !! the scaled deviation, or NaN.
+        real(real64), allocatable :: dev(:), nw(:)
+        real(real64) :: c
+        integer(int64) :: n, i
+
+        n = hi - lo + 1_int64
+        res = stats_nan()
+        if (n <= 0_int64) return
+        call slice_median(xs, lo, hi, c)
+        ! The deviations are a DIFFERENT population from the values: |x - c| is not monotone in x,
+        ! so the slice's own order says nothing about theirs and they have to be ordered again.
+        ! That is the one part of a `stdfunc="mad_std"` round that is not O(n).
+        allocate(dev(n))
+        do i = 1_int64, n
+            dev(i) = abs(xs(lo + i - 1_int64) - c)
+        end do
+        call order_in_place(dev, nw, n)
+        call slice_median(dev, 1_int64, n, res)
+        res = res / MAD_NORMAL_DENOM
+    end subroutine slice_mad_std
+
+    module procedure sigma_clipped_stats_f64
+        real(real64), allocatable :: keep_x(:), keep_w(:)
+        real(real64) :: centre, scale, slo, shi, blo, bhi, junk
+        integer(int64) :: m, nnull, nnan, lo, hi, prev_lo, prev_hi, i, rounds, cap
+        integer :: iters
+        logical :: poisoned, use_mean, use_mad, done
+
+        ! There is no `weights` dummy at all, which is stronger than a runtime refusal: a weighted
+        ! scale estimator is a further definitional choice that no workload in evidence asks for,
+        ! and its ABSENCE from the signature makes passing one a compile error rather than an
+        ! abort. Same reasoning as `pf_mode`'s missing real kinds.
+        call clip_token("pf_sigma_clipped_stats", "cenfunc", cenfunc, "median", "mean", use_mean)
+        call clip_token("pf_sigma_clipped_stats", "stdfunc", stdfunc, "std", "mad_std", use_mad)
+        slo = 3.0_real64
+        shi = 3.0_real64
+        if (present(sigma)) then
+            slo = sigma
+            shi = sigma
+        end if
+        if (present(sigma_lower)) slo = sigma_lower
+        if (present(sigma_upper)) shi = sigma_upper
+        if (slo /= slo .or. shi /= shi .or. slo < 0.0_real64 .or. shi < 0.0_real64) &
+            error stop "pf_sigma_clipped_stats: sigma, sigma_lower and sigma_upper must be " // &
+                "non-negative numbers; a NaN or negative clip width can only be a caller mistake"
+        iters = 5
+        if (present(maxiters)) iters = maxiters
+
+        mean = stats_nan()
+        median = stats_nan()
+        stddev = stats_nan()
+        if (present(n_clipped)) n_clipped = 0_int64
+        if (present(converged)) converged = .true.
+        if (present(ok)) ok = .false.
+        if (present(keep)) then
+            if (size(keep, kind=int64) /= size(values, kind=int64)) &
+                error stop "pf_sigma_clipped_stats: keep has " // &
+                    trim(stats_i2s(size(keep, kind=int64))) // " elements but values has " // &
+                    trim(stats_i2s(size(values, kind=int64)))
+            keep = .false.
+        end if
+
+        call stats_compact(values, "pf_sigma_clipped_stats", is_valid, skipnan=skipnan, &
+            keep_x=keep_x, keep_w=keep_w, n_valid=m, n_null=nnull, n_nan=nnan, saw_nan=poisoned)
+        if (present(n_null)) n_null = nnull
+        if (present(n_nan)) n_nan = nnan
+        if (m == 0_int64 .or. poisoned) return
+
+        ! THE one ordering. Everything below indexes a contiguous sub-range of it.
+        call order_in_place(keep_x, keep_w, m, threads)
+        lo = 1_int64
+        hi = m
+        blo = keep_x(1)
+        bhi = keep_x(m)
+
+        ! `maxiters <= 0` means "until nothing more is removed", capped at 100 -- and reaching the
+        ! cap REPORTS rather than aborting. Each non-terminating round removes at least one point,
+        ! so the honest bound is `m` rather than a small constant, and aborting there would break
+        ! this module's own rule that it never aborts on a data condition.
+        cap = 100_int64
+        if (iters > 0) cap = int(iters, int64)
+        rounds = 0_int64
+        done = .false.
+        do while (rounds < cap)
+            rounds = rounds + 1_int64
+            if (use_mean) then
+                call slice_mean_sd(keep_x, lo, hi, centre, scale)
+            else
+                call slice_median(keep_x, lo, hi, centre)
+                ! `junk` rather than passing `scale` twice: one variable given to two dummies that
+                ! can both be defined is illegal (F2018 15.5.2.13) and nothing diagnoses it.
+                call slice_mean_sd(keep_x, lo, hi, junk, scale)
+            end if
+            if (use_mad) call slice_mad_std(keep_x, lo, hi, scale)
+            if (.not. (scale > 0.0_real64)) then
+                ! No spread left to clip against -- a constant slice, or one too short for a
+                ! standard deviation. Stopping is the answer: every remaining point is at the
+                ! centre, so no interval could remove one.
+                done = .true.
+                exit
+            end if
+            blo = centre - slo * scale
+            bhi = centre + shi * scale
+            prev_lo = lo
+            prev_hi = hi
+            ! Inclusive at both ends, matching astropy's rejection test. The survivors are a
+            ! contiguous range because the test is on VALUE and the buffer is sorted.
+            do while (lo <= hi)
+                if (keep_x(lo) >= blo) exit
+                lo = lo + 1_int64
+            end do
+            do while (hi >= lo)
+                if (keep_x(hi) <= bhi) exit
+                hi = hi - 1_int64
+            end do
+            if (hi - lo + 1_int64 < 2_int64) then
+                ! A round that would leave fewer than two values stops instead, and the PREVIOUS
+                ! round's survivors are what is reported -- a one-element or empty set has no
+                ! scale, so continuing could only produce NaNs.
+                lo = prev_lo
+                hi = prev_hi
+                done = .true.
+                exit
+            end if
+            if (lo == prev_lo .and. hi == prev_hi) then
+                done = .true.
+                exit
+            end if
+        end do
+        if (present(converged)) converged = done
+
+        call slice_mean_sd(keep_x, lo, hi, mean, stddev)
+        call slice_median(keep_x, lo, hi, median)
+        if (present(n_clipped)) n_clipped = m - (hi - lo + 1_int64)
+        if (present(keep)) then
+            ! Recovered from the surviving VALUE interval rather than by carrying indices through
+            ! the sort, and that is exact rather than nearly so: the keep test is on value, so
+            ! equal values are always kept or clipped together, which makes `keep_x(lo-1)`
+            ! strictly less than `keep_x(lo)` whenever `lo > 1`. There is therefore no value that
+            ! sits inside the interval and was nonetheless clipped.
+            blo = keep_x(lo)
+            bhi = keep_x(hi)
+            do i = 1_int64, size(values, kind=int64)
+                if (present(is_valid)) then
+                    if (.not. is_valid(i)) cycle
+                end if
+                if (values(i) /= values(i)) cycle
+                keep(i) = (values(i) >= blo .and. values(i) <= bhi)
+            end do
+        end if
+        ! `ok` reports whether the ANSWER is usable, which is what a caller needs; `converged`
+        ! reports how the iteration ended, and the two are deliberately independent.
+        if (present(ok)) ok = (mean == mean)
+    end procedure sigma_clipped_stats_f64
+
+    ! ==================================================================================
     ! pf_mode -- the most common value
     !
     ! Every specific is the same three steps: survive the exclusions, order the survivors, then
@@ -1171,7 +1434,6 @@ contains
         if (self%ordered) return
         call order_in_place(self%keep, self%keep_w, self%keep_n)
         self%ordered = .true.
-        stats_sort_count = stats_sort_count + 1_int64
     end subroutine ensure_ordered
 
     !> Whether every order statistic of this object is undefined, before any of them is computed.

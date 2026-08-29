@@ -40,7 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Gaussian data, with `scale=` and `center=`; `pf_mode` gives the most common value over the
   integer, logical and string kinds, breaking ties to the smallest value. `pf_describe` fills a
   `pf_stats` in one pair of passes and one ordering, and `%print` renders the summary block pandas'
-  `describe()` prints. See [Array statistics](doc/pages/utilities/statistics.md).
+  `describe()` prints. `pf_gmean` and `pf_hmean` give the geometric and harmonic means; `pf_cov`
+  and `pf_corr` the pairwise-complete covariance and correlation, Pearson or Spearman; `pf_zscore`
+  standardises a whole array; and `pf_sigma_clipped_stats` reproduces astropy's iterative clip on a
+  single ordering, reporting the surviving mask so the same clip can be applied to another column.
+  See [Array statistics](doc/pages/utilities/statistics.md).
 - **`parquet_logging`: general-purpose logging for the calling program.** A `pf_logger` type and a
   matching set of `pf_log_*` procedures on a process-wide default logger: eight ascending severity
   levels using Python's numbers (`PF_LEVEL_DEBUG` = 10, and an arbitrary integer level is accepted

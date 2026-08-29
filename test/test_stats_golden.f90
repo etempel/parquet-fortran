@@ -35,6 +35,9 @@ module test_stats_golden
     !> How many probabilities each `Q_*` row carries.
     integer, parameter :: NQP = 7
 
+    !> How many elements each `Z_*` row probes.
+    integer, parameter :: NZP = 4
+
     !> The first 8 values `golden_fixture` must produce. A recipe that has drifted from the
     !! generator's is reported here, as a fixture mismatch, rather than as an unexplained
     !! tolerance failure in every case at once.
@@ -243,5 +246,55 @@ module test_stats_golden
 
     !> four wild points in thirty-six: this is the case pf_stddev gets wrong and MAD does not
     real(real64), parameter :: M_OUT(2) = [365.96240425186812_real64, 246.837890625_real64]
+
+    !> The second sample the two-sample rows are taken against.
+    real(real64), parameter :: G_PROBE_B(8) = [-472.7392578125_real64, -462.27734375_real64, -444.8408203125_real64,  &
+        -420.4296875_real64, -389.0439453125_real64, -350.68359375_real64, -305.3486328125_real64, -253.0390625_real64]
+    !> The first values of the strictly positive population.
+    real(real64), parameter :: G_PROBE_POS(8) = [19.7900390625_real64, 42.990234375_real64, 81.6572265625_real64,  &
+        135.791015625_real64, 205.3916015625_real64, 290.458984375_real64, 390.9931640625_real64, 506.994140625_real64]
+
+    !> Each R_* row is `[cov, pearson, spearman]` over the two n=32 recipes.
+    !> the two recipes at n=32, unweighted, ddof=1
+    real(real64), parameter :: R_U32(3) = [8707.2646712939586_real64, 0.10685255991936873_real64, 0.16458944281524926_real64]
+
+    !> unequal weights, every fifth of them zero
+    real(real64), parameter :: R_WVAR(3) = [-764.64697125295754_real64, -0.0097682485635520473_real64,  &
+        -0.015750995285306449_real64]
+
+    !> one PAIR in three excluded, which is what pairwise-complete means
+    real(real64), parameter :: R_NULLS(3) = [-1459.312353904113_real64, -0.016126792352242247_real64,  &
+        0.04912478825522304_real64]
+
+    !> The 1-based positions Z_U32 probes, and the standardised values there.
+    integer, parameter :: G_ZPROBES(NZP) = [1, 7, 20, 32]
+    real(real64), parameter :: Z_U32(NZP) = [-1.4017075043973748_real64, -0.12358579756648698_real64,  &
+        -0.86481245984971122_real64, -1.0617163435216552_real64]
+
+    !> Each P_* row is `[gmean, hmean]` over the strictly positive population.
+    !> a strictly positive population at n=32
+    real(real64), parameter :: P_U32(2) = [299.60864450391307_real64, 160.29660926566297_real64]
+
+    !> the same, weighted
+    real(real64), parameter :: P_WVAR(2) = [323.58460728468742_real64, 192.11787546325061_real64]
+
+    !> The first values of the sigma-clip fixture: the recipe with four wild points.
+    real(real64), parameter :: G_PROBE_CLIP(8) = [-468.4931640625_real64, -445.29296875_real64, -406.6259765625_real64,  &
+        -352.4921875_real64, -282.8916015625_real64, -197.82421875_real64, 4000.0_real64, 18.7109375_real64]
+    !> Each C_* row is `[mean, median, stddev]` of the survivors.
+    !> astropy's defaults: sigma=3, maxiters=5, median centre, std scale
+    real(real64), parameter :: C_DEF(3) = [17.597426905776516_real64, 33.3564453125_real64, 288.83748479882723_real64]
+
+    !> cenfunc=mean, which moves with the outliers it is trying to reject
+    real(real64), parameter :: C_MEANC(3) = [17.597426905776516_real64, 33.3564453125_real64, 288.83748479882723_real64]
+
+    !> stdfunc=mad_std, which barely moves at all
+    real(real64), parameter :: C_MADSTD(3) = [17.597426905776516_real64, 33.3564453125_real64, 288.83748479882723_real64]
+
+    !> maxiters<=0: iterate until a round removes nothing
+    real(real64), parameter :: C_CONV(3) = [17.597426905776516_real64, 33.3564453125_real64, 288.83748479882723_real64]
+
+    !> an asymmetric clip, where a sigma_lower/sigma_upper mix-up would show
+    real(real64), parameter :: C_ASYM(3) = [170.44556281024367_real64, 171.0068359375_real64, 195.424608843367_real64]
 
 end module test_stats_golden ! GCOVR_EXCL_LINE

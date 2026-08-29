@@ -351,6 +351,76 @@ def self_test():
                   file=sys.stderr)
             ok = False
 
+    # ---- the two-sample family against numpy and scipy ----
+    xa, ya = fixture(32), fixture_b(32)
+    ax = np.array([float(v) for v in xa]); ay = np.array([float(v) for v in ya])
+    ok &= close(cov_model(xa, ya), np.cov(ax, ay, ddof=1)[0, 1], "cov ddof=1")
+    ok &= close(cov_model(xa, ya, ddof=0), np.cov(ax, ay, ddof=0)[0, 1], "cov ddof=0")
+    ok &= close(corr_model(xa, ya), sps.pearsonr(ax, ay).statistic, "pearson")
+    ok &= close(corr_model(xa, ya, spearman=True), sps.spearmanr(ax, ay).statistic, "spearman")
+    # The pairwise-complete rule, against pandas -- which is where the rule comes from.
+    mask = [(i % 3) != 0 for i in range(1, 33)]
+    sx = pd.Series([float(v) if m else np.nan for v, m in zip(xa, mask)])
+    sy = pd.Series([float(v) if m else np.nan for v, m in zip(ya, mask)])
+    ok &= close(cov_model(xa, ya, is_valid=mask), sx.cov(sy), "cov, pairwise-complete")
+    ok &= close(corr_model(xa, ya, is_valid=mask), sx.corr(sy), "pearson, pairwise-complete")
+    # Spearman with TIES, which is the only thing midranks are for. Two ties in each sample.
+    tx = [1.0, 2.0, 2.0, 3.0, 4.0, 4.0, 5.0]
+    ty = [9.0, 8.0, 8.0, 5.0, 3.0, 1.0, 1.0]
+    ok &= close(corr_model(tx, ty, spearman=True),
+                sps.spearmanr(np.array(tx), np.array(ty)).statistic, "spearman with ties")
+    ok &= close(cov_model(xa, xa), model(xa)["variance"], "cov(x, x) is the variance")
+
+    # ---- pf_zscore against scipy ----
+    zs = sps.zscore(ax, ddof=1)
+    for k, got in zip(ZPROBES, zscore_model(xa, ZPROBES)):
+        ok &= close(got, zs[k - 1], "zscore at %d" % k)
+
+    # ---- pf_gmean / pf_hmean against scipy ----
+    xp = fixture_pos(32)
+    apos = np.array([float(v) for v in xp])
+    ok &= close(power_model(xp, False), sps.gmean(apos), "gmean")
+    ok &= close(power_model(xp, True), sps.hmean(apos), "hmean")
+    wv = weights_mod5(32)
+    # scipy drops nothing for a zero weight, so the comparison is made over the SURVIVORS -- which
+    # is what this module's zero-weight rule means, and is the point of comparing at all.
+    live = [(float(v), float(w)) for v, w in zip(xp, wv) if w > 0]
+    ok &= close(power_model(xp, False, weights=wv),
+                sps.gmean(np.array([v for v, _ in live]),
+                          weights=np.array([w for _, w in live])), "gmean weighted")
+    ok &= close(power_model(xp, True, weights=wv),
+                sps.hmean(np.array([v for v, _ in live]),
+                          weights=np.array([w for _, w in live])), "hmean weighted")
+
+    # ---- the sigma clip against astropy, if it is installed ----
+    #
+    # Optional: this is a maintainer-only self-test and astropy is a heavy fourth dependency, so a
+    # machine without it gets a printed SKIP rather than a failure. CI runs `--check`, not this.
+    try:
+        from astropy.stats import sigma_clipped_stats as astro_clip
+    except ImportError:                                        # pragma: no cover - maintainer tool
+        print("--self-test: astropy not installed; the sigma-clip cross-check was SKIPPED. That "
+              "is the ONE cross-check this file cannot do without a fourth library, so a run "
+              "without it does not certify the clip.")
+    else:
+        xc = fixture_clip(400)
+        arr = np.array([float(v) for v in xc])
+        for cen, std in (("median", "std"), ("mean", "std"), ("median", "mad_std")):
+            want = astro_clip(arr, sigma=3.0, maxiters=5, cenfunc=cen, stdfunc=std)
+            got = clip_model(xc, cenfunc=cen, stdfunc=std)
+            for k, label in enumerate(("mean", "median", "stddev")):
+                ok &= close(got[k], want[k], "sigma clip %s/%s %s" % (cen, std, label))
+        # `maxiters=None` -- iterate to convergence -- which is what `maxiters <= 0` spells here.
+        want = astro_clip(arr, sigma=3.0, maxiters=None)
+        got = clip_model(xc, maxiters=0)
+        for k, label in enumerate(("mean", "median", "stddev")):
+            ok &= close(got[k], want[k], "sigma clip to convergence %s" % label)
+        # An asymmetric clip, which is where a `sigma_lower`/`sigma_upper` mix-up would show.
+        want = astro_clip(arr, sigma_lower=1.5, sigma_upper=4.0, maxiters=5)
+        got = clip_model(xc, sigma_lower=1.5, sigma_upper=4.0)
+        for k, label in enumerate(("mean", "median", "stddev")):
+            ok &= close(got[k], want[k], "sigma clip asymmetric %s" % label)
+
     if not ok:
         return 1
     print("generate_stats_vectors.py --self-test: %d model/library comparisons agree "
@@ -466,6 +536,243 @@ QCASES = [
      dict(values=fixture(32), is_valid=[(i % 3) != 0 for i in range(1, 33)], method="linear")),
 ]
 
+
+#: The SECOND sample, for the two-sample family. A different multiplier through the same recipe,
+#: so it is exactly representable in both languages for the same reason the first is, and is not a
+#: shift or a permutation of it -- either of those would give a correlation this family should not
+#: be pinned by. Mirrored by `golden_fixture_b` in test/test_stats.f90.
+RECIPE_B2 = 3571
+
+
+def fixture_b(n):
+    """The `y(1:n)` a Fortran `golden_fixture_b(n, y)` call must produce, as exact doubles."""
+    out = []
+    for i in range(1, n + 1):
+        a = (i * i * RECIPE_B2 + RECIPE_B) % RECIPE_M
+        out.append(mpf(a - RECIPE_OFFSET) / mpf(int(RECIPE_SCALE)))
+    return out
+
+
+def fixture_pos(n):
+    """A strictly POSITIVE population, which `pf_gmean` and `pf_hmean` need to be defined at all.
+
+    The same recipe without its offset, so every value is at least `1/1024` and the whole domain
+    question is about what the procedures do, not about whether the fixture reaches it. Mirrored
+    by `golden_fixture_pos` in test/test_stats.f90.
+    """
+    out = []
+    for i in range(1, n + 1):
+        a = (i * i * RECIPE_A + RECIPE_B) % RECIPE_M
+        out.append(mpf(a + 1) / mpf(int(RECIPE_SCALE)))
+    return out
+
+
+def pair_select(x, y, is_valid=None, weights=None):
+    """The surviving (x, y, w) triples under the PAIRWISE-COMPLETE rule."""
+    out = []
+    for i in range(len(x)):
+        if is_valid is not None and not is_valid[i]:
+            continue
+        if x[i] != x[i] or y[i] != y[i]:
+            continue
+        w = mpf(1) if weights is None else mpf(repr(weights[i]))
+        if weights is not None and w <= 0:
+            continue
+        out.append((mpf(x[i]), mpf(y[i]), w))
+    return out
+
+
+def pair_moments(trips):
+    """`(mx, my, sxx, sxy, syy, W, Wsq)` at 50 digits, from the definitions."""
+    w_sum = sum((w for _, _, w in trips), mpf(0))
+    w_sq = sum((w * w for _, _, w in trips), mpf(0))
+    mx = sum((w * a for a, _, w in trips), mpf(0)) / w_sum
+    my = sum((w * b for _, b, w in trips), mpf(0)) / w_sum
+    sxx = sum((w * (a - mx) ** 2 for a, _, w in trips), mpf(0))
+    sxy = sum((w * (a - mx) * (b - my) for a, b, w in trips), mpf(0))
+    syy = sum((w * (b - my) ** 2 for _, b, w in trips), mpf(0))
+    return mx, my, sxx, sxy, syy, w_sum, w_sq
+
+
+def midrank_model(vals):
+    """Each value's midrank: every run of equal values gets the mean of the positions it spans."""
+    order = sorted(range(len(vals)), key=lambda k: vals[k])
+    out = [mpf(0)] * len(vals)
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and vals[order[j + 1]] == vals[order[i]]:
+            j += 1
+        mid = mpf(i + j + 2) / 2               # 1-based positions i+1 .. j+1
+        for k in range(i, j + 1):
+            out[order[k]] = mid
+        i = j + 1
+    return out
+
+
+def cov_model(x, y, is_valid=None, weights=None, ddof=1):
+    """The pairwise-complete covariance, with the reliability `ddof` denominator."""
+    trips = pair_select(x, y, is_valid, weights)
+    if not trips:
+        return None
+    _, _, _, sxy, _, w_sum, w_sq = pair_moments(trips)
+    denom = w_sum - mpf(ddof) * w_sq / w_sum
+    if denom <= 0:
+        return None
+    return sxy / denom
+
+
+def corr_model(x, y, is_valid=None, weights=None, spearman=False):
+    """Pearson, or Pearson over midranks."""
+    trips = pair_select(x, y, is_valid, weights)
+    if not trips:
+        return None
+    if spearman:
+        rx = midrank_model([a for a, _, _ in trips])
+        ry = midrank_model([b for _, b, _ in trips])
+        trips = [(rx[k], ry[k], trips[k][2]) for k in range(len(trips))]
+    _, _, sxx, sxy, syy, _, _ = pair_moments(trips)
+    if sxx <= 0 or syy <= 0:
+        return None
+    return sxy / (mpsqrt(sxx) * mpsqrt(syy))
+
+
+def zscore_model(values, probes, is_valid=None, ddof=1):
+    """The standardised value at each 1-based index in `probes`."""
+    keep, _, _ = select(values, is_valid, None, True)
+    xs = [x for x, _ in keep]
+    if len(xs) < 2:
+        return [None] * len(probes)
+    mu = sum(xs, mpf(0)) / mpf(len(xs))
+    var = sum(((x - mu) ** 2 for x in xs), mpf(0)) / mpf(len(xs) - ddof)
+    if var <= 0:
+        return [None] * len(probes)
+    sd = mpsqrt(var)
+    out = []
+    for k in probes:
+        if is_valid is not None and not is_valid[k - 1]:
+            out.append(None)
+        else:
+            out.append((mpf(values[k - 1]) - mu) / sd)
+    return out
+
+
+def power_model(values, harmonic, weights=None):
+    """The geometric or harmonic mean, from the definition."""
+    from mpmath import log as mplog, exp as mpexp
+    keep, _, _ = select(values, None, weights, True)
+    if not keep:
+        return None
+    if any(x < 0 for x, _ in keep):
+        return None
+    if any(x == 0 for x, _ in keep):
+        return mpf(0)
+    w_sum = sum((w for _, w in keep), mpf(0))
+    if harmonic:
+        return w_sum / sum((w / x for x, w in keep), mpf(0))
+    return mpexp(sum((w * mplog(x) for x, w in keep), mpf(0)) / w_sum)
+
+
+def fixture_clip(n):
+    """The population the sigma-clip rows are taken over: the recipe, plus four wild points.
+
+    Deliberately built from the same recipe rather than from a random generator, so the Fortran
+    side reproduces it exactly from `golden_fixture` and four assignments -- a clip fixture that
+    could not be mirrored bit for bit would make every disagreement ambiguous.
+    """
+    out = list(fixture(n))
+    for k, v in ((7, 4000), (123, -3500), (200, 5000), (365, -6000)):
+        if k <= n:                 # so the 8-element probe row is a prefix of the real fixture
+            out[k - 1] = mpf(v)
+    return out
+
+
+def clip_model(values, sigma=3.0, sigma_lower=None, sigma_upper=None, maxiters=5,
+               cenfunc="median", stdfunc="std"):
+    """astropy's iterative clip, written from the algorithm rather than from astropy.
+
+    Returns `[mean, median, stddev]` of the survivors. Unweighted, because the procedure is.
+    """
+    slo = mpf(repr(sigma if sigma_lower is None else sigma_lower))
+    shi = mpf(repr(sigma if sigma_upper is None else sigma_upper))
+    xs = sorted(mpf(v) for v in values if v == v)
+    lo, hi = 0, len(xs) - 1
+    cap = 100 if maxiters <= 0 else maxiters
+    for _ in range(cap):
+        n = hi - lo + 1
+        if n < 2:
+            break
+        sl = xs[lo:hi + 1]
+        mu = sum(sl, mpf(0)) / mpf(n)
+        # ddof = 0, which is what astropy's default `stdfunc='std'` (numpy's `nanstd`) uses --
+        # for the ROUND SCALE and for the reported stddev alike.
+        var = sum(((v - mu) ** 2 for v in sl), mpf(0)) / mpf(n)
+        sd = mpsqrt(var)
+        centre = mu if cenfunc == "mean" else _median(sl)
+        if stdfunc == "mad_std":
+            c = _median(sl)
+            sd = _median(sorted(abs(v - c) for v in sl)) / MAD_NORMAL_DENOM
+        if not sd > 0:
+            break
+        a, b = centre - slo * sd, centre + shi * sd
+        plo, phi = lo, hi
+        while lo <= hi and xs[lo] < a:
+            lo += 1
+        while hi >= lo and xs[hi] > b:
+            hi -= 1
+        if hi - lo + 1 < 2:
+            lo, hi = plo, phi
+            break
+        if lo == plo and hi == phi:
+            break
+    sl = xs[lo:hi + 1]
+    n = len(sl)
+    if n == 0:
+        return [None, None, None]
+    mu = sum(sl, mpf(0)) / mpf(n)
+    sd = None
+    if n >= 1:
+        sd = mpsqrt(sum(((v - mu) ** 2 for v in sl), mpf(0)) / mpf(n))
+    return [mu, _median(sl), sd]
+
+
+def _median(sorted_vals):
+    """The interpolating median of an already-sorted list."""
+    n = len(sorted_vals)
+    k = (n - 1) // 2
+    if n % 2 == 1:
+        return sorted_vals[k]
+    return (sorted_vals[k] + sorted_vals[k + 1]) / 2
+
+
+#: The sigma-clip cases. Each emits `[mean, median, stddev, n_clipped]`.
+CCASES = [
+    ("DEF", "astropy's defaults: sigma=3, maxiters=5, median centre, std scale", dict()),
+    ("MEANC", "cenfunc=mean, which moves with the outliers it is trying to reject",
+     dict(cenfunc="mean")),
+    ("MADSTD", "stdfunc=mad_std, which barely moves at all", dict(stdfunc="mad_std")),
+    ("CONV", "maxiters<=0: iterate until a round removes nothing", dict(maxiters=0)),
+    ("ASYM", "an asymmetric clip, where a sigma_lower/sigma_upper mix-up would show",
+     dict(sigma_lower=1.5, sigma_upper=4.0)),
+]
+
+#: The two-sample and transform cases. Each row emits what its own comment names.
+RCASES = [
+    ("U32", "the two recipes at n=32, unweighted, ddof=1", dict()),
+    ("WVAR", "unequal weights, every fifth of them zero", dict(weights=weights_mod5(32))),
+    ("NULLS", "one PAIR in three excluded, which is what pairwise-complete means",
+     dict(is_valid=[(i % 3) != 0 for i in range(1, 33)])),
+]
+
+#: Which elements `pf_zscore`'s golden row probes. The first, the last and two in between, so a
+#: transform that got the mean right and the scale wrong still fails.
+ZPROBES = [1, 7, 20, 32]
+
+#: `pf_gmean`/`pf_hmean`'s cases; each emits `[gmean, hmean]`.
+PCASES = [
+    ("U32", "a strictly positive population at n=32", dict()),
+    ("WVAR", "the same, weighted", dict(weights=weights_mod5(32))),
+]
 
 #: `pf_mad`'s cases. Each emits the pair `[normal, raw]`, so the normal scale factor is pinned by
 #: the RATIO of two committed numbers rather than by a literal a test could copy from the source.
@@ -661,6 +968,9 @@ module test_stats_golden
 
     !> How many probabilities each `Q_*` row carries.
     integer, parameter :: NQP = 7
+
+    !> How many elements each `Z_*` row probes.
+    integer, parameter :: NZP = 4
 '''
 
 
@@ -709,6 +1019,52 @@ def emit():
         vals = mad_model(kwargs.pop("values"), **kwargs)
         out.append("    !> %s" % doc)
         out += wrap_array("    real(real64), parameter :: M_%s(2) =" % name,
+                          [fortran_real(v) for v in vals])
+        out.append("")
+
+    out.append("    !> The second sample the two-sample rows are taken against.")
+    out += wrap_array("    real(real64), parameter :: G_PROBE_B(%d) =" % probe_n,
+                      [fortran_real(v) for v in fixture_b(probe_n)])
+    out.append("    !> The first values of the strictly positive population.")
+    out += wrap_array("    real(real64), parameter :: G_PROBE_POS(%d) =" % probe_n,
+                      [fortran_real(v) for v in fixture_pos(probe_n)])
+    out.append("")
+    out.append("    !> Each R_* row is `[cov, pearson, spearman]` over the two n=32 recipes.")
+    xa, ya = fixture(32), fixture_b(32)
+    for name, doc, case in RCASES:
+        kwargs = dict(case)
+        vals = [cov_model(xa, ya, **kwargs),
+                corr_model(xa, ya, **kwargs),
+                corr_model(xa, ya, spearman=True, **kwargs)]
+        out.append("    !> %s" % doc)
+        out += wrap_array("    real(real64), parameter :: R_%s(3) =" % name,
+                          [fortran_real(v) for v in vals])
+        out.append("")
+    out.append("    !> The 1-based positions Z_U32 probes, and the standardised values there.")
+    out.append("    integer, parameter :: G_ZPROBES(NZP) = [%s]"
+               % ", ".join(str(k) for k in ZPROBES))
+    out += wrap_array("    real(real64), parameter :: Z_U32(NZP) =",
+                      [fortran_real(v) for v in zscore_model(xa, ZPROBES)])
+    out.append("")
+    out.append("    !> Each P_* row is `[gmean, hmean]` over the strictly positive population.")
+    xp = fixture_pos(32)
+    for name, doc, case in PCASES:
+        kwargs = dict(case)
+        vals = [power_model(xp, False, **kwargs), power_model(xp, True, **kwargs)]
+        out.append("    !> %s" % doc)
+        out += wrap_array("    real(real64), parameter :: P_%s(2) =" % name,
+                          [fortran_real(v) for v in vals])
+        out.append("")
+
+    out.append("    !> The first values of the sigma-clip fixture: the recipe with four wild points.")
+    out += wrap_array("    real(real64), parameter :: G_PROBE_CLIP(%d) =" % probe_n,
+                      [fortran_real(v) for v in fixture_clip(probe_n)])
+    out.append("    !> Each C_* row is `[mean, median, stddev]` of the survivors.")
+    xc = fixture_clip(400)
+    for name, doc, case in CCASES:
+        vals = clip_model(xc, **dict(case))
+        out.append("    !> %s" % doc)
+        out += wrap_array("    real(real64), parameter :: C_%s(3) =" % name,
                           [fortran_real(v) for v in vals])
         out.append("")
 

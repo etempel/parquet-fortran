@@ -781,6 +781,18 @@ program error_scenarios
         call scenario_stats_mad_center_not_finite()
     case ("stats_mode_string_column_is_valid")
         call scenario_stats_mode_string_column_is_valid()
+    case ("stats_corr_bad_method")
+        call scenario_stats_corr_bad_method()
+    case ("stats_spearman_with_weights")
+        call scenario_stats_spearman_with_weights()
+    case ("stats_pair_size_mismatch")
+        call scenario_stats_pair_size_mismatch()
+    case ("stats_clip_bad_cenfunc")
+        call scenario_stats_clip_bad_cenfunc()
+    case ("stats_clip_bad_sigma")
+        call scenario_stats_clip_bad_sigma()
+    case ("stats_zscore_size_mismatch")
+        call scenario_stats_zscore_size_mismatch()
     case ("sorting_column_vector")
         call scenario_sorting_column_vector()
     case ("sorting_search_unsorted")
@@ -16881,6 +16893,78 @@ contains
         call pf_mode(col, m, is_valid=mask)           ! -> aborts (two sources of nullness)
         print '(a,a)', "unexpectedly accepted is_valid= beside a string column, m=", m
     end subroutine scenario_stats_mode_string_column_is_valid
+
+    !> An unrecognised correlation method aborts naming both, rather than silently picking one.
+    subroutine scenario_stats_corr_bad_method()
+        real(real64) :: x(4) = [1.0_real64, 2.0_real64, 3.0_real64, 5.0_real64]
+        real(real64) :: y(4) = [2.0_real64, 1.0_real64, 4.0_real64, 3.0_real64]
+        real(real64) :: r
+
+        call pf_corr(x, y, r, method="spearman")   ! a real token: accepted
+        if (r < -1.0_real64 .or. r > 1.0_real64) print '(a)', "a correlation left [-1, 1]"
+        call pf_corr(x, y, r, method="kendall")    ! -> aborts (unknown token)
+        print '(a,es12.5)', "unexpectedly accepted method=kendall, r=", r
+    end subroutine scenario_stats_corr_bad_method
+
+    !> A weighted midrank is a definitional choice no reference library makes, so this refuses.
+    subroutine scenario_stats_spearman_with_weights()
+        real(real64) :: x(4) = [1.0_real64, 2.0_real64, 3.0_real64, 5.0_real64]
+        real(real64) :: y(4) = [2.0_real64, 1.0_real64, 4.0_real64, 3.0_real64]
+        real(real64) :: w(4) = [1.0_real64, 2.0_real64, 1.0_real64, 2.0_real64]
+        real(real64) :: r
+
+        call pf_corr(x, y, r, weights=w)                        ! Pearson weighted: accepted
+        if (r /= r) print '(a)', "a weighted Pearson correlation was expected to be a number"
+        call pf_corr(x, y, r, weights=w, method="spearman")     ! -> aborts (weighted Spearman)
+        print '(a,es12.5)', "unexpectedly accepted a weighted Spearman, r=", r
+    end subroutine scenario_stats_spearman_with_weights
+
+    !> Two samples of different lengths have no pairs, so there is nothing to correlate.
+    subroutine scenario_stats_pair_size_mismatch()
+        real(real64) :: x(4) = [1.0_real64, 2.0_real64, 3.0_real64, 5.0_real64]
+        real(real64) :: y(3) = [2.0_real64, 1.0_real64, 4.0_real64]
+        real(real64) :: c
+
+        call pf_cov(x, x, c)          ! matched: accepted
+        if (c <= 0.0_real64) print '(a)', "the covariance of a sample with itself was not positive"
+        call pf_cov(x, y, c)          ! -> aborts (size mismatch)
+        print '(a,es12.5)', "unexpectedly accepted two samples of different size, c=", c
+    end subroutine scenario_stats_pair_size_mismatch
+
+    !> An unrecognised cenfunc token aborts naming both.
+    subroutine scenario_stats_clip_bad_cenfunc()
+        real(real64) :: x(6) = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64, &
+            60.0_real64]
+        real(real64) :: m, md, sd
+
+        call pf_sigma_clipped_stats(x, m, md, sd, cenfunc="mean")   ! a real token: accepted
+        if (m /= m) print '(a)', "cenfunc=mean was expected to give a number"
+        call pf_sigma_clipped_stats(x, m, md, sd, cenfunc="mode")   ! -> aborts (unknown token)
+        print '(a,es12.5)', "unexpectedly accepted cenfunc=mode, m=", m
+    end subroutine scenario_stats_clip_bad_cenfunc
+
+    !> A negative clip width can only be a caller mistake, so it aborts rather than clipping all.
+    subroutine scenario_stats_clip_bad_sigma()
+        real(real64) :: x(6) = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64, &
+            60.0_real64]
+        real(real64) :: m, md, sd
+
+        call pf_sigma_clipped_stats(x, m, md, sd, sigma=2.0_real64)   ! positive: accepted
+        if (m /= m) print '(a)', "sigma=2 was expected to give a number"
+        call pf_sigma_clipped_stats(x, m, md, sd, sigma=-1.0_real64)  ! -> aborts (negative width)
+        print '(a,es12.5)', "unexpectedly accepted sigma=-1, m=", m
+    end subroutine scenario_stats_clip_bad_sigma
+
+    !> `z` must be the same size as `values`; a mismatch is a caller error, not a data condition.
+    subroutine scenario_stats_zscore_size_mismatch()
+        real(real64) :: x(4) = [1.0_real64, 2.0_real64, 3.0_real64, 5.0_real64]
+        real(real64) :: four(4), three(3)
+
+        call pf_zscore(x, four)     ! matched: accepted
+        if (four(1) >= four(4)) print '(a)', "the z-scores came back out of order"
+        call pf_zscore(x, three)    ! -> aborts (size mismatch)
+        print '(a,es12.5)', "unexpectedly accepted a short output array, z=", three(1)
+    end subroutine scenario_stats_zscore_size_mismatch
 
     !> A vector column has no defined order on a whole row, so it cannot be a sort key -- the
     !! same rule parquet_table%sort_by applies, enforced here for a bare parquet_column.

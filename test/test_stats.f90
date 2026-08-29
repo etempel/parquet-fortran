@@ -30,7 +30,8 @@ module test_stats
     use parquet
     use test_stats_golden
     use iso_fortran_env, only : int32, int64, real32, real64
-    use ieee_arithmetic, only : ieee_value, ieee_quiet_nan
+    use ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_get_flag, ieee_set_flag, &
+        ieee_support_flag, ieee_divide_by_zero
     use testdrive, only : new_unittest, unittest_type, error_type, check, skip_test
     implicit none
     private
@@ -152,7 +153,31 @@ contains
             new_unittest("%print writes the block, can be silenced, and never aborts", &
                 test_print_writes_and_can_be_silenced), &
             new_unittest("skipnan=.false. propagates a NaN through every order statistic", &
-                test_propagating_nan_reaches_every_tier) &
+                test_propagating_nan_reaches_every_tier), &
+            new_unittest("every P8 fixture recipe still produces what the generator emitted", &
+                test_p8_fixture_recipes), &
+            new_unittest("pf_gmean and pf_hmean match the 50-digit oracle", &
+                test_power_means_match_the_oracle), &
+            new_unittest("a zero gives exactly zero and a negative gives NaN", &
+                test_power_mean_domain), &
+            new_unittest("pf_cov and pf_corr match the oracle and reproduce both identities", &
+                test_two_sample_matches_the_oracle), &
+            new_unittest("Spearman sees a monotone relationship Pearson cannot, and ties", &
+                test_spearman_sees_monotone), &
+            new_unittest("pf_zscore standardises and reports its exclusions", &
+                test_zscore_standardises), &
+            new_unittest("pf_sigma_clipped_stats reproduces astropy", &
+                test_sigma_clip_matches_astropy), &
+            new_unittest("a whole sigma-clipping run costs ONE ordering", &
+                test_sigma_clip_costs_one_ordering), &
+            new_unittest("the sigma clip's keep mask names exactly the survivors", &
+                test_sigma_clip_keep_mask), &
+            new_unittest("the sigma clip's empty, constant and two-element cases", &
+                test_sigma_clip_degenerate), &
+            new_unittest("every P8 procedure agrees across all six input kinds", &
+                test_p8_kinds_agree), &
+            new_unittest("the four properties P8's first mutation round found unasserted", &
+                test_p8_mutation_gaps) &
             ]
     end subroutine collect_tests_parquet_stats
 
@@ -2750,6 +2775,581 @@ contains
         call pf_mad(v, r, ok=ok)
         call check(error, r == r .and. ok, "and pf_mad answers a number too")
     end subroutine test_propagating_nan_reaches_every_tier
+
+    !> The second sample the two-sample tests are taken against.
+    !!
+    !! A different multiplier through the same recipe as `golden_fixture`, so it is exactly
+    !! representable for the same reason and is NOT a shift or a permutation of the first --
+    !! either of those would pin the correlation family against a degenerate case.
+    subroutine golden_fixture_b(n, y)
+        integer(int64), intent(in) :: n                          !! how many values to build.
+        real(real64), allocatable, intent(out) :: y(:)           !! the second sample.
+        integer(int64) :: i, a
+
+        allocate(y(n))
+        do i = 1_int64, n
+            a = mod(i * i * 3571_int64 + 12345_int64, 1000003_int64)
+            y(i) = real(a - 500001_int64, real64) / 1024.0_real64
+        end do
+    end subroutine golden_fixture_b
+
+    !> A strictly POSITIVE population, which `pf_gmean` and `pf_hmean` need to be defined at all.
+    subroutine golden_fixture_pos(n, x)
+        integer(int64), intent(in) :: n                          !! how many values to build.
+        real(real64), allocatable, intent(out) :: x(:)           !! the population.
+        integer(int64) :: i, a
+
+        allocate(x(n))
+        do i = 1_int64, n
+            a = mod(i * i * 7919_int64 + 12345_int64, 1000003_int64)
+            x(i) = real(a + 1_int64, real64) / 1024.0_real64
+        end do
+    end subroutine golden_fixture_pos
+
+    !> The sigma-clip fixture: the recipe with four wild points written over it.
+    subroutine golden_fixture_clip(n, x)
+        integer(int64), intent(in) :: n                          !! how many values to build.
+        real(real64), allocatable, intent(out) :: x(:)           !! the population.
+
+        call golden_fixture(n, x)
+        if (n >= 7_int64) x(7) = 4000.0_real64
+        if (n >= 123_int64) x(123) = -3500.0_real64
+        if (n >= 200_int64) x(200) = 5000.0_real64
+        if (n >= 365_int64) x(365) = -6000.0_real64
+    end subroutine golden_fixture_clip
+
+    !> Every P8 fixture recipe still produces what the generator emitted for it.
+    !!
+    !! Written for the same reason `test_fixture_recipe` is: a recipe that has drifted is reported
+    !! here, once, rather than as an unexplained tolerance failure in every case that uses it.
+    subroutine test_p8_fixture_recipes(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: x(:)
+
+        call golden_fixture_b(8_int64, x)
+        call check(error, all(x == G_PROBE_B), "the second sample's recipe has drifted")
+        if (allocated(error)) return
+        call golden_fixture_pos(8_int64, x)
+        call check(error, all(x == G_PROBE_POS), "the positive population's recipe has drifted")
+        if (allocated(error)) return
+        call golden_fixture_clip(8_int64, x)
+        call check(error, all(x == G_PROBE_CLIP), "the sigma-clip fixture's recipe has drifted")
+    end subroutine test_p8_fixture_recipes
+
+    !> `pf_gmean` and `pf_hmean` match the 50-digit oracle, weighted and not.
+    subroutine test_power_means_match_the_oracle(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: x(:), w(:)
+        real(real64) :: got(2)
+
+        call golden_fixture_pos(32_int64, x)
+        call pf_gmean(x, got(1))
+        call pf_hmean(x, got(2))
+        call check(error, all_close(got, P_U32), "the unweighted geometric and harmonic means")
+        if (allocated(error)) return
+
+        call golden_weights_mod5(32_int64, w)
+        call pf_gmean(x, got(1), weights=w)
+        call pf_hmean(x, got(2), weights=w)
+        call check(error, all_close(got, P_WVAR), "the weighted pair; a zero weight drops its element")
+        if (allocated(error)) return
+
+        ! The ordering that always holds for a positive population, and which no rounding can
+        ! reverse: harmonic <= geometric <= arithmetic. It costs nothing and it catches the two
+        ! procedures being swapped, which the golden rows alone would not if both were wrong.
+        block
+            real(real64) :: am
+            call pf_mean(x, am)
+            call check(error, got(2) < got(1) .and. got(1) < am, &
+                "harmonic < geometric < arithmetic must hold for a positive population")
+        end block
+    end subroutine test_power_means_match_the_oracle
+
+    !> The domain rules: a zero gives exactly 0, a negative gives NaN, and neither aborts.
+    subroutine test_power_mean_domain(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: v(4), g, h
+        logical :: ok
+
+        v = [2.0_real64, 4.0_real64, 8.0_real64, 16.0_real64]
+        call pf_gmean(v, g, ok=ok)
+        ! 2, 4, 8, 16 -> exp(mean(log)) = 2**2.5 = 5.656854...
+        call check(error, ok .and. close_to(g, 2.0_real64**2.5_real64), &
+            "the control: a clean positive population gives the geometric mean")
+        if (allocated(error)) return
+
+        v(3) = 0.0_real64
+        call pf_gmean(v, g, ok=ok)
+        call pf_hmean(v, h)
+        call check(error, g == 0.0_real64 .and. h == 0.0_real64, &
+            "a value of exactly zero gives exactly zero, as scipy does")
+        if (allocated(error)) return
+        call check(error, ok, "and zero is a DEFINED answer, so ok must stay .true.")
+        if (allocated(error)) return
+
+        v(3) = -1.0_real64
+        call pf_gmean(v, g, ok=ok)
+        call check(error, g /= g .and. .not. ok, "a negative value gives NaN with ok=.false.")
+        if (allocated(error)) return
+        call pf_hmean(v, h, ok=ok)
+        call check(error, h /= h .and. .not. ok, "and so does the harmonic mean")
+        if (allocated(error)) return
+
+        ! A zero AND a negative: undefined, not zero. The negative must be found first, which is
+        ! what the screen's ordering guarantees.
+        v = [-1.0_real64, 0.0_real64, 2.0_real64, 4.0_real64]
+        call pf_gmean(v, g, ok=ok)
+        call check(error, g /= g .and. .not. ok, &
+            "a population holding both a zero and a negative is undefined, not zero")
+        if (allocated(error)) return
+
+        ! An empty population is the ordinary empty case, not an error.
+        block
+            real(real64) :: none(0)
+            call pf_gmean(none, g, ok=ok)
+            call check(error, g /= g .and. .not. ok, "an empty population gives NaN with ok=.false.")
+        end block
+    end subroutine test_power_mean_domain
+
+    !> `pf_cov` and `pf_corr` match the oracle, and reproduce the two identities exactly.
+    subroutine test_two_sample_matches_the_oracle(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: x(:), y(:), w(:)
+        logical, allocatable :: mask(:)
+        real(real64) :: got(3), v
+        integer(int64) :: i
+
+        call golden_fixture(32_int64, x)
+        call golden_fixture_b(32_int64, y)
+        call pf_cov(x, y, got(1))
+        call pf_corr(x, y, got(2))
+        call pf_corr(x, y, got(3), method="spearman")
+        call check(error, all_close(got, R_U32), "the unweighted covariance and both correlations")
+        if (allocated(error)) return
+
+        call golden_weights_mod5(32_int64, w)
+        call pf_cov(x, y, got(1), weights=w)
+        call pf_corr(x, y, got(2), weights=w)
+        call pf_corr(x, y, got(3), weights=w, method="pearson")
+        got(3) = got(2)   ! Spearman refuses weights; the oracle's third slot is unweighted-ranked
+        call check(error, close_to(got(1), R_WVAR(1)) .and. close_to(got(2), R_WVAR(2)), &
+            "the weighted covariance and Pearson correlation")
+        if (allocated(error)) return
+
+        allocate(mask(32))
+        do i = 1_int64, 32_int64
+            mask(i) = (mod(i, 3_int64) /= 0_int64)
+        end do
+        call pf_cov(x, y, got(1), is_valid=mask)
+        call pf_corr(x, y, got(2), is_valid=mask)
+        call pf_corr(x, y, got(3), is_valid=mask, method="spearman")
+        call check(error, all_close(got, R_NULLS), &
+            "pairwise-complete: one pair in three excluded from BOTH samples")
+        if (allocated(error)) return
+
+        ! **The phase's own identities, and both must be EXACT.** `pf_cov(x, x)` reaching the same
+        ! block tree as `pf_variance` is the whole reason `stats_pair_moments` lives in the core;
+        ! `pf_corr(x, x)` being exactly 1 is why the three-sums equality is tested before the
+        ! quotient is formed.
+        call pf_cov(x, x, got(1))
+        call pf_variance(x, v)
+        call check(error, got(1) == v, "pf_cov(x, x) must be pf_variance(x) BIT FOR BIT")
+        if (allocated(error)) return
+        call pf_cov(x, x, got(1), ddof=0)
+        call pf_variance(x, v, ddof=0)
+        call check(error, got(1) == v, "and at ddof=0 as well")
+        if (allocated(error)) return
+        call pf_corr(x, x, got(2))
+        call check(error, got(2) == 1.0_real64, "pf_corr(x, x) must be exactly 1")
+        if (allocated(error)) return
+        call pf_corr(x, x, got(2), method="spearman")
+        call check(error, got(2) == 1.0_real64, "and exactly 1 under Spearman too")
+        if (allocated(error)) return
+        call pf_corr(x, -x, got(2))
+        call check(error, got(2) == -1.0_real64, "a perfectly anti-correlated pair must be exactly -1")
+    end subroutine test_two_sample_matches_the_oracle
+
+    !> Spearman measures a monotone relationship Pearson cannot see, and handles ties.
+    subroutine test_spearman_sees_monotone(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: x(7), y(7), r
+        integer :: i
+
+        ! A strictly increasing but very non-linear relationship: Spearman is exactly 1, Pearson
+        ! is not. This is the negative control for "spearman is a synonym for pearson".
+        do i = 1, 7
+            x(i) = real(i, real64)
+            y(i) = real(i, real64)**5
+        end do
+        call pf_corr(x, y, r, method="spearman")
+        call check(error, r == 1.0_real64, "a monotone relationship must give Spearman exactly 1")
+        if (allocated(error)) return
+        call pf_corr(x, y, r)
+        call check(error, r < 0.95_real64, &
+            "the control: Pearson must NOT see the same relationship as perfect")
+        if (allocated(error)) return
+
+        ! Ties, which are the only thing midranks exist for. Two ties in each sample; the expected
+        ! value is scipy's, cross-checked in the oracle's --self-test.
+        x = [1.0_real64, 2.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 4.0_real64, 5.0_real64]
+        y = [9.0_real64, 8.0_real64, 8.0_real64, 5.0_real64, 3.0_real64, 1.0_real64, 1.0_real64]
+        call pf_corr(x, y, r, method="spearman")
+        ! scipy.stats.spearmanr on this pair; the oracle's --self-test compares its own midrank
+        ! model against that same call, so this literal is checked from two sides.
+        call check(error, close_to(r, -0.97222222222222232_real64), &
+            "tied values must share a midrank, matching scipy.stats.spearmanr")
+    end subroutine test_spearman_sees_monotone
+
+    !> `pf_zscore` standardises, reports its exclusions, and has mean 0 and stddev 1.
+    subroutine test_zscore_standardises(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: x(:), z(:)
+        logical, allocatable :: mask(:), ov(:)
+        real(real64) :: m, sd, got(NZP)
+        integer(int64) :: nnull, i
+        integer :: k
+        logical :: ok
+
+        call golden_fixture(32_int64, x)
+        allocate(z(32))
+        call pf_zscore(x, z, ok=ok)
+        call check(error, ok, "a clean population must standardise")
+        if (allocated(error)) return
+        do k = 1, NZP
+            got(k) = z(G_ZPROBES(k))
+        end do
+        call check(error, all_close(got, Z_U32), "the standardised values must match the oracle")
+        if (allocated(error)) return
+
+        ! The defining property, asserted rather than assumed: mean 0 and standard deviation 1.
+        call pf_mean(z, m)
+        call pf_stddev(z, sd)
+        call check(error, abs(m) < 1.0e-13_real64 .and. abs(sd - 1.0_real64) < 1.0e-13_real64, &
+            "the result must have mean 0 and standard deviation 1")
+        if (allocated(error)) return
+
+        ! An excluded element: NaN in the output, marked in out_valid, counted in n_null, and ok
+        ! comes back .false. -- one flag with two causes, which n_null separates.
+        allocate(mask(32), ov(32))
+        mask = .true.
+        mask(5) = .false.
+        mask(11) = .false.
+        call pf_zscore(x, z, is_valid=mask, out_valid=ov, n_null=nnull, ok=ok)
+        call check(error, (.not. ok) .and. nnull == 2_int64, &
+            "an excluded element must give ok=.false. with n_null naming the cause")
+        if (allocated(error)) return
+        call check(error, (.not. ov(5)) .and. (.not. ov(11)) .and. count(ov) == 30, &
+            "out_valid must mark exactly the excluded elements")
+        if (allocated(error)) return
+        call check(error, z(5) /= z(5) .and. z(11) /= z(11), &
+            "and their outputs must be quiet NaNs, not stale or zero")
+        if (allocated(error)) return
+        do i = 1_int64, 32_int64
+            if (mask(i)) then
+                if (z(i) /= z(i)) then
+                    call check(error, .false., "a surviving element must have a real z-score")
+                    return
+                end if
+            end if
+        end do
+
+        ! A constant population has no spread, so EVERY output is undefined -- and `n_null` is 0,
+        ! which is what tells the two causes of ok=.false. apart.
+        x = 3.0_real64
+        call pf_zscore(x, z, n_null=nnull, ok=ok)
+        call check(error, (.not. ok) .and. nnull == 0_int64, &
+            "a constant population gives ok=.false. with n_null zero")
+        if (allocated(error)) return
+        call check(error, all(z /= z), "and every output element is NaN")
+    end subroutine test_zscore_standardises
+
+    !> `pf_sigma_clipped_stats` reproduces astropy, on ONE ordering.
+    subroutine test_sigma_clip_matches_astropy(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: x(:)
+        real(real64) :: got(3)
+        integer(int64) :: nc
+        logical :: conv, ok
+
+        call golden_fixture_clip(400_int64, x)
+        call pf_sigma_clipped_stats(x, got(1), got(2), got(3), n_clipped=nc, converged=conv, ok=ok)
+        call check(error, all_close(got, C_DEF), "astropy's defaults: sigma=3, maxiters=5")
+        if (allocated(error)) return
+        call check(error, ok .and. conv, "the default run must converge with a usable answer")
+        if (allocated(error)) return
+        call check(error, nc >= 4_int64, "and must clip at least the four wild points")
+        if (allocated(error)) return
+
+        call pf_sigma_clipped_stats(x, got(1), got(2), got(3), cenfunc="mean")
+        call check(error, all_close(got, C_MEANC), 'cenfunc="mean"')
+        if (allocated(error)) return
+        call pf_sigma_clipped_stats(x, got(1), got(2), got(3), stdfunc="mad_std")
+        call check(error, all_close(got, C_MADSTD), 'stdfunc="mad_std"')
+        if (allocated(error)) return
+        call pf_sigma_clipped_stats(x, got(1), got(2), got(3), maxiters=0)
+        call check(error, all_close(got, C_CONV), "maxiters<=0 iterates to convergence")
+        if (allocated(error)) return
+        call pf_sigma_clipped_stats(x, got(1), got(2), got(3), sigma_lower=1.5_real64, &
+            sigma_upper=4.0_real64)
+        call check(error, all_close(got, C_ASYM), "an asymmetric clip")
+    end subroutine test_sigma_clip_matches_astropy
+
+    !> A whole clipping run costs ONE ordering, whatever the number of rounds.
+    !!
+    !! This is P8's own acceptance gate. It is asserted with a counter rather than by inspection
+    !! because the alternative implementation -- sort inside the loop -- gives the same numbers and
+    !! differs only in cost, which no equality assertion can see.
+    subroutine test_sigma_clip_costs_one_ordering(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: x(:)
+        real(real64) :: m, md, sd
+        integer(int64) :: before, rounds_sorts
+        logical :: conv
+
+        call golden_fixture_clip(400_int64, x)
+        call parquet_debug_reset_stats_sorts()
+        before = parquet_debug_stats_sorts()
+        call pf_sigma_clipped_stats(x, m, md, sd, maxiters=0, converged=conv)
+        rounds_sorts = parquet_debug_stats_sorts() - before
+        call check(error, rounds_sorts == 1_int64, &
+            "a whole sigma-clipping run must order the population exactly once")
+        if (allocated(error)) return
+        call check(error, conv, "the control: the run must actually have iterated to convergence")
+        if (allocated(error)) return
+
+        ! `stdfunc="mad_std"` orders the DEVIATIONS once per round as well, which is honest: the
+        ! deviations are a different population and their order is not implied by the values'.
+        ! Asserted so that the extra cost is a stated property rather than a surprise.
+        call parquet_debug_reset_stats_sorts()
+        call pf_sigma_clipped_stats(x, m, md, sd, stdfunc="mad_std", maxiters=3)
+        call check(error, parquet_debug_stats_sorts() > 1_int64, &
+            'stdfunc="mad_std" orders the deviations too, once per round')
+    end subroutine test_sigma_clip_costs_one_ordering
+
+    !> `keep(:)` names exactly the survivors, and is what applies one clip to a second column.
+    subroutine test_sigma_clip_keep_mask(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: x(:)
+        logical, allocatable :: kept(:), mask(:)
+        real(real64) :: m, md, sd, m2, md2, sd2
+        integer(int64) :: nc, i
+
+        call golden_fixture_clip(400_int64, x)
+        allocate(kept(400), mask(400))
+        call pf_sigma_clipped_stats(x, m, md, sd, n_clipped=nc, keep=kept)
+        call check(error, count(kept) == 400 - int(nc), &
+            "keep must mark exactly the survivors n_clipped counts")
+        if (allocated(error)) return
+        call check(error, .not. (kept(7) .or. kept(123) .or. kept(200) .or. kept(365)), &
+            "the four wild points must all be clipped")
+        if (allocated(error)) return
+
+        ! The mask must reproduce the same statistics when used as `is_valid` on a re-run with the
+        ! clipping effectively disabled -- which is what a caller does with it on a second column.
+        call pf_mean(x, m2, is_valid=kept)
+        call pf_stddev(x, sd2, is_valid=kept, ddof=0)
+        call pf_median(x, md2, is_valid=kept)
+        call check(error, close_to(m2, m) .and. close_to(md2, md) .and. close_to(sd2, sd), &
+            "reducing over keep= must reproduce the clipped statistics")
+        if (allocated(error)) return
+
+        ! A null must never be kept, whatever the clip decides about its value.
+        mask = .true.
+        do i = 1_int64, 400_int64, 10_int64
+            mask(i) = .false.
+        end do
+        call pf_sigma_clipped_stats(x, m, md, sd, keep=kept, is_valid=mask)
+        do i = 1_int64, 400_int64
+            if (.not. mask(i) .and. kept(i)) then
+                call check(error, .false., "an excluded element must never be marked as kept")
+                return
+            end if
+        end do
+        call check(error, count(kept) > 0, "and something must still survive")
+    end subroutine test_sigma_clip_keep_mask
+
+    !> The clip's own degenerate cases: empty, constant, and a round that would leave one value.
+    subroutine test_sigma_clip_degenerate(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: none(0), flat(9), two(2), m, md, sd
+        integer(int64) :: nc
+        logical :: ok, conv
+
+        call pf_sigma_clipped_stats(none, m, md, sd, n_clipped=nc, ok=ok)
+        call check(error, m /= m .and. md /= md .and. sd /= sd, &
+            "an empty population gives three NaNs")
+        if (allocated(error)) return
+        call check(error, (.not. ok) .and. nc == 0_int64, "with ok=.false. and nothing clipped")
+        if (allocated(error)) return
+
+        ! A constant population has no spread, so no interval could remove anything. It must stop
+        ! rather than loop, and must report the population it was given.
+        flat = 5.0_real64
+        call pf_sigma_clipped_stats(flat, m, md, sd, n_clipped=nc, ok=ok, converged=conv)
+        call check(error, m == 5.0_real64 .and. md == 5.0_real64 .and. sd == 0.0_real64, &
+            "a constant population is reported unchanged")
+        if (allocated(error)) return
+        call check(error, ok .and. conv .and. nc == 0_int64, &
+            "and that is a converged, usable answer with nothing clipped")
+        if (allocated(error)) return
+
+        ! Two elements: a clip that would leave fewer than two stops instead and reports the pair.
+        two = [1.0_real64, 100.0_real64]
+        call pf_sigma_clipped_stats(two, m, md, sd, sigma=0.5_real64, n_clipped=nc, ok=ok)
+        call check(error, nc == 0_int64 .and. ok, &
+            "a round that would leave fewer than two values stops and keeps the previous set")
+        if (allocated(error)) return
+        call check(error, close_to(m, 50.5_real64), "and reports that set's statistics")
+    end subroutine test_sigma_clip_degenerate
+
+    !> Every P8 procedure reaches the same answer through all six input kinds.
+    subroutine test_p8_kinds_agree(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        integer(int32) :: ix(24), iy(24)
+        real(real32) :: rx(24), ry(24)
+        real(real64) :: dx(24), dy(24), z32(24), z64(24)
+        real(real64) :: a, b, m1, m2, s1, s2, d1, d2
+        integer :: i
+
+        do i = 1, 24
+            ix(i) = int(mod(i * 37, 101) + 1, int32)
+            iy(i) = int(mod(i * 53, 97) + 1, int32)
+        end do
+        rx = real(ix, real32)
+        ry = real(iy, real32)
+        dx = real(ix, real64)
+        dy = real(iy, real64)
+
+        call pf_cov(ix, iy, a)
+        call pf_cov(dx, dy, b)
+        call check(error, a == b, "pf_cov must widen int32 to exactly the real64 answer")
+        if (allocated(error)) return
+        call pf_cov(rx, ry, a)
+        call check(error, a == b, "and real32 likewise")
+        if (allocated(error)) return
+        call pf_corr(ix, iy, a)
+        call pf_corr(dx, dy, b)
+        call check(error, a == b, "pf_corr must agree across kinds")
+        if (allocated(error)) return
+        call pf_gmean(ix, a)
+        call pf_gmean(dx, b)
+        call check(error, a == b, "pf_gmean must agree across kinds")
+        if (allocated(error)) return
+        call pf_zscore(ix, z32)
+        call pf_zscore(dx, z64)
+        call check(error, all(z32 == z64), "pf_zscore must agree across kinds")
+        if (allocated(error)) return
+        call pf_sigma_clipped_stats(ix, m1, d1, s1)
+        call pf_sigma_clipped_stats(dx, m2, d2, s2)
+        call check(error, m1 == m2 .and. d1 == d2 .and. s1 == s2, &
+            "pf_sigma_clipped_stats must agree across kinds")
+    end subroutine test_p8_kinds_agree
+
+    !> The four properties P8's first mutation round found nothing asserting.
+    !!
+    !! Each of these was written because a deliberate defect **survived** the suite: the covariance
+    !! losing its re-centring correction, a NaN in the SECOND sample no longer dropping the pair,
+    !! the clip's lower bound ceasing to be inclusive, and `pf_gmean` reaching `log(0)`. All four
+    !! answered plausibly without them, which is what a mutation round is for.
+    subroutine test_p8_mutation_gaps(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: x(:), y(:), xs(:), ys(:)
+        real(real64) :: c0, c1, r0, r1, m, md, sd, v(4), g
+        real(real64), parameter :: OFFSET = 1.0e9_real64
+        real(real64) :: edge(9)
+        integer(int64) :: nc, nn
+        logical :: flag, saved, sup
+
+        ! ---- 1. The covariance is SHIFT-INVARIANT, which is what the re-centring correction buys.
+        !
+        ! Offsetting both samples by 1e9 cannot change a covariance, and the textbook
+        ! `sum(xy) - sum(x)sum(y)/n` loses almost every digit doing it. What this pins is the
+        ! two-pass STRUCTURE. It does NOT pin the re-centring correction, and no test can: that
+        ! term is a product of two rounding errors and is some twenty orders of magnitude below
+        ! one ulp of the sum it corrects -- see `stats_pair_moments` for why it is kept anyway.
+        call golden_fixture(64_int64, x)
+        call golden_fixture_b(64_int64, y)
+        allocate(xs(64), ys(64))
+        xs = x + OFFSET
+        ys = y + OFFSET
+        call pf_cov(x, y, c0)
+        call pf_cov(xs, ys, c1)
+        ! `==`, not a tolerance: the two-pass form is shift-invariant to the LAST BIT here, and
+        ! measuring that before writing the assertion is what turned a vague 1e-9 into a real one.
+        call check(error, c1 == c0, &
+            "pf_cov must be shift-invariant at an offset of 1e9, bit for bit")
+        if (allocated(error)) return
+        call pf_corr(x, y, r0)
+        call pf_corr(xs, ys, r1)
+        call check(error, r1 == r0, "and so must pf_corr")
+        if (allocated(error)) return
+
+        ! ---- 2. A NaN in EITHER sample drops the pair, not just one of them.
+        y(9) = ieee_value(1.0_real64, ieee_quiet_nan)
+        y(41) = ieee_value(1.0_real64, ieee_quiet_nan)
+        call pf_cov(x, y, c0, n_nan=nn)
+        call check(error, nn == 2_int64, &
+            "a NaN in the SECOND sample must drop its pair and be counted")
+        if (allocated(error)) return
+        call check(error, c0 == c0, "and the covariance of what remains must be a number")
+        if (allocated(error)) return
+        ! The same two positions moved to the first sample must give the identical answer, since
+        ! the rule is symmetric in the two samples.
+        block
+            real(real64), allocatable :: x2(:), y2(:)
+            real(real64) :: c2
+            call golden_fixture(64_int64, x2)
+            call golden_fixture_b(64_int64, y2)
+            x2(9) = ieee_value(1.0_real64, ieee_quiet_nan)
+            x2(41) = ieee_value(1.0_real64, ieee_quiet_nan)
+            call pf_cov(x2, y2, c2, n_nan=nn)
+            call check(error, c2 == c0 .and. nn == 2_int64, &
+                "the pairwise rule must be symmetric in the two samples")
+        end block
+        if (allocated(error)) return
+
+        ! ---- 3. The clip's bounds are INCLUSIVE at both ends, as astropy's are.
+        !
+        ! Every value here is exactly representable and the mean is exactly 0 with a standard
+        ! deviation of exactly 1, so `sigma = 1.5` puts the bounds exactly on the four extreme
+        ! values. Inclusive keeps all nine; exclusive would keep the five zeros. A fixture whose
+        ! boundary did not land on a value cannot tell the two apart at all.
+        edge = [-1.5_real64, -1.5_real64, 0.0_real64, 0.0_real64, 0.0_real64, 0.0_real64, &
+            0.0_real64, 1.5_real64, 1.5_real64]
+        call pf_sigma_clipped_stats(edge, m, md, sd, sigma=1.5_real64, cenfunc="mean", &
+            n_clipped=nc)
+        call check(error, sd == 1.0_real64, &
+            "the fixture's own precondition: mean 0 and standard deviation exactly 1")
+        if (allocated(error)) return
+        call check(error, nc == 0_int64, &
+            "a value sitting exactly on the bound must be KEPT, as astropy keeps it")
+        if (allocated(error)) return
+
+        ! ---- 4. `pf_gmean` must not RAISE on a zero, which is the reason for its zero branch.
+        !
+        ! The branch changes no answer on a compiler that masks the IEEE traps -- `exp(-inf)` is
+        ! already 0 -- so removing it survives every value assertion in this suite. What it changes
+        ! is whether `log(0)` is reached at all, and under nagfor's default `-ieee=stop` that is
+        ! the difference between an answer and a dead process. The flag is saved and restored, so a
+        ! flag raised elsewhere in the run is neither hidden nor blamed on this call.
+        sup = ieee_support_flag(ieee_divide_by_zero, 0.0_real64)
+        if (sup) then
+            call ieee_get_flag(ieee_divide_by_zero, saved)
+            call ieee_set_flag(ieee_divide_by_zero, .false.)
+        end if
+        v = [2.0_real64, 0.0_real64, 8.0_real64, 16.0_real64]
+        call pf_gmean(v, g)
+        if (sup) then
+            call ieee_get_flag(ieee_divide_by_zero, flag)
+            call ieee_set_flag(ieee_divide_by_zero, saved .or. flag)
+        else
+            flag = .false.
+        end if
+        call check(error, g == 0.0_real64, "the control: a zero still gives exactly zero")
+        if (allocated(error)) return
+        call check(error, .not. flag, &
+            "pf_gmean must not reach log(0); under nagfor's default traps that ends the process")
+    end subroutine test_p8_mutation_gaps
 
     !> Whether two reals agree to the golden tolerance.
     logical function close_to(got, want)

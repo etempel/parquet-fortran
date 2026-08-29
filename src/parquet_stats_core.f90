@@ -781,6 +781,91 @@ contains
         if (present(ok)) ok = (m == m)
     end procedure mean_f64
 
+    !> The shared body of `pf_gmean` and `pf_hmean`: one compaction, then one accumulation.
+    !!
+    !! **Every value that would reach a transcendental or a reciprocal is screened first**, and
+    !! that ordering is a correctness requirement rather than tidiness. `log(0)` raises
+    !! `IEEE_DIVIDE_BY_ZERO` and `log` of a negative raises `IEEE_INVALID`; nagfor unmasks the IEEE
+    !! traps by default (`-ieee=stop`), so reaching either would terminate the process on that
+    !! compiler while returning a plausible `0` or NaN on every other one. The same screen also
+    !! keeps a propagating NaN away from `log` under `skipnan = .false.`, which matters on ifx --
+    !! it pairs adjacent transcendental calls into one SVML call, and the vectorised routine
+    !! raises `IEEE_INVALID` on a NaN element where the scalar one is quiet.
+    subroutine power_mean(values, what, harmonic, is_valid, weights, skipnan, res, &
+            n_null, n_nan, ok)
+        real(real64), intent(in) :: values(:)             !! the population, before exclusions.
+        character(len=*), intent(in) :: what              !! the public procedure's name.
+        logical, intent(in) :: harmonic                   !! .true. for hmean, .false. for gmean.
+        logical, intent(in), optional :: is_valid(:)      !! per element: .false. marks a null.
+        real(real64), intent(in), optional :: weights(:)  !! per element weight.
+        logical, intent(in), optional :: skipnan          !! .true. (default) excludes a NaN.
+        real(real64), intent(out) :: res                  !! the mean.
+        integer(int64), intent(out), optional :: n_null   !! how many were null.
+        integer(int64), intent(out), optional :: n_nan    !! how many were NaN.
+        logical, intent(out), optional :: ok              !! .false. when the answer is NaN.
+        real(real64), allocatable :: keep(:), keep_w(:)
+        real(real64) :: acc_sum, w_sum, w, x
+        integer(int64) :: m, nnull, nnan, i
+        logical :: poisoned, saw_zero
+
+        call stats_compact(values, what, is_valid, weights, skipnan, keep, keep_w, m, nnull, &
+            nnan, poisoned)
+        if (present(n_null)) n_null = nnull
+        if (present(n_nan)) n_nan = nnan
+        res = stats_nan()
+        if (present(ok)) ok = .false.
+        if (m == 0_int64 .or. poisoned) return
+
+        ! Pass one: the domain screen, in full, before any arithmetic. A negative anywhere makes
+        ! the answer undefined; a zero makes it exactly zero. Both are DATA conditions and neither
+        ! aborts. The two are checked in this order because a population holding both a negative
+        ! and a zero has no defined mean, and scipy answers NaN there too.
+        saw_zero = .false.
+        do i = 1_int64, m
+            if (keep(i) < 0.0_real64) return
+            if (keep(i) == 0.0_real64) saw_zero = .true.
+        end do
+        if (saw_zero) then
+            ! Exactly 0, which is the limit of both means and what scipy returns. Reported as a
+            ! defined answer -- `ok` is .true. -- because it is one.
+            res = 0.0_real64
+            if (present(ok)) ok = .true.
+            return
+        end if
+
+        acc_sum = 0.0_real64
+        w_sum = 0.0_real64
+        do i = 1_int64, m
+            w = 1.0_real64
+            if (allocated(keep_w)) w = keep_w(i)
+            x = keep(i)
+            if (harmonic) then
+                acc_sum = acc_sum + w / x
+            else
+                acc_sum = acc_sum + w * log(x)
+            end if
+            w_sum = w_sum + w
+        end do
+        if (w_sum <= 0.0_real64) return
+        if (harmonic) then
+            if (acc_sum <= 0.0_real64) return
+            res = w_sum / acc_sum
+        else
+            res = exp(acc_sum / w_sum)
+        end if
+        if (present(ok)) ok = (res == res)
+    end subroutine power_mean
+
+    module procedure gmean_f64
+        call power_mean(values, "pf_gmean", .false., is_valid, weights, skipnan, g, &
+            n_null, n_nan, ok)
+    end procedure gmean_f64
+
+    module procedure hmean_f64
+        call power_mean(values, "pf_hmean", .true., is_valid, weights, skipnan, h, &
+            n_null, n_nan, ok)
+    end procedure hmean_f64
+
     module procedure variance_f64
         type(stats_acc) :: acc
         logical :: freq
@@ -1530,6 +1615,183 @@ contains
     end procedure obj_range
 
     ! ---- The traversal counter ----
+
+    !> One block of the two-sample pass two: the three centred cross sums about `(mux, muy)`.
+    !!
+    !! The single-sample twin of this is `stats_block_moments`, and the two are deliberately
+    !! adjacent: `sxy` accumulates `w*dx*dy` in exactly the order that one accumulates `w*d*d`,
+    !! which is what makes the diagonal case bit-identical rather than merely close.
+    pure subroutine stats_pair_block(kx, ky, kw, mux, muy, j, m, o1x, o1y, oxx, oxy, oyy)
+        real(real64), intent(in) :: kx(:)     !! the surviving first-sample values.
+        real(real64), intent(in) :: ky(:)     !! the surviving second-sample values, paired.
+        real(real64), intent(in), optional :: kw(:)
+        !! their weights. Absent for an unweighted population, which is what an unallocated actual
+        !! argument produces; its presence is the weighted test.
+        real(real64), intent(in) :: mux       !! the first sample's mean from pass one.
+        real(real64), intent(in) :: muy       !! the second's.
+        integer(int64), intent(in) :: j       !! which block, 1-based.
+        integer(int64), intent(in) :: m       !! how many pairs there are in total.
+        real(real64), intent(out) :: o1x      !! `sum(w*dx)`, the first re-centring term.
+        real(real64), intent(out) :: o1y      !! `sum(w*dy)`.
+        real(real64), intent(out) :: oxx      !! `sum(w*dx**2)`.
+        real(real64), intent(out) :: oxy      !! `sum(w*dx*dy)`.
+        real(real64), intent(out) :: oyy      !! `sum(w*dy**2)`.
+        real(real64) :: s1x, s1y, sxx, sxy, syy, dx, dy
+        integer(int64) :: i, lo, hi
+
+        lo = (j - 1_int64) * STATS_BLOCK + 1_int64
+        hi = min(j * STATS_BLOCK, m)
+        s1x = 0.0_real64
+        s1y = 0.0_real64
+        sxx = 0.0_real64
+        sxy = 0.0_real64
+        syy = 0.0_real64
+        if (present(kw)) then
+            do i = lo, hi
+                dx = kx(i) - mux
+                dy = ky(i) - muy
+                s1x = s1x + kw(i) * dx
+                s1y = s1y + kw(i) * dy
+                sxx = sxx + kw(i) * dx * dx
+                sxy = sxy + kw(i) * dx * dy
+                syy = syy + kw(i) * dy * dy
+            end do
+        else
+            do i = lo, hi
+                dx = kx(i) - mux
+                dy = ky(i) - muy
+                s1x = s1x + dx
+                s1y = s1y + dy
+                sxx = sxx + dx * dx
+                sxy = sxy + dx * dy
+                syy = syy + dy * dy
+            end do
+        end if
+        o1x = s1x
+        o1y = s1y
+        oxx = sxx
+        oxy = sxy
+        oyy = syy
+    end subroutine stats_pair_block
+
+    module procedure stats_pair_moments
+        real(real64), allocatable :: px(:), py(:), pw(:)
+        real(real64), allocatable :: q1x(:), q1y(:), qxx(:), qxy(:), qyy(:)
+        real(real64) :: sx, sy, sw, mux, muy, dx, dy
+        integer(int64) :: i, c, nb
+        logical :: weighted
+
+        weighted = allocated(kw)
+        mean_x = stats_nan()
+        mean_y = stats_nan()
+        sxx = 0.0_real64
+        sxy = 0.0_real64
+        syy = 0.0_real64
+        w_sum = 0.0_real64
+        w_sq = 0.0_real64
+        if (m == 0_int64) return
+
+        ! ---- Pass one: the two weighted sums, over the SAME fixed block tree stats_engine uses.
+        !
+        ! Same block size, same partial-sum layout, same `pair_reduce` walk -- so for `x == y` the
+        ! sum below is bit-identical to the one `stats_engine` computes for its `vsum`. That is
+        ! the whole reason this lives beside it.
+        allocate(px(m / STATS_BLOCK + 1_int64), py(m / STATS_BLOCK + 1_int64))
+        if (weighted) allocate(pw(m / STATS_BLOCK + 1_int64))
+        nb = 0_int64
+        c = 0_int64
+        sx = 0.0_real64
+        sy = 0.0_real64
+        sw = 0.0_real64
+        do i = 1_int64, m
+            if (weighted) then
+                sx = sx + kw(i) * kx(i)
+                sy = sy + kw(i) * ky(i)
+                sw = sw + kw(i)
+            else
+                sx = sx + kx(i)
+                sy = sy + ky(i)
+                sw = sw + 1.0_real64
+            end if
+            c = c + 1_int64
+            if (c == STATS_BLOCK) then
+                nb = nb + 1_int64
+                px(nb) = sx
+                py(nb) = sy
+                if (weighted) pw(nb) = sw
+                sx = 0.0_real64
+                sy = 0.0_real64
+                sw = 0.0_real64
+                c = 0_int64
+            end if
+        end do
+        if (c > 0_int64) then
+            nb = nb + 1_int64
+            px(nb) = sx
+            py(nb) = sy
+            if (weighted) pw(nb) = sw
+        end if
+        call pair_reduce(px, nb)
+        call pair_reduce(py, nb)
+        if (weighted) then
+            call pair_reduce(pw, nb)
+            w_sum = pw(1)
+            w_sq = sum_of_squares(kw, m, nb)
+        else
+            w_sum = real(m, real64)
+            w_sq = real(m, real64)
+        end if
+        if (w_sum <= 0.0_real64) return
+        mux = px(1) / w_sum
+        muy = py(1) / w_sum
+
+        ! ---- Pass two: the three centred sums, then the same re-centring correction.
+        allocate(q1x(nb), q1y(nb), qxx(nb), qxy(nb), qyy(nb))
+        do i = 1_int64, nb
+            call stats_pair_block(kx, ky, mux=mux, muy=muy, j=i, m=m, kw=kw, o1x=q1x(i), &
+                o1y=q1y(i), oxx=qxx(i), oxy=qxy(i), oyy=qyy(i))
+        end do
+        call pair_reduce(q1x, nb)
+        call pair_reduce(q1y, nb)
+        call pair_reduce(qxx, nb)
+        call pair_reduce(qxy, nb)
+        call pair_reduce(qyy, nb)
+        ! `sum(w*(dx - deltax)*(dy - deltay))` expanded, using `sum(w*dx) = deltax*W`: every cross
+        ! term collapses and one product of the two rounding errors is left. The single-sample
+        ! form `q2 - delta**2 * W` is this with `x == y`.
+        !
+        ! **The correction is UNOBSERVABLE at double precision, and is kept for symmetry.** Both
+        ! deltas are rounding errors of size `eps*|mu|`, so the term is about `eps**2 * mu**2 * W`
+        ! against a `qxy` of about `var * W` -- it could only matter once `|mu|/sigma` passed
+        ! `1/eps`, roughly 1e16, a shift at which the values themselves have no resolution left.
+        ! Deleting it changes no answer, and a mutation that does so SURVIVES the whole suite.
+        ! It stays because this procedure has to mirror `stats_engine` line for line: that is what
+        ! makes `pf_cov(x, x)` exactly `pf_variance(x)` by construction rather than by the
+        ! correction happening to vanish on whatever fixture a test picked. The single-sample
+        ! engine needs it for real, because `m3` and `m4` pick the error up linearly.
+        dx = q1x(1) / w_sum
+        dy = q1y(1) / w_sum
+        mean_x = mux + dx
+        mean_y = muy + dy
+        sxx = qxx(1) - dx * dx * w_sum
+        sxy = qxy(1) - dx * dy * w_sum
+        syy = qyy(1) - dy * dy * w_sum
+    end procedure stats_pair_moments
+
+    module procedure stats_mean_sd
+        type(stats_acc) :: acc
+        integer :: dd
+
+        dd = 1
+        if (present(ddof)) dd = ddof
+        call stats_engine(values, what, is_valid, skipnan=skipnan, acc=acc)
+        mean = acc%mean
+        sd = sqrt(stats_var(acc, dd, .false.))
+        n_valid = acc%n_valid
+        n_null = acc%n_null
+        n_nan = acc%n_nan
+        saw_nan = acc%saw_nan
+    end procedure stats_mean_sd
 
     module procedure stats_compact
         type(stats_acc) :: acc

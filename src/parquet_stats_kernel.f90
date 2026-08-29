@@ -41,6 +41,25 @@ contains
     !! type-bound procedure -- so ifx does not build a class descriptor per call. The scalar
     !! metadata queries below have no typed twin and are called once per column, which is the same
     !! trade `parquet_sorting` already makes for its key extraction.
+    !> Combines two columns' validity masks into the one a PAIRWISE statistic needs.
+    !!
+    !! Either input may be unallocated, which `col_to_real64` uses to mean "this column has no
+    !! nulls". When BOTH are, `both` is left unallocated too -- and an unallocated allocatable
+    !! passed to an `optional` dummy is ABSENT, so the core takes its no-mask fast path with no
+    !! branch at the call site. That is the same idiom `col_to_real64` documents for one column.
+    subroutine pair_mask(a, b, n, both)
+        logical, allocatable, intent(in) :: a(:)          !! the first column's validity, or none.
+        logical, allocatable, intent(in) :: b(:)          !! the second's, or none.
+        integer(int64), intent(in) :: n                   !! how many pairs there are.
+        logical, allocatable, intent(out) :: both(:)      !! their conjunction, or unallocated.
+
+        if (.not. allocated(a) .and. .not. allocated(b)) return
+        allocate(both(n))
+        both = .true.
+        if (allocated(a)) both = both .and. a
+        if (allocated(b)) both = both .and. b
+    end subroutine pair_mask
+
     subroutine col_to_real64(col, what, is_valid, v, mask)
         type(parquet_column), intent(in), target :: col
         !! the column. `target` because `parquet_column_data_ptr` requires it; the pointer never
@@ -252,6 +271,20 @@ contains
         call mean_f64(wide, m, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok, threads=threads)
     end procedure mean_i32
 
+    module procedure gmean_i32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call gmean_f64(wide, g, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok, threads=threads)
+    end procedure gmean_i32
+
+    module procedure hmean_i32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call hmean_f64(wide, h, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok, threads=threads)
+    end procedure hmean_i32
+
     module procedure variance_i32
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
@@ -366,6 +399,41 @@ contains
             threads=threads)
     end procedure describe_i32
 
+    module procedure cov_i32
+        real(real64), allocatable :: wx(:), wy(:)
+        allocate(wx(size(x, kind=int64)), wy(size(y, kind=int64)))
+        wx = real(x, real64)
+        wy = real(y, real64)
+        call cov_f64(wx, wy, c, is_valid=is_valid, weights=weights, ddof=ddof, n_null=n_null, n_nan=n_nan, &
+            ok=ok)
+    end procedure cov_i32
+
+    module procedure corr_i32
+        real(real64), allocatable :: wx(:), wy(:)
+        allocate(wx(size(x, kind=int64)), wy(size(y, kind=int64)))
+        wx = real(x, real64)
+        wy = real(y, real64)
+        call corr_f64(wx, wy, r, is_valid=is_valid, weights=weights, method=method, n_null=n_null, &
+            n_nan=n_nan, ok=ok)
+    end procedure corr_i32
+
+    module procedure zscore_i32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call zscore_f64(wide, z, is_valid=is_valid, ddof=ddof, out_valid=out_valid, n_null=n_null, ok=ok)
+    end procedure zscore_i32
+
+    module procedure sigma_clipped_stats_i32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call sigma_clipped_stats_f64(wide, mean, median, stddev, sigma=sigma, sigma_lower=sigma_lower, &
+            sigma_upper=sigma_upper, maxiters=maxiters, cenfunc=cenfunc, stdfunc=stdfunc, &
+            n_clipped=n_clipped, keep=keep, converged=converged, is_valid=is_valid, &
+            n_null=n_null, ok=ok, threads=threads)
+    end procedure sigma_clipped_stats_i32
+
     module procedure sum_i64
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
@@ -379,6 +447,20 @@ contains
         wide = real(values, real64)
         call mean_f64(wide, m, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok, threads=threads)
     end procedure mean_i64
+
+    module procedure gmean_i64
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call gmean_f64(wide, g, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok, threads=threads)
+    end procedure gmean_i64
+
+    module procedure hmean_i64
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call hmean_f64(wide, h, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok, threads=threads)
+    end procedure hmean_i64
 
     module procedure variance_i64
         real(real64), allocatable :: wide(:)
@@ -494,6 +576,41 @@ contains
             threads=threads)
     end procedure describe_i64
 
+    module procedure cov_i64
+        real(real64), allocatable :: wx(:), wy(:)
+        allocate(wx(size(x, kind=int64)), wy(size(y, kind=int64)))
+        wx = real(x, real64)
+        wy = real(y, real64)
+        call cov_f64(wx, wy, c, is_valid=is_valid, weights=weights, ddof=ddof, n_null=n_null, n_nan=n_nan, &
+            ok=ok)
+    end procedure cov_i64
+
+    module procedure corr_i64
+        real(real64), allocatable :: wx(:), wy(:)
+        allocate(wx(size(x, kind=int64)), wy(size(y, kind=int64)))
+        wx = real(x, real64)
+        wy = real(y, real64)
+        call corr_f64(wx, wy, r, is_valid=is_valid, weights=weights, method=method, n_null=n_null, &
+            n_nan=n_nan, ok=ok)
+    end procedure corr_i64
+
+    module procedure zscore_i64
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call zscore_f64(wide, z, is_valid=is_valid, ddof=ddof, out_valid=out_valid, n_null=n_null, ok=ok)
+    end procedure zscore_i64
+
+    module procedure sigma_clipped_stats_i64
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call sigma_clipped_stats_f64(wide, mean, median, stddev, sigma=sigma, sigma_lower=sigma_lower, &
+            sigma_upper=sigma_upper, maxiters=maxiters, cenfunc=cenfunc, stdfunc=stdfunc, &
+            n_clipped=n_clipped, keep=keep, converged=converged, is_valid=is_valid, &
+            n_null=n_null, ok=ok, threads=threads)
+    end procedure sigma_clipped_stats_i64
+
     module procedure sum_f32
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
@@ -509,6 +626,22 @@ contains
         call mean_f64(wide, m, is_valid=is_valid, weights=weights, skipnan=skipnan, n_null=n_null, &
             n_nan=n_nan, ok=ok, threads=threads)
     end procedure mean_f32
+
+    module procedure gmean_f32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call gmean_f64(wide, g, is_valid=is_valid, weights=weights, skipnan=skipnan, n_null=n_null, &
+            n_nan=n_nan, ok=ok, threads=threads)
+    end procedure gmean_f32
+
+    module procedure hmean_f32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call hmean_f64(wide, h, is_valid=is_valid, weights=weights, skipnan=skipnan, n_null=n_null, &
+            n_nan=n_nan, ok=ok, threads=threads)
+    end procedure hmean_f32
 
     module procedure variance_f32
         real(real64), allocatable :: wide(:)
@@ -624,6 +757,42 @@ contains
             skipnan=skipnan, threads=threads)
     end procedure describe_f32
 
+    module procedure cov_f32
+        real(real64), allocatable :: wx(:), wy(:)
+        allocate(wx(size(x, kind=int64)), wy(size(y, kind=int64)))
+        wx = real(x, real64)
+        wy = real(y, real64)
+        call cov_f64(wx, wy, c, is_valid=is_valid, weights=weights, ddof=ddof, n_null=n_null, n_nan=n_nan, &
+            ok=ok)
+    end procedure cov_f32
+
+    module procedure corr_f32
+        real(real64), allocatable :: wx(:), wy(:)
+        allocate(wx(size(x, kind=int64)), wy(size(y, kind=int64)))
+        wx = real(x, real64)
+        wy = real(y, real64)
+        call corr_f64(wx, wy, r, is_valid=is_valid, weights=weights, method=method, n_null=n_null, &
+            n_nan=n_nan, ok=ok)
+    end procedure corr_f32
+
+    module procedure zscore_f32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call zscore_f64(wide, z, is_valid=is_valid, ddof=ddof, skipnan=skipnan, out_valid=out_valid, &
+            n_null=n_null, ok=ok)
+    end procedure zscore_f32
+
+    module procedure sigma_clipped_stats_f32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call sigma_clipped_stats_f64(wide, mean, median, stddev, sigma=sigma, sigma_lower=sigma_lower, &
+            sigma_upper=sigma_upper, maxiters=maxiters, cenfunc=cenfunc, stdfunc=stdfunc, &
+            n_clipped=n_clipped, keep=keep, converged=converged, is_valid=is_valid, &
+            skipnan=skipnan, n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
+    end procedure sigma_clipped_stats_f32
+
     module procedure sum_bool
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
@@ -637,6 +806,20 @@ contains
         wide = merge(1.0_real64, 0.0_real64, values)
         call mean_f64(wide, m, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok, threads=threads)
     end procedure mean_bool
+
+    module procedure gmean_bool
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = merge(1.0_real64, 0.0_real64, values)
+        call gmean_f64(wide, g, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok, threads=threads)
+    end procedure gmean_bool
+
+    module procedure hmean_bool
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = merge(1.0_real64, 0.0_real64, values)
+        call hmean_f64(wide, h, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok, threads=threads)
+    end procedure hmean_bool
 
     module procedure variance_bool
         real(real64), allocatable :: wide(:)
@@ -752,6 +935,41 @@ contains
             threads=threads)
     end procedure describe_bool
 
+    module procedure cov_bool
+        real(real64), allocatable :: wx(:), wy(:)
+        allocate(wx(size(x, kind=int64)), wy(size(y, kind=int64)))
+        wx = merge(1.0_real64, 0.0_real64, x)
+        wy = merge(1.0_real64, 0.0_real64, y)
+        call cov_f64(wx, wy, c, is_valid=is_valid, weights=weights, ddof=ddof, n_null=n_null, n_nan=n_nan, &
+            ok=ok)
+    end procedure cov_bool
+
+    module procedure corr_bool
+        real(real64), allocatable :: wx(:), wy(:)
+        allocate(wx(size(x, kind=int64)), wy(size(y, kind=int64)))
+        wx = merge(1.0_real64, 0.0_real64, x)
+        wy = merge(1.0_real64, 0.0_real64, y)
+        call corr_f64(wx, wy, r, is_valid=is_valid, weights=weights, method=method, n_null=n_null, &
+            n_nan=n_nan, ok=ok)
+    end procedure corr_bool
+
+    module procedure zscore_bool
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = merge(1.0_real64, 0.0_real64, values)
+        call zscore_f64(wide, z, is_valid=is_valid, ddof=ddof, out_valid=out_valid, n_null=n_null, ok=ok)
+    end procedure zscore_bool
+
+    module procedure sigma_clipped_stats_bool
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = merge(1.0_real64, 0.0_real64, values)
+        call sigma_clipped_stats_f64(wide, mean, median, stddev, sigma=sigma, sigma_lower=sigma_lower, &
+            sigma_upper=sigma_upper, maxiters=maxiters, cenfunc=cenfunc, stdfunc=stdfunc, &
+            n_clipped=n_clipped, keep=keep, converged=converged, is_valid=is_valid, &
+            n_null=n_null, ok=ok, threads=threads)
+    end procedure sigma_clipped_stats_bool
+
     module procedure sum_col
         real(real64), allocatable :: wide(:)
         logical, allocatable :: mask(:)
@@ -767,6 +985,22 @@ contains
         call mean_f64(wide, m, is_valid=mask, weights=weights, skipnan=skipnan, n_null=n_null, n_nan=n_nan, &
             ok=ok, threads=threads)
     end procedure mean_col
+
+    module procedure gmean_col
+        real(real64), allocatable :: wide(:)
+        logical, allocatable :: mask(:)
+        call col_to_real64(values, "pf_gmean", is_valid, wide, mask)
+        call gmean_f64(wide, g, is_valid=mask, weights=weights, skipnan=skipnan, n_null=n_null, n_nan=n_nan, &
+            ok=ok, threads=threads)
+    end procedure gmean_col
+
+    module procedure hmean_col
+        real(real64), allocatable :: wide(:)
+        logical, allocatable :: mask(:)
+        call col_to_real64(values, "pf_hmean", is_valid, wide, mask)
+        call hmean_f64(wide, h, is_valid=mask, weights=weights, skipnan=skipnan, n_null=n_null, n_nan=n_nan, &
+            ok=ok, threads=threads)
+    end procedure hmean_col
 
     module procedure variance_col
         real(real64), allocatable :: wide(:)
@@ -881,6 +1115,43 @@ contains
         call describe_f64(wide, s, is_valid=mask, weights=weights, weight_type=weight_type, skipnan=skipnan, &
             threads=threads)
     end procedure describe_col
+
+    module procedure cov_col
+        real(real64), allocatable :: wx(:), wy(:)
+        logical, allocatable :: mx(:), my(:), both(:)
+        call col_to_real64(x, "pf_cov", is_valid, wx, mx)
+        call col_to_real64(y, "pf_cov", v=wy, mask=my)
+        call pair_mask(mx, my, size(wx, kind=int64), both)
+        call cov_f64(wx, wy, c, is_valid=both, weights=weights, ddof=ddof, n_null=n_null, n_nan=n_nan, ok=ok)
+    end procedure cov_col
+
+    module procedure corr_col
+        real(real64), allocatable :: wx(:), wy(:)
+        logical, allocatable :: mx(:), my(:), both(:)
+        call col_to_real64(x, "pf_corr", is_valid, wx, mx)
+        call col_to_real64(y, "pf_corr", v=wy, mask=my)
+        call pair_mask(mx, my, size(wx, kind=int64), both)
+        call corr_f64(wx, wy, r, is_valid=both, weights=weights, method=method, n_null=n_null, n_nan=n_nan, &
+            ok=ok)
+    end procedure corr_col
+
+    module procedure zscore_col
+        real(real64), allocatable :: wide(:)
+        logical, allocatable :: mask(:)
+        call col_to_real64(values, "pf_zscore", is_valid, wide, mask)
+        call zscore_f64(wide, z, is_valid=mask, ddof=ddof, skipnan=skipnan, out_valid=out_valid, &
+            n_null=n_null, ok=ok)
+    end procedure zscore_col
+
+    module procedure sigma_clipped_stats_col
+        real(real64), allocatable :: wide(:)
+        logical, allocatable :: mask(:)
+        call col_to_real64(values, "pf_sigma_clipped_stats", is_valid, wide, mask)
+        call sigma_clipped_stats_f64(wide, mean, median, stddev, sigma=sigma, sigma_lower=sigma_lower, &
+            sigma_upper=sigma_upper, maxiters=maxiters, cenfunc=cenfunc, stdfunc=stdfunc, &
+            n_clipped=n_clipped, keep=keep, converged=converged, is_valid=mask, &
+            skipnan=skipnan, n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
+    end procedure sigma_clipped_stats_col
 
     module procedure obj_compute_i32
         real(real64), allocatable :: wide(:)

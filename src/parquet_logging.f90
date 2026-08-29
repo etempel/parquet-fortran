@@ -603,6 +603,77 @@ contains
         end if
     end subroutine put
 
+    !> Appends caller-supplied text -- a message, a context or a name -- with every ANSI escape
+    !! sequence removed when `strip` is set.
+    !!
+    !! Called instead of `put` for exactly the three fields whose text comes from the CALLER rather
+    !! than from the sink's own layout, so that codes a caller embedded with `pf_log_color` reach
+    !! only the sinks that colour at all. Layout literals are deliberately NOT stripped: a template
+    !! is chosen per sink, so colour written into one is already a per-sink decision.
+    !!
+    !! Recognises the CSI form `ESC [ <parameters> <intermediates> <final>`, which covers every code
+    !! `pf_log_color` can produce and every cursor/erase sequence besides. **An unterminated CSI
+    !! takes the rest of the text with it**, and a lone `ESC` is dropped, since a bare escape
+    !! character reaching a log file is the thing this exists to prevent.
+    !!
+    !! Advances `pos` by exactly the retained length whether or not `out` is present, so the
+    !! measuring and writing passes of `render_line` cannot disagree -- see `put`, and the length
+    !! contract `emit_to_sink`'s over-long fallback rests on.
+    subroutine put_caller_text(out, pos, text, strip)
+        character(len=*), intent(out), optional :: out  !! Absent while measuring, present while writing.
+        integer, intent(inout) :: pos                   !! Next free position; advanced by the retained length.
+        character(len=*), intent(in) :: text            !! The caller-supplied text.
+        logical, intent(in) :: strip                    !! Whether to remove ANSI escape sequences.
+        integer :: i, j, n, c
+
+        ! The fast path, and the one every uncoloured record takes: one scan, then the plain copy.
+        if (.not. strip) then
+            call put(out, pos, text)
+            return
+        end if
+        if (index(text, ESC) == 0) then
+            call put(out, pos, text)
+            return
+        end if
+
+        n = len(text)
+        i = 1
+        do while (i <= n)
+            if (text(i:i) /= ESC) then
+                ! Place the whole run up to the next ESC in one call rather than byte by byte.
+                j = i
+                do while (j < n)
+                    if (text(j + 1:j + 1) == ESC) exit
+                    j = j + 1
+                end do
+                call put(out, pos, text(i:j))
+                i = j + 1
+                cycle
+            end if
+            if (i + 1 > n) return                     ! a trailing lone ESC: nothing more to place
+            if (text(i + 1:i + 1) /= "[") then
+                i = i + 1                             ! not a CSI: drop the ESC alone
+                cycle
+            end if
+            ! A CSI: intermediate and parameter bytes 0x20-0x3F, then one final byte 0x40-0x7E.
+            ! The scan advances over the former and stops on anything else, so the byte it stops
+            ! on is the final byte when it is in range and a malformed one otherwise.
+            j = i + 2
+            do while (j <= n)
+                c = iachar(text(j:j))
+                if (c < 32 .or. c > 63) exit
+                j = j + 1
+            end do
+            if (j > n) return                         ! unterminated: the tail goes with it
+            c = iachar(text(j:j))
+            if (c >= 64 .and. c <= 126) then
+                i = j + 1                             ! consumed through the final byte
+            else
+                i = j                                 ! malformed: resume at the offending byte
+            end if
+        end do
+    end subroutine put_caller_text
+
     !> Renders one record for one sink, either measuring it (`out` absent) or writing it
     !> (`out` present). One implementation for both passes, so the length this reports and the
     !> bytes it writes cannot disagree -- which is what makes the over-long fallback in
@@ -617,8 +688,12 @@ contains
         character(len=16) :: lvl
         character(len=2) :: code
         character(len=12) :: num
-        logical :: empty
+        logical :: empty, strip
 
+        ! A sink that does not colour also does not carry a caller's own codes: whatever
+        ! `pf_log_color` embedded in the message, the context or a name is removed on the way out.
+        ! `PF_LOG_COLOR_ALWAYS` is how a caller keeps them, on a file sink as much as a console one.
+        strip = .not. sk%use_color
         pos = 1
         do k = 1, sk%nops
             associate (o => sk%op(k))
@@ -657,7 +732,7 @@ contains
                     if (ln < 8) call put(out, pos, repeat(" ", 8 - ln))
                     if (sk%use_color .and. cn > 0) call put(out, pos, ANSI_RESET)
                 case (FLD_NAME)
-                    call put(out, pos, rec%name(1:rec%name_len))
+                    call put_caller_text(out, pos, rec%name(1:rec%name_len), strip)
                 case (FLD_THREAD)
                     write (num, '(i0)') rec%thread
                     call put(out, pos, trim(num))
@@ -665,9 +740,9 @@ contains
                     write (num, '(i0)') rec%rank
                     call put(out, pos, trim(num))
                 case (FLD_CONTEXT)
-                    call put(out, pos, rec%context(1:rec%context_len))
+                    call put_caller_text(out, pos, rec%context(1:rec%context_len), strip)
                 case (FLD_MESSAGE)
-                    call put(out, pos, msg)
+                    call put_caller_text(out, pos, msg, strip)
                 end select
             end associate
         end do

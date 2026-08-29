@@ -50,6 +50,7 @@ contains
         call pf_log_color("also nice!", PF_LOG_C_MAGENTA, msg2)
         !
         call pf_log_trace("trace message")
+        !call pf_log_set_color(PF_LOG_COLOR_ALWAYS)
         !
         call pf_log_set_level(PF_LEVEL_trace, name="deep") ! <-- set lowering
         call pf_log_trace(msg1//" and "//msg2, "deep")
@@ -118,7 +119,7 @@ contains
         call lg1%info("logger 1 info")
         call lg2%info("logger 2 info")
         !
-        call pf_log_fatal("This is a fatal message")
+        !call pf_log_fatal("This is a fatal message")
         call pf_log_close()
         !
     end subroutine test_logging

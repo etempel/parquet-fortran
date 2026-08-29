@@ -272,7 +272,9 @@ and `PF_LOG_FMT_FULL` (date, level, name, thread and context — the file defaul
 
 Per sink: `PF_LOG_COLOR_AUTO` (the default), `_NEVER`, `_ALWAYS`. `AUTO` colours a console sink
 only, and only when `NO_COLOR` is unset and `TERM` is set to something other than `dumb`. A file
-sink under `AUTO` never colours, so there is nothing to strip out of a log file.
+sink under `AUTO` never colours, so a log file holds no escape sequences — **including any you
+embedded yourself**, which a sink that does not colour removes on the way out. See
+[Colouring message text yourself](#colouring-message-text-yourself).
 
 Colour is applied to the rendered `{level}` field, on this fixed mapping:
 
@@ -287,6 +289,8 @@ Colour is applied to the rendered `{level}` field, on this fixed mapping:
 
 `INFO` is deliberately uncoloured: it is the ordinary case, and colouring it would colour every
 line, which is what the colouring exists to avoid.
+
+### Colouring message text yourself
 
 To colour message text yourself, use `pf_log_color(text, code, out)`:
 
@@ -317,9 +321,30 @@ Being plain strings, they are a convenience rather than a closed set — `pf_log
 ANSI code, so `pf_log_color(text, "38;5;208", out)` gives 256-colour orange. `GREEN`, `BLUE` and
 `MAGENTA` are exported for your use and are read by nothing in this module.
 
-**Colouring message text yourself is independent of a sink's policy**, which governs only the
-`{level}` field. Set the sink to `PF_LOG_COLOR_NEVER` if you want your own codes and no others,
-and be aware that codes you embed reach a file sink as escape sequences whatever the policy says.
+**Which codes are emitted is a sink's own decision, and it covers yours as well as the
+`{level}` field's.** A sink that colours passes your codes through; a sink that does not removes
+them, so the same call reaches a terminal in red and a log file as plain text, with no second
+message to compose and nothing to strip afterwards.
+
+| sink | policy | `{level}` | your own codes |
+|---|---|---|---|
+| console | `AUTO` (and `NO_COLOR` unset) | coloured | kept |
+| console | `NEVER`, or `NO_COLOR` set | plain | **removed** |
+| file, or a unit | `AUTO` | plain | **removed** |
+| any | `ALWAYS` | coloured | kept |
+
+Removal applies to the `{message}`, `{context}` and `{name}` fields — the three whose text comes
+from you. It does **not** apply to your layout template, since a template is chosen per sink, so
+colour written into one is already a decision about that sink alone.
+
+Any ANSI control sequence is removed, not only the colour codes above. One that never terminates
+takes the rest of that field's text with it, on the grounds that a bare escape character in a log
+file is the thing being prevented — so keep a `pf_log_color` result whole rather than slicing it,
+and note that `{context}` saturates at `PF_LOG_MAX_CONTEXT` bytes and could in principle be cut
+mid-sequence.
+
+`PF_LOG_COLOR_ALWAYS` is the way to keep your own codes on a sink that would otherwise drop them —
+a file you intend to `cat` rather than archive, say.
 
 ## Emitting a record: the call signature
 

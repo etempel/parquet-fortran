@@ -1310,6 +1310,124 @@ contains
             "pf_log_color wraps text in the code it was given")
     end subroutine test_color_policies
 
+    !> A sink that does not colour strips a caller's OWN codes out of the message, the context and
+    !> the name -- and one that does colour keeps them, which is the negative control the whole test
+    !> rests on: a renderer that stripped unconditionally would satisfy every positive assertion
+    !> here. The level tag's own colour is asserted on both arms, so a strip reaching the layout as
+    !> well as the caller's data fails rather than passing quietly.
+    subroutine test_strip_color_from_uncolored_sinks(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
+        character(len=*), parameter :: path = "test_run/log_strip_color.txt"
+        character(len=512), allocatable :: lines(:)
+        character(len=1), parameter :: esc = achar(27)
+        type(pf_logger) :: lg
+        character(len=:), allocatable :: hot
+        integer :: n, sk
+
+        call pf_log_color("42 rows", PF_LOG_C_RED, hot)
+
+        call lg%init(console = .false.)
+        call lg%add_file(path, append = .false., format = "{level}|{name|}|{context|}|{message}", &
+            sink = sk)
+        call lg%warning("dropped " // hot)                                        ! 1  AUTO: stripped
+        call lg%warning("named", name = "a" // hot // "b")                        ! 2  name too
+        call lg%warning("ctx", context = "in" // hot)                             ! 3  context too
+        call lg%warning("cursor" // esc // "[2Ktail")                             ! 4  any CSI, not just SGR
+        call lg%warning("cut" // esc // "[31")                                    ! 5  unterminated: tail goes
+        call lg%warning("bare" // esc)                                            ! 6  a lone trailing ESC
+        call lg%warning("mid" // esc // "end")                                    ! 7  a lone ESC mid-text
+        call lg%set_color(PF_LOG_COLOR_ALWAYS, sink = sk)
+        call lg%warning("kept " // hot)                                           ! 8  ALWAYS: preserved
+        call lg%close()
+        call read_back(path, lines, n)
+
+        call check(error, n == 8, "all eight records reached the file")
+        if (allocated(error)) return
+        call check(error, .not. has(lines(1), esc), "a file sink under AUTO strips the caller's own codes")
+        if (allocated(error)) return
+        call check(error, has(lines(1), "dropped 42 rows"), "stripping leaves the message text itself intact")
+        if (allocated(error)) return
+        call check(error, .not. has(lines(2), esc) .and. has(lines(2), "|a42 rowsb|"), &
+            "a coloured {name} is stripped and its text kept")
+        if (allocated(error)) return
+        call check(error, .not. has(lines(3), esc) .and. has(lines(3), "|in42 rows|"), &
+            "a coloured {context} is stripped and its text kept")
+        if (allocated(error)) return
+        call check(error, .not. has(lines(4), esc) .and. has(lines(4), "cursortail"), &
+            "a non-SGR CSI sequence is stripped too")
+        if (allocated(error)) return
+        call check(error, .not. has(lines(5), esc) .and. has(lines(5), "|cut") .and. &
+            .not. has(lines(5), "31"), "an unterminated CSI takes the rest of the text with it")
+        if (allocated(error)) return
+        call check(error, .not. has(lines(6), esc) .and. has(lines(6), "|bare"), &
+            "a trailing lone ESC is dropped")
+        if (allocated(error)) return
+        call check(error, .not. has(lines(7), esc) .and. has(lines(7), "|midend"), &
+            "a lone ESC mid-text is dropped without taking the text after it")
+        if (allocated(error)) return
+
+        ! The control: the same message on the same sink, colouring, keeps every byte.
+        call check(error, has(lines(8), hot), "PF_LOG_COLOR_ALWAYS keeps the caller's own codes")
+        if (allocated(error)) return
+        call check(error, has(lines(8), esc // "[" // PF_LOG_C_YELLOW // "m"), &
+            "the level tag is still coloured on the colouring arm")
+        if (allocated(error)) return
+        call check(error, .not. has(lines(1), esc // "[" // PF_LOG_C_YELLOW // "m"), &
+            "the level tag is uncoloured on the stripping arm, as AUTO already required")
+    end subroutine test_strip_color_from_uncolored_sinks
+
+    !> Stripping happens while the line is RENDERED, so the length `emit_to_sink` measures and the
+    !> bytes it writes are produced by one walk and cannot disagree. Both sides of the
+    !> `PF_LOG_MAX_LINE` fork are exercised, since the measuring pass is what chooses between the
+    !> fixed buffer and the allocatable fallback: a strip applied after rendering would size the
+    !> fallback from the unstripped length and leave the line trailing blanks, and a strip whose
+    !> measuring and writing arms disagreed would truncate it. The assertion is on the exact byte
+    !> count -- "no ESC in the file" alone passes against both faults.
+    subroutine test_strip_color_line_length(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
+        character(len=*), parameter :: path = "test_run/log_strip_long.txt"
+        character(len=1), parameter :: esc = achar(27)
+        character(len=:), allocatable :: over, under
+        character(len=8192) :: buf
+        type(pf_logger) :: lg
+        integer :: u, ios, i, n1, n2
+
+        ! 100 five-byte SGR codes among 4000 payload bytes: 4500 raw, 4000 once stripped, so this
+        ! record crosses PF_LOG_MAX_LINE before stripping and sits under it after.
+        under = ""
+        do i = 1, 100
+            under = under // esc // "[31m" // repeat("x", 40)
+        end do
+        ! 5000 payload bytes: over PF_LOG_MAX_LINE even stripped, so it takes the allocatable path.
+        over = ""
+        do i = 1, 100
+            over = over // esc // "[32m" // repeat("y", 50)
+        end do
+
+        call lg%init(console = .false.)
+        call lg%add_file(path, append = .false., format = "{message}")
+        call lg%warning(under)
+        call lg%warning(over)
+        call lg%close()
+
+        n1 = -1
+        n2 = -1
+        open (newunit = u, file = path, action = "read", status = "old", iostat = ios)
+        call check(error, ios == 0, "the long-line fixture file was written")
+        if (allocated(error)) return
+        read (u, '(a)', iostat = ios) buf
+        if (ios == 0) n1 = len_trim(buf)
+        read (u, '(a)', iostat = ios) buf
+        if (ios == 0) n2 = len_trim(buf)
+        close (u)
+
+        call check(error, n1 == 4000, "a record over PF_LOG_MAX_LINE only before stripping " // &
+            "is written at its stripped length exactly")
+        if (allocated(error)) return
+        call check(error, n2 == 5000, "a record over PF_LOG_MAX_LINE after stripping too keeps " // &
+            "every byte through the allocatable fallback")
+    end subroutine test_strip_color_line_length
+
     !> A blank line obeys a sink's rank filter. It has no level for a threshold to act on, so the
     !> rank filter is the only thing standing between a rank-filtered sink and every rank's blank
     !> lines -- and the sink that should receive them is the control proving the filter is not
@@ -1867,6 +1985,9 @@ contains
             new_unittest("date, time, stamp and elapsed render in shape", test_layout_clock_fields), &
             new_unittest("thread renders, and an unset rank collapses", test_layout_thread_and_rank), &
             new_unittest("colour policy is honoured in all three arms", test_color_policies), &
+            new_unittest("an uncoloured sink strips the caller's own codes", &
+                test_strip_color_from_uncolored_sinks), &
+            new_unittest("stripping keeps the rendered length exact", test_strip_color_line_length), &
             new_unittest("a blank line obeys a sink's rank filter", test_blank_obeys_rank_filter), &
             new_unittest("the built-in templates render and PF_LEVEL_OFF admits nothing", &
                 test_builtin_templates_and_off), &

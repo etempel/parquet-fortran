@@ -324,6 +324,11 @@ per record, inside a region; configuration happens once, before one.
   [A note on functions returning `character(len=:), allocatable`](#a-note-on-functions-returning-characterlen-allocatable)
   for the neighbouring hazard, and the type's own documentation for why those two absences are
   load-bearing rather than incidental.
+- **The name stack is per thread; the logger's own name is shared.**
+  `pf_log_push_name`/`pf_log_pop_name` act on the calling thread's own stack, so a subprogram
+  entered on one thread tags only that thread's records. `%set_name` sets the logger-wide base and
+  is configuration — set it outside the region, for the same `threadprivate` reason as the context
+  base below.
 - **The context stack is per thread; its base is shared.** `pf_log_push_context`/`_pop_context`
   act on the calling thread's own stack, so each thread tags its records with its own frames.
   `pf_log_set_context` sets one shared base rendered ahead of them, and is configuration — set it

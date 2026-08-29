@@ -29,6 +29,7 @@ omitted.
 - [Emitting a record: the call signature](#emitting-a-record-the-call-signature)
 - [Building a message](#building-a-message)
 - [Logging from an OpenMP parallel region](#logging-from-an-openmp-parallel-region)
+- [What every logger shares](#what-every-logger-shares)
 - [Deduplicating a repeated record](#deduplicating-a-repeated-record)
 - [Turning down a library's noise](#turning-down-a-librarys-noise)
 - [Rank filtering, for MPI and worker pools](#rank-filtering-for-mpi-and-worker-pools)
@@ -126,6 +127,10 @@ call lg%set_format("{level}: {message}", sink = s_err)
   already manages its own output file adds logging to it.
 - **`%set_level(level, [sink], [name])`** sets the logger threshold, one sink's, or a per-name
   override. Passing both `sink` and `name` is refused rather than guessed at.
+- **`%set_name(name)` / `%get_name(name)`** set and read the logger's own base name, and
+  **`%get_full_name(name)`** reads it composed with this thread's pushed frames — the text `{name}`
+  actually renders. `pf_log_push_name`/`pf_log_pop_name` add a scoped frame to it — see
+  [`name`, in more detail](#name-in-more-detail).
 - **`%unset_level([name], [found])`** removes one per-name override, or every one when `name` is
   absent. Removing an override that is not there is a no-op; pass `found` to learn which it was.
 - **`%set_format` / `%set_color`** with no `sink` apply to every sink *currently* attached, and do
@@ -363,6 +368,50 @@ override that applies to the record — see
 [Turning down a library's noise](#turning-down-a-librarys-noise). A name it has no rule for simply
 uses the logger's own threshold.
 
+**A subprogram can add to the name without knowing what its caller chose**, by pushing a frame for
+the duration of a call:
+
+```fortran
+subroutine io_read(...)
+    integer :: frame
+    call pf_log_push_name("io", frame)   ! "prog" -> "prog.io" for records from here down
+    ...
+    call pf_log_pop_name(frame)
+end subroutine
+```
+
+Frames nest (`prog.io.stat`), they are joined with dots, and the composed name is what a per-name
+override matches — so an application can turn one subprogram up to `PF_LEVEL_TRACE` while the rest
+of the program stays quiet, and that subprogram needs to know nothing about it.
+
+- **`frame` is an optional balance token.** Push reports the depth it created; pop asserts the
+  frame on top is still yours and aborts if it is not. Without it, a callee that pushed and forgot
+  to pop would have *its* frame silently removed by your pop while yours leaked on — a bug that
+  then surfaces nowhere near its cause. Casual use can omit it on both calls.
+- **`pf_log_clear_names()`** empties the stack from any depth. It is a *boundary* reset, not the
+  counterpart of a push: put it at the top of a loop body and the body is self-healing whatever a
+  callee left behind. `pf_log_name_depth()` reports the current depth.
+- **Popping an empty stack is a no-op**, so a defensive pop in cleanup code is safe.
+- **The stack is per thread, and it is not per logger** — every logger in the process renders the
+  frames the calling thread has pushed, so a frame pushed inside a parallel region is private to the
+  thread that pushed it but shared by every logger on it (see
+  [What every logger shares](#what-every-logger-shares)). Push a frame *before* a region and only
+  the initial thread sees it — a logger-wide name belongs on the logger, via `%set_name`; only
+  dynamic scope belongs on the stack.
+- **One segment per push, and an over-long name aborts.** A frame containing a dot is refused, and
+  a composed name longer than `PF_LOG_MAX_NAME` (64) aborts rather than being truncated: a
+  shortened name would silently change which override matches.
+- **An explicit per-call `name=` replaces the stack rather than composing with it**, the same rule
+  `context=` follows.
+- **`%get_name(name)`** reports the logger's own base — what `%set_name` set, without the calling
+  thread's frames. Prefer `push_name` where the addition is scoped to a call; reach for `get_name`
+  when you genuinely need to read the base and compose something yourself.
+- **`%get_full_name(name)`** reports the composed name instead — base plus this thread's frames,
+  exactly the text `{name}` renders and exactly what a per-name override is matched against, so it
+  is the call that answers "why did my override not fire?". Both have `pf_log_*` forms. The answer
+  is per thread, and a composed name too long to fit aborts here just as it would on emission,
+  rather than reporting a name the logger would never use.
+
 **An override works in both directions.** It can make a name stricter than the logger, and it can
 make one *more verbose* — which is how a single subsystem is turned up for debugging while the rest
 of the program stays quiet:
@@ -501,6 +550,57 @@ That post-region `%flush()` is **required** — without it, whatever is still bu
 It recovers every thread's records, not just the calling thread's. `slot_bytes` sizes the per-thread
 buffer, which is worth setting on a machine with hundreds of threads.
 
+**The mode is sticky, and `%flush` does not clear it.** A flush drains what is buffered at that
+moment; the logger stays in buffered mode afterwards, so every later record — including an ordinary
+serial one, nowhere near a parallel region — goes into the collector too, and is lost if the program
+ends without another flush. Switch back once the region is done:
+
+```fortran
+call lg%set_thread_mode(PF_LOG_THREAD_DIRECT)     ! flushes every slot on the way out
+```
+
+That flushes and restores immediate emission in one call, so it is the better closing move than a
+bare `%flush()` whenever the parallel section is over. Records are not emitted directly while the
+mode is on, deliberately: a serial record written straight to the stream would appear *ahead* of the
+buffered records that preceded it.
+
+## What every logger shares
+
+A `type(pf_logger)` owns its level, its name, its rank, its sinks — each with its own format,
+colour, threshold, `flush_level` and `only_rank` — and its per-name override rules. Declaring a
+second logger gives you a second, independent destination set.
+
+**Six things are not per-logger.** They live in the module, so a change made through any logger, or
+through the `pf_log_*` default logger, is seen by every logger in the process:
+
+| what | changed by | scope |
+|---|---|---|
+| the name stack | `pf_log_push_name` / `pf_log_pop_name` / `pf_log_clear_names` | one thread |
+| the context frames | `pf_log_push_context` / `pf_log_pop_context` / `pf_log_clear_context` | one thread |
+| the base context | `pf_log_set_context` | whole process |
+| the `once=` / `every=` table | any record carrying either; `pf_log_reset_dedup` | whole process |
+| the buffered-mode collector | `%set_thread_mode(PF_LOG_THREAD_BUFFERED, [slot_bytes])`, `%flush` | whole process |
+| the `{elapsed}` origin | the first `%init` or `%add_*` anywhere | whole process |
+
+So `call pf_log_push_name("io")` composes `.io` onto the name of records from *your* logger, the
+default logger and every other logger alike, until it is popped. That is the intended behaviour —
+the stack says which part of the program is speaking, which is a property of where you are, not of
+which logger you happen to hold — but it is worth knowing before pushing a frame in library code.
+
+Four consequences that are easy to meet by surprise:
+
+- **`lg2%flush()` emits `lg1`'s buffered records too.** There is one collector, keyed by output
+  unit, which is exactly what stops two loggers writing to the same unit from interleaving
+  mid-line. The thread *mode* is per-logger, though — a record only reaches the collector when the
+  logger emitting it is itself in buffered mode.
+- **`%set_thread_mode` sizes the slots for everyone.** `slot_bytes` on one logger reallocates the
+  one shared slot array, flushing whatever it held first.
+- **The dedup key is `name|level|message`.** Two loggers with different names never share a
+  counter, but they do share the 256-key table (`PF_LOG_MAX_DEDUP_KEYS`), and `%init`/`%close`
+  deliberately do not clear it — one logger must not un-suppress another's messages.
+- **Machinery warnings are one-shot per process**, not per logger: a truncated context, a full
+  dedup table or a failed console write reports once, whichever logger provoked it.
+
 ## Deduplicating a repeated record
 
 ```fortran
@@ -523,10 +623,10 @@ the Fortran counterpart of `logging.getLogger('matplotlib').setLevel('INFO')`:
 call pf_log_set_level(PF_LEVEL_WARNING, name = "qfeet.io")   ! and every "qfeet.io.*" below it
 ```
 
-The override applies to that name and to any name below it in dotted notation, and it works in
-**both** directions — turning one name *up* to `PF_LEVEL_TRACE` for debugging is the same call with
-a lower level. See [`name`, in more detail](#name-in-more-detail) for that direction and what it
-costs.
+The override applies to that name and to any name below it in dotted notation — including a name
+a subprogram composed with `pf_log_push_name` — and it works in **both** directions: turning one
+name *up* to `PF_LEVEL_TRACE` for debugging is the same call with a lower level. See
+[`name`, in more detail](#name-in-more-detail) for that direction and what it costs.
 
 `%enabled(level)` cannot see a name, so it answers conservatively (it may say yes for a record an
 override will drop); pass `%enabled(level, name = ...)` for the exact answer.

@@ -1705,6 +1705,12 @@ contains
                 test_logging_implicit_console_retires), &
             new_unittest("unset_level validates its name as set_level does", &
                 test_logging_unset_level_empty_name), &
+            new_unittest("an unbalanced name pop is caught by its frame token", &
+                test_logging_pop_name_token_mismatch), &
+            new_unittest("a name frame containing a dot is refused", &
+                test_logging_push_name_with_dot), &
+            new_unittest("a composed name over PF_LOG_MAX_NAME aborts, not truncates", &
+                test_logging_composed_name_too_long), &
             new_unittest("the same logging calls made correctly do not abort", &
                 test_logging_control_does_not_abort) &
             ]
@@ -3829,6 +3835,35 @@ contains
             failure_message="unset_level with an empty name= was expected to abort", &
             required_stderr="name= is empty")
     end subroutine test_logging_unset_level_empty_name
+
+    !> An unbalanced name pop aborts at the site that can fix it, rather than silently removing
+    !> a callee's frame and leaving the caller's to leak.
+    subroutine test_logging_pop_name_token_mismatch(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "logging_pop_name_token_mismatch", &
+            expect_abort=.true., &
+            failure_message="a name pop with a stale frame token was expected to abort", &
+            required_stderr="unbalanced")
+    end subroutine test_logging_pop_name_token_mismatch
+
+    !> push_name takes one segment: a dotted frame could not be popped off as a unit.
+    subroutine test_logging_push_name_with_dot(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "logging_push_name_with_dot", &
+            expect_abort=.true., &
+            failure_message="a name frame containing a dot was expected to be refused", &
+            required_stderr="one segment")
+    end subroutine test_logging_push_name_with_dot
+
+    !> The composed name aborts rather than truncating, because a shortened name silently changes
+    !> which per-name override matches.
+    subroutine test_logging_composed_name_too_long(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "logging_composed_name_too_long", &
+            expect_abort=.true., &
+            failure_message="a composed name over PF_LOG_MAX_NAME was expected to abort", &
+            required_stderr="PF_LOG_MAX_NAME")
+    end subroutine test_logging_composed_name_too_long
 
     !> The negative control: the same calls made correctly must not abort.
     subroutine test_logging_control_does_not_abort(error)

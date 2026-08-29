@@ -1168,6 +1168,9 @@ scenarios=(
     "logging_file_cannot_open:1"
     "logging_implicit_console:0"
     "logging_unset_level_empty_name:1"
+    "logging_pop_name_token_mismatch:1"
+    "logging_push_name_with_dot:1"
+    "logging_composed_name_too_long:1"
     "logging_control:0"
 )
 

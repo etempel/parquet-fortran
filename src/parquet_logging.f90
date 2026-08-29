@@ -75,6 +75,7 @@ module parquet_logging
     integer, parameter, public :: PF_LOG_MAX_FORMAT_OPS     = 32     !! Parsed placeholders plus literals in one template.
     integer, parameter, public :: PF_LOG_MAX_CONTEXT        = 256    !! Rendered context bytes. SATURATES.
     integer, parameter, public :: PF_LOG_MAX_CONTEXT_DEPTH  = 8      !! Context frames whose text is kept. SATURATES.
+    integer, parameter, public :: PF_LOG_MAX_NAME_DEPTH     = 8      !! Name frames one thread may stack. ABORTS.
     integer, parameter, public :: PF_LOG_MAX_LINE           = 4096   !! Rendered line before the allocatable fallback.
     integer, parameter, public :: PF_LOG_MAX_BUFFER_BYTES   = 65536  !! Per-thread collector slot, text. Default, settable.
     integer, parameter, public :: PF_LOG_MIN_BUFFER_BYTES   = 4096   !! Floor validated against set_thread_mode's slot_bytes.
@@ -112,6 +113,8 @@ module parquet_logging
     public :: pf_log_level_from_name, pf_log_level_name, pf_log_color, pf_log_elapsed
     public :: pf_log_set_context, pf_log_push_context, pf_log_pop_context
     public :: pf_log_clear_context, pf_log_context_depth
+    public :: pf_log_push_name, pf_log_pop_name, pf_log_clear_names, pf_log_name_depth
+    public :: pf_log_get_name, pf_log_get_full_name
     public :: pf_log_configure_from_env
 
     ! ---- Private sink kinds ----
@@ -238,6 +241,8 @@ module parquet_logging
         procedure :: set_format => logger_set_format !! Sets the layout template of one sink or of every current sink.
         procedure :: set_color => logger_set_color !! Sets the colour policy of one sink or of every current sink.
         procedure :: set_name => logger_set_name !! Sets the name rendered as `{name}` and keyed on by overrides.
+        procedure :: get_name => logger_get_name !! Reports this logger's own base name.
+        procedure :: get_full_name => logger_get_full_name !! Base name plus this thread's pushed frames.
         procedure :: set_rank => logger_set_rank !! Sets the rank rendered as `{rank}` and tested by a rank filter.
         procedure :: set_thread_mode => logger_set_thread_mode !! Selects direct or buffered emission.
         procedure :: close => logger_close !! Closes units this logger opened and clears every sink.
@@ -308,6 +313,23 @@ module parquet_logging
     integer, save :: t_context_depth = 0                          !! TRUE depth, which may exceed the kept frames.
     integer, save :: t_context_ends(PF_LOG_MAX_CONTEXT_DEPTH) = 0 !! End offset of each kept frame.
     !$omp threadprivate(t_context, t_context_len, t_context_depth, t_context_ends)
+
+    ! ---- Per-thread NAME stack. Only the owning thread ever touches its own copy. ----
+    !
+    ! This holds the SUFFIX appended to whichever logger's own `%name` is emitting -- so it is a
+    ! stack of frames, not a composed name, and it composes with every logger rather than
+    ! belonging to one. That is deliberate and mirrors the context stack: the base is per-logger
+    ! configuration, the frames are per-thread dynamic scope.
+    !
+    ! **Unlike the context stack, this one ABORTS rather than saturating.** A context is
+    ! descriptive, so dropping a frame's text degrades a diagnostic and nothing more. A name is
+    ! FUNCTIONAL -- it is what `set_level(..., name=)` matches against -- so a silently truncated
+    ! name changes which records are emitted, with nothing to report it.
+    character(len=PF_LOG_MAX_NAME), save :: t_name = ""        !! This thread's rendered frames, dot-joined.
+    integer, save :: t_name_len = 0                            !! Used length of `t_name`.
+    integer, save :: t_name_depth = 0                          !! Frames currently pushed.
+    integer, save :: t_name_ends(PF_LOG_MAX_NAME_DEPTH) = 0    !! End offset of each frame.
+    !$omp threadprivate(t_name, t_name_len, t_name_depth, t_name_ends)
 
     ! ---- Process-wide once=/every= table. Every access is inside the output critical section. ----
     ! Deliberately NO initializer: `= ""` would place 32 KB of literal blanks in the data
@@ -1101,12 +1123,18 @@ contains
         ! The name is resolved and the per-name threshold applied to it BEFORE the clock reads and
         ! the context assembly (and before `rec` exists at all). A record dropped by a name rule
         ! therefore pays a string copy and a short prefix scan, not the whole record.
+        !
+        ! An explicit per-call `name=` wins outright -- it is not composed with the thread's name
+        ! stack, the same rule `context=` follows. Otherwise the record's name is the logger's own
+        ! base followed by this thread's pushed frames. With an empty stack, which is the
+        ! overwhelmingly common case, that is the single copy it has always been plus one integer
+        ! test; the composition is bounded by construction, since push_name refuses a frame that
+        ! would not fit.
         if (present(name)) then
             rlen = min(len_trim(name), PF_LOG_MAX_NAME)
             rname = name(1:rlen)
         else
-            rlen = len_trim(self%name)
-            rname = self%name
+            call compose_name(self%name, rname, rlen)
         end if
         if (level < effective_level(self, rname, rlen)) return
 
@@ -1157,6 +1185,55 @@ contains
         end do
         end block
     end subroutine emit_core
+
+    !> Composes a logger's own name with the calling thread's pushed name frames.
+    !!
+    !! The one place the composition rule lives. `emit_core` renders `{name}` from it and
+    !! `%get_full_name` reports it, so the two cannot disagree about the name a per-name override
+    !! is matched against -- a second copy of the rule could drift, and the symptom would be an
+    !! override that fires on the record but not on the query a user made to explain it.
+    !!
+    !! With an empty stack, which is the overwhelmingly common case, this is the single copy the
+    !! name has always cost plus one integer test.
+    subroutine compose_name(base, out, outlen)
+        character(len=*), intent(in) :: base                !! The logger's own name.
+        character(len=PF_LOG_MAX_NAME), intent(out) :: out  !! Receives the composed name, blank-padded.
+        integer, intent(out) :: outlen                      !! Its used length.
+
+        outlen = len_trim(base)
+        out = base
+        if (t_name_len == 0) return
+        if (outlen == 0) then
+            out = t_name(1:t_name_len)
+            outlen = t_name_len
+            return
+        end if
+        ! Aborts rather than truncating, and this is the one overflow `push_name` cannot catch at
+        ! its own call site: the stack is logger-agnostic, so how long the composed name comes out
+        ! depends on which logger emits. Truncating would silently change which override matches.
+        if (outlen + 1 + t_name_len > PF_LOG_MAX_NAME) call name_overflow_abort(base)
+        out(outlen + 1:outlen + 1) = "."
+        out(outlen + 2:outlen + 1 + t_name_len) = t_name(1:t_name_len)
+        outlen = outlen + 1 + t_name_len
+    end subroutine compose_name
+
+    !> Aborts when a logger's own name plus the calling thread's pushed frames will not fit.
+    !!
+    !! A separate procedure for two reasons. It keeps the message building -- two blank-padded
+    !! locals and a concatenation -- out of `emit_core`, which must stay lean on the path every
+    !! record takes. And gfortran rejects a variable substring bound inside an `error stop`
+    !! stop-code (`self%name(1:rlen)`), which nagfor accepts, so the text has to be assembled from
+    !! `trim`ed whole variables: assigning the used part of the frame buffer to a fixed-length
+    !! local blank-pads the tail, which a bare `trim(t_name)` would not, since a popped frame
+    !! leaves its text behind past `t_name_len`.
+    subroutine name_overflow_abort(base)
+        character(len=*), intent(in) :: base  !! The logger's own name.
+        character(len=PF_LOG_MAX_NAME) :: frames
+
+        frames = t_name(1:t_name_len)
+        error stop "pf_logger: logger name '" // trim(base) // "' with the pushed name frames '" // &
+            trim(frames) // "' is longer than PF_LOG_MAX_NAME characters"
+    end subroutine name_overflow_abort
 
     ! ================================================================================
     ! Configuration. Single-threaded only -- configure before entering a parallel region.
@@ -1583,6 +1660,39 @@ contains
         self%name = name
     end subroutine logger_set_name
 
+    !> Reports this logger's own base name -- what `%set_name` last set, without the calling
+    !> thread's pushed name frames.
+    !!
+    !! Deliberately the BASE only. Composing it with the frames would make the answer depend on
+    !! which thread asked, and the reason to read a name is to build a longer one from it, for
+    !! which the base is what you want. `pf_log_push_name` is the way to add a frame without
+    !! reading anything at all, and is preferable wherever the addition is scoped to a call.
+    subroutine logger_get_name(self, name)
+        class(pf_logger), intent(in) :: self   !! The logger being asked.
+        character(len=*), intent(out) :: name  !! Receives the base name, blank-padded.
+
+        name = self%name
+    end subroutine logger_get_name
+
+    !> Reports the name a record from this logger would carry right now -- the base composed with
+    !> the calling thread's pushed name frames, exactly as `{name}` renders it.
+    !!
+    !! This is the answer to "why did/didn't my per-name override fire?", since the composed name
+    !! is what an override is matched against. It is **per thread**: two threads at different stack
+    !! depths get different answers from the same logger, which is why `%get_name` reports the base
+    !! instead and this one says so in its name. A composed name that would not fit
+    !! `PF_LOG_MAX_NAME` aborts here exactly as it would on emission, rather than reporting a
+    !! truncated name the logger would never actually use.
+    subroutine logger_get_full_name(self, name)
+        class(pf_logger), intent(in) :: self   !! The logger being asked.
+        character(len=*), intent(out) :: name  !! Receives the composed name, blank-padded.
+        character(len=PF_LOG_MAX_NAME) :: full
+        integer :: n
+
+        call compose_name(self%name, full, n)
+        name = full(1:n)
+    end subroutine logger_get_full_name
+
     !> Sets the rank rendered as `{rank}` and tested by a sink's `only_rank` filter.
     !!
     !! The number is whatever identity the program already has -- an MPI rank, a worker index, a
@@ -1708,6 +1818,10 @@ contains
             write (u, '(a)') "  thread mode : buffered"
         else
             write (u, '(a)') "  thread mode : direct"
+        end if
+        if (t_name_depth > 0) then
+            write (u, '(a,i0,a)') "  name frames : ", t_name_depth, &
+                " pushed on this thread: ." // t_name(1:t_name_len)
         end if
         do i = 1, self%nrules
             call level_text(self%rule(i)%level, lvl, ln)
@@ -2218,6 +2332,21 @@ contains
         call g_default%set_name(name)
     end subroutine pf_log_set_name
 
+    !> Reports the default logger's own base name. See `%get_name`.
+    subroutine pf_log_get_name(name)
+        character(len=*), intent(out) :: name  !! Receives the base name, blank-padded.
+
+        call g_default%get_name(name)
+    end subroutine pf_log_get_name
+
+    !> Reports the default logger's composed name -- base plus this thread's frames. See
+    !> `%get_full_name`.
+    subroutine pf_log_get_full_name(name)
+        character(len=*), intent(out) :: name  !! Receives the composed name, blank-padded.
+
+        call g_default%get_full_name(name)
+    end subroutine pf_log_get_full_name
+
     !> Sets the default logger's rank.
     subroutine pf_log_set_rank(rank)
         integer, intent(in) :: rank  !! The rank, or `PF_LOG_RANK_ANY` to clear it.
@@ -2410,6 +2539,120 @@ contains
 
         depth = t_context_depth
     end function pf_log_context_depth
+
+    ! ================================================================================
+    ! The per-thread name stack
+    ! ================================================================================
+
+    !> Appends one frame to the calling thread's name stack, so records carry
+    !> `<logger name>.<frame>...` until the frame is popped.
+    !!
+    !! This is how a subprogram names itself without knowing the name its caller chose:
+    !!
+    !! ```fortran
+    !! subroutine io_read(...)
+    !!     integer :: frame
+    !!     call pf_log_push_name("io", frame)   ! "prog" -> "prog.io"
+    !!     ...
+    !!     call pf_log_pop_name(frame)
+    !! end subroutine
+    !! ```
+    !!
+    !! The composed name is what `%set_level(..., name=)` matches against, so an application can
+    !! turn one subprogram up or down without that subprogram knowing anything about it.
+    !!
+    !! **The stack is per-thread and composes with every logger**, exactly like the context stack:
+    !! the base belongs to the logger, the frames belong to the thread. A frame pushed inside a
+    !! parallel region is private to the thread that pushed it. A frame pushed *before* a region
+    !! reaches only the initial thread, since an OpenMP `threadprivate` copy is undefined in every
+    !! other thread at the start of a region -- which is why a logger-wide name belongs on the
+    !! logger, via `%set_name`, and only dynamic scope belongs here.
+    !!
+    !! **An over-long name aborts rather than truncating.** A context saturates because it is
+    !! descriptive; a name decides which records are emitted, so a silently shortened one changes
+    !! behaviour with nothing to report it.
+    !!
+    !! An explicit per-call `name=` is not composed with the stack -- it replaces it outright, the
+    !! same rule `context=` follows.
+    subroutine pf_log_push_name(text, frame)
+        character(len=*), intent(in) :: text     !! This frame's name segment.
+        integer, intent(out), optional :: frame  !! Receives the depth created, for a checked `pop`.
+        integer :: n, need
+        character(len=16) :: a
+
+        n = len_trim(text)
+        if (n == 0) error stop "pf_log_push_name: text is empty"
+        if (index(text(1:n), ".") > 0) then
+            ! One call, one segment: a frame carrying its own dot could not be popped back off as
+            ! a unit, and it would silently create per-name override levels nobody pushed.
+            error stop "pf_log_push_name: text must be one segment, with no '.': '" // text(1:n) // "'"
+        end if
+        if (t_name_depth >= PF_LOG_MAX_NAME_DEPTH) then
+            write (a, '(i0)') PF_LOG_MAX_NAME_DEPTH
+            error stop "pf_log_push_name: the name stack is already PF_LOG_MAX_NAME_DEPTH (" // &
+                trim(a) // ") frames deep"
+        end if
+        need = t_name_len + n
+        if (t_name_len > 0) need = need + 1
+        if (need > PF_LOG_MAX_NAME) then
+            error stop "pf_log_push_name: pushing '" // text(1:n) // "' would make the name " // &
+                "frames longer than PF_LOG_MAX_NAME characters"
+        end if
+        if (t_name_len > 0) then
+            t_name(t_name_len + 1:t_name_len + 1) = "."
+            t_name_len = t_name_len + 1
+        end if
+        t_name(t_name_len + 1:t_name_len + n) = text(1:n)
+        t_name_len = t_name_len + n
+        t_name_depth = t_name_depth + 1
+        t_name_ends(t_name_depth) = t_name_len
+        if (present(frame)) frame = t_name_depth
+    end subroutine pf_log_push_name
+
+    !> Pops the most recent name frame from the calling thread's stack.
+    !!
+    !! **On an empty stack this is a no-op, not an error** -- a defensive pop in cleanup code is a
+    !! reasonable thing to write. Pass the `frame` token `pf_log_push_name` reported to assert that
+    !! the frame on top is still yours: a callee that pushed and forgot to pop would otherwise have
+    !! its frame silently removed by your pop while yours leaked on, which is a bug that then
+    !! surfaces nowhere near its cause.
+    subroutine pf_log_pop_name(frame)
+        integer, intent(in), optional :: frame  !! The token `pf_log_push_name` reported.
+        character(len=16) :: a, b
+
+        if (present(frame)) then
+            if (frame /= t_name_depth) then
+                write (a, '(i0)') frame
+                write (b, '(i0)') t_name_depth
+                error stop "pf_log_pop_name: frame token " // trim(a) // " does not match the " // &
+                    "current name depth " // trim(b) // "; a push and a pop are unbalanced"
+            end if
+        end if
+        if (t_name_depth <= 0) return
+        t_name_depth = t_name_depth - 1
+        if (t_name_depth <= 0) then
+            t_name_len = 0
+        else
+            t_name_len = t_name_ends(t_name_depth)
+        end if
+    end subroutine pf_log_pop_name
+
+    !> Resets the calling thread's name stack to empty, leaving every logger's own name untouched.
+    !!
+    !! A **boundary** reset, not the counterpart of `pf_log_push_name`: it is what makes a loop
+    !! body self-healing, whatever a callee did or failed to undo.
+    subroutine pf_log_clear_names()
+
+        t_name_depth = 0
+        t_name_len = 0
+        t_name = ""
+    end subroutine pf_log_clear_names
+
+    !> The calling thread's current name-stack depth, for asserting that pushes and pops balance.
+    integer function pf_log_name_depth() result(depth)
+
+        depth = t_name_depth
+    end function pf_log_name_depth
 
     ! ================================================================================
     ! Free-standing helpers

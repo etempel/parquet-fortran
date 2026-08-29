@@ -2203,6 +2203,12 @@ program error_scenarios
         call scenario_logging_implicit_console()
     case ("logging_unset_level_empty_name")
         call scenario_logging_unset_level_empty_name()
+    case ("logging_pop_name_token_mismatch")
+        call scenario_logging_pop_name_token_mismatch()
+    case ("logging_push_name_with_dot")
+        call scenario_logging_push_name_with_dot()
+    case ("logging_composed_name_too_long")
+        call scenario_logging_composed_name_too_long()
     case ("logging_control")
         call scenario_logging_control()
     case default
@@ -19177,6 +19183,43 @@ contains
         print '(a)', "unexpectedly accepted an empty name= in unset_level"
     end subroutine scenario_logging_unset_level_empty_name
 
+    !> A pop whose token does not match the current depth means a push and a pop are unbalanced
+    !> somewhere -- silently removing the wrong frame is what the token exists to prevent.
+    subroutine scenario_logging_pop_name_token_mismatch()
+        integer :: frame
+
+        call pf_log_clear_names()
+        call pf_log_push_name("io", frame)
+        call pf_log_push_name("stat")          ! a callee that forgot to pop
+        call pf_log_pop_name(frame)
+        print '(a)', "unexpectedly accepted a name pop whose token did not match the depth"
+    end subroutine scenario_logging_pop_name_token_mismatch
+
+    !> One push, one segment: a frame carrying its own dot could not be popped off as a unit.
+    subroutine scenario_logging_push_name_with_dot()
+
+        call pf_log_clear_names()
+        call pf_log_push_name("io.stat")
+        print '(a)', "unexpectedly accepted a name frame containing a dot"
+    end subroutine scenario_logging_push_name_with_dot
+
+    !> A composed name over PF_LOG_MAX_NAME aborts rather than truncating: the name decides which
+    !> records are emitted, so a silently shortened one changes behaviour with nothing to report
+    !> it. This is the overflow push_name cannot catch at its own site, since how long the name
+    !> comes out depends on which logger emits.
+    subroutine scenario_logging_composed_name_too_long()
+        type(pf_logger) :: lg
+        character(len=PF_LOG_MAX_NAME) :: long_base
+
+        long_base = repeat("b", PF_LOG_MAX_NAME - 2)
+        call pf_log_clear_names()
+        call lg%init(console=.false., name=trim(long_base))
+        call lg%add_file("test_run/es_log_longname.txt", append=.false., format="{name}")
+        call pf_log_push_name("frame")
+        call lg%info("this record cannot carry the composed name")
+        print '(a)', "unexpectedly emitted a record whose composed name exceeds PF_LOG_MAX_NAME"
+    end subroutine scenario_logging_composed_name_too_long
+
     !> The negative control for every scenario above: the same configuration calls, made
     !> correctly, must exit cleanly. Without it each abort test would pass just as happily
     !> against a guard that fired unconditionally.
@@ -19184,6 +19227,7 @@ contains
         type(pf_logger) :: lg
         integer :: s, frame, lev
         logical :: ok
+        character(len=PF_LOG_MAX_NAME) :: gotname
 
         call lg%init(console=.false.)
         call lg%add_file("test_run/es_log_control.txt", append=.false., format="{stamp} {message}", &
@@ -19197,6 +19241,11 @@ contains
         call pf_log_pop_context(frame)
         call lg%unset_level("a.b")
         call lg%unset_level()
+        call pf_log_clear_names()
+        call pf_log_push_name("io", frame)
+        call pf_log_pop_name(frame)
+        call pf_log_pop_name()
+        call lg%get_name(gotname)
         call pf_log_level_from_name("verbose", lev, ok)
         if (ok) print '(a)', "control: an unknown level name reported success"
         call lg%error("control record")

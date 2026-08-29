@@ -27,6 +27,7 @@ contains
         use parquet_logging
         integer :: i, sink
         type(pf_logger) :: lg
+        type(pf_logger) :: lg1, lg2
         character(len=:),allocatable:: msg1,msg2
         !
         call pf_log_info("Starting test_logging subroutine")
@@ -75,6 +76,7 @@ contains
         call pf_log_info("test 1")
         !
         call pf_log_blank()
+        call pf_log_set_name("final")
         call pf_log_set_level(PF_LEVEL_ERROR, sink=2)
         call pf_log_set_thread_mode(PF_LOG_THREAD_BUFFERED)   ! BEFORE the region
         !$omp parallel do
@@ -84,6 +86,40 @@ contains
         end do
         !$omp end parallel do
         call pf_log_flush()
+        call pf_log_set_thread_mode(PF_LOG_THREAD_DIRECT)
+        !
+        call pf_log_info("After flush 1")
+        !
+        ! test push and pop name
+        call pf_log_set_format("{time} [{level}] {name}: {message}")
+        call pf_log_info("After flush 2")
+        !
+        call pf_log_blank()
+        call lg1%init(level = PF_LEVEL_DEBUG, name="lg1")
+        call lg2%init(level = PF_LEVEL_DEBUG, name="lg2")
+        call pf_log_info("After flush 3") ! <-- why this do not print?
+        call lg2%flush()
+        call lg1%set_format("{time} [{level}] {name}: {message}")
+        call lg2%set_format("{time} [{level}] {name}: {message}")
+        call pf_log_push_name("io")
+        call lg1%get_name(msg1)
+        call lg2%get_name(msg2)
+        print*, "Logger 1 name: ", msg1
+        print*, "Logger 2 name: ", msg2
+        call pf_log_get_name(msg1)
+        print*, "Current logger name: ", msg1
+        ! how to retrieve the current active name?
+        call pf_log_info("main logger info")
+        call lg1%info("logger 1 info")
+        call lg2%info("logger 2 info")
+        call lg2%info("logger 2 myname", name="myname")
+        call pf_log_pop_name()
+        call pf_log_info("main logger info")
+        call lg1%info("logger 1 info")
+        call lg2%info("logger 2 info")
+        !
+        call pf_log_fatal("This is a fatal message")
+        call pf_log_close()
         !
     end subroutine test_logging
     !

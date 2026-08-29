@@ -1556,6 +1556,280 @@ contains
             "pf_log_print writes the configuration banner")
     end subroutine test_print_config
 
+    !> The name stack composes onto the logger's own name, nests, and pops one frame at a time.
+    !!
+    !! The negative controls are what make this more than a string test: a record emitted after
+    !! the pops must be back to the bare logger name (a stack that never truly popped would still
+    !! pass every positive assertion), and an explicit per-call `name=` must beat the stack
+    !! outright rather than composing with it.
+    subroutine test_name_stack(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
+        character(len=*), parameter :: path = "test_run/log_name_stack.txt"
+        type(pf_logger) :: lg
+        character(len=512), allocatable :: lines(:)
+        integer :: n, f1, f2, d0, d1, d2
+
+        call pf_log_clear_names()
+        call lg%init(console = .false., name = "prog")
+        call lg%add_file(path, append = .false., format = "{name}|{message}")
+
+        d0 = pf_log_name_depth()
+        call lg%info("bare")
+        call pf_log_push_name("io", f1)
+        d1 = pf_log_name_depth()
+        call lg%info("one frame")
+        call pf_log_push_name("stat", f2)
+        d2 = pf_log_name_depth()
+        call lg%info("two frames")
+        call lg%info("explicit wins", name = "other")
+        call pf_log_pop_name(f2)
+        call lg%info("back to one")
+        call pf_log_pop_name(f1)
+        call lg%info("back to bare")
+        call lg%close()
+        call read_back(path, lines, n)
+
+        call check(error, d0 == 0 .and. d1 == 1 .and. d2 == 2, &
+            "the depth counts the frames pushed")
+        if (allocated(error)) return
+        call check(error, f1 == 1 .and. f2 == 2, "each push reports its own depth as the token")
+        if (allocated(error)) return
+        call check(error, n == 6, "all six records reached the file")
+        if (allocated(error)) return
+        call check(error, trim(lines(1)) == "prog|bare", "no frames means the logger's own name")
+        if (allocated(error)) return
+        call check(error, trim(lines(2)) == "prog.io|one frame", "one frame composes onto the base")
+        if (allocated(error)) return
+        call check(error, trim(lines(3)) == "prog.io.stat|two frames", "frames nest, dot-joined")
+        if (allocated(error)) return
+        call check(error, trim(lines(4)) == "other|explicit wins", &
+            "an explicit per-call name= replaces the stack rather than composing with it")
+        if (allocated(error)) return
+        call check(error, trim(lines(5)) == "prog.io|back to one", "a pop removes exactly one frame")
+        if (allocated(error)) return
+        call check(error, trim(lines(6)) == "prog|back to bare", &
+            "popping every frame returns the bare logger name")
+    end subroutine test_name_stack
+
+    !> The composed name is what a per-name level override matches, which is the whole point of
+    !> the feature: a subprogram names itself and the application tunes it by that name.
+    subroutine test_name_stack_drives_overrides(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
+        character(len=*), parameter :: path = "test_run/log_name_stack_level.txt"
+        type(pf_logger) :: lg
+        character(len=512), allocatable :: lines(:)
+        integer :: n
+        logical :: on_in, on_out
+
+        call pf_log_clear_names()
+        call lg%init(level = PF_LEVEL_INFO, console = .false., name = "prog")
+        call lg%add_file(path, append = .false., format = "{name}|{message}")
+        call lg%set_level(PF_LEVEL_TRACE, name = "prog.io")   ! turn just this subtree up
+
+        call lg%trace("outside the frame")                    ! control: "prog", no rule -> dropped
+        on_out = lg%enabled(PF_LEVEL_TRACE)
+        call pf_log_push_name("io")
+        call lg%trace("inside the frame")                     ! "prog.io" -> the rule admits it
+        on_in = lg%enabled(PF_LEVEL_TRACE, name = "prog.io")
+        call pf_log_pop_name()
+        call lg%trace("outside again")                        ! control again
+        call lg%close()
+        call read_back(path, lines, n)
+
+        call check(error, n == 1, "only the record emitted inside the frame got through")
+        if (allocated(error)) return
+        call check(error, trim(lines(1)) == "prog.io|inside the frame", &
+            "the pushed frame is what the per-name override matched")
+        if (allocated(error)) return
+        call check(error, on_in, "enabled agrees for the composed name")
+        if (allocated(error)) return
+        ! The nameless %enabled answers .true. here while the record it was asked about is
+        ! dropped -- which is the documented conservative contract, not a defect: it cannot see a
+        ! name, so with any lowering rule in the table it must assume some name might pass. The
+        ! record count above is what proves the record really was dropped. Pass a name for the
+        ! exact answer, as the assertion above does.
+        call check(error, on_out, &
+            "%enabled without a name stays conservative rather than consulting the name stack")
+    end subroutine test_name_stack_drives_overrides
+
+    !> `clear_names` is a boundary reset from any depth, and a pop on an empty stack is a no-op.
+    subroutine test_name_stack_clear_and_empty_pop(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
+        character(len=*), parameter :: path = "test_run/log_name_clear.txt"
+        type(pf_logger) :: lg
+        character(len=512), allocatable :: lines(:)
+        integer :: n
+
+        call pf_log_clear_names()
+        call lg%init(console = .false., name = "prog")
+        call lg%add_file(path, append = .false., format = "{name}|{message}")
+
+        call pf_log_push_name("a")
+        call pf_log_push_name("b")
+        call pf_log_push_name("c")
+        call pf_log_clear_names()
+        call check(error, pf_log_name_depth() == 0, "clear_names empties the stack from any depth")
+        if (allocated(error)) return
+        call pf_log_pop_name()          ! must be a no-op, not an abort or an underflow
+        call check(error, pf_log_name_depth() == 0, "a pop on an empty stack leaves it empty")
+        if (allocated(error)) return
+        call lg%info("after clearing")
+        call lg%close()
+        call read_back(path, lines, n)
+        call check(error, n == 1 .and. trim(lines(1)) == "prog|after clearing", &
+            "and the logger is back to its own bare name")
+    end subroutine test_name_stack_clear_and_empty_pop
+
+    !> Each thread owns its own name frames: one thread's push is invisible to every other.
+    !!
+    !! Without OpenMP both arms run on the initial thread and the assertion would hold because
+    !! there is only one stack, not because the stack is per-thread -- vacuous, so it skips.
+    subroutine test_name_stack_is_per_thread(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
+        character(len=*), parameter :: path = "test_run/log_name_threads.txt"
+        type(pf_logger) :: lg
+        character(len=512), allocatable :: lines(:)
+        integer :: n, i, nbare, ndeep
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: with one thread the per-thread stack cannot be " // &
+            "distinguished from a single shared one, so the assertion would hold for the wrong reason")
+        return
+#endif
+        if (.not. can_thread()) then
+            call skip_test(error, "needs more than one thread available")
+            return
+        end if
+
+        call pf_log_clear_names()
+        call lg%init(console = .false., name = "prog")
+        call lg%add_file(path, append = .false., format = "{name}", flush_level = PF_LEVEL_ALL)
+
+        !$omp parallel do default(shared) private(i)
+        do i = 1, 32
+            if (mod(i, 2) == 0) then
+                call pf_log_push_name("deep")
+                call lg%info("x")
+                call pf_log_pop_name()
+            else
+                call lg%info("x")
+            end if
+        end do
+        !$omp end parallel do
+
+        call lg%close()
+        call read_back(path, lines, n)
+        nbare = 0
+        ndeep = 0
+        do i = 1, n
+            if (trim(lines(i)) == "prog") nbare = nbare + 1
+            if (trim(lines(i)) == "prog.deep") ndeep = ndeep + 1
+        end do
+        call check(error, n == 32, "every iteration emitted exactly one record")
+        if (allocated(error)) return
+        ! The counts are exact, not merely non-zero: a stack shared between threads would let one
+        ! thread's frame leak into another's record and the split would drift from 16/16.
+        call check(error, nbare == 16 .and. ndeep == 16, &
+            "each thread's frames are its own, so the split is exactly the one the loop wrote")
+    end subroutine test_name_stack_is_per_thread
+
+    !> `%get_name` reports the logger's own base, not the composed name.
+    subroutine test_get_name(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
+        type(pf_logger) :: lg
+        character(len=PF_LOG_MAX_NAME) :: got, got_default
+
+        call pf_log_clear_names()
+        call lg%init(console = .false., name = "prog")
+        call lg%get_name(got)
+        call check(error, trim(got) == "prog", "get_name reports what set_name set")
+        if (allocated(error)) return
+
+        call pf_log_push_name("io")
+        call lg%get_name(got)
+        call pf_log_pop_name()
+        call check(error, trim(got) == "prog", &
+            "get_name reports the BASE, unaffected by this thread's pushed frames")
+        if (allocated(error)) return
+
+        call pf_log_init(console = .false.)
+        call pf_log_set_name("shim")
+        call pf_log_get_name(got_default)
+        call pf_log_close()
+        call check(error, trim(got_default) == "shim", "pf_log_get_name reads the default logger")
+    end subroutine test_get_name
+
+    !> `%get_full_name` reports the composed name, and reports exactly what `{name}` renders.
+    subroutine test_get_full_name(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
+        character(len=*), parameter :: path = "test_run/log_full_name.txt"
+        type(pf_logger) :: lg
+        character(len=512), allocatable :: lines(:)
+        character(len=PF_LOG_MAX_NAME) :: bare, one, two, popped, cleared, anon, shim
+        integer :: n
+
+        call pf_log_clear_names()
+        call lg%init(console = .false., name = "prog")
+        call lg%add_file(path, append = .false., format = "{name}")
+
+        call lg%get_full_name(bare)
+        call lg%info("x")
+        call pf_log_push_name("io")
+        call lg%get_full_name(one)
+        call lg%info("x")
+        call pf_log_push_name("stat")
+        call lg%get_full_name(two)
+        call lg%info("x")
+        call pf_log_pop_name()
+        call lg%get_full_name(popped)
+        call lg%info("x")
+        call pf_log_clear_names()
+        call lg%get_full_name(cleared)
+        call lg%info("x")
+        call lg%close()
+        call read_back(path, lines, n)
+
+        call check(error, trim(bare) == "prog", "an empty stack composes to the logger's own name")
+        if (allocated(error)) return
+        call check(error, trim(one) == "prog.io", "one frame composes onto the base")
+        if (allocated(error)) return
+        call check(error, trim(two) == "prog.io.stat", "frames nest, dot-joined")
+        if (allocated(error)) return
+        call check(error, trim(popped) == "prog.io", "a pop is reflected immediately")
+        if (allocated(error)) return
+        call check(error, trim(cleared) == "prog", "clear_names returns the bare name")
+        if (allocated(error)) return
+
+        ! The tie-down, and the reason the composition rule lives in ONE procedure: a query that
+        ! disagreed with what the record actually carries would be worse than no query at all,
+        ! since the composed name is what a per-name override is matched against.
+        call check(error, n == 5, "all five records reached the file")
+        if (allocated(error)) return
+        call check(error, trim(lines(1)) == trim(bare) .and. trim(lines(2)) == trim(one) .and. &
+            trim(lines(3)) == trim(two) .and. trim(lines(4)) == trim(popped) .and. &
+            trim(lines(5)) == trim(cleared), &
+            "get_full_name reports exactly the name {name} renders, at every depth")
+        if (allocated(error)) return
+
+        ! A logger with no name of its own is the case where the composition has no base to join
+        ! onto, so the frames stand alone with no leading dot.
+        call lg%init(console = .false.)
+        call pf_log_push_name("io")
+        call lg%get_full_name(anon)
+        call pf_log_clear_names()
+        call check(error, trim(anon) == "io", &
+            "a nameless logger composes to the frames alone, with no leading separator")
+        if (allocated(error)) return
+
+        call pf_log_init(console = .false.)
+        call pf_log_set_name("shimmed")
+        call pf_log_push_name("io")
+        call pf_log_get_full_name(shim)
+        call pf_log_clear_names()
+        call pf_log_close()
+        call check(error, trim(shim) == "shimmed.io", &
+            "pf_log_get_full_name reads the default logger")
+    end subroutine test_get_full_name
+
     !> Registers this suite's tests.
     subroutine collect_tests_logging(testsuite)
         type(unittest_type), allocatable, intent(out) :: testsuite(:)  !! the suite's tests.
@@ -1600,7 +1874,15 @@ contains
                 test_flush_level), &
             new_unittest("clock fields follow the sinks' templates, set_format included", &
                 test_clock_mask_across_sinks), &
-            new_unittest("print dumps the whole configuration", test_print_config) &
+            new_unittest("print dumps the whole configuration", test_print_config), &
+            new_unittest("the name stack composes, nests and pops", test_name_stack), &
+            new_unittest("the composed name drives per-name overrides", &
+                test_name_stack_drives_overrides), &
+            new_unittest("clear_names resets and an empty pop is a no-op", &
+                test_name_stack_clear_and_empty_pop), &
+            new_unittest("name frames are per-thread", test_name_stack_is_per_thread), &
+            new_unittest("get_name reports the base name", test_get_name), &
+            new_unittest("get_full_name reports the composed name", test_get_full_name) &
             ]
     end subroutine collect_tests_logging
 

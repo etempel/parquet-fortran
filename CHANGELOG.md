@@ -22,7 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   context stack (`pf_log_push_context`/`pf_log_pop_context`) over a shared base, `{thread}` in the
   layout, and an opt-in buffered mode that keeps one thread's records contiguous. Also `once=` and
   `every=` deduplication, per-name level overrides that turn a library's noise down or one
-  subsystem's up and are removed again with `pf_log_unset_level`, a caller-supplied rank filter
+  subsystem's up and are removed again with `pf_log_unset_level`, a per-thread name stack
+  (`pf_log_push_name`/`pf_log_pop_name`) letting a subprogram name itself without knowing its
+  caller's name, a caller-supplied rank filter
   that adds no MPI dependency, `pf_str` for building
   messages by concatenation, and `pf_log_configure_from_env`. It is a leaf — `use parquet_logging`
   compiles one Fortran file — and it is **not** this library's own messaging, which stays with

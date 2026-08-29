@@ -127,6 +127,12 @@ module parquet_stats
     ! `private`, so nothing is re-exported, and the later phases reach `pf_argsort`,
     ! `pf_nth_element` and `pf_sort_threads` through it.
     use parquet_sorting
+    ! `parquet_sorting` imports these with an `only:` list and does not re-export them, so this
+    ! module names them itself. Nothing new enters the dependency graph: `parquet_columns` is
+    ! already in it, through `parquet_sorting`'s own `pf_argsort` over a column.
+    use parquet_columns, only : parquet_column, parquet_kind_name, parquet_column_data_ptr, &
+        PK_INT32, PK_INT64, PK_FLOAT32, PK_FLOAT64, PK_LOGICAL, &
+        PK_INT32_VEC, PK_INT64_VEC, PK_FLOAT32_VEC, PK_FLOAT64_VEC, PK_LOGICAL_VEC
     use iso_fortran_env, only : int32, int64, real32, real64
     implicit none
     private
@@ -287,10 +293,18 @@ TYPE_BLOCK = """    !
         logical :: skip = .true.                 !! `skipnan`, fixed at %init/%compute.
         logical :: stale = .false.               !! retained moments need recomputing.
     contains
-        procedure :: compute => obj_compute !! Summarises a resident array; the usual entry point.
         procedure :: init => obj_init !! Arms an empty accumulator for a loop of `%update`.
-        procedure :: update => obj_update !! Folds one more batch into the population.
         procedure :: clear => obj_clear !! Returns the object to its default-initialised state.
+        procedure, private :: obj_compute_f64 !! `%compute` over a 64-bit real array.
+@@compute_bindings@@
+        !> Summarises a resident array; the usual entry point. Accepts the same kinds the one-shot
+        !> family does -- the four widened numeric arrays and a scalar numeric `parquet_column` --
+        !> and every one of them reaches the same real64 engine.
+        generic :: compute => obj_compute_f64, @@compute_list@@
+        procedure, private :: obj_update_f64 !! `%update` over a 64-bit real array.
+@@update_bindings@@
+        !> Folds one more batch into the population, over any kind `%compute` accepts.
+        generic :: update => obj_update_f64, @@update_list@@
         procedure, private :: obj_merge_one !! `%merge` over one other accumulator.
         procedure, private :: obj_merge_many !! `%merge` over an array of them, in index order.
         generic :: merge => obj_merge_one, obj_merge_many !! Folds other accumulators into this one.
@@ -322,9 +336,9 @@ LIFECYCLE_IFACES = """        !> Summarises a resident array: the usual way to b
         !! Two traversals, whatever is asked of the result afterwards. Any previous contents of
         !! `self` are discarded, so an object may be reused across a loop of groups without
         !! `%clear` in between.
-        module subroutine obj_compute(self, values, retain, is_valid, weights, weight_type, skipnan)
+        module subroutine obj_compute_f64(self, values, retain, is_valid, weights, weight_type, skipnan)
 @@compute@@
-        end subroutine obj_compute
+        end subroutine obj_compute_f64
         !> Arms an empty accumulator for a loop of `%update`, or for a `%merge`.
         !!
         !! The population is EMPTY afterwards, which is a different state from uncomputed: every
@@ -340,9 +354,9 @@ LIFECYCLE_IFACES = """        !> Summarises a resident array: the usual way to b
         !! and the result is bit for bit what `%compute` over the concatenated batches gives.
         !! In streaming mode this is one traversal and O(1) memory, combining by the Chan/Pebay
         !! formulas, and the accuracy is theirs.
-        module subroutine obj_update(self, values, is_valid, weights)
+        module subroutine obj_update_f64(self, values, is_valid, weights)
 @@update@@
-        end subroutine obj_update
+        end subroutine obj_update_f64
         !> Folds one other accumulator into this one.
         !!
         !! Both must agree on `retain` and on the weight convention, and the source must have been
@@ -583,6 +597,11 @@ def iface(name, doc, out_decl, opts):
 
 MOMENT_OPTS = ["is_valid", "weights", "weight_type", "ddof", "skipnan", "n_null", "n_nan", "ok"]
 PLAIN_OPTS = ["is_valid", "weights", "skipnan", "n_null", "n_nan", "ok"]
+SKEW_OPTS = ["is_valid", "weights", "weight_type", "bias", "skipnan", "n_null", "n_nan", "ok"]
+KURT_OPTS = ["is_valid", "weights", "weight_type", "bias", "excess", "skipnan", "n_null", "n_nan",
+             "ok"]
+MOMENTS_OPTS = ["is_valid", "weights", "weight_type", "ddof", "bias", "excess", "skipnan",
+                "n_null", "n_nan"]
 
 CORE_IFACES = [
     iface("sum_f64",
@@ -593,7 +612,11 @@ CORE_IFACES = [
            "is the one quantity in this family that an empty population still defines."],
           ("s", "the sum."), PLAIN_OPTS),
     iface("mean_f64",
-          ["`pf_mean` over a 64-bit real array: `sum(w*x) / sum(w)`."],
+          ["`pf_mean` over a 64-bit real array: `sum(w*x) / sum(w)`, REFINED.",
+           "",
+           "The quotient is taken first and corrected by `sum(w*(x - mu))/sum(w)`, so the result",
+           "can sit one ulp from the naive quotient. See `pf_mean`'s own doc-comment for why that",
+           "is the right answer and what it means for a test."],
           ("m", "the mean; NaN when the population is empty."), PLAIN_OPTS),
     iface("variance_f64",
           ["`pf_variance` over a 64-bit real array, computed in TWO passes.",
@@ -618,16 +641,13 @@ CORE_IFACES = [
            "takes one, and an argument that can never do anything is worse than an absent one.",
            "`weight_type` is present because the bias correction counts through `n_eff`.",
            "NaN when the variance is zero, or when `n_valid < 3` and `bias` is .false."],
-          ("g", "the skewness."),
-          ["is_valid", "weights", "weight_type", "bias", "skipnan", "n_null", "n_nan", "ok"]),
+          ("g", "the skewness."), SKEW_OPTS),
     iface("kurtosis_f64",
           ["`pf_kurtosis` over a 64-bit real array: the fourth standardised moment.",
            "",
            "`ddof` is absent for the same reason as on `pf_skewness`. NaN when the variance is",
            "zero, or when `n_valid < 4` and `bias` is .false."],
-          ("k", "the kurtosis, excess by default."),
-          ["is_valid", "weights", "weight_type", "bias", "excess", "skipnan", "n_null", "n_nan",
-           "ok"]),
+          ("k", "the kurtosis, excess by default."), KURT_OPTS),
 ]
 
 MOMENTS_IFACE = '''        !> `pf_moments` over a 64-bit real array: every tier-A quantity in ONE pair of passes.
@@ -656,13 +676,379 @@ MOMENTS_IFACE = '''        !> `pf_moments` over a 64-bit real array: every tier-
         end subroutine moments_f64'''
 
 
+#: `%compute` and `%update` accept the same kinds the one-shot family does, so the object is not
+#: the one place in the module that is real64-only. Each specific widens and delegates to the
+#: real64 form, exactly as `sum_i32` delegates to `sum_f64`.
+OBJ_COMPUTE_OPTS = ["retain", "is_valid", "weights", "weight_type", "skipnan"]
+OBJ_UPDATE_OPTS = ["is_valid", "weights"]
+
+
+def obj_entry_ifaces():
+    """`%compute` and `%update`'s interface bodies, one pair per widened kind."""
+    out = []
+    for tag, decl, _, has_nan, kindword in MOMENT_KINDS:
+        mine = kind_opts(OBJ_COMPUTE_OPTS, has_nan)
+        lines = ["        !> `%%compute` over %s." % kindword]
+        for line in KIND_NOTE.get(tag, []):
+            lines.append(("        !> " + line).rstrip())
+        lines.append("        module subroutine obj_compute_%s(self, %s)"
+                     % (tag, ", ".join(["values"] + mine)))
+        lines.append("            class(pf_stats), intent(inout) :: self")
+        lines.append("            !! the accumulator; any previous contents are discarded.")
+        lines.append("            " + decl.strip())
+        for key in mine:
+            lines.append(D[key])
+        lines.append("        end subroutine obj_compute_%s" % tag)
+        out.append("\n".join(lines))
+
+        lines = ["        !> `%%update` over %s." % kindword]
+        lines.append("        module subroutine obj_update_%s(self, %s)"
+                     % (tag, ", ".join(["values"] + OBJ_UPDATE_OPTS)))
+        lines.append("            class(pf_stats), intent(inout) :: self !! the accumulator.")
+        lines.append("            " + decl.strip().replace("the population.", "the batch.")
+                     .replace("the column; scalar numeric kinds only.",
+                              "the batch; scalar numeric kinds only."))
+        for key in OBJ_UPDATE_OPTS:
+            lines.append(D[key])
+        lines.append("        end subroutine obj_update_%s" % tag)
+        out.append("\n".join(lines))
+    return "\n".join(out)
+
+
+def obj_entry_bodies():
+    """`%compute` and `%update`'s bodies, one pair per widened kind."""
+    out = []
+    for tag, _, widen, has_nan, _ in MOMENT_KINDS:
+        for what, opts, target in (("compute", kind_opts(OBJ_COMPUTE_OPTS, has_nan), "obj_compute_f64"),
+                                   ("update", OBJ_UPDATE_OPTS, "obj_update_f64")):
+            lines = ["    module procedure obj_%s_%s" % (what, tag)]
+            lines.append("        real(real64), allocatable :: wide(:)")
+            if tag == "col":
+                lines.append("        logical, allocatable :: mask(:)")
+                lines.append('        call col_to_real64(values, "pf_stats%%%s", is_valid, wide, mask)'
+                             % what)
+            else:
+                lines.append("        allocate(wide(size(values, kind=int64)))")
+                lines.append("        wide = %s" % widen)
+            call = ["self", "wide"] + ["%s=%s" % (o, "mask" if (o == "is_valid" and tag == "col") else o)
+                                       for o in opts]
+            lines.append("        call " + wrap_call(target, call))
+            lines.append("    end procedure obj_%s_%s" % (what, tag))
+            out.append("\n".join(lines))
+    return "\n\n".join(out)
+
+
+#: `pf_count_valid` over a column. Written out rather than folded into `spec_iface`/`body`, which
+#: are shaped for a plain array: this one widens and delegates, exactly as the moment family's own
+#: `*_col` entry points do, so the three refusals are stated in one place for the whole module.
+COUNT_COL_IFACE = """        !> `pf_count_valid` over a scalar numeric `parquet_column`.
+        !>
+        !> Same dispatch and same three refusals as the moment family: numeric scalar kinds only,
+        !> width 1 only, and `is_valid=` alongside a column aborts because the column carries its
+        !> own validity.
+        module subroutine count_valid_col(values, n, is_valid, weights, skipnan)
+            type(parquet_column), intent(in) :: values !! the column to count.
+            integer(int64), intent(out) :: n !! how many elements are in the population.
+            logical, intent(in), optional :: is_valid(:) !! must be absent; the column carries it.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight. A zero weight REMOVES the element from the population, so a
+            !! weighted count and an unweighted one over the same column legitimately differ.
+            !! A negative, NaN or infinite weight aborts.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. counts it as an ordinary value.
+        end subroutine count_valid_col"""
+
+COUNT_COL_BODY = """    module procedure count_valid_col
+        real(real64), allocatable :: wide(:)
+        logical, allocatable :: mask(:)
+        call col_to_real64(values, "pf_count_valid", is_valid, wide, mask)
+        call count_valid_f64(wide, n, mask, weights, skipnan)
+    end procedure count_valid_col"""
+
+
+#: The one place a `parquet_column` becomes a population. Every `*_col` entry point goes through
+#: it, so the three refusals and the nullness rule are stated once rather than eight times.
+COL_WIDEN = '''    !> Widens a scalar numeric `parquet_column` into a `real64` population and its validity mask.
+    !!
+    !! Three refusals, and each is a wrong answer rather than an inconvenience if it is dropped:
+    !!
+    !! * a **string, temporal or container** column has no numeric statistics, and the message names
+    !!   the kind it actually found;
+    !! * a column **wider than one element** aborts, because flattening a width-16 column into one
+    !!   population is a DIFFERENT statistic -- a caller who wants one element position across all
+    !!   rows has `%get_elem`, and one who genuinely wants the flattened population can pass the
+    !!   flattened array and thereby say so;
+    !! * `is_valid=` **alongside** a column aborts, because the column carries its own validity and
+    !!   two sources of truth that can disagree is a shape this repository has been bitten by.
+    !!
+    !! `mask` comes back UNALLOCATED for a null-free column, which is not a detail: an unallocated
+    !! allocatable passed to an `optional` dummy is ABSENT, so the core takes its own no-mask fast
+    !! path with no branch at the call site.
+    !!
+    !! The bulk read goes through `parquet_column_data_ptr` -- the typed accessor tier, never a
+    !! type-bound procedure -- so ifx does not build a class descriptor per call. The scalar
+    !! metadata queries below have no typed twin and are called once per column, which is the same
+    !! trade `parquet_sorting` already makes for its key extraction.
+    subroutine col_to_real64(col, what, is_valid, v, mask)
+        type(parquet_column), intent(in), target :: col
+        !! the column. `target` because `parquet_column_data_ptr` requires it; the pointer never
+        !! leaves this procedure, so the caller's actual argument needs no `target` of its own.
+        character(len=*), intent(in) :: what                  !! the public procedure's name.
+        logical, intent(in), optional :: is_valid(:)          !! must be absent; see above.
+        real(real64), allocatable, intent(out) :: v(:)        !! the widened population.
+        logical, allocatable, intent(out) :: mask(:)          !! its validity, or unallocated.
+        integer(int32), pointer :: p32(:)
+        integer(int64), pointer :: p64(:)
+        real(real32), pointer :: r32(:)
+        real(real64), pointer :: r64(:)
+        logical, pointer :: pb(:)
+        character(len=:), allocatable :: kname
+        integer :: k
+        integer(int64) :: n
+
+        if (present(is_valid)) error stop what // ": is_valid= cannot be given alongside a " // &
+            "parquet_column; the column carries its own validity, and two sources that can " // &
+            "disagree is exactly what this refuses"
+        k = col%kindof()
+        select case (k)
+        case (PK_INT32, PK_INT64, PK_FLOAT32, PK_FLOAT64, PK_LOGICAL)
+            continue
+        case (PK_INT32_VEC, PK_INT64_VEC, PK_FLOAT32_VEC, PK_FLOAT64_VEC, PK_LOGICAL_VEC)
+            ! The VECTOR kinds get their own arm, and the message names the width rather than the
+            ! kind, because "a column of kind PK_INT32_VEC has no numeric statistics" would be
+            ! misleading -- the ELEMENTS are perfectly numeric and it is the shape that is refused.
+            ! Width cannot be tested separately: `%init` already guarantees a scalar kind is width
+            ! 1 and a vector kind is wider, so a `colwidth() /= 1` check would be dead code.
+            error stop what // ": this column is " // trim(stats_i2s(int(col%colwidth(), int64))) // &
+                " elements wide; flattening a vector column into one population is a different " // &
+                "statistic, so use %get_elem for one element position or pass the flattened " // &
+                "array yourself if that is what you mean"
+        case default
+            call parquet_kind_name(k, kname)
+            error stop what // ": a column of kind " // kname // " has no numeric statistics; " // &
+                "this family accepts int32, int64, float32, float64 and logical columns"
+        end select
+
+        ! The `(1:n)` bounds below are BELT AND BRACES, not what makes this correct, and saying so
+        ! is worth a line: `parquet_column_data_ptr` already returns `col%i32(1:col%nrows)`, so the
+        ! pointer never spans the slack that geometric growth leaves beyond the row count. Verified
+        ! by mutation -- reading the whole pointer instead changes no answer. The bound stays
+        ! because it states the intent and would survive a `data_ptr` that stopped slicing.
+        n = col%length()
+        allocate(v(n))
+        select case (k)
+        case (PK_INT32)
+            call parquet_column_data_ptr(col, p32)
+            v = real(p32(1:n), real64)
+        case (PK_INT64)
+            call parquet_column_data_ptr(col, p64)
+            v = real(p64(1:n), real64)
+        case (PK_FLOAT32)
+            call parquet_column_data_ptr(col, r32)
+            v = real(r32(1:n), real64)
+        case (PK_FLOAT64)
+            call parquet_column_data_ptr(col, r64)
+            v = r64(1:n)
+        case default
+            call parquet_column_data_ptr(col, pb)
+            v = merge(1.0_real64, 0.0_real64, pb(1:n))
+        end select
+        call col%row_validity(mask)
+    end subroutine col_to_real64'''
+
+
+#: The output block `pf_moments` declares before its input block, shared by every kind's entry
+#: point so the ten names and their order cannot drift between them.
+MOMENTS_OUT_DECLS = """            integer(int64), intent(out), optional :: n_valid !! how many elements were used.
+            real(real64), intent(out), optional :: mean !! the mean; NaN when empty.
+            real(real64), intent(out), optional :: variance !! the variance; NaN when undefined.
+            real(real64), intent(out), optional :: stddev !! the standard deviation.
+            real(real64), intent(out), optional :: sem !! the standard error of the mean.
+            real(real64), intent(out), optional :: skewness !! the third standardised moment.
+            real(real64), intent(out), optional :: kurtosis !! the fourth, excess by default.
+            real(real64), intent(out), optional :: vsum !! the pairwise sum; 0 when empty.
+            real(real64), intent(out), optional :: vmin !! the smallest value; NaN when empty.
+            real(real64), intent(out), optional :: vmax !! the largest value; NaN when empty."""
+
+MOMENTS_OUT_NAMES = ["n_valid", "mean", "variance", "stddev", "sem", "skewness", "kurtosis",
+                     "vsum", "vmin", "vmax"]
+
+
+#: The kinds the moment family accepts as `values` besides `real(real64)`, which the core already
+#: serves directly. Each entry point widens into a `real64` buffer and calls that core, so there
+#: is exactly one implementation of every statistic and a new kind cannot answer differently.
+#:
+#: `has_nan` drives F5: a kind that cannot hold a NaN gets no `skipnan` and no `n_nan`, because an
+#: argument that can never do anything is worse than an absent one. The subsequence rule the lint
+#: check enforces is unaffected -- omission is what a subsequence permits.
+#:
+#: (tag, dummy declaration, how to widen `values` into `v`, has_nan, what the doc calls it)
+MOMENT_KINDS = [
+    ("i32", "integer(int32), intent(in) :: values(:) !! the population.",
+     "real(values, real64)", False, "a 32-bit integer array"),
+    ("i64", "integer(int64), intent(in) :: values(:) !! the population.",
+     "real(values, real64)", False, "a 64-bit integer array"),
+    ("f32", "real(real32), intent(in) :: values(:) !! the population.",
+     "real(values, real64)", True, "a 32-bit real array"),
+    ("bool", "logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.",
+     "merge(1.0_real64, 0.0_real64, values)", False, "a logical array"),
+    ("col", "type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.",
+     None, True, "a scalar numeric `parquet_column`"),
+]
+
+#: The extra doc paragraph a kind needs beyond "<statistic> over a <kind> array".
+KIND_NOTE = {
+    "i64": ["",
+            "**An `integer(int64)` above 2**53 loses exactness** on the way into the real64 buffer",
+            "every statistic here is computed in. That is unavoidable for a mean and irrelevant for",
+            "the workloads this serves -- nobody averages an object ID -- but it is NOT irrelevant",
+            "for a median, which `pf_nth_quantile` computes exactly on the original array."],
+    "bool": ["",
+             "`.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the",
+             "fraction that are true."],
+    "col": ["",
+            "Dispatched on the column's kind at run time, and **scalar numeric columns only**:",
+            "int32, int64, float32, float64 and logical. A string, temporal or container column",
+            "aborts naming its kind, and so does a column more than one element wide -- flattening",
+            "a vector column into one population is a different statistic and nobody should get it",
+            "by accident. **The column's own validity is the only source of nullness**, so passing",
+            "`is_valid=` alongside one aborts rather than silently preferring one of two sources."],
+}
+
+#: The seven one-output procedures, one row each: (base, result dummy, its doc, its option list).
+#: The real64 core's own interfaces above are built from the same option constants, so the two
+#: cannot drift on the half that is a permanent compatibility contract.
+ENTRY_FAMILY = [
+    ("sum", "s", "the sum.", PLAIN_OPTS),
+    ("mean", "m", "the mean; NaN when the population is empty.", PLAIN_OPTS),
+    ("variance", "v", "the variance; NaN when `n_valid <= ddof`.", MOMENT_OPTS),
+    ("stddev", "sd", "the standard deviation; NaN when the variance is.", MOMENT_OPTS),
+    ("sem", "se", "the standard error; NaN when the standard deviation is.", MOMENT_OPTS),
+    ("skewness", "g", "the skewness.", SKEW_OPTS),
+    ("kurtosis", "k", "the kurtosis, excess by default.", KURT_OPTS),
+]
+
+
+def kind_opts(opts, has_nan):
+    """This kind's option list: the family's, minus what a NaN-free kind cannot use."""
+    if has_nan:
+        return list(opts)
+    return [o for o in opts if o not in ("skipnan", "n_nan")]
+
+
+def entry_iface(base, out_name, out_doc, opts, tag, decl, has_nan, kindword):
+    """One interface body for a per-kind entry point."""
+    mine = kind_opts(opts, has_nan)
+    lines = ["        !> `pf_%s` over %s." % (base, kindword)]
+    for line in KIND_NOTE.get(tag, []):
+        lines.append(("        !> " + line).rstrip())
+    lines.append("        module subroutine %s_%s(values, %s)"
+                 % (base, tag, ", ".join([out_name] + mine)))
+    lines.append("            " + decl.strip())
+    lines.append("            real(real64), intent(out) :: %s !! %s" % (out_name, out_doc))
+    for key in mine:
+        lines.append(D[key])
+    lines.append("        end subroutine %s_%s" % (base, tag))
+    return "\n".join(lines)
+
+
+def entry_moments_iface(tag, decl, has_nan, kindword):
+    """`pf_moments`' interface body for one kind."""
+    mine = kind_opts(MOMENTS_OPTS, has_nan)
+    args = ["values"] + MOMENTS_OUT_NAMES + mine
+    lines = ["        !> `pf_moments` over %s: every tier-A quantity in one pair of passes."
+             % kindword]
+    for line in KIND_NOTE.get(tag, []):
+        lines.append(("        !> " + line).rstrip())
+    lines.append("        module subroutine moments_%s(%s)" % (tag, wrap_args(args)))
+    lines.append("            " + decl.strip())
+    lines.append(MOMENTS_OUT_DECLS)
+    for key in mine:
+        lines.append(D[key])
+    lines.append("        end subroutine moments_%s" % tag)
+    return "\n".join(lines)
+
+
+def wrap_args(args):
+    """Renders an argument list with Fortran continuations, inside the 132-column limit."""
+    out, line = [], ""
+    for i, a in enumerate(args):
+        piece = a + (", " if i < len(args) - 1 else "")
+        if len(line) + len(piece) > 78:
+            out.append(line + "&")
+            line = "                "
+        line += piece
+    out.append(line)
+    return "\n".join(out)
+
+
+def entry_body(base, out_name, opts, tag, widen, has_nan):
+    """One `module procedure` body for a per-kind entry point."""
+    mine = kind_opts(opts, has_nan)
+    lines = ["    module procedure %s_%s" % (base, tag)]
+    lines.append("        real(real64), allocatable :: wide(:)")
+    if tag == "col":
+        lines.append("        logical, allocatable :: mask(:)")
+        lines.append('        call col_to_real64(values, "pf_%s", is_valid, wide, mask)' % base)
+    else:
+        lines.append("        allocate(wide(size(values, kind=int64)))")
+        lines.append("        wide = %s" % widen)
+    call = ["wide", out_name] + ["%s=%s" % (o, "mask" if (o == "is_valid" and tag == "col") else o)
+                              for o in mine]
+    lines.append("        call " + wrap_call("%s_f64" % base, call))
+    lines.append("    end procedure %s_%s" % (base, tag))
+    return "\n".join(lines)
+
+
+def entry_moments_body(tag, widen, has_nan):
+    """`pf_moments`' body for one kind."""
+    mine = kind_opts(MOMENTS_OPTS, has_nan)
+    lines = ["    module procedure moments_%s" % tag]
+    lines.append("        real(real64), allocatable :: wide(:)")
+    if tag == "col":
+        lines.append("        logical, allocatable :: mask(:)")
+        lines.append('        call col_to_real64(values, "pf_moments", is_valid, wide, mask)')
+    else:
+        lines.append("        allocate(wide(size(values, kind=int64)))")
+        lines.append("        wide = %s" % widen)
+    call = ["wide"] + ["%s=%s" % (o, o) for o in MOMENTS_OUT_NAMES] \
+        + ["%s=%s" % (o, "mask" if (o == "is_valid" and tag == "col") else o) for o in mine]
+    lines.append("        call " + wrap_call("moments_f64", call))
+    lines.append("    end procedure moments_%s" % tag)
+    return "\n".join(lines)
+
+
+def wrap_call(name, args):
+    """Renders a call's argument list with continuations, inside the 132-column limit."""
+    out, line = [], name + "("
+    for i, a in enumerate(args):
+        piece = a + (", " if i < len(args) - 1 else ")")
+        if len(line) + len(piece) > 96:
+            out.append(line + "&")
+            line = "            "
+        line += piece
+    out.append(line)
+    return "\n".join(out)
+
+
 GENERIC_DOC = {
     "pf_sum": ["The sum of a population, computed PAIRWISE rather than left to right.",
                "",
                "Pairwise summation loses O(log n) relative accuracy against a naive sum's O(n),",
                "for the same number of additions and no extra memory -- and it is the same fixed",
                "block tree that makes every answer here independent of the thread count."],
-    "pf_mean": ["The arithmetic mean of a population, weighted when `weights` is present."],
+    "pf_mean": ["The arithmetic mean of a population, weighted when `weights` is present.",
+                "",
+                "**Not literally `sum(w*x)/sum(w)`, and deliberately so.** That quotient is taken",
+                "first and then REFINED by `sum(w*(x - mu))/sum(w)`, which is algebraically zero",
+                "and in floating point is the rounding error left in it -- the standard two-pass",
+                "refinement, and the more accurate answer. It is also the centre the variance and",
+                "the higher moments are taken about, so it has to be this one. The visible",
+                "consequence is that the result can differ from the naive quotient in the last",
+                "bit: `pf_mean` over ten logicals of which three are `.true.` is one ulp below",
+                "`0.3_real64`. Compare with a tolerance, or against another reduction of the same",
+                "population, rather than against a decimal literal."],
     "pf_variance": ["The variance of a population, in two passes so that it is shift-invariant.",
                     "",
                     "`ddof = 1` by default (the sample variance, as pandas returns); pass",
@@ -677,10 +1063,12 @@ GENERIC_DOC = {
                    "same two traversals as asking for one."],
 }
 
+#: Every generic's members: the real64 core first, then one entry point per widened kind. Derived
+#: rather than listed, so adding a kind to MOMENT_KINDS adds it to all eight generics at once.
+_MOMENT_BASES = [b for b, _, _, _ in ENTRY_FAMILY] + ["moments"]
 GENERIC_SPECIFICS = {
-    "pf_sum": ["sum_f64"], "pf_mean": ["mean_f64"], "pf_variance": ["variance_f64"],
-    "pf_stddev": ["stddev_f64"], "pf_sem": ["sem_f64"], "pf_skewness": ["skewness_f64"],
-    "pf_kurtosis": ["kurtosis_f64"], "pf_moments": ["moments_f64"],
+    "pf_" + base: ["%s_f64" % base] + ["%s_%s" % (base, k[0]) for k in MOMENT_KINDS]
+    for base in _MOMENT_BASES
 }
 
 
@@ -743,6 +1131,21 @@ def body(tag, decl, what, is_real):
     return "\n".join(out)
 
 
+def type_block():
+    """TYPE_BLOCK with the per-kind `%compute`/`%update` binding lists filled in."""
+    tags = [k[0] for k in MOMENT_KINDS]
+    text = TYPE_BLOCK
+    for what in ("compute", "update"):
+        binds = "\n".join(
+            "        procedure, private :: obj_%s_%s !! `%%%s` over %s." % (what, k[0], what, k[4])
+            for k in MOMENT_KINDS)
+        text = text.replace("@@%s_bindings@@" % what, binds)
+        names = ["obj_%s_%s" % (what, t) for t in tags]
+        text = text.replace("@@%s_list@@" % what,
+                            ", ".join(names[:2]) + ", &\n            " + ", ".join(names[2:]))
+    return text
+
+
 def gen_spec():
     out = [SPEC_HEAD.rstrip("\n") + "\n"]
     out.append("    public :: pf_count_valid")
@@ -750,7 +1153,7 @@ def gen_spec():
     out.append("    public :: pf_skewness, pf_kurtosis, pf_moments")
     out.append("    public :: pf_stats")
     out.append("    public :: parquet_debug_stats_scans, parquet_debug_reset_stats_scans")
-    out.append(TYPE_BLOCK)
+    out.append(type_block())
     out.append("")
     out.append("    !> How many elements of `values` are in the population -- pandas' `Series.count()`.")
     out.append("    !>")
@@ -765,11 +1168,13 @@ def gen_spec():
     out.append("    interface pf_count_valid")
     for tag, _, _, _ in TYPES:
         out.append("        module procedure count_valid_%s" % tag)
+    out.append("        module procedure count_valid_col")
     out.append("    end interface pf_count_valid")
     out.append("    !")
     out.append("    ! ---- Counting ----")
     out.append("    interface")
     out.append("\n".join(spec_iface(*t) for t in TYPES))
+    out.append(COUNT_COL_IFACE)
     out.append("    end interface")
     for name in ("pf_sum", "pf_mean", "pf_variance", "pf_stddev", "pf_sem", "pf_skewness",
                  "pf_kurtosis", "pf_moments"):
@@ -788,9 +1193,16 @@ def gen_spec():
     out.append("    interface")
     for text in CORE_IFACES:
         out.append("\n".join(line.rstrip() for line in text.split("\n")))
-    out.append(MOMENTS_IFACE % "\n".join(
-        D[k] for k in ("is_valid", "weights", "weight_type", "ddof", "bias", "excess", "skipnan",
-                       "n_null", "n_nan")))
+    out.append(MOMENTS_IFACE % "\n".join(D[k] for k in MOMENTS_OPTS))
+    out.append("    end interface")
+    out.append("    !")
+    out.append("    ! ---- The per-kind entry layer (implemented in parquet_stats_kernel) ----")
+    out.append("    interface")
+    for tag, decl, _, has_nan, kindword in MOMENT_KINDS:
+        for base, out_name, out_doc, opts in ENTRY_FAMILY:
+            out.append(entry_iface(base, out_name, out_doc, opts, tag, decl, has_nan, kindword))
+        out.append(entry_moments_iface(tag, decl, has_nan, kindword))
+    out.append(obj_entry_ifaces())
     out.append("    end interface")
     out.append(object_ifaces())
     out.append("    !")
@@ -801,7 +1213,20 @@ def gen_spec():
 def gen_kernel():
     out = [KERNEL_HEAD.rstrip("\n")]
     out.append("")
+    out.append(COL_WIDEN)
+    out.append("")
     out.append("\n\n".join(body(*t) for t in TYPES))
+    out.append("")
+    out.append(COUNT_COL_BODY)
+    out.append("")
+    bodies = []
+    for tag, _, widen, has_nan, _ in MOMENT_KINDS:
+        for base, out_name, _, opts in ENTRY_FAMILY:
+            bodies.append(entry_body(base, out_name, opts, tag, widen, has_nan))
+        bodies.append(entry_moments_body(tag, widen, has_nan))
+    out.append("\n\n".join(bodies))
+    out.append("")
+    out.append(obj_entry_bodies())
     out.append("")
     out.append("end submodule parquet_stats_kernel ! GCOVR_EXCL_LINE")
     return "\n".join(out) + "\n"

@@ -26,7 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   return a quiet NaN with `ok=.false.` wherever a statistic is undefined. A `pf_stats` accumulator
   summarises a population once and answers any number of queries off it: `%compute` for a resident
   array, `%init` plus `%update` for one arriving in pieces, and `%merge` — whose array form folds in
-  index order — for accumulating in parallel. See
+  index order — for accumulating in parallel. Everything in the module takes any of six inputs:
+  `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` and `logical` arrays, all
+  widened exactly, and a scalar numeric `type(parquet_column)` dispatched on its kind. See
   [Array statistics](doc/pages/utilities/statistics.md).
 - **`parquet_logging`: general-purpose logging for the calling program.** A `pf_logger` type and a
   matching set of `pf_log_*` procedures on a process-wide default logger: eight ascending severity

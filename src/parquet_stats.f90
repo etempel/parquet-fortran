@@ -47,6 +47,12 @@ module parquet_stats
     ! `private`, so nothing is re-exported, and the later phases reach `pf_argsort`,
     ! `pf_nth_element` and `pf_sort_threads` through it.
     use parquet_sorting
+    ! `parquet_sorting` imports these with an `only:` list and does not re-export them, so this
+    ! module names them itself. Nothing new enters the dependency graph: `parquet_columns` is
+    ! already in it, through `parquet_sorting`'s own `pf_argsort` over a column.
+    use parquet_columns, only : parquet_column, parquet_kind_name, parquet_column_data_ptr, &
+        PK_INT32, PK_INT64, PK_FLOAT32, PK_FLOAT64, PK_LOGICAL, &
+        PK_INT32_VEC, PK_INT64_VEC, PK_FLOAT32_VEC, PK_FLOAT64_VEC, PK_LOGICAL_VEC
     use iso_fortran_env, only : int32, int64, real32, real64
     implicit none
     private
@@ -133,10 +139,28 @@ module parquet_stats
         logical :: skip = .true.                 !! `skipnan`, fixed at %init/%compute.
         logical :: stale = .false.               !! retained moments need recomputing.
     contains
-        procedure :: compute => obj_compute !! Summarises a resident array; the usual entry point.
         procedure :: init => obj_init !! Arms an empty accumulator for a loop of `%update`.
-        procedure :: update => obj_update !! Folds one more batch into the population.
         procedure :: clear => obj_clear !! Returns the object to its default-initialised state.
+        procedure, private :: obj_compute_f64 !! `%compute` over a 64-bit real array.
+        procedure, private :: obj_compute_i32 !! `%compute` over a 32-bit integer array.
+        procedure, private :: obj_compute_i64 !! `%compute` over a 64-bit integer array.
+        procedure, private :: obj_compute_f32 !! `%compute` over a 32-bit real array.
+        procedure, private :: obj_compute_bool !! `%compute` over a logical array.
+        procedure, private :: obj_compute_col !! `%compute` over a scalar numeric `parquet_column`.
+        !> Summarises a resident array; the usual entry point. Accepts the same kinds the one-shot
+        !> family does -- the four widened numeric arrays and a scalar numeric `parquet_column` --
+        !> and every one of them reaches the same real64 engine.
+        generic :: compute => obj_compute_f64, obj_compute_i32, obj_compute_i64, &
+            obj_compute_f32, obj_compute_bool, obj_compute_col
+        procedure, private :: obj_update_f64 !! `%update` over a 64-bit real array.
+        procedure, private :: obj_update_i32 !! `%update` over a 32-bit integer array.
+        procedure, private :: obj_update_i64 !! `%update` over a 64-bit integer array.
+        procedure, private :: obj_update_f32 !! `%update` over a 32-bit real array.
+        procedure, private :: obj_update_bool !! `%update` over a logical array.
+        procedure, private :: obj_update_col !! `%update` over a scalar numeric `parquet_column`.
+        !> Folds one more batch into the population, over any kind `%compute` accepts.
+        generic :: update => obj_update_f64, obj_update_i32, obj_update_i64, &
+            obj_update_f32, obj_update_bool, obj_update_col
         procedure, private :: obj_merge_one !! `%merge` over one other accumulator.
         procedure, private :: obj_merge_many !! `%merge` over an array of them, in index order.
         generic :: merge => obj_merge_one, obj_merge_many !! Folds other accumulators into this one.
@@ -175,6 +199,7 @@ module parquet_stats
         module procedure count_valid_f32
         module procedure count_valid_f64
         module procedure count_valid_bool
+        module procedure count_valid_col
     end interface pf_count_valid
     !
     ! ---- Counting ----
@@ -235,6 +260,23 @@ module parquet_stats
             !! weighted count and an unweighted one over the same array legitimately differ.
             !! A negative, NaN or infinite weight aborts.
         end subroutine count_valid_bool
+        !> `pf_count_valid` over a scalar numeric `parquet_column`.
+        !>
+        !> Same dispatch and same three refusals as the moment family: numeric scalar kinds only,
+        !> width 1 only, and `is_valid=` alongside a column aborts because the column carries its
+        !> own validity.
+        module subroutine count_valid_col(values, n, is_valid, weights, skipnan)
+            type(parquet_column), intent(in) :: values !! the column to count.
+            integer(int64), intent(out) :: n !! how many elements are in the population.
+            logical, intent(in), optional :: is_valid(:) !! must be absent; the column carries it.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight. A zero weight REMOVES the element from the population, so a
+            !! weighted count and an unweighted one over the same column legitimately differ.
+            !! A negative, NaN or infinite weight aborts.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. counts it as an ordinary value.
+        end subroutine count_valid_col
     end interface
     !
     !> The sum of a population, computed PAIRWISE rather than left to right.
@@ -253,9 +295,24 @@ module parquet_stats
     !> this same generic, which is source-compatible for every existing call.
     interface pf_sum
         module procedure sum_f64
+        module procedure sum_i32
+        module procedure sum_i64
+        module procedure sum_f32
+        module procedure sum_bool
+        module procedure sum_col
     end interface pf_sum
     !
     !> The arithmetic mean of a population, weighted when `weights` is present.
+    !>
+    !> **Not literally `sum(w*x)/sum(w)`, and deliberately so.** That quotient is taken
+    !> first and then REFINED by `sum(w*(x - mu))/sum(w)`, which is algebraically zero
+    !> and in floating point is the rounding error left in it -- the standard two-pass
+    !> refinement, and the more accurate answer. It is also the centre the variance and
+    !> the higher moments are taken about, so it has to be this one. The visible
+    !> consequence is that the result can differ from the naive quotient in the last
+    !> bit: `pf_mean` over ten logicals of which three are `.true.` is one ulp below
+    !> `0.3_real64`. Compare with a tolerance, or against another reduction of the same
+    !> population, rather than against a decimal literal.
     !>
     !> Nulls, NaNs and zero-weight elements are excluded from the population, in that order, and
     !> `n_null`/`n_nan` report how many. An undefined answer is a **quiet NaN** with
@@ -267,6 +324,11 @@ module parquet_stats
     !> this same generic, which is source-compatible for every existing call.
     interface pf_mean
         module procedure mean_f64
+        module procedure mean_i32
+        module procedure mean_i64
+        module procedure mean_f32
+        module procedure mean_bool
+        module procedure mean_col
     end interface pf_mean
     !
     !> The variance of a population, in two passes so that it is shift-invariant.
@@ -284,6 +346,11 @@ module parquet_stats
     !> this same generic, which is source-compatible for every existing call.
     interface pf_variance
         module procedure variance_f64
+        module procedure variance_i32
+        module procedure variance_i64
+        module procedure variance_f32
+        module procedure variance_bool
+        module procedure variance_col
     end interface pf_variance
     !
     !> The standard deviation: the square root of `pf_variance`, same arguments.
@@ -298,6 +365,11 @@ module parquet_stats
     !> this same generic, which is source-compatible for every existing call.
     interface pf_stddev
         module procedure stddev_f64
+        module procedure stddev_i32
+        module procedure stddev_i64
+        module procedure stddev_f32
+        module procedure stddev_bool
+        module procedure stddev_col
     end interface pf_stddev
     !
     !> The standard error of the mean.
@@ -312,6 +384,11 @@ module parquet_stats
     !> this same generic, which is source-compatible for every existing call.
     interface pf_sem
         module procedure sem_f64
+        module procedure sem_i32
+        module procedure sem_i64
+        module procedure sem_f32
+        module procedure sem_bool
+        module procedure sem_col
     end interface pf_sem
     !
     !> The skewness, bias-corrected by default (pandas' G1, not scipy's g1).
@@ -326,6 +403,11 @@ module parquet_stats
     !> this same generic, which is source-compatible for every existing call.
     interface pf_skewness
         module procedure skewness_f64
+        module procedure skewness_i32
+        module procedure skewness_i64
+        module procedure skewness_f32
+        module procedure skewness_bool
+        module procedure skewness_col
     end interface pf_skewness
     !
     !> The kurtosis, excess and bias-corrected by default (pandas' G2).
@@ -340,6 +422,11 @@ module parquet_stats
     !> this same generic, which is source-compatible for every existing call.
     interface pf_kurtosis
         module procedure kurtosis_f64
+        module procedure kurtosis_i32
+        module procedure kurtosis_i64
+        module procedure kurtosis_f32
+        module procedure kurtosis_bool
+        module procedure kurtosis_col
     end interface pf_kurtosis
     !
     !> Every tier-A statistic of a population in one pair of passes.
@@ -357,6 +444,11 @@ module parquet_stats
     !> this same generic, which is source-compatible for every existing call.
     interface pf_moments
         module procedure moments_f64
+        module procedure moments_i32
+        module procedure moments_i64
+        module procedure moments_f32
+        module procedure moments_bool
+        module procedure moments_col
     end interface pf_moments
     !
     ! ---- Shared argument guards (implemented in parquet_stats_core) ----
@@ -416,7 +508,11 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
         end subroutine sum_f64
-        !> `pf_mean` over a 64-bit real array: `sum(w*x) / sum(w)`.
+        !> `pf_mean` over a 64-bit real array: `sum(w*x) / sum(w)`, REFINED.
+        !>
+        !> The quotient is taken first and corrected by `sum(w*(x - mu))/sum(w)`, so the result
+        !> can sit one ulp from the naive quotient. See `pf_mean`'s own doc-comment for why that
+        !> is the right answer and what it means for a test.
         module subroutine mean_f64(values, m, is_valid, weights, skipnan, n_null, n_nan, ok)
             real(real64), intent(in) :: values(:) !! the population.
             real(real64), intent(out) :: m !! the mean; NaN when the population is empty.
@@ -666,6 +762,1409 @@ module parquet_stats
         end subroutine moments_f64
     end interface
     !
+    ! ---- The per-kind entry layer (implemented in parquet_stats_kernel) ----
+    interface
+        !> `pf_sum` over a 32-bit integer array.
+        module subroutine sum_i32(values, s, is_valid, weights, n_null, ok)
+            integer(int32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: s !! the sum.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine sum_i32
+        !> `pf_mean` over a 32-bit integer array.
+        module subroutine mean_i32(values, m, is_valid, weights, n_null, ok)
+            integer(int32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: m !! the mean; NaN when the population is empty.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine mean_i32
+        !> `pf_variance` over a 32-bit integer array.
+        module subroutine variance_i32(values, v, is_valid, weights, weight_type, ddof, n_null, ok)
+            integer(int32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: v !! the variance; NaN when `n_valid <= ddof`.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine variance_i32
+        !> `pf_stddev` over a 32-bit integer array.
+        module subroutine stddev_i32(values, sd, is_valid, weights, weight_type, ddof, n_null, ok)
+            integer(int32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: sd !! the standard deviation; NaN when the variance is.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine stddev_i32
+        !> `pf_sem` over a 32-bit integer array.
+        module subroutine sem_i32(values, se, is_valid, weights, weight_type, ddof, n_null, ok)
+            integer(int32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: se !! the standard error; NaN when the standard deviation is.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine sem_i32
+        !> `pf_skewness` over a 32-bit integer array.
+        module subroutine skewness_i32(values, g, is_valid, weights, weight_type, bias, n_null, ok)
+            integer(int32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: g !! the skewness.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            logical, intent(in), optional :: bias
+            !! .false. by default: the bias-CORRECTED G1/G2, which is what pandas returns.
+            !! .true. gives the uncorrected g1/g2, which is what scipy returns by default.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine skewness_i32
+        !> `pf_kurtosis` over a 32-bit integer array.
+        module subroutine kurtosis_i32(values, k, is_valid, weights, weight_type, bias, excess, n_null, ok)
+            integer(int32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: k !! the kurtosis, excess by default.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            logical, intent(in), optional :: bias
+            !! .false. by default: the bias-CORRECTED G1/G2, which is what pandas returns.
+            !! .true. gives the uncorrected g1/g2, which is what scipy returns by default.
+            logical, intent(in), optional :: excess
+            !! .true. by default: EXCESS kurtosis, which is 0 for a normal population.
+            !! .false. adds 3 back, giving the raw fourth-moment ratio.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine kurtosis_i32
+        !> `pf_moments` over a 32-bit integer array: every tier-A quantity in one pair of passes.
+        module subroutine moments_i32(values, n_valid, mean, variance, stddev, sem, skewness, kurtosis, vsum, vmin, &
+                vmax, is_valid, weights, weight_type, ddof, bias, excess, &
+                n_null)
+            integer(int32), intent(in) :: values(:) !! the population.
+            integer(int64), intent(out), optional :: n_valid !! how many elements were used.
+            real(real64), intent(out), optional :: mean !! the mean; NaN when empty.
+            real(real64), intent(out), optional :: variance !! the variance; NaN when undefined.
+            real(real64), intent(out), optional :: stddev !! the standard deviation.
+            real(real64), intent(out), optional :: sem !! the standard error of the mean.
+            real(real64), intent(out), optional :: skewness !! the third standardised moment.
+            real(real64), intent(out), optional :: kurtosis !! the fourth, excess by default.
+            real(real64), intent(out), optional :: vsum !! the pairwise sum; 0 when empty.
+            real(real64), intent(out), optional :: vmin !! the smallest value; NaN when empty.
+            real(real64), intent(out), optional :: vmax !! the largest value; NaN when empty.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            logical, intent(in), optional :: bias
+            !! .false. by default: the bias-CORRECTED G1/G2, which is what pandas returns.
+            !! .true. gives the uncorrected g1/g2, which is what scipy returns by default.
+            logical, intent(in), optional :: excess
+            !! .true. by default: EXCESS kurtosis, which is 0 for a normal population.
+            !! .false. adds 3 back, giving the raw fourth-moment ratio.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+        end subroutine moments_i32
+        !> `pf_sum` over a 64-bit integer array.
+        !>
+        !> **An `integer(int64)` above 2**53 loses exactness** on the way into the real64 buffer
+        !> every statistic here is computed in. That is unavoidable for a mean and irrelevant for
+        !> the workloads this serves -- nobody averages an object ID -- but it is NOT irrelevant
+        !> for a median, which `pf_nth_quantile` computes exactly on the original array.
+        module subroutine sum_i64(values, s, is_valid, weights, n_null, ok)
+            integer(int64), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: s !! the sum.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine sum_i64
+        !> `pf_mean` over a 64-bit integer array.
+        !>
+        !> **An `integer(int64)` above 2**53 loses exactness** on the way into the real64 buffer
+        !> every statistic here is computed in. That is unavoidable for a mean and irrelevant for
+        !> the workloads this serves -- nobody averages an object ID -- but it is NOT irrelevant
+        !> for a median, which `pf_nth_quantile` computes exactly on the original array.
+        module subroutine mean_i64(values, m, is_valid, weights, n_null, ok)
+            integer(int64), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: m !! the mean; NaN when the population is empty.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine mean_i64
+        !> `pf_variance` over a 64-bit integer array.
+        !>
+        !> **An `integer(int64)` above 2**53 loses exactness** on the way into the real64 buffer
+        !> every statistic here is computed in. That is unavoidable for a mean and irrelevant for
+        !> the workloads this serves -- nobody averages an object ID -- but it is NOT irrelevant
+        !> for a median, which `pf_nth_quantile` computes exactly on the original array.
+        module subroutine variance_i64(values, v, is_valid, weights, weight_type, ddof, n_null, ok)
+            integer(int64), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: v !! the variance; NaN when `n_valid <= ddof`.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine variance_i64
+        !> `pf_stddev` over a 64-bit integer array.
+        !>
+        !> **An `integer(int64)` above 2**53 loses exactness** on the way into the real64 buffer
+        !> every statistic here is computed in. That is unavoidable for a mean and irrelevant for
+        !> the workloads this serves -- nobody averages an object ID -- but it is NOT irrelevant
+        !> for a median, which `pf_nth_quantile` computes exactly on the original array.
+        module subroutine stddev_i64(values, sd, is_valid, weights, weight_type, ddof, n_null, ok)
+            integer(int64), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: sd !! the standard deviation; NaN when the variance is.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine stddev_i64
+        !> `pf_sem` over a 64-bit integer array.
+        !>
+        !> **An `integer(int64)` above 2**53 loses exactness** on the way into the real64 buffer
+        !> every statistic here is computed in. That is unavoidable for a mean and irrelevant for
+        !> the workloads this serves -- nobody averages an object ID -- but it is NOT irrelevant
+        !> for a median, which `pf_nth_quantile` computes exactly on the original array.
+        module subroutine sem_i64(values, se, is_valid, weights, weight_type, ddof, n_null, ok)
+            integer(int64), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: se !! the standard error; NaN when the standard deviation is.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine sem_i64
+        !> `pf_skewness` over a 64-bit integer array.
+        !>
+        !> **An `integer(int64)` above 2**53 loses exactness** on the way into the real64 buffer
+        !> every statistic here is computed in. That is unavoidable for a mean and irrelevant for
+        !> the workloads this serves -- nobody averages an object ID -- but it is NOT irrelevant
+        !> for a median, which `pf_nth_quantile` computes exactly on the original array.
+        module subroutine skewness_i64(values, g, is_valid, weights, weight_type, bias, n_null, ok)
+            integer(int64), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: g !! the skewness.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            logical, intent(in), optional :: bias
+            !! .false. by default: the bias-CORRECTED G1/G2, which is what pandas returns.
+            !! .true. gives the uncorrected g1/g2, which is what scipy returns by default.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine skewness_i64
+        !> `pf_kurtosis` over a 64-bit integer array.
+        !>
+        !> **An `integer(int64)` above 2**53 loses exactness** on the way into the real64 buffer
+        !> every statistic here is computed in. That is unavoidable for a mean and irrelevant for
+        !> the workloads this serves -- nobody averages an object ID -- but it is NOT irrelevant
+        !> for a median, which `pf_nth_quantile` computes exactly on the original array.
+        module subroutine kurtosis_i64(values, k, is_valid, weights, weight_type, bias, excess, n_null, ok)
+            integer(int64), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: k !! the kurtosis, excess by default.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            logical, intent(in), optional :: bias
+            !! .false. by default: the bias-CORRECTED G1/G2, which is what pandas returns.
+            !! .true. gives the uncorrected g1/g2, which is what scipy returns by default.
+            logical, intent(in), optional :: excess
+            !! .true. by default: EXCESS kurtosis, which is 0 for a normal population.
+            !! .false. adds 3 back, giving the raw fourth-moment ratio.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine kurtosis_i64
+        !> `pf_moments` over a 64-bit integer array: every tier-A quantity in one pair of passes.
+        !>
+        !> **An `integer(int64)` above 2**53 loses exactness** on the way into the real64 buffer
+        !> every statistic here is computed in. That is unavoidable for a mean and irrelevant for
+        !> the workloads this serves -- nobody averages an object ID -- but it is NOT irrelevant
+        !> for a median, which `pf_nth_quantile` computes exactly on the original array.
+        module subroutine moments_i64(values, n_valid, mean, variance, stddev, sem, skewness, kurtosis, vsum, vmin, &
+                vmax, is_valid, weights, weight_type, ddof, bias, excess, &
+                n_null)
+            integer(int64), intent(in) :: values(:) !! the population.
+            integer(int64), intent(out), optional :: n_valid !! how many elements were used.
+            real(real64), intent(out), optional :: mean !! the mean; NaN when empty.
+            real(real64), intent(out), optional :: variance !! the variance; NaN when undefined.
+            real(real64), intent(out), optional :: stddev !! the standard deviation.
+            real(real64), intent(out), optional :: sem !! the standard error of the mean.
+            real(real64), intent(out), optional :: skewness !! the third standardised moment.
+            real(real64), intent(out), optional :: kurtosis !! the fourth, excess by default.
+            real(real64), intent(out), optional :: vsum !! the pairwise sum; 0 when empty.
+            real(real64), intent(out), optional :: vmin !! the smallest value; NaN when empty.
+            real(real64), intent(out), optional :: vmax !! the largest value; NaN when empty.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            logical, intent(in), optional :: bias
+            !! .false. by default: the bias-CORRECTED G1/G2, which is what pandas returns.
+            !! .true. gives the uncorrected g1/g2, which is what scipy returns by default.
+            logical, intent(in), optional :: excess
+            !! .true. by default: EXCESS kurtosis, which is 0 for a normal population.
+            !! .false. adds 3 back, giving the raw fourth-moment ratio.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+        end subroutine moments_i64
+        !> `pf_sum` over a 32-bit real array.
+        module subroutine sum_f32(values, s, is_valid, weights, skipnan, n_null, n_nan, ok)
+            real(real32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: s !! the sum.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine sum_f32
+        !> `pf_mean` over a 32-bit real array.
+        module subroutine mean_f32(values, m, is_valid, weights, skipnan, n_null, n_nan, ok)
+            real(real32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: m !! the mean; NaN when the population is empty.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine mean_f32
+        !> `pf_variance` over a 32-bit real array.
+        module subroutine variance_f32(values, v, is_valid, weights, weight_type, ddof, skipnan, n_null, n_nan, ok)
+            real(real32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: v !! the variance; NaN when `n_valid <= ddof`.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine variance_f32
+        !> `pf_stddev` over a 32-bit real array.
+        module subroutine stddev_f32(values, sd, is_valid, weights, weight_type, ddof, skipnan, n_null, n_nan, ok)
+            real(real32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: sd !! the standard deviation; NaN when the variance is.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine stddev_f32
+        !> `pf_sem` over a 32-bit real array.
+        module subroutine sem_f32(values, se, is_valid, weights, weight_type, ddof, skipnan, n_null, n_nan, ok)
+            real(real32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: se !! the standard error; NaN when the standard deviation is.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine sem_f32
+        !> `pf_skewness` over a 32-bit real array.
+        module subroutine skewness_f32(values, g, is_valid, weights, weight_type, bias, skipnan, n_null, n_nan, ok)
+            real(real32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: g !! the skewness.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            logical, intent(in), optional :: bias
+            !! .false. by default: the bias-CORRECTED G1/G2, which is what pandas returns.
+            !! .true. gives the uncorrected g1/g2, which is what scipy returns by default.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine skewness_f32
+        !> `pf_kurtosis` over a 32-bit real array.
+        module subroutine kurtosis_f32(values, k, is_valid, weights, weight_type, bias, excess, skipnan, n_null, n_nan, ok)
+            real(real32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: k !! the kurtosis, excess by default.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            logical, intent(in), optional :: bias
+            !! .false. by default: the bias-CORRECTED G1/G2, which is what pandas returns.
+            !! .true. gives the uncorrected g1/g2, which is what scipy returns by default.
+            logical, intent(in), optional :: excess
+            !! .true. by default: EXCESS kurtosis, which is 0 for a normal population.
+            !! .false. adds 3 back, giving the raw fourth-moment ratio.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine kurtosis_f32
+        !> `pf_moments` over a 32-bit real array: every tier-A quantity in one pair of passes.
+        module subroutine moments_f32(values, n_valid, mean, variance, stddev, sem, skewness, kurtosis, vsum, vmin, &
+                vmax, is_valid, weights, weight_type, ddof, bias, excess, &
+                skipnan, n_null, n_nan)
+            real(real32), intent(in) :: values(:) !! the population.
+            integer(int64), intent(out), optional :: n_valid !! how many elements were used.
+            real(real64), intent(out), optional :: mean !! the mean; NaN when empty.
+            real(real64), intent(out), optional :: variance !! the variance; NaN when undefined.
+            real(real64), intent(out), optional :: stddev !! the standard deviation.
+            real(real64), intent(out), optional :: sem !! the standard error of the mean.
+            real(real64), intent(out), optional :: skewness !! the third standardised moment.
+            real(real64), intent(out), optional :: kurtosis !! the fourth, excess by default.
+            real(real64), intent(out), optional :: vsum !! the pairwise sum; 0 when empty.
+            real(real64), intent(out), optional :: vmin !! the smallest value; NaN when empty.
+            real(real64), intent(out), optional :: vmax !! the largest value; NaN when empty.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            logical, intent(in), optional :: bias
+            !! .false. by default: the bias-CORRECTED G1/G2, which is what pandas returns.
+            !! .true. gives the uncorrected g1/g2, which is what scipy returns by default.
+            logical, intent(in), optional :: excess
+            !! .true. by default: EXCESS kurtosis, which is 0 for a normal population.
+            !! .false. adds 3 back, giving the raw fourth-moment ratio.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+        end subroutine moments_f32
+        !> `pf_sum` over a logical array.
+        !>
+        !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
+        !> fraction that are true.
+        module subroutine sum_bool(values, s, is_valid, weights, n_null, ok)
+            logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
+            real(real64), intent(out) :: s !! the sum.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine sum_bool
+        !> `pf_mean` over a logical array.
+        !>
+        !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
+        !> fraction that are true.
+        module subroutine mean_bool(values, m, is_valid, weights, n_null, ok)
+            logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
+            real(real64), intent(out) :: m !! the mean; NaN when the population is empty.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine mean_bool
+        !> `pf_variance` over a logical array.
+        !>
+        !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
+        !> fraction that are true.
+        module subroutine variance_bool(values, v, is_valid, weights, weight_type, ddof, n_null, ok)
+            logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
+            real(real64), intent(out) :: v !! the variance; NaN when `n_valid <= ddof`.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine variance_bool
+        !> `pf_stddev` over a logical array.
+        !>
+        !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
+        !> fraction that are true.
+        module subroutine stddev_bool(values, sd, is_valid, weights, weight_type, ddof, n_null, ok)
+            logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
+            real(real64), intent(out) :: sd !! the standard deviation; NaN when the variance is.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine stddev_bool
+        !> `pf_sem` over a logical array.
+        !>
+        !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
+        !> fraction that are true.
+        module subroutine sem_bool(values, se, is_valid, weights, weight_type, ddof, n_null, ok)
+            logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
+            real(real64), intent(out) :: se !! the standard error; NaN when the standard deviation is.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine sem_bool
+        !> `pf_skewness` over a logical array.
+        !>
+        !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
+        !> fraction that are true.
+        module subroutine skewness_bool(values, g, is_valid, weights, weight_type, bias, n_null, ok)
+            logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
+            real(real64), intent(out) :: g !! the skewness.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            logical, intent(in), optional :: bias
+            !! .false. by default: the bias-CORRECTED G1/G2, which is what pandas returns.
+            !! .true. gives the uncorrected g1/g2, which is what scipy returns by default.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine skewness_bool
+        !> `pf_kurtosis` over a logical array.
+        !>
+        !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
+        !> fraction that are true.
+        module subroutine kurtosis_bool(values, k, is_valid, weights, weight_type, bias, excess, n_null, ok)
+            logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
+            real(real64), intent(out) :: k !! the kurtosis, excess by default.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            logical, intent(in), optional :: bias
+            !! .false. by default: the bias-CORRECTED G1/G2, which is what pandas returns.
+            !! .true. gives the uncorrected g1/g2, which is what scipy returns by default.
+            logical, intent(in), optional :: excess
+            !! .true. by default: EXCESS kurtosis, which is 0 for a normal population.
+            !! .false. adds 3 back, giving the raw fourth-moment ratio.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine kurtosis_bool
+        !> `pf_moments` over a logical array: every tier-A quantity in one pair of passes.
+        !>
+        !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
+        !> fraction that are true.
+        module subroutine moments_bool(values, n_valid, mean, variance, stddev, sem, skewness, kurtosis, vsum, vmin, &
+                vmax, is_valid, weights, weight_type, ddof, bias, excess, &
+                n_null)
+            logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
+            integer(int64), intent(out), optional :: n_valid !! how many elements were used.
+            real(real64), intent(out), optional :: mean !! the mean; NaN when empty.
+            real(real64), intent(out), optional :: variance !! the variance; NaN when undefined.
+            real(real64), intent(out), optional :: stddev !! the standard deviation.
+            real(real64), intent(out), optional :: sem !! the standard error of the mean.
+            real(real64), intent(out), optional :: skewness !! the third standardised moment.
+            real(real64), intent(out), optional :: kurtosis !! the fourth, excess by default.
+            real(real64), intent(out), optional :: vsum !! the pairwise sum; 0 when empty.
+            real(real64), intent(out), optional :: vmin !! the smallest value; NaN when empty.
+            real(real64), intent(out), optional :: vmax !! the largest value; NaN when empty.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            logical, intent(in), optional :: bias
+            !! .false. by default: the bias-CORRECTED G1/G2, which is what pandas returns.
+            !! .true. gives the uncorrected g1/g2, which is what scipy returns by default.
+            logical, intent(in), optional :: excess
+            !! .true. by default: EXCESS kurtosis, which is 0 for a normal population.
+            !! .false. adds 3 back, giving the raw fourth-moment ratio.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+        end subroutine moments_bool
+        !> `pf_sum` over a scalar numeric `parquet_column`.
+        !>
+        !> Dispatched on the column's kind at run time, and **scalar numeric columns only**:
+        !> int32, int64, float32, float64 and logical. A string, temporal or container column
+        !> aborts naming its kind, and so does a column more than one element wide -- flattening
+        !> a vector column into one population is a different statistic and nobody should get it
+        !> by accident. **The column's own validity is the only source of nullness**, so passing
+        !> `is_valid=` alongside one aborts rather than silently preferring one of two sources.
+        module subroutine sum_col(values, s, is_valid, weights, skipnan, n_null, n_nan, ok)
+            type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
+            real(real64), intent(out) :: s !! the sum.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine sum_col
+        !> `pf_mean` over a scalar numeric `parquet_column`.
+        !>
+        !> Dispatched on the column's kind at run time, and **scalar numeric columns only**:
+        !> int32, int64, float32, float64 and logical. A string, temporal or container column
+        !> aborts naming its kind, and so does a column more than one element wide -- flattening
+        !> a vector column into one population is a different statistic and nobody should get it
+        !> by accident. **The column's own validity is the only source of nullness**, so passing
+        !> `is_valid=` alongside one aborts rather than silently preferring one of two sources.
+        module subroutine mean_col(values, m, is_valid, weights, skipnan, n_null, n_nan, ok)
+            type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
+            real(real64), intent(out) :: m !! the mean; NaN when the population is empty.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine mean_col
+        !> `pf_variance` over a scalar numeric `parquet_column`.
+        !>
+        !> Dispatched on the column's kind at run time, and **scalar numeric columns only**:
+        !> int32, int64, float32, float64 and logical. A string, temporal or container column
+        !> aborts naming its kind, and so does a column more than one element wide -- flattening
+        !> a vector column into one population is a different statistic and nobody should get it
+        !> by accident. **The column's own validity is the only source of nullness**, so passing
+        !> `is_valid=` alongside one aborts rather than silently preferring one of two sources.
+        module subroutine variance_col(values, v, is_valid, weights, weight_type, ddof, skipnan, n_null, n_nan, ok)
+            type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
+            real(real64), intent(out) :: v !! the variance; NaN when `n_valid <= ddof`.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine variance_col
+        !> `pf_stddev` over a scalar numeric `parquet_column`.
+        !>
+        !> Dispatched on the column's kind at run time, and **scalar numeric columns only**:
+        !> int32, int64, float32, float64 and logical. A string, temporal or container column
+        !> aborts naming its kind, and so does a column more than one element wide -- flattening
+        !> a vector column into one population is a different statistic and nobody should get it
+        !> by accident. **The column's own validity is the only source of nullness**, so passing
+        !> `is_valid=` alongside one aborts rather than silently preferring one of two sources.
+        module subroutine stddev_col(values, sd, is_valid, weights, weight_type, ddof, skipnan, n_null, n_nan, ok)
+            type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
+            real(real64), intent(out) :: sd !! the standard deviation; NaN when the variance is.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine stddev_col
+        !> `pf_sem` over a scalar numeric `parquet_column`.
+        !>
+        !> Dispatched on the column's kind at run time, and **scalar numeric columns only**:
+        !> int32, int64, float32, float64 and logical. A string, temporal or container column
+        !> aborts naming its kind, and so does a column more than one element wide -- flattening
+        !> a vector column into one population is a different statistic and nobody should get it
+        !> by accident. **The column's own validity is the only source of nullness**, so passing
+        !> `is_valid=` alongside one aborts rather than silently preferring one of two sources.
+        module subroutine sem_col(values, se, is_valid, weights, weight_type, ddof, skipnan, n_null, n_nan, ok)
+            type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
+            real(real64), intent(out) :: se !! the standard error; NaN when the standard deviation is.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine sem_col
+        !> `pf_skewness` over a scalar numeric `parquet_column`.
+        !>
+        !> Dispatched on the column's kind at run time, and **scalar numeric columns only**:
+        !> int32, int64, float32, float64 and logical. A string, temporal or container column
+        !> aborts naming its kind, and so does a column more than one element wide -- flattening
+        !> a vector column into one population is a different statistic and nobody should get it
+        !> by accident. **The column's own validity is the only source of nullness**, so passing
+        !> `is_valid=` alongside one aborts rather than silently preferring one of two sources.
+        module subroutine skewness_col(values, g, is_valid, weights, weight_type, bias, skipnan, n_null, n_nan, ok)
+            type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
+            real(real64), intent(out) :: g !! the skewness.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            logical, intent(in), optional :: bias
+            !! .false. by default: the bias-CORRECTED G1/G2, which is what pandas returns.
+            !! .true. gives the uncorrected g1/g2, which is what scipy returns by default.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine skewness_col
+        !> `pf_kurtosis` over a scalar numeric `parquet_column`.
+        !>
+        !> Dispatched on the column's kind at run time, and **scalar numeric columns only**:
+        !> int32, int64, float32, float64 and logical. A string, temporal or container column
+        !> aborts naming its kind, and so does a column more than one element wide -- flattening
+        !> a vector column into one population is a different statistic and nobody should get it
+        !> by accident. **The column's own validity is the only source of nullness**, so passing
+        !> `is_valid=` alongside one aborts rather than silently preferring one of two sources.
+        module subroutine kurtosis_col(values, k, is_valid, weights, weight_type, bias, excess, skipnan, n_null, n_nan, ok)
+            type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
+            real(real64), intent(out) :: k !! the kurtosis, excess by default.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            logical, intent(in), optional :: bias
+            !! .false. by default: the bias-CORRECTED G1/G2, which is what pandas returns.
+            !! .true. gives the uncorrected g1/g2, which is what scipy returns by default.
+            logical, intent(in), optional :: excess
+            !! .true. by default: EXCESS kurtosis, which is 0 for a normal population.
+            !! .false. adds 3 back, giving the raw fourth-moment ratio.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine kurtosis_col
+        !> `pf_moments` over a scalar numeric `parquet_column`: every tier-A quantity in one pair of passes.
+        !>
+        !> Dispatched on the column's kind at run time, and **scalar numeric columns only**:
+        !> int32, int64, float32, float64 and logical. A string, temporal or container column
+        !> aborts naming its kind, and so does a column more than one element wide -- flattening
+        !> a vector column into one population is a different statistic and nobody should get it
+        !> by accident. **The column's own validity is the only source of nullness**, so passing
+        !> `is_valid=` alongside one aborts rather than silently preferring one of two sources.
+        module subroutine moments_col(values, n_valid, mean, variance, stddev, sem, skewness, kurtosis, vsum, vmin, &
+                vmax, is_valid, weights, weight_type, ddof, bias, excess, &
+                skipnan, n_null, n_nan)
+            type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
+            integer(int64), intent(out), optional :: n_valid !! how many elements were used.
+            real(real64), intent(out), optional :: mean !! the mean; NaN when empty.
+            real(real64), intent(out), optional :: variance !! the variance; NaN when undefined.
+            real(real64), intent(out), optional :: stddev !! the standard deviation.
+            real(real64), intent(out), optional :: sem !! the standard error of the mean.
+            real(real64), intent(out), optional :: skewness !! the third standardised moment.
+            real(real64), intent(out), optional :: kurtosis !! the fourth, excess by default.
+            real(real64), intent(out), optional :: vsum !! the pairwise sum; 0 when empty.
+            real(real64), intent(out), optional :: vmin !! the smallest value; NaN when empty.
+            real(real64), intent(out), optional :: vmax !! the largest value; NaN when empty.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            logical, intent(in), optional :: bias
+            !! .false. by default: the bias-CORRECTED G1/G2, which is what pandas returns.
+            !! .true. gives the uncorrected g1/g2, which is what scipy returns by default.
+            logical, intent(in), optional :: excess
+            !! .true. by default: EXCESS kurtosis, which is 0 for a normal population.
+            !! .false. adds 3 back, giving the raw fourth-moment ratio.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+        end subroutine moments_col
+        !> `%compute` over a 32-bit integer array.
+        module subroutine obj_compute_i32(self, values, retain, is_valid, weights, weight_type)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; any previous contents are discarded.
+            integer(int32), intent(in) :: values(:) !! the population.
+            logical, intent(in), optional :: retain
+            !! .true. by default: keep a copy of the surviving values, which costs 8 bytes per
+            !! survivor (16 when weighted) and is what makes `%update` and `%merge` EXACT rather
+            !! than approximate. .false. keeps nothing but the accumulator, which is O(1) whatever
+            !! the population size and is what a row-group loop over a file larger than RAM wants.
+            !! Fixed for the object's lifetime; every accumulator in one `%merge` must agree.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+        end subroutine obj_compute_i32
+        !> `%update` over a 32-bit integer array.
+        module subroutine obj_update_i32(self, values, is_valid, weights)
+            class(pf_stats), intent(inout) :: self !! the accumulator.
+            integer(int32), intent(in) :: values(:) !! the batch.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+        end subroutine obj_update_i32
+        !> `%compute` over a 64-bit integer array.
+        !>
+        !> **An `integer(int64)` above 2**53 loses exactness** on the way into the real64 buffer
+        !> every statistic here is computed in. That is unavoidable for a mean and irrelevant for
+        !> the workloads this serves -- nobody averages an object ID -- but it is NOT irrelevant
+        !> for a median, which `pf_nth_quantile` computes exactly on the original array.
+        module subroutine obj_compute_i64(self, values, retain, is_valid, weights, weight_type)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; any previous contents are discarded.
+            integer(int64), intent(in) :: values(:) !! the population.
+            logical, intent(in), optional :: retain
+            !! .true. by default: keep a copy of the surviving values, which costs 8 bytes per
+            !! survivor (16 when weighted) and is what makes `%update` and `%merge` EXACT rather
+            !! than approximate. .false. keeps nothing but the accumulator, which is O(1) whatever
+            !! the population size and is what a row-group loop over a file larger than RAM wants.
+            !! Fixed for the object's lifetime; every accumulator in one `%merge` must agree.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+        end subroutine obj_compute_i64
+        !> `%update` over a 64-bit integer array.
+        module subroutine obj_update_i64(self, values, is_valid, weights)
+            class(pf_stats), intent(inout) :: self !! the accumulator.
+            integer(int64), intent(in) :: values(:) !! the batch.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+        end subroutine obj_update_i64
+        !> `%compute` over a 32-bit real array.
+        module subroutine obj_compute_f32(self, values, retain, is_valid, weights, weight_type, skipnan)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; any previous contents are discarded.
+            real(real32), intent(in) :: values(:) !! the population.
+            logical, intent(in), optional :: retain
+            !! .true. by default: keep a copy of the surviving values, which costs 8 bytes per
+            !! survivor (16 when weighted) and is what makes `%update` and `%merge` EXACT rather
+            !! than approximate. .false. keeps nothing but the accumulator, which is O(1) whatever
+            !! the population size and is what a row-group loop over a file larger than RAM wants.
+            !! Fixed for the object's lifetime; every accumulator in one `%merge` must agree.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+        end subroutine obj_compute_f32
+        !> `%update` over a 32-bit real array.
+        module subroutine obj_update_f32(self, values, is_valid, weights)
+            class(pf_stats), intent(inout) :: self !! the accumulator.
+            real(real32), intent(in) :: values(:) !! the batch.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+        end subroutine obj_update_f32
+        !> `%compute` over a logical array.
+        !>
+        !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
+        !> fraction that are true.
+        module subroutine obj_compute_bool(self, values, retain, is_valid, weights, weight_type)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; any previous contents are discarded.
+            logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
+            logical, intent(in), optional :: retain
+            !! .true. by default: keep a copy of the surviving values, which costs 8 bytes per
+            !! survivor (16 when weighted) and is what makes `%update` and `%merge` EXACT rather
+            !! than approximate. .false. keeps nothing but the accumulator, which is O(1) whatever
+            !! the population size and is what a row-group loop over a file larger than RAM wants.
+            !! Fixed for the object's lifetime; every accumulator in one `%merge` must agree.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+        end subroutine obj_compute_bool
+        !> `%update` over a logical array.
+        module subroutine obj_update_bool(self, values, is_valid, weights)
+            class(pf_stats), intent(inout) :: self !! the accumulator.
+            logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+        end subroutine obj_update_bool
+        !> `%compute` over a scalar numeric `parquet_column`.
+        !>
+        !> Dispatched on the column's kind at run time, and **scalar numeric columns only**:
+        !> int32, int64, float32, float64 and logical. A string, temporal or container column
+        !> aborts naming its kind, and so does a column more than one element wide -- flattening
+        !> a vector column into one population is a different statistic and nobody should get it
+        !> by accident. **The column's own validity is the only source of nullness**, so passing
+        !> `is_valid=` alongside one aborts rather than silently preferring one of two sources.
+        module subroutine obj_compute_col(self, values, retain, is_valid, weights, weight_type, skipnan)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; any previous contents are discarded.
+            type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
+            logical, intent(in), optional :: retain
+            !! .true. by default: keep a copy of the surviving values, which costs 8 bytes per
+            !! survivor (16 when weighted) and is what makes `%update` and `%merge` EXACT rather
+            !! than approximate. .false. keeps nothing but the accumulator, which is O(1) whatever
+            !! the population size and is what a row-group loop over a file larger than RAM wants.
+            !! Fixed for the object's lifetime; every accumulator in one `%merge` must agree.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+        end subroutine obj_compute_col
+        !> `%update` over a scalar numeric `parquet_column`.
+        module subroutine obj_update_col(self, values, is_valid, weights)
+            class(pf_stats), intent(inout) :: self !! the accumulator.
+            type(parquet_column), intent(in) :: values !! the batch; scalar numeric kinds only.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+        end subroutine obj_update_col
+    end interface
+    !
     ! ---- pf_stats (implemented in parquet_stats_core) ----
     interface
         !> Summarises a resident array: the usual way to build a `pf_stats`.
@@ -673,7 +2172,7 @@ module parquet_stats
         !! Two traversals, whatever is asked of the result afterwards. Any previous contents of
         !! `self` are discarded, so an object may be reused across a loop of groups without
         !! `%clear` in between.
-        module subroutine obj_compute(self, values, retain, is_valid, weights, weight_type, skipnan)
+        module subroutine obj_compute_f64(self, values, retain, is_valid, weights, weight_type, skipnan)
             class(pf_stats), intent(inout) :: self
             !! the accumulator; any previous contents are discarded.
             real(real64), intent(in) :: values(:) !! the population, before exclusions.
@@ -698,7 +2197,7 @@ module parquet_stats
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
             !! which one NaN makes every answer NaN.
-        end subroutine obj_compute
+        end subroutine obj_compute_f64
         !> Arms an empty accumulator for a loop of `%update`, or for a `%merge`.
         !!
         !! The population is EMPTY afterwards, which is a different state from uncomputed: every
@@ -731,7 +2230,7 @@ module parquet_stats
         !! and the result is bit for bit what `%compute` over the concatenated batches gives.
         !! In streaming mode this is one traversal and O(1) memory, combining by the Chan/Pebay
         !! formulas, and the accuracy is theirs.
-        module subroutine obj_update(self, values, is_valid, weights)
+        module subroutine obj_update_f64(self, values, is_valid, weights)
             class(pf_stats), intent(inout) :: self !! the accumulator.
             real(real64), intent(in) :: values(:) !! the batch, before exclusions.
             logical, intent(in), optional :: is_valid(:)
@@ -739,7 +2238,7 @@ module parquet_stats
             real(real64), intent(in), optional :: weights(:)
             !! per element weight, non-negative. A ZERO weight removes the element from the
             !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
-        end subroutine obj_update
+        end subroutine obj_update_f64
         !> Folds one other accumulator into this one.
         !!
         !! Both must agree on `retain` and on the weight convention, and the source must have been

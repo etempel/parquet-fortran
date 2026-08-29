@@ -755,6 +755,12 @@ program error_scenarios
         call scenario_stats_object_merge_retain_mismatch()
     case ("stats_object_merge_uncomputed_source")
         call scenario_stats_object_merge_uncomputed_source()
+    case ("stats_column_string_kind")
+        call scenario_stats_column_string_kind()
+    case ("stats_column_vector_width")
+        call scenario_stats_column_vector_width()
+    case ("stats_column_is_valid_conflict")
+        call scenario_stats_column_is_valid_conflict()
     case ("sorting_column_vector")
         call scenario_sorting_column_vector()
     case ("sorting_search_unsorted")
@@ -16683,6 +16689,54 @@ contains
         call total%merge(never)        ! -> aborts (never computed, never armed)
         print '(a,i0)', "unexpectedly merged an uncomputed source, n=", total%n()
     end subroutine scenario_stats_object_merge_uncomputed_source
+
+    !> A string column has no numeric statistics, and the message must name the kind it found.
+    !!
+    !! The numeric column first is the negative control: without it, a dispatch that refused every
+    !! column would pass this scenario while making the whole `parquet_column` entry layer unusable.
+    subroutine scenario_stats_column_string_kind()
+        type(parquet_column) :: num, txt
+        real(real64) :: m
+
+        call num%init(PK_INT32, 3_int64)
+        call num%set_all([1_int32, 2_int32, 3_int32])
+        call pf_mean(num, m)                    ! a numeric column: accepted
+        if (m /= 2.0_real64) print '(a)', "the mean of a numeric column was expected to be 2"
+        call txt%init(PK_STRING, 3_int64)
+        call pf_mean(txt, m)                    ! -> aborts (no numeric statistics for a string)
+        print '(a,es12.5)', "unexpectedly averaged a string column, mean=", m
+    end subroutine scenario_stats_column_string_kind
+
+    !> Flattening a vector column into one population is a DIFFERENT statistic, so it is refused.
+    !!
+    !! A caller who wants one element position across all rows has `%get_elem`; one who genuinely
+    !! wants the flattened population can pass the flattened array and thereby say so. Answering
+    !! silently would give a plausible number for a question nobody asked.
+    subroutine scenario_stats_column_vector_width()
+        type(parquet_column) :: c
+        real(real64) :: m
+
+        call c%init(PK_INT32_VEC, 3_int64, width=2)
+        call pf_mean(c, m)                      ! -> aborts (width 2)
+        print '(a,es12.5)', "unexpectedly averaged a vector column, mean=", m
+    end subroutine scenario_stats_column_vector_width
+
+    !> A column carries its own validity, so a second source of nullness beside it is refused.
+    !!
+    !! Two sources that can disagree is a shape this repository has been bitten by before; the
+    !! null-free call first is the negative control for the guard being keyed on PRESENCE.
+    subroutine scenario_stats_column_is_valid_conflict()
+        type(parquet_column) :: c
+        logical :: mask(3) = [.true., .false., .true.]
+        real(real64) :: m
+
+        call c%init(PK_INT32, 3_int64)
+        call c%set_all([1_int32, 2_int32, 3_int32])
+        call pf_mean(c, m)                      ! no is_valid=: accepted
+        if (m /= 2.0_real64) print '(a)', "the mean of a numeric column was expected to be 2"
+        call pf_mean(c, m, is_valid=mask)       ! -> aborts (two sources of nullness)
+        print '(a,es12.5)', "unexpectedly accepted is_valid= beside a column, mean=", m
+    end subroutine scenario_stats_column_is_valid_conflict
 
     !> A vector column has no defined order on a whole row, so it cannot be a sort key -- the
     !! same rule parquet_table%sort_by applies, enforced here for a bare parquet_column.

@@ -1148,7 +1148,7 @@ contains
         self%live = .true.
     end procedure obj_init
 
-    module procedure obj_compute
+    module procedure obj_compute_f64
         call stats_reset(self)
         if (present(retain)) self%hold = retain
         if (present(skipnan)) self%skip = skipnan
@@ -1166,9 +1166,9 @@ contains
         self%c_null = self%acc%n_null
         self%c_nan = self%acc%n_nan
         self%live = .true.
-    end procedure obj_compute
+    end procedure obj_compute_f64
 
-    module procedure obj_update
+    module procedure obj_update_f64
         type(stats_acc) :: batch
         call stats_require_live(self, "pf_stats%update")
         if (self%hold) then
@@ -1186,7 +1186,7 @@ contains
             self%c_null = self%acc%n_null
             self%c_nan = self%acc%n_nan
         end if
-    end procedure obj_update
+    end procedure obj_update_f64
 
     module procedure obj_merge_one
         logical :: eat

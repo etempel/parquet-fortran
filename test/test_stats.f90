@@ -87,7 +87,20 @@ contains
             new_unittest("an empty pf_stats is computed, and differs from an uncomputed one", &
                 test_object_empty_and_cleared), &
             new_unittest("weights arriving part-way through a retained stream backfill as 1", &
-                test_weights_arriving_late_backfill) &
+                test_weights_arriving_late_backfill), &
+            new_unittest("every numeric kind widens exactly to the real64 answer", &
+                test_every_kind_agrees_with_real64), &
+            new_unittest("the mean of a logical array is the fraction that are true", &
+                test_logical_mean_is_a_fraction), &
+            new_unittest("a parquet_column gives exactly the answer its array does", &
+                test_column_matches_its_array), &
+            new_unittest("all five numeric column kinds reach the generic", test_every_column_kind), &
+            new_unittest("a real32 NaN is still a NaN after widening", &
+                test_real32_nan_survives_widening), &
+            new_unittest("pf_stats accepts every kind the one-shot family does", &
+                test_object_accepts_every_kind), &
+            new_unittest("a column with spare capacity is read only to its row count", &
+                test_column_capacity_is_not_the_population) &
             ]
     end subroutine collect_tests_parquet_stats
 
@@ -1053,5 +1066,384 @@ contains
         call check(error, s%sum_weights() == whole%sum_weights(), &
             "the backfilled weights must sum to the same total")
     end subroutine test_weights_arriving_late_backfill
+
+    ! ==============================================================================================
+    ! The per-kind entry layer
+    !
+    ! Every kind widens into a real64 buffer and calls the ONE engine, so what has to be asserted is
+    ! not that each kind computes the right answer -- the golden vectors already pin the engine --
+    ! but that widening is EXACT and that every specific reaches it. Both are `==` comparisons
+    ! against the real64 form over the same numbers; a tolerance here would pass against a kind that
+    ! had quietly reached a different code path.
+    ! ==============================================================================================
+
+    !> An integer fixture, chosen so that every kind can hold it EXACTLY.
+    !!
+    !! Values stay inside +/-500001, which is well under real32's 2**24 exact-integer ceiling and
+    !! trivially inside int32. That is what makes `==` the right comparison below: any difference
+    !! between kinds would be the library's, not the format's.
+    subroutine kind_fixture(n, iv)
+        integer(int64), intent(in) :: n                          !! how many values to build.
+        integer(int32), allocatable, intent(out) :: iv(:)        !! the population.
+        integer(int64) :: i, a
+
+        allocate(iv(n))
+        do i = 1_int64, n
+            a = mod(i * i * 7919_int64 + 12345_int64, 1000003_int64)
+            iv(i) = int(a - 500001_int64, int32)
+        end do
+    end subroutine kind_fixture
+
+    !> Every numeric kind widens exactly, so all four agree with `real64` bit for bit.
+    subroutine test_every_kind_agrees_with_real64(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        integer(int32), allocatable :: iv(:)
+        integer(int64), allocatable :: i8(:)
+        real(real32), allocatable :: r4(:)
+        real(real64), allocatable :: r8(:)
+        real(real64) :: want(NQ), got(NQ)
+        integer(int64) :: nv
+        integer :: q
+
+        call kind_fixture(1000_int64, iv)
+        allocate(i8(1000), r4(1000), r8(1000))
+        i8 = int(iv, int64)
+        r4 = real(iv, real32)
+        r8 = real(iv, real64)
+        call one_row(r8, want)
+
+        call one_row_i32(iv, got, nv)
+        do q = 1, NQ
+            call check(error, got(q) == want(q), &
+                "an int32 population must give exactly the real64 answer: " // trim(QNAME(q)))
+            if (allocated(error)) return
+        end do
+        call check(error, nv == 1000_int64, "the int32 form must report every element as valid")
+        if (allocated(error)) return
+
+        call one_row_i64(i8, got)
+        do q = 1, NQ
+            call check(error, got(q) == want(q), &
+                "an int64 population must give exactly the real64 answer: " // trim(QNAME(q)))
+            if (allocated(error)) return
+        end do
+
+        call one_row_f32(r4, got)
+        do q = 1, NQ
+            call check(error, got(q) == want(q), &
+                "a real32 population of exact integers must give exactly the real64 answer: " // &
+                trim(QNAME(q)))
+            if (allocated(error)) return
+        end do
+    end subroutine test_every_kind_agrees_with_real64
+
+    !> `pf_moments` over a real64 array, packed into the comparison row.
+    subroutine one_row(v, got)
+        real(real64), intent(in) :: v(:)     !! the population.
+        real(real64), intent(out) :: got(NQ) !! the nine compared quantities.
+        call pf_moments(v, mean=got(2), variance=got(3), stddev=got(4), sem=got(5), &
+            skewness=got(6), kurtosis=got(7), vsum=got(1), vmin=got(8), vmax=got(9))
+    end subroutine one_row
+
+    !> The same over an int32 array, which also reports `n_valid` so the counts are covered.
+    subroutine one_row_i32(v, got, nv)
+        integer(int32), intent(in) :: v(:)      !! the population.
+        real(real64), intent(out) :: got(NQ)    !! the nine compared quantities.
+        integer(int64), intent(out) :: nv       !! how many were in the population.
+        call pf_moments(v, n_valid=nv, mean=got(2), variance=got(3), stddev=got(4), sem=got(5), &
+            skewness=got(6), kurtosis=got(7), vsum=got(1), vmin=got(8), vmax=got(9))
+    end subroutine one_row_i32
+
+    !> The same over an int64 array.
+    subroutine one_row_i64(v, got)
+        integer(int64), intent(in) :: v(:)   !! the population.
+        real(real64), intent(out) :: got(NQ) !! the nine compared quantities.
+        call pf_moments(v, mean=got(2), variance=got(3), stddev=got(4), sem=got(5), &
+            skewness=got(6), kurtosis=got(7), vsum=got(1), vmin=got(8), vmax=got(9))
+    end subroutine one_row_i64
+
+    !> The same over a real32 array.
+    subroutine one_row_f32(v, got)
+        real(real32), intent(in) :: v(:)     !! the population.
+        real(real64), intent(out) :: got(NQ) !! the nine compared quantities.
+        call pf_moments(v, mean=got(2), variance=got(3), stddev=got(4), sem=got(5), &
+            skewness=got(6), kurtosis=got(7), vsum=got(1), vmin=got(8), vmax=got(9))
+    end subroutine one_row_f32
+
+    !> The same over a parquet_column.
+    subroutine one_row_col(c, got, nnull)
+        type(parquet_column), intent(in) :: c   !! the column.
+        real(real64), intent(out) :: got(NQ)    !! the nine compared quantities.
+        integer(int64), intent(out) :: nnull    !! how many rows were null.
+        call pf_moments(c, mean=got(2), variance=got(3), stddev=got(4), sem=got(5), &
+            skewness=got(6), kurtosis=got(7), vsum=got(1), vmin=got(8), vmax=got(9), n_null=nnull)
+    end subroutine one_row_col
+
+    !> The mean of a logical array is the fraction that are `.true.`.
+    subroutine test_logical_mean_is_a_fraction(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        logical :: b(10)
+        real(real64) :: m, t
+        integer(int64) :: n
+
+        b = .false.
+        b(1:3) = .true.
+        call pf_sum(b, t)
+        call check(error, t == 3.0_real64, "the sum of a logical array must count the .true. entries")
+        if (allocated(error)) return
+        call pf_count_valid(b, n)
+        call check(error, n == 10_int64, "pf_count_valid must count a .false. as an ordinary value")
+        if (allocated(error)) return
+
+        ! The claim being tested is that `.true.` widens to 1 and `.false.` to 0, so the comparison
+        ! is against the widened array and not against a decimal literal. `3/10` is NOT the right
+        ! expectation: the two-pass mean refines `sum/n` by the re-centring correction, which is
+        ! more accurate and differs from the naive quotient in the last bit here.
+        call pf_mean(b, m)
+        call pf_mean(merge(1.0_real64, 0.0_real64, b), t)
+        call check(error, m == t, "the mean of a logical array must equal the mean of its 0/1 form")
+        if (allocated(error)) return
+
+        ! A fraction that IS a binary one, so the refinement is exactly zero and the answer can be
+        ! written down: five of ten.
+        b = .false.
+        b(1:5) = .true.
+        call pf_mean(b, m)
+        call check(error, m == 0.5_real64, "the mean of a half-true logical array must be exactly 0.5")
+    end subroutine test_logical_mean_is_a_fraction
+
+    !> A `parquet_column` reaches the same engine as the array of the same numbers.
+    subroutine test_column_matches_its_array(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        integer(int32), allocatable :: iv(:)
+        real(real64), allocatable :: r8(:)
+        logical, allocatable :: mask(:)
+        real(real64) :: want(NQ), got(NQ)
+        type(parquet_column) :: c
+        integer(int64) :: nnull, i, n
+        integer :: q
+
+        call kind_fixture(500_int64, iv)
+        allocate(r8(500))
+        r8 = real(iv, real64)
+
+        ! (a) a null-free column: the mask never exists, on either side.
+        call c%init(PK_INT32, 500_int64)
+        call c%set_all(iv)
+        call one_row(r8, want)
+        call one_row_col(c, got, nnull)
+        do q = 1, NQ
+            call check(error, got(q) == want(q), &
+                "a null-free column must give exactly the array answer: " // trim(QNAME(q)))
+            if (allocated(error)) return
+        end do
+        call check(error, nnull == 0_int64, "a null-free column must report no nulls")
+        if (allocated(error)) return
+
+        ! (b) the same column with nulls: the column's own validity must reach the engine as the
+        ! equivalent is_valid= mask does on the array side. This is the assertion that would fail
+        ! if row_validity were dropped, which nothing else here can see.
+        allocate(mask(500))
+        mask = .true.
+        do i = 1_int64, 500_int64, 6_int64
+            call c%set_null(i)
+            mask(i) = .false.
+        end do
+        call pf_moments(r8, is_valid=mask, mean=want(2), variance=want(3), stddev=want(4), &
+            sem=want(5), skewness=want(6), kurtosis=want(7), vsum=want(1), vmin=want(8), &
+            vmax=want(9))
+        call one_row_col(c, got, nnull)
+        do q = 1, NQ
+            call check(error, got(q) == want(q), &
+                "a column's own nulls must reach the engine as is_valid= does: " // trim(QNAME(q)))
+            if (allocated(error)) return
+        end do
+        call check(error, nnull == count(.not. mask, kind=int64), &
+            "a column form must report the column's nulls")
+        if (allocated(error)) return
+        call pf_count_valid(c, n)
+        call check(error, n == 500_int64 - nnull, "pf_count_valid must accept a column too")
+    end subroutine test_column_matches_its_array
+
+    !> Every one of the five column kinds is accepted, and each answers for itself.
+    !!
+    !! A generic that resolved four of five would pass any test written for one of them, so all
+    !! five are built and read back rather than a representative.
+    subroutine test_every_column_kind(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        type(parquet_column) :: c
+        real(real64) :: m
+        logical :: b(4) = [.true., .false., .true., .true.]
+
+        call c%init(PK_INT32, 4_int64)
+        call c%set_all([1_int32, 2_int32, 3_int32, 4_int32])
+        call pf_mean(c, m)
+        call check(error, m == 2.5_real64, "a PK_INT32 column must reach pf_mean")
+        if (allocated(error)) return
+
+        call c%clear()
+        call c%init(PK_INT64, 4_int64)
+        call c%set_all([1_int64, 2_int64, 3_int64, 4_int64])
+        call pf_mean(c, m)
+        call check(error, m == 2.5_real64, "a PK_INT64 column must reach pf_mean")
+        if (allocated(error)) return
+
+        call c%clear()
+        call c%init(PK_FLOAT32, 4_int64)
+        call c%set_all([1.0_real32, 2.0_real32, 3.0_real32, 4.0_real32])
+        call pf_mean(c, m)
+        call check(error, m == 2.5_real64, "a PK_FLOAT32 column must reach pf_mean")
+        if (allocated(error)) return
+
+        call c%clear()
+        call c%init(PK_FLOAT64, 4_int64)
+        call c%set_all([1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64])
+        call pf_mean(c, m)
+        call check(error, m == 2.5_real64, "a PK_FLOAT64 column must reach pf_mean")
+        if (allocated(error)) return
+
+        call c%clear()
+        call c%init(PK_LOGICAL, 4_int64)
+        call c%set_all(b)
+        call pf_mean(c, m)
+        call check(error, m == 0.75_real64, "a PK_LOGICAL column must reach pf_mean as 0/1")
+    end subroutine test_every_column_kind
+
+    !> An integer kind takes no `skipnan` and reports no `n_nan`, and that is the assertion.
+    !!
+    !! There is nothing to run here: a call passing `skipnan=` to the int32 specific would not
+    !! compile, so the test is that this file compiles at all with the calls below in it. What CAN
+    !! be checked at run time is the other half -- that a real32 NaN really is excluded after
+    !! widening, which is the one thing the widening could plausibly break.
+    subroutine test_real32_nan_survives_widening(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real32) :: v(5)
+        real(real64) :: m
+        integer(int64) :: nn, n
+
+        v = [1.0_real32, 2.0_real32, 0.0_real32, 4.0_real32, 5.0_real32]
+        v(3) = ieee_value(1.0_real32, ieee_quiet_nan)
+        call pf_mean(v, m, n_nan=nn)
+        call check(error, m == 3.0_real64, "a real32 NaN must be excluded after widening to real64")
+        if (allocated(error)) return
+        call check(error, nn == 1_int64, "the real32 form must report the NaN it excluded")
+        if (allocated(error)) return
+        call pf_mean(v, m, skipnan=.false.)
+        call check(error, m /= m, "skipnan=.false. must propagate a widened real32 NaN")
+        if (allocated(error)) return
+        call pf_count_valid(v, n, skipnan=.false.)
+        call check(error, n == 5_int64, "pf_count_valid(skipnan=.false.) must keep the NaN")
+    end subroutine test_real32_nan_survives_widening
+
+    !> `pf_stats` must not be the one place in the module that is real64-only.
+    !!
+    !! Each kind's `%compute` widens and delegates to the real64 form, so the assertion is `==`
+    !! against that form over the same numbers -- and `%update` gets the same treatment, because a
+    !! type whose `%compute` accepts a column and whose `%update` does not would be a worse wart
+    !! than the one this closes.
+    subroutine test_object_accepts_every_kind(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        integer(int32), allocatable :: iv(:)
+        real(real64), allocatable :: r8(:)
+        real(real64) :: want(NQ), got(NQ)
+        type(pf_stats) :: ref, s
+        type(parquet_column) :: c
+        integer :: q
+
+        call kind_fixture(400_int64, iv)
+        allocate(r8(400))
+        r8 = real(iv, real64)
+        call ref%compute(r8)
+        call object_row(ref, want)
+
+        ! (a) every widened array kind through %compute.
+        call s%compute(iv)
+        call object_row(s, got)
+        do q = 1, NQ
+            call check(error, got(q) == want(q), &
+                "%compute over int32 must equal %compute over the same real64 values: " // trim(QNAME(q)))
+            if (allocated(error)) return
+        end do
+        call s%compute(int(iv, int64))
+        call check(error, s%mean() == want(2), "%compute must accept an int64 array")
+        if (allocated(error)) return
+        call s%compute(real(iv, real32))
+        call check(error, s%mean() == want(2), "%compute must accept a real32 array")
+        if (allocated(error)) return
+        call s%compute(iv > 0_int32)
+        call check(error, s%n_valid() == 400_int64, "%compute must accept a logical array")
+        if (allocated(error)) return
+
+        ! (b) a column through %compute.
+        call c%init(PK_INT32, 400_int64)
+        call c%set_all(iv)
+        call s%compute(c)
+        call object_row(s, got)
+        do q = 1, NQ
+            call check(error, got(q) == want(q), &
+                "%compute over a column must equal %compute over its values: " // trim(QNAME(q)))
+            if (allocated(error)) return
+        end do
+
+        ! (c) %update over a widened kind, and over a column, in one retained population.
+        call s%init()
+        call s%update(iv(1:200))
+        call s%update(int(iv(201:400), int64))
+        call object_row(s, got)
+        do q = 1, NQ
+            call check(error, got(q) == want(q), &
+                "an %update loop mixing kinds must equal %compute over the whole: " // trim(QNAME(q)))
+            if (allocated(error)) return
+        end do
+        call s%init()
+        call s%update(c)
+        call check(error, s%mean() == want(2), "%update must accept a column too")
+    end subroutine test_object_accepts_every_kind
+
+    !> A column's storage is its CAPACITY, which is larger than its row count after appending.
+    !!
+    !! `%append_values` grows the buffer geometrically, so the slack beyond `%length()` holds
+    !! whatever the allocator left there, and a statistic taken over the storage rather than the
+    !! rows is a silent wrong answer -- too many elements, moments over garbage, nothing to
+    !! announce it. That is `feature_risks.md` Risk-67 reaching this module.
+    !!
+    !! **What actually protects it is one level down**, and this test was written believing
+    !! otherwise: `parquet_column_data_ptr` returns `col%i32(1:col%nrows)`, so the pointer never
+    !! spans the slack at all. Mutating this module to read the whole pointer changes no answer.
+    !! The test is kept because it pins that contract END TO END -- a future `data_ptr` that
+    !! stopped slicing would fail here -- but it is a regression test for `parquet_columns`'
+    !! promise, not for arithmetic in `parquet_stats`, and the distinction is worth knowing before
+    !! anyone reads a green run as evidence about this module.
+    !!
+    !! The fixture is only meaningful with real slack, so that is asserted first: a future growth
+    !! rule that happened to fit exactly would fail here rather than quietly stop testing.
+    subroutine test_column_capacity_is_not_the_population(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        type(parquet_column) :: c
+        real(real64) :: m, want
+        integer(int64) :: n
+        integer :: k
+
+        ! One row at a time, because the 1.5x growth rule only leaves slack once the geometric
+        ! term overtakes the exact requirement -- appending the five in two batches fits exactly.
+        call c%init(PK_INT32, 0_int64)
+        do k = 1, 5
+            call c%append_values([int(k, int32)])
+        end do
+        n = c%length()
+        call check(error, n == 5_int64, "the fixture must hold five rows")
+        if (allocated(error)) return
+        call check(error, c%capacity() > n, &
+            "this fixture is only meaningful with spare capacity; %append_values must have left some")
+        if (allocated(error)) return
+
+        call pf_mean(c, m)
+        call pf_mean([1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64], want)
+        call check(error, m == want, &
+            "a column must be read to its row count, never to its capacity")
+        if (allocated(error)) return
+        call pf_count_valid(c, n)
+        call check(error, n == 5_int64, "pf_count_valid over a column must count rows, not capacity")
+    end subroutine test_column_capacity_is_not_the_population
 
 end module test_stats

@@ -12,8 +12,9 @@ whole surface.** The reduction family it is being built for arrives in stages: t
 here, the order statistics — quantiles, the median absolute deviation, the robust estimators — are
 not yet.
 
-Today the arrays must be `real(real64)` for everything but `pf_count_valid`; the other numeric kinds
-join the same generics later, which is source-compatible for every call written now.
+Every procedure here accepts the same six inputs — see
+[What `values` may be](#what-values-may-be) — so the kind of array you happen to have is not a
+reason to convert anything first.
 
 ## `pf_count_valid` — how many elements are in the population
 
@@ -34,11 +35,53 @@ call pf_count_valid(mag, n, skipnan=.false.)     ! ... counting NaNs as ordinary
 Square brackets in a signature below mark an optional argument.
 
 **`pf_count_valid(values, n, [is_valid], [weights], [skipnan])`** answers pandas' `Series.count()`:
-how many elements of `values` are in the population. `n` is an `integer(int64)`. `values` may be
-`integer(int32)`, `integer(int64)`, `real(real32)`, `real(real64)` or `logical`.
+how many elements of `values` are in the population. `n` is an `integer(int64)`.
 
-`skipnan` is offered only on the two real kinds. An integer or logical array has no NaN to skip, and
-an argument that can never do anything is worse than an absent one.
+`skipnan` is offered only on the two real kinds and on a `parquet_column`. An integer or logical
+array has no NaN to skip, and an argument that can never do anything is worse than an absent one.
+
+## What `values` may be
+
+Every reduction on this page — `pf_count_valid`, the moment family, and `pf_stats`' `%compute` and
+`%update` — takes any of six things, and all six reach the same engine:
+
+| `values` | notes |
+|---|---|
+| `real(real64)` array | the engine's own type; nothing is copied |
+| `real(real32)` array | widened exactly; a NaN stays a NaN |
+| `integer(int32)` array | widened exactly; no `skipnan`, no `n_nan` |
+| `integer(int64)` array | **exact only below 2**53**; no `skipnan`, no `n_nan` |
+| `logical` array | `.true.` is 1 and `.false.` is 0, so the mean is the fraction true |
+| `type(parquet_column)` | scalar numeric kinds only; see below |
+
+The widening is exact for every kind but one, so a statistic over an `integer(int32)` array is bit
+for bit the statistic over the same values as `real(real64)`. The exception is an `integer(int64)`
+above 2\*\*53, which cannot be held exactly in a 64-bit real. That is unavoidable for a mean and
+irrelevant for the workloads this serves — nobody averages an object ID — but it is *not*
+irrelevant for a median, which
+[`pf_nth_quantile`](sorting.html) computes exactly on the original array.
+
+### Passing a `parquet_column`
+
+A column is dispatched on its kind at run time and needs no unpacking:
+
+```fortran
+type(parquet_column) :: mag
+real(real64) :: m
+
+call pf_mean(mag, m)
+```
+
+Three things are refused rather than guessed at, each with a message saying what to do instead:
+
+- **a string, temporal or container column** — it has no numeric statistics, and the message names
+  the kind it found;
+- **a column more than one element wide** — flattening a width-16 column into one population is a
+  *different* statistic. Use `%get_elem` for one element position across all rows, or pass the
+  flattened array yourself and thereby say so;
+- **`is_valid=` alongside a column** — the column carries its own validity, and two sources of
+  truth that can disagree is exactly what this refuses. The column's nulls are excluded either
+  way, and `n_null=` reports them.
 
 ## The moment family
 
@@ -62,6 +105,14 @@ asked for. Its outputs come before the common argument block and are, in order, 
 
 The one-shot forms are `pf_sum`, `pf_mean`, `pf_variance`, `pf_stddev`, `pf_sem`, `pf_skewness` and
 `pf_kurtosis`. Each is that same engine with one output, so they agree with `pf_moments` bit for bit.
+
+**`pf_mean` is not literally `sum/n`.** The quotient is taken and then refined by
+`sum(w*(x - mu))/sum(w)`, which is algebraically zero and in floating point is the rounding error
+left in it — the more accurate answer, and the centre the variance and the higher moments are taken
+about, so it has to be this one. It can therefore sit one ulp from the quotient you would write by
+hand: the mean of ten logicals of which three are `.true.` is one ulp below `0.3_real64`. Compare
+against another reduction of the same population, or with a tolerance, rather than against a
+decimal literal.
 
 ### Four defaults that differ from numpy or scipy
 
@@ -143,7 +194,8 @@ That whole line costs the same two traversals `s%mean()` alone would.
 ### Three lifecycles
 
 **`%compute(values, [retain], [is_valid], [weights], [weight_type], [skipnan])`** summarises a
-resident array. This is the usual entry point, and it discards whatever the object held, so one
+resident array, of any of the six things
+[`values` may be](#what-values-may-be). This is the usual entry point, and it discards whatever the object held, so one
 `pf_stats` can be reused across a loop of groups without `%clear` in between.
 
 **`%init([retain], [weight_type], [skipnan])` then a loop of `%update(values, [is_valid],

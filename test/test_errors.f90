@@ -1730,7 +1730,13 @@ contains
             new_unittest("merging across a retain mismatch aborts", &
                 test_stats_object_merge_retain_mismatch_aborts), &
             new_unittest("merging a pf_stats that holds no population aborts", &
-                test_stats_object_merge_uncomputed_source_aborts) &
+                test_stats_object_merge_uncomputed_source_aborts), &
+            new_unittest("a string column has no numeric statistics and aborts naming its kind", &
+                test_stats_column_string_kind_aborts), &
+            new_unittest("a vector column aborts naming its width, not its kind", &
+                test_stats_column_vector_width_aborts), &
+            new_unittest("is_valid= alongside a parquet_column aborts", &
+                test_stats_column_is_valid_conflict_aborts) &
             ]
         testsuite = [p1, p2, p3, p4, p5, p6, p7, p8, p9]
     end subroutine collect_tests_parquet_errors
@@ -6002,6 +6008,42 @@ contains
             failure_message="merging an uncomputed source was expected to abort", &
             required_stderr="pf_stats%merge: the source holds no population")
     end subroutine test_stats_object_merge_uncomputed_source_aborts
+
+    !> parquet_stats abort path: see scenario_stats_column_string_kind in
+    !> test/error_scenarios.f90. The message must name the kind it FOUND -- a caller reaching a
+    !> column entry point by mistake usually has the wrong column, not the wrong procedure.
+    subroutine test_stats_column_string_kind_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_column_string_kind", &
+            expect_abort=.true., &
+            failure_message="a string column was expected to abort", &
+            required_stderr="pf_mean: a column of kind PK_STRING has no numeric statistics")
+    end subroutine test_stats_column_string_kind_aborts
+
+    !> parquet_stats abort path: see scenario_stats_column_vector_width in
+    !> test/error_scenarios.f90. **The message must name the WIDTH, not the kind**, and that is
+    !> the whole point of the assertion: a vector column's elements are perfectly numeric, so a
+    !> "no numeric statistics" message would send the reader looking for the wrong problem.
+    subroutine test_stats_column_vector_width_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_column_vector_width", &
+            expect_abort=.true., &
+            failure_message="a vector column was expected to abort", &
+            required_stderr="pf_mean: this column is 2 elements wide")
+    end subroutine test_stats_column_vector_width_aborts
+
+    !> parquet_stats abort path: see scenario_stats_column_is_valid_conflict in
+    !> test/error_scenarios.f90.
+    subroutine test_stats_column_is_valid_conflict_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_column_is_valid_conflict", &
+            expect_abort=.true., &
+            failure_message="is_valid= beside a column was expected to abort", &
+            required_stderr="pf_mean: is_valid= cannot be given alongside a parquet_column")
+    end subroutine test_stats_column_is_valid_conflict_aborts
 
     !> pf_nth_quantile abort path: see scenario_sorting_quantile_out_of_range in
     !> test/error_scenarios.f90. The message names the scale, since 50 is exactly what a caller

@@ -313,6 +313,7 @@ Output is committed; re-run the generator and its `--check` after editing one.
 | `philox_reference.py` | An independent Philox model, for `check_philox_compliance.sh`. |
 | `count_lines.py` | Code/comment/blank line counts per source group. |
 | `count_tests.sh` | Unit tests per suite, read from source without building. |
+| `doc_review_process.md` | The procedure for reviewing the `doc/pages/` user guide one page at a time: the passes, the report, and what a review may change. Prose, not a script. |
 
 #### `bench/` — benchmarks and probes
 

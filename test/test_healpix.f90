@@ -873,9 +873,14 @@ contains
         logical :: had_inv, had_div, had_ovf, got_inv, got_div, got_ovf
         integer(int64) :: nside, p, nlist, sink
         integer(int64), allocatable :: listpix(:)
-        real(real64) :: theta, phi, vec(3), dist
+        real(real64) :: theta, phi, vec(3), dist, negvec(3)
         integer :: c
         real(real64), parameter :: two_thirds = 2.0_real64 / 3.0_real64
+        ! Named rather than written inline at the call: an array constructor or an expression
+        ! passed to `pf_angdist`'s explicit-shape `vec(3)` dummy is a value with no address, so
+        ! ifx argument-associates it through a temporary and reports `warning (406)` on every
+        ! call under --profile debug. See CLAUDE.md's ifx-specific gotchas.
+        real(real64), parameter :: north(3) = [0.0_real64, 0.0_real64, 1.0_real64]
 
         ! Every pixel of the nside 32 pixelisation, because the sweep below includes a disc of
         ! radius pi. Allocated rather than automatic, so the sweep can be widened without putting a
@@ -944,8 +949,9 @@ contains
             call pf_pix2vec_nest(nside, p, vec)
             call pf_ring2nest(nside, p, sink)
             call pf_nest2ring(nside, p, sink)
-            call pf_angdist(vec, [0.0_real64, 0.0_real64, 1.0_real64], dist)
-            call pf_angdist(vec, -vec, dist)
+            call pf_angdist(vec, north, dist)
+            negvec = -vec
+            call pf_angdist(vec, negvec, dist)
         end do
         ! Every disc shape the walk has a branch for: a pole, the seam, the boundary latitude, a
         ! hemisphere, the whole sphere, and both schemes with and without the enlargement.
@@ -1350,14 +1356,36 @@ contains
             if (can_test) call ieee_set_flag(ieee_invalid, saved)
             return
         end if
+        ! **A NaN DECLINATION is a separate case from a NaN right ascension, and it is the one
+        ! ifx fails.** The RA guard alone lets a declination NaN reach `sin`, which ifx vectorises
+        ! into `__svml_sin2` -- not quiet on a NaN element. Both declinations are checked because
+        ! that pairing is exactly what the vector call covers, so a guard that caught only the
+        ! first would still raise on the second.
         got = pf_angdist_deg(0.0_real64, nan, 10.0_real64, 20.0_real64)
+        raised = .false.
+        if (can_test) then
+            call ieee_get_flag(ieee_invalid, raised)
+            call ieee_set_flag(ieee_invalid, .false.)
+        end if
+        call check(error, .not. raised, "a NaN declination raised IEEE_INVALID")
+        if (allocated(error)) then
+            if (can_test) call ieee_set_flag(ieee_invalid, saved)
+            return
+        end if
+        call check(error, ieee_is_nan(got), "a NaN declination did not give a NaN separation")
+        if (allocated(error)) then
+            if (can_test) call ieee_set_flag(ieee_invalid, saved)
+            return
+        end if
+        got = pf_angdist_deg(0.0_real64, 45.0_real64, 10.0_real64, nan)
         if (can_test) then
             call ieee_get_flag(ieee_invalid, raised)
             call ieee_set_flag(ieee_invalid, saved)
         end if
-        call check(error, .not. raised, "a NaN declination raised IEEE_INVALID")
+        call check(error, .not. raised, "a NaN second declination raised IEEE_INVALID")
         if (allocated(error)) return
-        call check(error, ieee_is_nan(got), "a NaN declination did not give a NaN separation")
+        call check(error, ieee_is_nan(got), &
+                   "a NaN second declination did not give a NaN separation")
         if (allocated(error)) return
         ! A declination outside [-90, 90] is read as the direction it names rather than refused:
         ! dec = 100 is the same direction as dec = 80 at the opposite right ascension.
@@ -1375,12 +1403,21 @@ contains
         real(real64) :: d
         real(real64), parameter :: e1(3) = [1.0_real64, 0.0_real64, 0.0_real64]
         real(real64), parameter :: e2(3) = [0.0_real64, 1.0_real64, 0.0_real64]
+        ! Every actual argument below is a NAMED constant rather than an inline array
+        ! constructor or expression: `pf_angdist`'s dummies are explicit-shape `vec(3)`, and a
+        ! value with no address of its own is argument-associated through a temporary, which ifx
+        ! reports as `warning (406)` under --profile debug. See CLAUDE.md's ifx-specific gotchas.
+        real(real64), parameter :: me1(3) = -e1
+        real(real64), parameter :: tiny_y(3) = [1.0_real64, 1.0e-9_real64, 0.0_real64]
+        real(real64), parameter :: three_x(3) = [3.0_real64, 0.0_real64, 0.0_real64]
+        real(real64), parameter :: five_y(3) = [0.0_real64, 5.0_real64, 0.0_real64]
+        real(real64), parameter :: zero3(3) = [0.0_real64, 0.0_real64, 0.0_real64]
 
         call pf_angdist(e1, e1, d)
         call check(error, d, 0.0_real64, "coincident directions did not separate by exactly zero", &
                    thr=0.0_real64)
         if (allocated(error)) return
-        call pf_angdist(e1, -e1, d)
+        call pf_angdist(e1, me1, d)
         call check(error, d, pi, "antipodal directions did not separate by pi", thr=1.0e-15_real64)
         if (allocated(error)) return
         call pf_angdist(e1, e2, d)
@@ -1388,16 +1425,16 @@ contains
                    thr=1.0e-15_real64)
         if (allocated(error)) return
         ! A tiny angle: acos(dot) would return zero here, since 1 - 5e-19 rounds to 1.
-        call pf_angdist(e1, [1.0_real64, 1.0e-9_real64, 0.0_real64], d)
+        call pf_angdist(e1, tiny_y, d)
         call check(error, d, 1.0e-9_real64, "a nanoradian separation was not resolved", &
                    thr=1.0e-18_real64)
         if (allocated(error)) return
         ! Scale invariance: the formula never normalises its inputs.
-        call pf_angdist([3.0_real64, 0.0_real64, 0.0_real64], [0.0_real64, 5.0_real64, 0.0_real64], d)
+        call pf_angdist(three_x, five_y, d)
         call check(error, d, 0.5_real64 * pi, "non-unit inputs changed the answer", thr=1.0e-15_real64)
         if (allocated(error)) return
         ! Two parallel zero vectors: atan2(0, 0) is zero, so this is total rather than an abort.
-        call pf_angdist([0.0_real64, 0.0_real64, 0.0_real64], [0.0_real64, 0.0_real64, 0.0_real64], d)
+        call pf_angdist(zero3, zero3, d)
         call check(error, d, 0.0_real64, "two zero vectors did not give zero", thr=0.0_real64)
     end subroutine test_angdist_extremes
 

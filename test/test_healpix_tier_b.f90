@@ -364,33 +364,42 @@ contains
     subroutine test_vec2ang_degenerate(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
         real(real64) :: th, ph
+        ! Named rather than written inline at the call: `pf_vec2ang`'s `vec(3)` dummy is
+        ! explicit-shape, so an array constructor -- a value with no address of its own -- is
+        ! argument-associated through a temporary, which ifx reports as `warning (406)` on every
+        ! call under --profile debug. See CLAUDE.md's ifx-specific gotchas.
+        real(real64), parameter :: north(3) = [0.0_real64, 0.0_real64, 1.0_real64]
+        real(real64), parameter :: south(3) = [0.0_real64, 0.0_real64, -1.0_real64]
+        real(real64), parameter :: long_north(3) = [0.0_real64, 0.0_real64, 7.5_real64]
+        real(real64), parameter :: zero3(3) = [0.0_real64, 0.0_real64, 0.0_real64]
+        real(real64), parameter :: near_north(3) = [1.0e-8_real64, 0.0_real64, 1.0_real64]
 
-        call pf_vec2ang([0.0_real64, 0.0_real64, 1.0_real64], th, ph)
+        call pf_vec2ang(north, th, ph)
         call check(error, th, 0.0_real64, "the north pole's colatitude is 0", thr=1.0e-15_real64)
         if (allocated(error)) return
         call check(error, ph, 0.0_real64, "the north pole reports longitude 0", thr=0.0_real64)
         if (allocated(error)) return
 
-        call pf_vec2ang([0.0_real64, 0.0_real64, -1.0_real64], th, ph)
+        call pf_vec2ang(south, th, ph)
         call check(error, th, pi, "the south pole's colatitude is pi", thr=1.0e-15_real64)
         if (allocated(error)) return
         call check(error, ph, 0.0_real64, "the south pole reports longitude 0", thr=0.0_real64)
         if (allocated(error)) return
 
         ! A non-unit polar vector must answer identically: the scale is divided out first.
-        call pf_vec2ang([0.0_real64, 0.0_real64, 7.5_real64], th, ph)
+        call pf_vec2ang(long_north, th, ph)
         call check(error, th, 0.0_real64, "a non-unit north pole still reports colatitude 0", &
                    thr=1.0e-15_real64)
         if (allocated(error)) return
 
-        call pf_vec2ang([0.0_real64, 0.0_real64, 0.0_real64], th, ph)
+        call pf_vec2ang(zero3, th, ph)
         call check(error, th, 0.0_real64, "the zero vector reports colatitude 0", thr=0.0_real64)
         if (allocated(error)) return
         call check(error, ph, 0.0_real64, "the zero vector reports longitude 0", thr=0.0_real64)
         if (allocated(error)) return
 
         ! A hair off the pole, where an `acos(z/|v|)` would answer exactly 0 and this must not.
-        call pf_vec2ang([1.0e-8_real64, 0.0_real64, 1.0_real64], th, ph)
+        call pf_vec2ang(near_north, th, ph)
         call check(error, th, 1.0e-8_real64, &
                    "a direction 1e-8 off the pole reports 1e-8, not 0 as an acos would", &
                    thr=1.0e-16_real64)
@@ -920,11 +929,15 @@ contains
         type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
         integer(int64) :: nlist, ncount
         integer(int64), allocatable :: got(:)
+        ! Named rather than written inline at the call, so that the disc centre is not passed to
+        ! an explicit-shape `vec(3)` dummy as a value with no address -- see the note in
+        ! test_vec2ang_degenerate above.
+        real(real64), parameter :: north(3) = [0.0_real64, 0.0_real64, 1.0_real64]
 
         ! A whole-sphere disc at nside 128 is 196608 pixels -- far past anything a caller would
         ! declare on the stack, and exactly the case the five hand-rolled buffer guards downstream
         ! exist to police.
-        call pf_query_disc_alloc(128_int64, [0.0_real64, 0.0_real64, 1.0_real64], pi, got, nlist)
+        call pf_query_disc_alloc(128_int64, north, pi, got, nlist)
         call check(error, nlist, 196608_int64, "a whole-sphere disc at nside 128 holds every pixel")
         if (allocated(error)) return
         call check(error, size(got), 196608, "listpix was allocated to exactly that many")
@@ -933,7 +946,7 @@ contains
         if (allocated(error)) return
         call check(error, got(196608), 196607_int64, "the last is npix-1")
         if (allocated(error)) return
-        call pf_query_disc_count(128_int64, [0.0_real64, 0.0_real64, 1.0_real64], pi, ncount)
+        call pf_query_disc_count(128_int64, north, pi, ncount)
         call check(error, ncount, nlist, "the count form agrees on the whole sphere")
     end subroutine test_disc_alloc_beyond_a_buffer
 

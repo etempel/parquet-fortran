@@ -87,13 +87,28 @@ contains
         ! `anint` rather than a subtract-until-in-range loop: such a loop never terminates on an
         ! infinite argument, since Inf - 360 is Inf. This form yields NaN there and returns.
         dl = ra1 - ra2
-        ! **A QUIET NaN MUST PROPAGATE QUIETLY, and `anint` is the one step that breaks that.**
-        ! IEEE says an operation on a quiet NaN yields a quiet NaN and raises nothing, and every
-        ! other step below obeys it -- but rounding a NaN to an integer is an invalid operation,
-        ! and nagfor duly raises `IEEE_INVALID` on `anint(NaN)` (gfortran, ifx and flang do not).
+        ! **A QUIET NaN MUST PROPAGATE QUIETLY, and TWO of the steps below break that.**
+        ! IEEE says an operation on a quiet NaN yields a quiet NaN and raises nothing, and most of
+        ! what follows obeys it -- but two steps do not, on different compilers, so the whole guard
+        ! is hoisted here and every NaN argument is returned before either can be reached. The three
+        ! quiet predicates cost less than they read: an unordered compare sets its parity flag when
+        ! EITHER operand is a NaN, so ifx emits two `ucomisd` and two not-taken branches for the
+        ! whole guard -- it tests `dl` against `dec1` in one instruction.
+        !
+        ! **`anint(NaN)` raises under nagfor.** Rounding a NaN to an integer is an invalid
+        ! operation, and nagfor duly raises `IEEE_INVALID` on it (gfortran, ifx and flang do not).
         ! That matters because nagfor UNMASKS the traps by default, so a caller who passed a NaN
         ! right ascension would have their process TERMINATED by a procedure documented as total.
-        ! Returning the NaN before the fold is the whole fix, and it costs one quiet predicate.
+        ! Only `ra1`/`ra2` reach the fold, and `dl` is NaN whenever either of them is.
+        !
+        ! **`sin(NaN)` raises under ifx, once the compiler VECTORISES it.** ifx pairs the two
+        ! `sin(dec * hpx_deg2rad)` calls below into one `__svml_sin2` call, and that routine is not
+        ! quiet on a NaN element: it raises `IEEE_INVALID` inside its own argument reduction (at a
+        ! `vmulpd`, located by single-stepping the released object under gdb). The scalar `sin` on
+        ! the same compiler is quiet, which is why this is invisible in a hand-written copy of this
+        ! formula and appears only in the separately compiled procedure -- and it is invisible on
+        ! gfortran and nagfor entirely. A declination NaN therefore has to be caught here too,
+        ! rather than left to propagate through the transcendentals as the IEEE model promises.
         !
         ! **An INFINITE right ascension still raises, and must.** `sin(Inf)` and `Inf - Inf` are
         ! invalid operations on any conforming processor, so no arrangement of this arithmetic can
@@ -114,8 +129,13 @@ contains
         ! because the entire point of the guard is to raise no flag. The cost is one
         ! `-Wcompare-reals` warning under gfortran's `--profile debug`, which is accepted here
         ! exactly as it is in the sort engine.
-        if (dl /= dl) then
+        if (dl /= dl .or. dec1 /= dec1 .or. dec2 /= dec2) then
+            ! Hand back whichever argument is the NaN rather than composing one: an arithmetic
+            ! combination such as `dl + dec1 + dec2` reaches `Inf + (-Inf)` on a mixed
+            ! infinite/NaN input and raises the very flag this guard exists to avoid.
             dist = dl
+            if (dec1 /= dec1) dist = dec1
+            if (dec2 /= dec2) dist = dec2
             return
         end if
         dl = (dl - 360.0_real64 * anint(dl / 360.0_real64)) * hpx_deg2rad

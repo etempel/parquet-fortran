@@ -165,6 +165,11 @@ contains
         integer(int64) :: got(4096), ref(4096), ngot, nref, k
         integer(int64), allocatable :: alloc_got(:)
         real(real64) :: dir(3)
+        ! Named rather than written inline at the call: `pf_query_disc`'s centre dummy is
+        ! explicit-shape `vec(3)`, so an array constructor is argument-associated through a
+        ! temporary, which ifx reports as `warning (406)` under --profile debug. See CLAUDE.md's
+        ! ifx-specific gotchas.
+        real(real64), parameter :: ra0_dec0(3) = [1.0_real64, 0.0_real64, 0.0_real64]
 
         ncase = 0
         call sweep_direction(5_int64, dir)
@@ -196,8 +201,8 @@ contains
             end do
             ! The RA/Dec spelling must find the same disc, given the same centre in degrees.
             call g%query_disc_radec(0.0_real64, 0.0_real64, 2.0_real64, got, ngot)
-            call pf_query_disc(256_int64, [1.0_real64, 0.0_real64, 0.0_real64], &
-                               2.0_real64 * pi / 180.0_real64, ref, nref, scheme=scheme)
+            call pf_query_disc(256_int64, ra0_dec0, 2.0_real64 * pi / 180.0_real64, ref, nref, &
+                               scheme=scheme)
             call check(error, ngot, nref, "%query_disc_radec returned a different count")
             if (allocated(error)) return
             do k = 1_int64, nref

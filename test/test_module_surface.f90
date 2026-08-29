@@ -214,6 +214,11 @@ contains
         integer(int64), allocatable :: alloclist(:)
         real(real64) :: vec(3), th(4), ph(4)
         integer(int64) :: bulkpix(4)
+        ! Named rather than written inline at the call: `pf_query_disc`'s centre dummy is
+        ! explicit-shape `vec(3)`, so an array constructor is argument-associated through a
+        ! temporary, which ifx reports as `warning (406)` under --profile debug. See CLAUDE.md's
+        ! ifx-specific gotchas.
+        real(real64), parameter :: north(3) = [0.0_real64, 0.0_real64, 1.0_real64]
         type(pf_healpix_grid) :: grid, south
 
         what = ""
@@ -235,8 +240,7 @@ contains
         ! scheme selectors are separate `public ::` entries and so separately droppable.
         call pf_ang2pix_nest(4_int64, 1.0_real64, 2.0_real64, ipix)
         if (what == "" .and. (ipix < 0_int64 .or. ipix >= 192_int64)) what = "pf_ang2pix_nest"
-        call pf_query_disc(4_int64, [0.0_real64, 0.0_real64, 1.0_real64], 0.5_real64, listpix, &
-                           nlist, scheme=PF_HP_NEST)
+        call pf_query_disc(4_int64, north, 0.5_real64, listpix, nlist, scheme=PF_HP_NEST)
         if (what == "" .and. nlist <= 0_int64) what = "pf_query_disc"
 
         ! Tier B, one name per group, for the same reason as above: a re-export list that compiles

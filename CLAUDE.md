@@ -3461,6 +3461,37 @@ Compiler-independent rules. Anything specific to one compiler is in its own sect
   `awk '/warning \(406\)/{w=$0; getline; getline; getline; print w, $0}'`, which pairs each
   warning with the frame that raised it.
 
+  **Not every 406 is avoidable, and the residue is the point: sort them before fixing any.** A
+  temporary that exists because the ACTUAL is a value with no address (an array constructor, a
+  function result, `-vec`) is pure waste and is removed by naming it — a `parameter` where the
+  value is constant, a local where it is not. A temporary that exists because the actual is
+  genuinely NON-CONTIGUOUS and the dummy requires contiguity is a **copy-in the language
+  mandates**, and no source change removes it: the copy has to happen somewhere, and moving it to
+  the caller only makes it explicit. The library's own writers are the standing example — every
+  `parquet_write_*_column` takes `values(:)` assumed-shape and hands it to a `flat(*)` assumed-size
+  worker, so a caller writing a derived-type component section (`data(:)%id`, the natural spelling
+  for a column drawn from an array of records) is copied once per write, and `WRITE_*_FLAT ...
+  argument #3` is that copy being reported rather than a defect. **The warning names the CALLEE, so
+  an inner worker in `src/` can be named for something a test did**; check the actual at the
+  outermost call before touching the procedure the message points at.
+- **ifx's VECTORISED transcendentals are not quiet on a NaN: `__svml_sin2` raises `IEEE_INVALID`
+  where the scalar `sin` does not.** ifx pairs two adjacent `sin` calls on independent arguments
+  into one `__svml_sin2` call, and that routine raises invalid on a NaN element inside its own
+  argument reduction (a `vmulpd`, located by single-stepping the released object under gdb). So a
+  procedure that means to propagate a quiet NaN quietly — which is what lets a caller running with
+  the traps unmasked, nagfor's default, carry a NaN through it — has to **return every NaN argument
+  before any transcendental**, not merely before the steps that are non-quiet in the scalar IEEE
+  model. `pf_angdist_deg` (`src/parquet_healpix_core.f90`) is the worked example: its guard covers
+  `dec1`/`dec2` for this reason and `ra1`/`ra2` for `anint(NaN)` under nagfor.
+
+  **It is invisible in a reproducer**, which is what makes it expensive. gfortran and nagfor never
+  raise here, and under ifx a hand-written copy of the same formula in the caller's own file is
+  vectorised differently and stays quiet — so a standalone probe exonerates code that fails when
+  the real, separately compiled procedure is called. Reproduce against the built library
+  (`-Ibuild/ifx_<hash>` plus `libparquet-fortran.a` from the sibling hash dir), and if the flag is
+  raised but the source line is not obvious, single-step it: a gdb `while` loop over `stepi` that
+  stops on `$mxcsr & 1` names the instruction and the SVML entry point in one run.
+
 #### flang-specific gotchas
 
 flang builds here are **serial only** and `--profile release` does not link — see

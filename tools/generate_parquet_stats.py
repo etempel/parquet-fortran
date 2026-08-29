@@ -207,6 +207,19 @@ D["skipnan"] = """            logical, intent(in), optional :: skipnan
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
             !! which one NaN makes every answer NaN."""
+D["method"] = """            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins."""
+D["kind"] = """            character(len=*), intent(in), optional :: kind
+            !! which convention counts a value EQUAL to `score`, in scipy's spelling: "rank" (the
+            !! default; ties count half), "weak" (a value <= score counts), "strict" (only < score)
+            !! or "mean" (the average of weak and strict). Any other token aborts, listing all
+            !! four. Matched case-insensitively."""
 D["threads"] = """            integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
             !! the `parquet_sort_threads` setting, capped by the processors actually available and
@@ -305,7 +318,12 @@ TYPE_BLOCK = """    !
         logical :: freq = .false.                !! frequency rather than reliability weights.
         logical :: wtd = .false.                 !! any weights have been supplied.
         logical :: skip = .true.                 !! `skipnan`, fixed at %init/%compute.
-        logical :: stale = .false.               !! retained moments need recomputing.
+        logical :: stale = .false.
+        logical :: ordered = .false.
+        !! tier B is built: `keep` (and `keep_w` with it) is in ascending order. **The retained
+        !! buffer is sorted IN PLACE**, so tier B costs no memory of its own -- which is also why
+        !! nothing in the public API ever hands the retained values back in their original order,
+        !! and why no binding should be added that does.               !! retained moments need recomputing.
     contains
         procedure :: init => obj_init !! Arms an empty accumulator for a loop of `%update`.
         procedure :: clear => obj_clear !! Returns the object to its default-initialised state.
@@ -339,6 +357,15 @@ TYPE_BLOCK = """    !
         procedure :: vmin => obj_vmin !! The smallest value in the population.
         procedure :: vmax => obj_vmax !! The largest value in the population.
         procedure :: range => obj_range !! `vmax - vmin`.
+        procedure :: median => obj_median !! The interpolating median.
+        procedure :: quantile => obj_quantile !! One quantile, on a 0-1 scale.
+        procedure :: quantiles => obj_quantiles !! Several quantiles from the one ordering.
+        procedure :: iqr => obj_iqr !! The interquartile range.
+        procedure :: trim_mean => obj_trim_mean !! The mean with a share trimmed from each tail.
+        procedure :: percentile_of_score => obj_percentile_of_score !! Where a value sits, 0-1.
+        procedure :: prepare_order => obj_prepare_order !! Builds tier B now rather than lazily.
+        procedure :: release_order => obj_release_order !! Frees tier B, keeping tier A.
+        procedure :: is_ordered => obj_is_ordered !! Whether tier B is currently built.
     end type pf_stats"""
 
 
@@ -522,7 +549,32 @@ DEBUG_IFACES = """        !> How many full traversals of a population's values t
         !! `0` teams up at any size; a negative value restores the measured floor.
         module subroutine parquet_debug_set_stats_min_per_thread(n)
             integer(int64), intent(in) :: n !! survivors per thread; 0 forces, negative restores.
-        end subroutine parquet_debug_set_stats_min_per_thread"""
+        end subroutine parquet_debug_set_stats_min_per_thread
+        !> How many times any `pf_stats` has built its sorted buffer.
+        !!
+        !! Test-only, and the **only** observable that can tell a working order cache from one
+        !! that never invalidates. Every equality assertion about a median passes just as happily
+        !! against a stale answer -- a stale median is a plausible number -- so `sorts == 1` across
+        !! four different order statistics, and `sorts == 2` after an intervening `%update`, is
+        !! what the caching contract is actually pinned by.
+        !!
+        !! Process-global and unsynchronised, which is why the `stats` suite is excluded from the
+        !! per-suite parallelism in `test/run_tester.f90`.
+        module function parquet_debug_stats_sorts() result(res)
+            integer(int64) :: res !! sorted-buffer builds since the last reset.
+        end function parquet_debug_stats_sorts
+        !> Resets the sorted-buffer counter to zero.
+        module subroutine parquet_debug_reset_stats_sorts()
+        end subroutine parquet_debug_reset_stats_sorts
+        !> Overrides the probability count at which `pf_quantiles` sorts instead of selecting.
+        !!
+        !! Test-only. The shipped threshold is small but not 1, so a unit test asking for two or
+        !! three probabilities would only ever exercise one of the two paths; this is what reaches
+        !! the other (CLAUDE.md's size-threshold rule). `0` always sorts, a huge value always
+        !! selects, and a negative value restores the shipped threshold.
+        module subroutine parquet_debug_set_stats_quantile_sort_min(n)
+            integer(int64), intent(in) :: n !! probabilities; 0 forces the sort, negative restores.
+        end subroutine parquet_debug_set_stats_quantile_sort_min"""
 
 
 def query_iface(impl, res_decl, res_doc, opts, doc):
@@ -568,7 +620,108 @@ def object_ifaces():
     out.extend(query_iface(*q) for q in QUERIES)
     out.append(DEBUG_IFACES)
     out.append("    end interface")
+    out.append("    !")
+    out.append("    ! ---- pf_stats tier B (implemented in parquet_stats_order) ----")
+    out.append("    interface")
+    tierb = OBJ_ORDER_IFACES
+    tierb = tierb.replace("@@method@@", D["method"])
+    tierb = tierb.replace("@@kind@@", D["kind"])
+    out.append(tierb.rstrip("\n"))
+    out.append("    end interface")
     return "\n".join(out)
+
+
+#: The tier-B bindings. Literal rather than table-driven for the same reason the lifecycle block
+#: is: each has a different argument list, and a table would carry one row per procedure.
+#:
+#: Every one takes `self` as `intent(inout)` and none is `pure`, because the FIRST of them to run
+#: builds the sorted buffer -- that is the whole point of the type, and it is the same trade the
+#: tier-A queries already make for the deferred recomputation.
+OBJ_ORDER_IFACES = """        !> The interpolating median of the population.
+        !!
+        !! Builds tier B on first use and reads it thereafter, so a median followed by an IQR and
+        !! three quantiles is ONE ordering; `parquet_debug_stats_sorts()` is what asserts it.
+        !!
+        !! **Aborts on a streaming accumulator** (`retain = .false.`), because no values were
+        !! kept and there is nothing to order. The message says so and names the fix.
+        module function obj_median(self, method) result(res)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; the first order statistic builds its sorted buffer.
+@@method@@
+            real(real64) :: res !! the median, or NaN for an empty population.
+        end function obj_median
+        !> One quantile of the population, on a 0-1 scale.
+        module function obj_quantile(self, p, method) result(res)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; the first order statistic builds its sorted buffer.
+            real(real64), intent(in) :: p !! the probability, 0 to 1. Outside that aborts.
+@@method@@
+            real(real64) :: res !! the quantile, or NaN for an empty population.
+        end function obj_quantile
+        !> Several quantiles of the population, from the one ordering.
+        !!
+        !! A subroutine rather than a function because the result is an array whose size the
+        !! caller already knows; `out` must be the same size as `probs`.
+        module subroutine obj_quantiles(self, probs, out, method)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; the first order statistic builds its sorted buffer.
+            real(real64), intent(in) :: probs(:) !! the probabilities, each 0 to 1.
+            real(real64), intent(out) :: out(:) !! one quantile each; same size as `probs`.
+@@method@@
+        end subroutine obj_quantiles
+        !> The interquartile range of the population.
+        module function obj_iqr(self, method) result(res)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; the first order statistic builds its sorted buffer.
+@@method@@
+            real(real64) :: res !! `q(0.75) - q(0.25)`, or NaN for an empty population.
+        end function obj_iqr
+        !> The mean with `prop` trimmed from each tail.
+        module function obj_trim_mean(self, prop) result(res)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; the first order statistic builds its sorted buffer.
+            real(real64), intent(in) :: prop
+            !! the share trimmed from EACH tail; `0 <= prop < 0.5`, anything else aborts.
+            real(real64) :: res !! the trimmed mean, or NaN when nothing survives the trim.
+        end function obj_trim_mean
+        !> Where `score` sits in the population, on a 0-1 scale.
+        module function obj_percentile_of_score(self, score, kind) result(res)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; the first order statistic builds its sorted buffer.
+            real(real64), intent(in) :: score !! the value to locate. NaN or infinite aborts.
+@@kind@@
+            real(real64) :: res !! the share at or below `score`, or NaN for an empty population.
+        end function obj_percentile_of_score
+        !> Builds tier B now, rather than leaving it to the first order statistic.
+        !!
+        !! **The escape hatch for concurrency, and the reason it exists.** The lazy fill is NOT
+        !! thread-safe on a SHARED accumulator: two threads calling `%median()` on the same object
+        !! both find tier B absent and both build it. This type takes no lock -- it is a value-like
+        !! summary, not a container with an ownership model -- so either the object is
+        !! thread-private, or the caller runs this before the parallel region. That is exactly the
+        !! trade `parquet_column%ensure_validity` makes, for exactly the same reason.
+        !!
+        !! Idempotent, and free when tier B is already built.
+        module subroutine obj_prepare_order(self)
+            class(pf_stats), intent(inout) :: self !! the accumulator.
+        end subroutine obj_prepare_order
+        !> Frees tier B, keeping tier A.
+        !!
+        !! The retained values are kept -- they ARE tier A's exactness -- but the object stops
+        !! claiming they are ordered, so the next order statistic sorts again. Use it when a
+        !! long-lived summary has had the quantiles taken off it and only the moments are wanted
+        !! afterwards; `%clear` is what gives the memory back.
+        module subroutine obj_release_order(self)
+            class(pf_stats), intent(inout) :: self !! the accumulator.
+        end subroutine obj_release_order
+        !> Whether tier B is currently built.
+        !!
+        !! Test-facing more than user-facing: it is how `%update` dropping the ordering is
+        !! asserted without reading the sort counter.
+        module function obj_is_ordered(self) result(res)
+            class(pf_stats), intent(in) :: self !! the accumulator.
+            logical :: res !! .true. when the retained values are in ascending order.
+        end function obj_is_ordered"""
 
 
 #: The shared argument guards. They are separate module procedures, implemented once in
@@ -648,6 +801,14 @@ KURT_OPTS = ["is_valid", "weights", "weight_type", "bias", "excess", "skipnan", 
              "ok", "threads"]
 MOMENTS_OPTS = ["is_valid", "weights", "weight_type", "ddof", "bias", "excess", "skipnan",
                 "n_null", "n_nan", "threads"]
+
+#: The order family's option lists. Every one is a subsequence of the canonical order that
+#: `check_stats_optional_argument_order` enforces, with `kind` sitting in `method`'s block -- both
+#: are token arguments naming a rule, and no procedure takes both.
+ORDER_OPTS = ["is_valid", "weights", "weight_type", "skipnan", "method", "n_null", "n_nan", "ok",
+              "threads"]
+TRIM_OPTS = ["is_valid", "weights", "skipnan", "n_null", "n_nan", "ok", "threads"]
+PCTS_OPTS = ["is_valid", "weights", "skipnan", "kind", "n_null", "n_nan", "ok", "threads"]
 
 CORE_IFACES = [
     iface("sum_f64",
@@ -976,6 +1137,133 @@ ENTRY_FAMILY = [
 ]
 
 
+#: The order family: (base, extra required inputs, out dummy, out declaration, out doc, options).
+#: The "extra inputs" slot is what distinguishes these from the moment family -- each sits between
+#: `values` and the output, in the position a reader of `pf_quantile(v, p, q)` expects.
+#: The tail every ORDER generic's doc-comment shares, stated once for the same reason `_COMMON` is.
+_ORDER_COMMON = """    !>
+    !> Nulls, NaNs and zero-weight elements leave the population first, in that order, exactly as
+    !> they do for the moments, and `n_null`/`n_nan` report how many. An empty population gives a
+    !> quiet NaN with `ok = .false.` rather than an abort. What DOES abort is misuse: a probability
+    !> outside `[0, 1]`, an unrecognised `method`, a mismatched array size, or a weight that is
+    !> negative, NaN or infinite.
+    !>
+    !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
+    !> `logical` array, or a scalar numeric `type(parquet_column)`.
+    !>
+    !> **Reaching for several order statistics of one population? Use `pf_stats`.** It orders the
+    !> values once and answers every later query off that ordering, which `parquet_debug_stats_sorts()`
+    !> is what asserts."""
+
+#: The one interface the order tier genuinely needs from its sibling.
+#:
+#: `parquet_stats_order` must apply the same exclusion rules and get the surviving values back, and
+#: that logic is pass one of `stats_engine`, contained in `parquet_stats_core`. Two SIBLING
+#: submodules cannot reach each other's contained procedures, so this is declared here and
+#: implemented there -- the "cross-subtree private-helper interfaces" mechanism `parquet_core.f90`
+#: uses for exactly this shape. Re-deriving the exclusion order in a second place is the
+#: alternative, and it is the one that eventually disagrees with itself.
+#:
+#: The order tier's OWN helpers -- the method-token resolver and the interpolator -- are ordinary
+#: contained procedures of `parquet_stats_order`, because only that submodule calls them. That also
+#: keeps them clear of nagfor's rule that a separate module procedure must be implemented before it
+#: is called within one submodule.
+ORDER_HELPER_IFACES = """        !> Applies the exclusion rules and hands back the surviving values, without the moments.
+        !!
+        !! Pass one of `stats_engine` and nothing else: an order statistic needs the survivors and
+        !! their weights, and computing four central moments it will discard would roughly double
+        !! the cost of every `pf_median`.
+        module subroutine stats_compact(values, what, is_valid, weights, skipnan, keep_x, keep_w, &
+                n_valid, n_null, n_nan)
+            real(real64), intent(in) :: values(:) !! the population, before exclusions.
+            character(len=*), intent(in) :: what !! the public procedure's name, for messages.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            real(real64), intent(in), optional :: weights(:) !! per element weight.
+            logical, intent(in), optional :: skipnan !! .true. (default) excludes a NaN.
+            real(real64), allocatable, intent(out) :: keep_x(:)
+            !! the survivors, in input order. `n_valid` of them are live and the rest of the array
+            !! is spare capacity, exactly as `stats_engine`'s own hand-off leaves it.
+            real(real64), allocatable, intent(out) :: keep_w(:)
+            !! their weights, allocated only when `weights` was supplied.
+            integer(int64), intent(out) :: n_valid !! how many survived.
+            integer(int64), intent(out) :: n_null !! how many `is_valid` excluded.
+            integer(int64), intent(out) :: n_nan !! how many were excluded as NaN.
+        end subroutine stats_compact
+        !> A quiet NaN, the value every undefined statistic in this module returns.
+        !!
+        !! Built with `ieee_value` rather than by arithmetic: `0.0/0.0` and anything routed through
+        !! `anint`/`int` raise under nagfor's default `-ieee=stop`, which terminates the process.
+        pure module function stats_nan() result(res)
+            real(real64) :: res !! a quiet NaN.
+        end function stats_nan
+        !> Resolves `weight_type` to the one bit the formulas actually branch on.
+        module subroutine stats_weight_kind(what, weight_type, freq)
+            character(len=*), intent(in) :: what !! the public procedure's name, for the message.
+            character(len=*), intent(in), optional :: weight_type !! the caller's token, if any.
+            logical, intent(out) :: freq !! .true. for frequency weights.
+        end subroutine stats_weight_kind
+        !> Completes a deferred tier-A recomputation, if one is pending.
+        module subroutine stats_ensure(self)
+            class(pf_stats), intent(inout) :: self !! the accumulator.
+        end subroutine stats_ensure"""
+
+ORDER_FAMILY = [
+    ("median", [], "med", "real(real64), intent(out) :: med",
+     "the median; NaN when the population is empty.", ORDER_OPTS),
+    ("quantile",
+     [("p", "real(real64), intent(in) :: p",
+       "the probability, on a 0-1 scale rather than 0-100. Outside [0, 1] aborts.")],
+     "q", "real(real64), intent(out) :: q",
+     "the quantile; NaN when the population is empty.", ORDER_OPTS),
+    ("quantiles",
+     [("probs", "real(real64), intent(in) :: probs(:)",
+       "the probabilities, each on a 0-1 scale. Any outside [0, 1] aborts. Need not be sorted.")],
+     "out", "real(real64), intent(out) :: out(:)",
+     "one quantile per entry of `probs`, same size. ONE sort serves all of them.",
+     ORDER_OPTS),
+    ("iqr", [], "r", "real(real64), intent(out) :: r",
+     "the interquartile range, `q(0.75) - q(0.25)`; NaN when either quartile is.", ORDER_OPTS),
+    ("trim_mean",
+     [("prop", "real(real64), intent(in) :: prop",
+       "the share trimmed from EACH tail, so `prop=0.1` drops 10% at each end and averages the "
+       "middle 80%. Must satisfy `0 <= prop < 0.5`; anything else aborts, because a caller who "
+       "asks to trim everything has made a mistake rather than expressed a preference.")],
+     "m", "real(real64), intent(out) :: m",
+     "the trimmed mean; NaN when nothing survives the trim.", TRIM_OPTS),
+    ("percentile_of_score",
+     [("score", "real(real64), intent(in) :: score",
+       "the value to locate. NaN or infinite aborts -- unlike a NaN in the population, which is "
+       "an ordinary data condition, a NaN score can only come from the caller's own arithmetic.")],
+     "p", "real(real64), intent(out) :: p",
+     "the share of the population at or below `score`, on a 0-1 scale; NaN when empty.",
+     PCTS_OPTS),
+]
+
+
+def order_extra_decls(extra):
+    """The declaration lines for an order procedure's extra required inputs."""
+    out = []
+    for name, decl, doc in extra:
+        out.append("            %s" % decl)
+        for line in _wrap_doc(doc):
+            out.append("            !! " + line)
+    return out
+
+
+def _wrap_doc(text, width=92):
+    """Wraps a doc-comment body so no emitted line passes the 132-column limit."""
+    words, line, out = text.split(), "", []
+    for w in words:
+        if line and len(line) + 1 + len(w) > width:
+            out.append(line)
+            line = w
+        else:
+            line = (line + " " + w).strip()
+    if line:
+        out.append(line)
+    return out
+
+
 def kind_opts(opts, has_nan):
     """This kind's option list: the family's, minus what a NaN-free kind cannot use."""
     if has_nan:
@@ -1065,6 +1353,55 @@ def entry_moments_body(tag, widen, has_nan):
     return "\n".join(lines)
 
 
+def order_core_iface(base, extra, out_name, out_decl, out_doc, opts, doc):
+    """One interface body for an order procedure's real64 core."""
+    args = ["values"] + [e[0] for e in extra] + [out_name] + opts
+    lines = [("        !> " + line).rstrip() for line in doc]
+    lines.append("        module subroutine %s_f64(%s)" % (base, wrap_args(args)))
+    lines.append("            real(real64), intent(in) :: values(:) !! the population.")
+    lines.extend(order_extra_decls(extra))
+    lines.append("            %s !! %s" % (out_decl, out_doc))
+    for key in opts:
+        lines.append(D[key])
+    lines.append("        end subroutine %s_f64" % base)
+    return "\n".join(lines)
+
+
+def order_entry_iface(base, extra, out_name, out_decl, out_doc, opts, tag, decl, has_nan, kindword):
+    """One interface body for an order procedure's per-kind entry point."""
+    mine = kind_opts(opts, has_nan)
+    args = ["values"] + [e[0] for e in extra] + [out_name] + mine
+    lines = ["        !> `pf_%s` over %s." % (base, kindword)]
+    for line in KIND_NOTE.get(tag, []):
+        lines.append(("        !> " + line).rstrip())
+    lines.append("        module subroutine %s_%s(%s)" % (base, tag, wrap_args(args)))
+    lines.append("            " + decl.strip())
+    lines.extend(order_extra_decls(extra))
+    lines.append("            %s !! %s" % (out_decl, out_doc))
+    for key in mine:
+        lines.append(D[key])
+    lines.append("        end subroutine %s_%s" % (base, tag))
+    return "\n".join(lines)
+
+
+def order_entry_body(base, extra, out_name, opts, tag, widen, has_nan):
+    """One `module procedure` body for an order procedure's per-kind entry point."""
+    mine = kind_opts(opts, has_nan)
+    lines = ["    module procedure %s_%s" % (base, tag)]
+    lines.append("        real(real64), allocatable :: wide(:)")
+    if tag == "col":
+        lines.append("        logical, allocatable :: mask(:)")
+        lines.append('        call col_to_real64(values, "pf_%s", is_valid, wide, mask)' % base)
+    else:
+        lines.append("        allocate(wide(size(values, kind=int64)))")
+        lines.append("        wide = %s" % widen)
+    call = ["wide"] + [e[0] for e in extra] + [out_name] \
+        + ["%s=%s" % (o, "mask" if (o == "is_valid" and tag == "col") else o) for o in mine]
+    lines.append("        call " + wrap_call("%s_f64" % base, call))
+    lines.append("    end procedure %s_%s" % (base, tag))
+    return "\n".join(lines)
+
+
 def wrap_call(name, args):
     """Renders a call's argument list with continuations, inside the 132-column limit."""
     out, line = [], name + "("
@@ -1107,6 +1444,84 @@ GENERIC_DOC = {
                    "",
                    "The form a per-group loop should use: asking for eight statistics costs the",
                    "same two traversals as asking for one."],
+}
+
+#: What each order generic's own doc-comment says. FORD renders this on the generic's page, which
+#: is the only place a multi-specific generic's arguments are described at all (see CLAUDE.md's
+#: FORD notes), so each spells out its arguments in prose.
+ORDER_DOC = {
+    "pf_median": [
+        "The median of a population: the INTERPOLATING one, not an element of the input.",
+        "",
+        "For an even-length population this is the mean of the two middle values, which is what",
+        "numpy, pandas and every spreadsheet mean by `median` -- and is deliberately NOT what",
+        "`pf_nth_quantile(v, 0.5)` in `parquet_sorting` returns, which is one of the two. That",
+        "one answers `which element`, this one answers `what value`; both are useful and they",
+        "are different questions.",
+        "",
+        "`method=` selects the rule (see `pf_quantile`); `pf_median` is exactly",
+        "`pf_quantile(values, 0.5, med)`."],
+    "pf_quantile": [
+        "One quantile of a population, interpolated between the bracketing order statistics.",
+        "",
+        "`p` is on a **0-1 scale**, not 0-100, and outside `[0, 1]` aborts. `method=` chooses how",
+        "a fractional position is resolved: `linear` (the default, Hyndman-Fan type 7 -- numpy's",
+        "and pandas' default), `lower`, `higher`, `nearest`, `midpoint`, or `inverted_cdf`.",
+        "",
+        "**Weighted, the position rule reduces EXACTLY to type 7 when the weights are equal**, so",
+        "adding uniform weights to a working script does not move its numbers. No reference",
+        "library implements an interpolating weighted quantile, so that invariant -- rather than",
+        "a cross-check -- is what pins it; `method=\"inverted_cdf\"` is the numpy-comparable",
+        "escape hatch, and is what `weight_type=\"frequency\"` selects by default.",
+        "",
+        "One call with one probability uses SELECTION rather than a sort where it can, so it is",
+        "O(n). Asking for several probabilities should use `pf_quantiles`, which sorts once."],
+    "pf_quantiles": [
+        "Several quantiles of one population, from ONE ordering of it.",
+        "",
+        "`probs(:)` on a 0-1 scale and `out(:)` the same size; `probs` need not be sorted and may",
+        "repeat. This is the form to reach for whenever more than one quantile is wanted --",
+        "`[0.16, 0.5, 0.84]` is one call and one sort, where three `pf_quantile` calls would",
+        "traverse the population three times.",
+        "",
+        "Every argument means what it does on `pf_quantile`, including `method=` and the weighted",
+        "position rule."],
+    "pf_iqr": [
+        "The interquartile range: `pf_quantile(v, 0.75) - pf_quantile(v, 0.25)`, from one sort.",
+        "",
+        "NaN when either quartile is undefined, which for this family means an empty population.",
+        "`method=` is passed through to both quartiles, so the difference is always taken between",
+        "two quantiles computed the same way."],
+    "pf_trim_mean": [
+        "The mean of the population with a share trimmed from EACH tail -- scipy's `trim_mean`.",
+        "",
+        "`prop` is the share removed at each end, so `prop=0.1` averages the middle 80%. It must",
+        "satisfy `0 <= prop < 0.5`; anything else aborts, since trimming everything is a mistake",
+        "rather than a request. `prop=0` is the ordinary mean and is allowed.",
+        "",
+        "The count trimmed from each end is `floor(prop * n_valid)`, matching scipy, so the",
+        "result changes in steps as `prop` grows rather than continuously.",
+        "",
+        "**Weights are supported and are trimmed with their values**: the same elements leave the",
+        "population, and the mean of what remains is weighted."],
+    "pf_percentile_of_score": [
+        "The share of the population at or below a given value -- scipy's `percentileofscore`,",
+        "on a **0-1 scale** rather than 0-100, matching every other probability in this module.",
+        "",
+        "The inverse of `pf_quantile` in the loose sense: it answers `where does this value sit`",
+        "rather than `what value sits here`. `kind=` chooses how a value exactly EQUAL to `score`",
+        "is counted -- `rank` (the default; ties count half), `weak` (`<=`), `strict` (`<`), or",
+        "`mean` (the average of weak and strict).",
+        "",
+        "A NaN or infinite `score` aborts: unlike a NaN in the population, which is an ordinary",
+        "data condition this module excludes, a NaN score can only be the caller's own mistake."],
+}
+
+#: The order family's members, derived the same way the moment family's are.
+_ORDER_BASES = [b for b, _, _, _, _, _ in ORDER_FAMILY]
+GENERIC_SPECIFICS_ORDER = {
+    "pf_" + base: ["%s_f64" % base] + ["%s_%s" % (base, k[0]) for k in MOMENT_KINDS]
+    for base in _ORDER_BASES
 }
 
 #: Every generic's members: the real64 core first, then one entry point per widened kind. Derived
@@ -1197,9 +1612,13 @@ def gen_spec():
     out.append("    public :: pf_count_valid")
     out.append("    public :: pf_sum, pf_mean, pf_variance, pf_stddev, pf_sem")
     out.append("    public :: pf_skewness, pf_kurtosis, pf_moments")
+    out.append("    public :: pf_median, pf_quantile, pf_quantiles")
+    out.append("    public :: pf_iqr, pf_trim_mean, pf_percentile_of_score")
     out.append("    public :: pf_stats")
     out.append("    public :: parquet_debug_stats_scans, parquet_debug_reset_stats_scans")
     out.append("    public :: parquet_debug_stats_team, parquet_debug_set_stats_min_per_thread")
+    out.append("    public :: parquet_debug_stats_sorts, parquet_debug_reset_stats_sorts")
+    out.append("    public :: parquet_debug_set_stats_quantile_sort_min")
     out.append(type_block())
     out.append("")
     out.append("    !> How many elements of `values` are in the population -- pandas' `Series.count()`.")
@@ -1234,6 +1653,17 @@ def gen_spec():
         for spec in GENERIC_SPECIFICS[name]:
             out.append("        module procedure %s" % spec)
         out.append("    end interface %s" % name)
+    for name in ("pf_median", "pf_quantile", "pf_quantiles", "pf_iqr", "pf_trim_mean",
+                 "pf_percentile_of_score"):
+        out.append("    !")
+        for line in ORDER_DOC[name]:
+            out.append(("    !> " + line).rstrip())
+        for line in _ORDER_COMMON.split("\n"):
+            out.append(line.rstrip())
+        out.append("    interface %s" % name)
+        for spec in GENERIC_SPECIFICS_ORDER[name]:
+            out.append("        module procedure %s" % spec)
+        out.append("    end interface %s" % name)
     out.append(GUARD_SPEC.rstrip("\n"))
     out.append("    !")
     out.append("    ! ---- The real64 moment core (implemented in parquet_stats_core) ----")
@@ -1243,12 +1673,23 @@ def gen_spec():
     out.append(MOMENTS_IFACE % "\n".join(D[k] for k in MOMENTS_OPTS))
     out.append("    end interface")
     out.append("    !")
+    out.append("    ! ---- The real64 order core (implemented in parquet_stats_order) ----")
+    out.append("    interface")
+    for base, extra, out_name, out_decl, out_doc, opts in ORDER_FAMILY:
+        out.append(order_core_iface(base, extra, out_name, out_decl, out_doc, opts,
+                                    ORDER_DOC["pf_" + base]))
+    out.append(ORDER_HELPER_IFACES.rstrip("\n"))
+    out.append("    end interface")
+    out.append("    !")
     out.append("    ! ---- The per-kind entry layer (implemented in parquet_stats_kernel) ----")
     out.append("    interface")
     for tag, decl, _, has_nan, kindword in MOMENT_KINDS:
         for base, out_name, out_doc, opts in ENTRY_FAMILY:
             out.append(entry_iface(base, out_name, out_doc, opts, tag, decl, has_nan, kindword))
         out.append(entry_moments_iface(tag, decl, has_nan, kindword))
+        for base, extra, out_name, out_decl, out_doc, opts in ORDER_FAMILY:
+            out.append(order_entry_iface(base, extra, out_name, out_decl, out_doc, opts,
+                                         tag, decl, has_nan, kindword))
     out.append(obj_entry_ifaces())
     out.append("    end interface")
     out.append(object_ifaces())
@@ -1271,6 +1712,8 @@ def gen_kernel():
         for base, out_name, _, opts in ENTRY_FAMILY:
             bodies.append(entry_body(base, out_name, opts, tag, widen, has_nan))
         bodies.append(entry_moments_body(tag, widen, has_nan))
+        for base, extra, out_name, _, _, opts in ORDER_FAMILY:
+            bodies.append(order_entry_body(base, extra, out_name, opts, tag, widen, has_nan))
     out.append("\n\n".join(bodies))
     out.append("")
     out.append(obj_entry_bodies())

@@ -166,10 +166,9 @@ contains
     !!
     !! Built with `ieee_value` rather than by arithmetic: `0.0/0.0` and anything routed through
     !! `anint`/`int` raise under nagfor's default `-ieee=stop`, which terminates the process.
-    pure function stats_nan() result(res)
-        real(real64) :: res !! a quiet NaN.
+    module procedure stats_nan
         res = ieee_value(1.0_real64, ieee_quiet_nan)
-    end function stats_nan
+    end procedure stats_nan
 
     !> Reduces `a(1:n)` in place by a fixed binary tree over index, leaving the total in `a(1)`.
     !!
@@ -198,10 +197,7 @@ contains
     end subroutine pair_reduce
 
     !> Resolves `weight_type` to the one bit the formulas actually branch on.
-    subroutine stats_weight_kind(what, weight_type, freq)
-        character(len=*), intent(in) :: what             !! the public procedure's name.
-        character(len=*), intent(in), optional :: weight_type !! the caller's token, if any.
-        logical, intent(out) :: freq                     !! .true. for frequency weights.
+    module procedure stats_weight_kind
         integer, parameter :: ECHO = 60                  !! cap the echoed token; see below.
 
         freq = .false.
@@ -217,7 +213,7 @@ contains
             error stop what // ": weight_type """ // trim(adjustl(weight_type(1:min(ECHO, len(weight_type))))) // &
                 """ is not recognised; use ""reliability"" (the default) or ""frequency"""
         end select
-    end subroutine stats_weight_kind
+    end procedure stats_weight_kind
 
     ! ==================================================================================
     ! The engine
@@ -234,7 +230,8 @@ contains
     !! The unweighted, mask-free, NaN-skipping case gets its own compaction loop. It is the shape
     !! nearly every call has, and giving it a loop with no per-element `present` test or weight
     !! branch is the difference between a tight copy and a predicted branch per element.
-    subroutine stats_engine(values, what, is_valid, weights, skipnan, acc, keep_x, keep_w, threads)
+    subroutine stats_engine(values, what, is_valid, weights, skipnan, acc, keep_x, keep_w, threads, &
+            moments)
         real(real64), intent(in) :: values(:)                 !! the population, before exclusions.
         character(len=*), intent(in) :: what                  !! the public procedure's name.
         logical, intent(in), optional :: is_valid(:)          !! per element: .false. marks a null.
@@ -247,6 +244,11 @@ contains
         !! re-deriving it is what lets a retaining `%compute` cost two traversals rather than three.
         real(real64), allocatable, intent(out), optional :: keep_w(:)
         !! likewise their weights, allocated only when `weights` was supplied.
+        logical, intent(in), optional :: moments
+        !! .true. by default. `.false.` stops after pass one, leaving the counts, `vsum`, the
+        !! extremes and the compacted survivors, and marking every central moment undefined. That
+        !! is what an ORDER statistic wants: it needs the survivors and would discard the four
+        !! central moments, which are roughly half the cost of the call.
         integer, intent(in), optional :: threads
         !! how many threads pass two may use. Absent takes the automatic rule; see
         !! `stats_pass_two_team`. **The answer does not depend on this argument** -- the block
@@ -256,13 +258,15 @@ contains
         real(real64), allocatable :: xb(:), wb(:), pw(:), px(:), q1(:), q2(:), q3(:), q4(:)
         real(real64) :: x, w, sw, sx, mu, delta
         integer(int64) :: nv, m, nb, i, c, j, team
-        logical :: skip, weighted, masked, threaded
+        logical :: skip, weighted, masked, threaded, want_moments
 
         nv = size(values, kind=int64)
         call stats_check_sizes(nv, what, is_valid, weights)
         stats_scan_count = stats_scan_count + 1_int64   ! pass one
         skip = .true.
         if (present(skipnan)) skip = skipnan
+        want_moments = .true.
+        if (present(moments)) want_moments = moments
         weighted = present(weights)
         masked = present(is_valid)
 
@@ -388,6 +392,14 @@ contains
         else
             acc%w_sum = real(m, real64)
             acc%w_sq = real(m, real64)
+        end if
+        if (.not. want_moments) then
+            ! Pass one answered everything this caller asked for. `stats_undefine` marks the
+            ! central moments NaN rather than leaving them zero, so a caller that reads one anyway
+            ! gets the module's own "undefined" answer instead of a plausible wrong number.
+            call stats_undefine(acc)
+            call stats_hand_over(xb, wb, keep_x, keep_w)
+            return
         end if
         mu = acc%vsum / acc%w_sum
         stats_scan_count = stats_scan_count + 1_int64   ! pass two
@@ -1122,7 +1134,24 @@ contains
         self%wtd = .false.
         self%skip = .true.
         self%stale = .false.
+        self%ordered = .false.
     end subroutine stats_reset
+
+    !> Drops tier B: the retained values may no longer be in order.
+    !!
+    !! **Called by every mutation, unconditionally, and before it mutates anything.** The
+    !! unconditional part is the point: writing `if (self%hold) self%ordered = .false.` inside a
+    !! branch would be correct today and would be lost the first time the branch structure changes,
+    !! and what it costs is one store on a path that is about to do O(n) work anyway.
+    !!
+    !! **The failure this prevents is silent.** A median cached across an `%update` is not wrong in
+    !! any way an assertion can see -- it is a plausible number for a population that no longer
+    !! exists. `test_update_drops_the_order_cache` is the only thing in the suite that can tell the
+    !! difference, and it was written before this procedure and confirmed to fail without it.
+    pure subroutine stats_invalidate_order(self)
+        class(pf_stats), intent(inout) :: self !! the accumulator being mutated.
+        self%ordered = .false.
+    end subroutine stats_invalidate_order
 
     !> Aborts unless `%compute` or `%init` has run.
     !!
@@ -1231,8 +1260,7 @@ contains
     !! so the block boundaries, the tree and every partial sum are the ones `%compute` over the
     !! concatenated input would have produced. The counts are restored afterwards because the
     !! retained buffer no longer contains the excluded elements that produced them.
-    subroutine stats_ensure(self)
-        class(pf_stats), intent(inout) :: self !! the accumulator.
+    module procedure stats_ensure
         if (.not. self%stale) return
         self%stale = .false.
         if (self%wtd) then
@@ -1244,7 +1272,7 @@ contains
         self%acc%n_valid = self%c_valid
         self%acc%n_null = self%c_null
         self%acc%n_nan = self%c_nan
-    end subroutine stats_ensure
+    end procedure stats_ensure
 
     !> Folds one source accumulator into `self`; the worker both `%merge` forms share.
     subroutine stats_merge_worker(self, other, consume)
@@ -1260,6 +1288,9 @@ contains
             "would leave the retained values describing only part of its own population"
         if (other%freq .neqv. self%freq) error stop "pf_stats%merge: the destination and the " // &
             "source disagree on weight_type"
+        ! After the guards, before anything is written: a refused merge must leave the destination
+        ! exactly as it was, ordering included.
+        call stats_invalidate_order(self)
 
         if (other%n_seen /= 0_int64) then
             if (self%hold) then
@@ -1338,6 +1369,7 @@ contains
     module procedure obj_update_f64
         type(stats_acc) :: batch
         call stats_require_live(self, "pf_stats%update")
+        call stats_invalidate_order(self)
         if (self%hold) then
             call stats_append(self, values, "pf_stats%update", is_valid, weights)
             self%stale = .true.
@@ -1490,6 +1522,17 @@ contains
     end procedure obj_range
 
     ! ---- The traversal counter ----
+
+    module procedure stats_compact
+        type(stats_acc) :: acc
+        call stats_engine(values, what, is_valid, weights, skipnan, acc, keep_x, keep_w, &
+            moments=.false.)
+        n_valid = acc%n_valid
+        n_null = acc%n_null
+        n_nan = acc%n_nan
+        ! An unweighted population leaves `keep_w` unallocated, and the order tier reads that as
+        ! "unweighted" rather than carrying a separate flag -- the same convention `pf_stats` uses.
+    end procedure stats_compact
 
     module procedure parquet_debug_stats_scans
         res = stats_scan_count

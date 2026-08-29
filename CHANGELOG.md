@@ -30,7 +30,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` and `logical` arrays, all
   widened exactly, and a scalar numeric `type(parquet_column)` dispatched on its kind. The
   central-moment pass is threaded on a large population, with `threads=` to override the automatic
-  count; the answer is bit-identical at every thread count and without OpenMP. See
+  count; the answer is bit-identical at every thread count and without OpenMP. Order statistics
+  follow: `pf_median`, `pf_quantile`, `pf_quantiles`, `pf_iqr`, `pf_trim_mean` and
+  `pf_percentile_of_score`, over the same six inputs, with numpy's six `method=` tokens and
+  weighted quantiles whose rule reduces exactly to the unweighted one at equal weights. A
+  `pf_stats` orders its retained values once and answers every later order statistic off that
+  ordering, dropping it whenever `%update` or `%merge` changes the population. See
   [Array statistics](doc/pages/utilities/statistics.md).
 - **`parquet_logging`: general-purpose logging for the calling program.** A `pf_logger` type and a
   matching set of `pf_log_*` procedures on a process-wide default logger: eight ascending severity

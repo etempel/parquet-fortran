@@ -1736,7 +1736,21 @@ contains
             new_unittest("a vector column aborts naming its width, not its kind", &
                 test_stats_column_vector_width_aborts), &
             new_unittest("is_valid= alongside a parquet_column aborts", &
-                test_stats_column_is_valid_conflict_aborts) &
+                test_stats_column_is_valid_conflict_aborts), &
+            new_unittest("a probability outside [0, 1] aborts", &
+                test_stats_quantile_bad_probability_aborts), &
+            new_unittest("an unrecognised quantile method aborts listing all six", &
+                test_stats_quantile_bad_method_aborts), &
+            new_unittest("pf_quantiles with mismatched probs and out aborts", &
+                test_stats_quantiles_size_mismatch_aborts), &
+            new_unittest("pf_trim_mean with prop outside [0, 0.5) aborts", &
+                test_stats_trim_mean_bad_prop_aborts), &
+            new_unittest("a NaN score aborts, unlike a NaN in the population", &
+                test_stats_score_not_finite_aborts), &
+            new_unittest("an unrecognised percentile-of-score kind aborts", &
+                test_stats_score_bad_kind_aborts), &
+            new_unittest("an order statistic on a streaming accumulator aborts", &
+                test_stats_median_on_streaming_aborts) &
             ]
         testsuite = [p1, p2, p3, p4, p5, p6, p7, p8, p9]
     end subroutine collect_tests_parquet_errors
@@ -6044,6 +6058,87 @@ contains
             failure_message="is_valid= beside a column was expected to abort", &
             required_stderr="pf_mean: is_valid= cannot be given alongside a parquet_column")
     end subroutine test_stats_column_is_valid_conflict_aborts
+
+    !> parquet_stats abort path: see scenario_stats_quantile_bad_probability in
+    !> test/error_scenarios.f90.
+    subroutine test_stats_quantile_bad_probability_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_quantile_bad_probability", &
+            expect_abort=.true., &
+            failure_message="a probability outside [0, 1] was expected to abort", &
+            required_stderr="every probability must lie in [0, 1]")
+    end subroutine test_stats_quantile_bad_probability_aborts
+
+    !> parquet_stats abort path: see scenario_stats_quantile_bad_method in
+    !> test/error_scenarios.f90. The message lists every accepted token, because a caller who
+    !> reached for "type7" needs to be told what this library calls it.
+    subroutine test_stats_quantile_bad_method_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_quantile_bad_method", &
+            expect_abort=.true., &
+            failure_message="an unrecognised method token was expected to abort", &
+            required_stderr="is not recognised; use ""linear""")
+    end subroutine test_stats_quantile_bad_method_aborts
+
+    !> parquet_stats abort path: see scenario_stats_quantiles_size_mismatch in
+    !> test/error_scenarios.f90.
+    subroutine test_stats_quantiles_size_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_quantiles_size_mismatch", &
+            expect_abort=.true., &
+            failure_message="mismatched probs and out were expected to abort", &
+            required_stderr="pf_quantiles: out has 3 elements but probs has 2")
+    end subroutine test_stats_quantiles_size_mismatch_aborts
+
+    !> parquet_stats abort path: see scenario_stats_trim_mean_bad_prop in
+    !> test/error_scenarios.f90.
+    subroutine test_stats_trim_mean_bad_prop_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_trim_mean_bad_prop", &
+            expect_abort=.true., &
+            failure_message="prop=0.5 was expected to abort", &
+            required_stderr="pf_trim_mean: prop must satisfy 0 <= prop < 0.5")
+    end subroutine test_stats_trim_mean_bad_prop_aborts
+
+    !> parquet_stats abort path: see scenario_stats_score_not_finite in test/error_scenarios.f90.
+    !>
+    !> The asymmetry is deliberate and is worth the scenario: a NaN in the POPULATION is an
+    !> ordinary data condition this module excludes silently, while a NaN SCORE can only be the
+    !> caller's own broken arithmetic.
+    subroutine test_stats_score_not_finite_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_score_not_finite", &
+            expect_abort=.true., &
+            failure_message="a NaN score was expected to abort", &
+            required_stderr="pf_percentile_of_score: score must be finite")
+    end subroutine test_stats_score_not_finite_aborts
+
+    !> parquet_stats abort path: see scenario_stats_score_bad_kind in test/error_scenarios.f90.
+    subroutine test_stats_score_bad_kind_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_score_bad_kind", &
+            expect_abort=.true., &
+            failure_message="an unrecognised kind token was expected to abort", &
+            required_stderr="is not recognised; use ""rank""")
+    end subroutine test_stats_score_bad_kind_aborts
+
+    !> parquet_stats abort path: see scenario_stats_median_on_streaming in
+    !> test/error_scenarios.f90. The message names the fix, because "retain" is the one decision a
+    !> caller makes early and meets the consequence of much later.
+    subroutine test_stats_median_on_streaming_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_median_on_streaming", &
+            expect_abort=.true., &
+            failure_message="an order statistic on a streaming accumulator was expected to abort", &
+            required_stderr="was created with retain=.false.")
+    end subroutine test_stats_median_on_streaming_aborts
 
     !> pf_nth_quantile abort path: see scenario_sorting_quantile_out_of_range in
     !> test/error_scenarios.f90. The message names the scale, since 50 is exactly what a caller

@@ -106,7 +106,31 @@ contains
             new_unittest("threading the central-moment pass changes not one bit of any answer", &
                 test_threading_changes_no_bit), &
             new_unittest("the work floor declines a team that would not pay, and lets one through", &
-                test_the_work_floor_decides) &
+                test_the_work_floor_decides), &
+            new_unittest("four order statistics off one accumulator cost ONE ordering", &
+                test_order_cache_costs_one_sort), &
+            new_unittest("%update drops the order cache, and the next median is recomputed", &
+                test_update_drops_the_order_cache), &
+            new_unittest("%merge drops the order cache too", test_merge_drops_the_order_cache), &
+            new_unittest("%release_order frees tier B and the next query rebuilds it", &
+                test_release_order_rebuilds), &
+            new_unittest("every quantile method matches the 50-digit oracle", &
+                test_quantile_methods_match_the_oracle), &
+            new_unittest("equal weights reproduce the unweighted quantile exactly", &
+                test_weighted_quantiles_reduce_to_unweighted), &
+            new_unittest("the one-shot family and the accumulator agree", test_order_forms_agree), &
+            new_unittest("the selection and ordering paths give identical quantiles", &
+                test_selection_and_sort_paths_agree), &
+            new_unittest("pf_trim_mean follows scipy's floor(prop*n) contract", &
+                test_trim_mean_contract), &
+            new_unittest("pf_percentile_of_score reproduces scipy's four conventions", &
+                test_percentile_of_score_kinds), &
+            new_unittest("an empty order-statistic population is NaN and ok=.false.", &
+                test_order_degenerate_populations), &
+            new_unittest("q(0) and q(1) are exactly the extremes, weighted or not", &
+                test_extreme_quantiles_are_the_extremes), &
+            new_unittest("weight_type=frequency defaults the quantile to inverted_cdf", &
+                test_frequency_weights_default_to_inverted_cdf) &
             ]
     end subroutine collect_tests_parquet_stats
 
@@ -1710,5 +1734,488 @@ contains
         call check(error, v_serial == v_threaded .and. v_serial == v_default, &
             "the floor may trade speed and never accuracy: all three arms must agree bit for bit")
     end subroutine test_the_work_floor_decides
+
+
+    !> The caching contract: many order statistics, one ordering.
+    !!
+    !! This is the promise `pf_stats` exists to make, and `parquet_debug_stats_sorts()` is the only
+    !! thing that can see it -- every value assertion below would pass just as happily against an
+    !! object that re-sorted on every call.
+    subroutine test_order_cache_costs_one_sort(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        type(pf_stats) :: s
+        real(real64) :: x(101), med, q, r, pc, probs(3), out(3)
+        integer(int64) :: i
+
+        do i = 1_int64, 101_int64
+            x(i) = sin(real(i, real64) * 0.7_real64) * 100.0_real64
+        end do
+        call s%compute(x)
+
+        call parquet_debug_reset_stats_sorts()
+        call check(error, parquet_debug_stats_sorts() == 0_int64, &
+            "the sort counter must reset to zero")
+        if (allocated(error)) return
+
+        med = s%median()
+        call check(error, parquet_debug_stats_sorts() == 1_int64, &
+            "the first order statistic must build the sorted buffer exactly once")
+        if (allocated(error)) return
+        call check(error, s%is_ordered(), "the accumulator must report itself ordered afterwards")
+        if (allocated(error)) return
+
+        q = s%quantile(0.9_real64)
+        r = s%iqr()
+        pc = s%percentile_of_score(0.0_real64)
+        probs = [0.1_real64, 0.5_real64, 0.99_real64]
+        call s%quantiles(probs, out)
+        call check(error, parquet_debug_stats_sorts() == 1_int64, &
+            "four further order statistics must reuse the ordering, not rebuild it")
+        if (allocated(error)) return
+
+        ! The answers must also be right, or the counter is measuring a cache of nothing.
+        call check(error, med == out(2), &
+            "%median and %quantiles(0.5) must agree exactly -- they share one interpolator")
+        if (allocated(error)) return
+        call check(error, q > med, "the 0.9 quantile must exceed the median on this fixture")
+        if (allocated(error)) return
+        call check(error, r > 0.0_real64, "the IQR of a spread population must be positive")
+        if (allocated(error)) return
+        call check(error, pc >= 0.0_real64 .and. pc <= 1.0_real64, &
+            "a percentile of score must lie in [0, 1]")
+    end subroutine test_order_cache_costs_one_sort
+
+    !> **The negative control this whole phase turns on**, written before the invalidation it
+    !! checks and confirmed to fail without it.
+    !!
+    !! A cached median that survives an `%update` is not a loud failure -- the answer is merely
+    !! stale, and a stale median is a perfectly plausible number. Every other assertion in this
+    !! suite passes against that defect. Two things are asserted here and both are needed: that the
+    !! second median costs a SECOND ordering (the counter), and that it equals `%compute` over the
+    !! concatenation (the value). The counter alone would pass against an object that re-sorted
+    !! pointlessly; the value alone would pass against one that never invalidated but happened to
+    !! be asked in an order where it did not matter.
+    subroutine test_update_drops_the_order_cache(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        type(pf_stats) :: s, whole
+        real(real64) :: a(41), b(37), both(78), m1, m2, want
+        integer(int64) :: i
+
+        do i = 1_int64, 41_int64
+            a(i) = real(i, real64)
+        end do
+        do i = 1_int64, 37_int64
+            b(i) = 1000.0_real64 + real(i, real64)
+        end do
+        both(1:41) = a
+        both(42:78) = b
+
+        call s%compute(a)
+        call parquet_debug_reset_stats_sorts()
+        m1 = s%median()
+        call check(error, parquet_debug_stats_sorts() == 1_int64, &
+            "the first median must order the buffer once")
+        if (allocated(error)) return
+
+        call s%update(b)
+        call check(error, .not. s%is_ordered(), &
+            "%update must drop the order cache; a median cached across a mutation is stale")
+        if (allocated(error)) return
+
+        m2 = s%median()
+        call check(error, parquet_debug_stats_sorts() == 2_int64, &
+            "the median after an %update must rebuild the ordering, not reuse the stale one")
+        if (allocated(error)) return
+        call check(error, m2 /= m1, &
+            "this fixture is only meaningful if the two medians differ; the appended batch is " // &
+            "far above the first, so a stale answer is visibly wrong")
+        if (allocated(error)) return
+
+        call whole%compute(both)
+        want = whole%median()
+        call check(error, m2 == want, &
+            "the median after %update must equal %compute over the concatenation, bit for bit")
+    end subroutine test_update_drops_the_order_cache
+
+    !> `%merge` is the other mutation, and it must drop the cache for the same reason.
+    subroutine test_merge_drops_the_order_cache(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        type(pf_stats) :: s, part, whole
+        real(real64) :: a(25), b(31), both(56), m1, m2, want
+        integer(int64) :: i
+
+        do i = 1_int64, 25_int64
+            a(i) = real(i, real64) * 2.0_real64
+        end do
+        do i = 1_int64, 31_int64
+            b(i) = 500.0_real64 + real(i, real64)
+        end do
+        both(1:25) = a
+        both(26:56) = b
+
+        call s%compute(a)
+        call part%compute(b)
+        call parquet_debug_reset_stats_sorts()
+        m1 = s%median()
+        call check(error, parquet_debug_stats_sorts() == 1_int64, &
+            "the first median must order the buffer once")
+        if (allocated(error)) return
+
+        call s%merge(part)
+        call check(error, .not. s%is_ordered(), "%merge must drop the order cache")
+        if (allocated(error)) return
+
+        m2 = s%median()
+        call check(error, parquet_debug_stats_sorts() == 2_int64, &
+            "the median after a %merge must rebuild the ordering")
+        if (allocated(error)) return
+        call check(error, m2 /= m1, "this fixture is only meaningful if the two medians differ")
+        if (allocated(error)) return
+
+        call whole%compute(both)
+        want = whole%median()
+        call check(error, m2 == want, &
+            "the median after %merge must equal %compute over the concatenation, bit for bit")
+    end subroutine test_merge_drops_the_order_cache
+
+    !> `%release_order` gives tier B back without disturbing tier A.
+    subroutine test_release_order_rebuilds(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        type(pf_stats) :: s
+        real(real64) :: x(60), m1, m2, mean_before, mean_after
+        integer(int64) :: i
+
+        do i = 1_int64, 60_int64
+            x(i) = cos(real(i, real64)) * 10.0_real64
+        end do
+        call s%compute(x)
+        call parquet_debug_reset_stats_sorts()
+
+        m1 = s%median()
+        mean_before = s%mean()
+        call check(error, parquet_debug_stats_sorts() == 1_int64, "one ordering so far")
+        if (allocated(error)) return
+
+        call s%release_order()
+        call check(error, .not. s%is_ordered(), "%release_order must drop the ordering")
+        if (allocated(error)) return
+
+        m2 = s%median()
+        mean_after = s%mean()
+        call check(error, parquet_debug_stats_sorts() == 2_int64, &
+            "a query after %release_order must rebuild the ordering")
+        if (allocated(error)) return
+        call check(error, m2 == m1, "releasing and rebuilding tier B must not change the median")
+        if (allocated(error)) return
+        call check(error, mean_after == mean_before, &
+            "%release_order keeps tier A: the mean must be untouched")
+    end subroutine test_release_order_rebuilds
+
+
+    !> Every quantile method against the 50-digit oracle, which itself agrees with numpy.
+    !!
+    !! `tools/generate_stats_vectors.py --self-test` checks the oracle's unweighted rows against
+    !! `np.quantile` at all seven probabilities, method by method -- not at the median alone, which
+    !! is precisely where an earlier draft of the weighted rule hid its error. So a failure here is
+    !! this library disagreeing with numpy, not two derivations disagreeing with each other.
+    subroutine test_quantile_methods_match_the_oracle(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: x(:)
+        real(real64) :: got(NQP)
+        integer :: k
+
+        call golden_fixture(32_int64, x)
+        call pf_quantiles(x, G_QPROBS, got, method="linear")
+        do k = 1, NQP
+            call check(error, close_to(got(k), Q_U32_LINEAR(k)), &
+                "pf_quantiles(method=linear) must match the oracle at every probability")
+            if (allocated(error)) return
+        end do
+        call pf_quantiles(x, G_QPROBS, got, method="lower")
+        call check(error, all_close(got, Q_U32_LOWER), "method=lower must match the oracle")
+        if (allocated(error)) return
+        call pf_quantiles(x, G_QPROBS, got, method="higher")
+        call check(error, all_close(got, Q_U32_HIGHER), "method=higher must match the oracle")
+        if (allocated(error)) return
+        call pf_quantiles(x, G_QPROBS, got, method="nearest")
+        call check(error, all_close(got, Q_U32_NEAREST), "method=nearest must match the oracle")
+        if (allocated(error)) return
+        call pf_quantiles(x, G_QPROBS, got, method="midpoint")
+        call check(error, all_close(got, Q_U32_MIDPOINT), "method=midpoint must match the oracle")
+        if (allocated(error)) return
+        call pf_quantiles(x, G_QPROBS, got, method="inverted_cdf")
+        call check(error, all_close(got, Q_U32_ICDF), "method=inverted_cdf must match the oracle")
+    end subroutine test_quantile_methods_match_the_oracle
+
+    !> The weighted rule, and the invariant it exists for.
+    !!
+    !! No reference library interpolates a weighted quantile, so the weighted rows come from this
+    !! project's own derivation. What makes them trustworthy is the **equal-weight reduction**:
+    !! uniform weights must give exactly the unweighted answer, so a script that adds `weights=`
+    !! does not see its numbers move. That is asserted with `==`, not a tolerance.
+    subroutine test_weighted_quantiles_reduce_to_unweighted(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: x(:), w(:)
+        real(real64) :: got(NQP), plain(NQP)
+        integer :: k
+
+        call golden_fixture(32_int64, x)
+        allocate(w(32))
+        w = 3.0_real64
+        call pf_quantiles(x, G_QPROBS, plain, method="linear")
+        call pf_quantiles(x, G_QPROBS, got, weights=w, method="linear")
+        do k = 1, NQP
+            ! **To a few ulp, not bit for bit, and the difference matters.** The reduction is an
+            ! ALGEBRAIC identity -- with every weight equal, `S_{i-1}/(W - w_i)` is exactly
+            ! `(i-1)/(m-1)` -- but the weighted and unweighted paths reach it by different
+            ! expressions, and floating point does not promise that equal values arrive by equal
+            ! roundings. What a user is promised is that adding uniform weights introduces no
+            ! DISCONTINUITY in their numbers, and a few ulp is not one. The tolerance is far
+            ! tighter than the golden one for that reason: this compares two of our own paths.
+            call check(error, abs(got(k) - plain(k)) <= 1.0e-14_real64 * max(1.0_real64, abs(plain(k))), &
+                "equal weights must reproduce the unweighted quantile; a discontinuity at " // &
+                "'all weights equal' is a trap a user meets by accident")
+            if (allocated(error)) return
+        end do
+
+        deallocate(w)
+        call golden_weights_mod5(32_int64, w)
+        call pf_quantiles(x, G_QPROBS, got, weights=w, method="linear")
+        call check(error, all_close(got, Q_WVAR_LINEAR), &
+            "the weighted linear rule must match the derivation at 50 digits")
+        if (allocated(error)) return
+        call pf_quantiles(x, G_QPROBS, got, weights=w, method="inverted_cdf")
+        call check(error, all_close(got, Q_WVAR_ICDF), &
+            "weighted inverted_cdf must match the oracle, which numpy itself agrees with")
+    end subroutine test_weighted_quantiles_reduce_to_unweighted
+
+    !> The one-shot family and the object must agree, and `pf_median` must be `pf_quantile(0.5)`.
+    !!
+    !! They travel different routes on purpose -- a single one-shot probe SELECTS where the object
+    !! orders -- so this is a real cross-check of two implementations rather than a tautology.
+    subroutine test_order_forms_agree(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        type(pf_stats) :: s
+        real(real64), allocatable :: x(:)
+        real(real64) :: med, q, r, med_obj, q_obj, r_obj, pc, pc_obj
+
+        call golden_fixture(33_int64, x)
+        call pf_median(x, med)
+        call pf_quantile(x, 0.5_real64, q)
+        call check(error, med == q, "pf_median must be exactly pf_quantile(0.5)")
+        if (allocated(error)) return
+
+        call s%compute(x)
+        med_obj = s%median()
+        call check(error, med_obj == med, &
+            "the object's median must equal the one-shot median, though one selects and the " // &
+            "other orders")
+        if (allocated(error)) return
+
+        call pf_quantile(x, 0.9_real64, q)
+        q_obj = s%quantile(0.9_real64)
+        call check(error, q_obj == q, "the object and the one-shot quantile must agree")
+        if (allocated(error)) return
+
+        call pf_iqr(x, r)
+        r_obj = s%iqr()
+        call check(error, r_obj == r, "the object and the one-shot IQR must agree")
+        if (allocated(error)) return
+
+        call pf_percentile_of_score(x, med, pc)
+        pc_obj = s%percentile_of_score(med)
+        call check(error, pc_obj == pc, &
+            "the object and the one-shot percentile-of-score must agree")
+    end subroutine test_order_forms_agree
+
+    !> Both sides of the select-versus-order threshold must give the same answer.
+    !!
+    !! The two are different code paths -- `pf_nth_element` twice against one `pf_argsort` -- and
+    !! nothing else in the suite would notice if one of them were wrong, because the shipped
+    !! threshold puts every small test on the same side of it. CLAUDE.md's size-threshold rule is
+    !! what this exists for, and `parquet_debug_set_stats_quantile_sort_min` is what reaches the
+    !! other side.
+    subroutine test_selection_and_sort_paths_agree(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: x(:)
+        real(real64) :: sel(NQP), srt(NQP)
+        integer :: k
+
+        call golden_fixture(64_int64, x)
+        ! A huge floor: every count is below it, so every probe SELECTS.
+        call parquet_debug_set_stats_quantile_sort_min(1000000_int64)
+        call pf_quantiles(x, G_QPROBS, sel, method="linear")
+        ! A floor of zero: nothing is below it, so the population is ORDERED once.
+        call parquet_debug_set_stats_quantile_sort_min(0_int64)
+        call pf_quantiles(x, G_QPROBS, srt, method="linear")
+        call parquet_debug_set_stats_quantile_sort_min(-1_int64)
+
+        do k = 1, NQP
+            call check(error, sel(k) == srt(k), &
+                "selection and ordering must give bit-identical quantiles; they are two code " // &
+                "paths and only this test crosses the threshold between them")
+            if (allocated(error)) return
+        end do
+        call check(error, all_close(srt, Q_U32_LINEAR) .eqv. .false., &
+            "this fixture is n=64, so it must NOT coincide with the n=32 oracle row -- a " // &
+            "sanity check that the comparison above is not comparing two constants")
+    end subroutine test_selection_and_sort_paths_agree
+
+    !> `pf_trim_mean` against scipy's contract, and its degenerate cases.
+    subroutine test_trim_mean_contract(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: x(10), m, plain
+        integer :: i
+
+        do i = 1, 10
+            x(i) = real(i, real64)
+        end do
+        ! prop = 0 is the ordinary mean.
+        call pf_trim_mean(x, 0.0_real64, m)
+        call pf_mean(x, plain)
+        call check(error, m == plain, "pf_trim_mean(prop=0) must be exactly the ordinary mean")
+        if (allocated(error)) return
+
+        ! floor(0.2*10) = 2 from each end: the middle six are 3..8, mean 5.5.
+        call pf_trim_mean(x, 0.2_real64, m)
+        call check(error, abs(m - 5.5_real64) < 1.0e-12_real64, &
+            "trimming 2 from each end of 1..10 must average 3..8, which is 5.5")
+        if (allocated(error)) return
+
+        ! floor(0.25*10) = 2 as well, so the answer must not change until the floor does.
+        call pf_trim_mean(x, 0.25_real64, m)
+        call check(error, abs(m - 5.5_real64) < 1.0e-12_real64, &
+            "the trimmed count is floor(prop*n), so the answer changes in steps, not smoothly")
+    end subroutine test_trim_mean_contract
+
+    !> `pf_percentile_of_score` against scipy's four conventions.
+    subroutine test_percentile_of_score_kinds(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: x(5), p
+        real(real64), parameter :: TOL = 1.0e-12_real64
+
+        ! scipy.stats.percentileofscore([1,2,3,3,5], 3, kind=...) / 100:
+        !   strict 0.4, weak 0.8, mean 0.6, rank 0.7
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 3.0_real64, 5.0_real64]
+        call pf_percentile_of_score(x, 3.0_real64, p, kind="strict")
+        call check(error, abs(p - 0.4_real64) < TOL, "kind=strict counts only values below")
+        if (allocated(error)) return
+        call pf_percentile_of_score(x, 3.0_real64, p, kind="weak")
+        call check(error, abs(p - 0.8_real64) < TOL, "kind=weak counts values at or below")
+        if (allocated(error)) return
+        call pf_percentile_of_score(x, 3.0_real64, p, kind="mean")
+        call check(error, abs(p - 0.6_real64) < TOL, "kind=mean averages weak and strict")
+        if (allocated(error)) return
+        call pf_percentile_of_score(x, 3.0_real64, p, kind="rank")
+        call check(error, abs(p - 0.7_real64) < TOL, &
+            "kind=rank is scipy's default and carries its half-place continuity correction")
+        if (allocated(error)) return
+        ! With no ties, rank collapses to the plain share below.
+        call pf_percentile_of_score(x, 4.0_real64, p, kind="rank")
+        call check(error, abs(p - 0.8_real64) < TOL, &
+            "with no tie at the score, rank must agree with strict and weak")
+    end subroutine test_percentile_of_score_kinds
+
+    !> An empty or fully excluded population gives NaN and `ok=.false.`, never an abort.
+    subroutine test_order_degenerate_populations(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: empty(0), x(4), med, r, p
+        logical :: mask(4), ok
+        real(real64) :: q(2)
+
+        call pf_median(empty, med, ok=ok)
+        call check(error, med /= med .and. .not. ok, &
+            "an empty population must give a quiet NaN with ok=.false., not an abort")
+        if (allocated(error)) return
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        mask = .false.
+        call pf_median(x, med, is_valid=mask, ok=ok)
+        call check(error, med /= med .and. .not. ok, "an all-null population is the empty case")
+        if (allocated(error)) return
+        call pf_iqr(x, r, is_valid=mask, ok=ok)
+        call check(error, r /= r .and. .not. ok, "so is an all-null IQR")
+        if (allocated(error)) return
+        call pf_percentile_of_score(x, 2.0_real64, p, is_valid=mask, ok=ok)
+        call check(error, p /= p .and. .not. ok, "and an all-null percentile of score")
+        if (allocated(error)) return
+
+        ! A single element is every quantile of itself.
+        call pf_quantiles([7.5_real64], [0.0_real64, 1.0_real64], q)
+        call check(error, q(1) == 7.5_real64 .and. q(2) == 7.5_real64, &
+            "a one-element population is every one of its own quantiles")
+    end subroutine test_order_degenerate_populations
+
+    !> q(0) and q(1) are the minimum and the maximum, exactly, weighted or not.
+    !!
+    !! A property of the position rule rather than of any fixture: `p_1 = 0` and `p_m = 1` by
+    !! construction, so no interpolation happens at either end.
+    subroutine test_extreme_quantiles_are_the_extremes(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: x(:), w(:)
+        real(real64) :: q(2), lo, hi
+        type(pf_stats) :: s
+
+        call golden_fixture(50_int64, x)
+        call golden_weights_mod5(50_int64, w)
+        call s%compute(x, weights=w)
+        lo = s%vmin()
+        hi = s%vmax()
+
+        call pf_quantiles(x, [0.0_real64, 1.0_real64], q, weights=w)
+        call check(error, q(1) == lo, "q(0) must be exactly the minimum, weighted too")
+        if (allocated(error)) return
+        call check(error, q(2) == hi, "q(1) must be exactly the maximum, weighted too")
+        if (allocated(error)) return
+
+        call pf_quantiles(x, [0.0_real64, 1.0_real64], q)
+        call check(error, q(1) == minval(x) .and. q(2) == maxval(x), &
+            "and unweighted, where the population is the whole array")
+    end subroutine test_extreme_quantiles_are_the_extremes
+
+    !> `weight_type="frequency"` changes the DEFAULT method, and an explicit method still wins.
+    subroutine test_frequency_weights_default_to_inverted_cdf(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: x(3), w(3), q_default, q_icdf, q_linear
+
+        ! x = [1,2,3], w = [1,1,2] expands to [1,2,3,3]; at p=0.5 the step rule gives 2 and the
+        ! linear rule 2.25, so the two are visibly different and the default is observable.
+        x = [1.0_real64, 2.0_real64, 3.0_real64]
+        w = [1.0_real64, 1.0_real64, 2.0_real64]
+
+        call pf_quantile(x, 0.5_real64, q_default, weights=w, weight_type="frequency")
+        call pf_quantile(x, 0.5_real64, q_icdf, weights=w, method="inverted_cdf")
+        call pf_quantile(x, 0.5_real64, q_linear, weights=w, method="linear")
+        call check(error, q_icdf /= q_linear, &
+            "this fixture is only meaningful if the two rules disagree at p=0.5")
+        if (allocated(error)) return
+        call check(error, q_default == q_icdf, &
+            "weight_type=frequency must default to inverted_cdf; that token IS frequency " // &
+            "expansion, and the reliability-shaped median would be the wrong answer for it")
+        if (allocated(error)) return
+
+        call pf_quantile(x, 0.5_real64, q_default, weights=w, weight_type="frequency", &
+            method="linear")
+        call check(error, q_default == q_linear, "an explicit method= must still win")
+    end subroutine test_frequency_weights_default_to_inverted_cdf
+
+    !> Whether two reals agree to the golden tolerance.
+    logical function close_to(got, want)
+        real(real64), intent(in) :: got  !! the library's answer.
+        real(real64), intent(in) :: want !! the oracle's.
+        real(real64), parameter :: TOL = 1.0e-12_real64
+        close_to = abs(got - want) <= TOL * max(1.0_real64, abs(want))
+    end function close_to
+
+    !> Whether every element of two arrays agrees to the golden tolerance.
+    logical function all_close(got, want)
+        real(real64), intent(in) :: got(:)  !! the library's answers.
+        real(real64), intent(in) :: want(:) !! the oracle's.
+        integer :: k
+        all_close = .true.
+        do k = 1, size(got)
+            if (.not. close_to(got(k), want(k))) all_close = .false.
+        end do
+    end function all_close
 
 end module test_stats

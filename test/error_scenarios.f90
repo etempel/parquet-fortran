@@ -761,6 +761,20 @@ program error_scenarios
         call scenario_stats_column_vector_width()
     case ("stats_column_is_valid_conflict")
         call scenario_stats_column_is_valid_conflict()
+    case ("stats_quantile_bad_probability")
+        call scenario_stats_quantile_bad_probability()
+    case ("stats_quantile_bad_method")
+        call scenario_stats_quantile_bad_method()
+    case ("stats_quantiles_size_mismatch")
+        call scenario_stats_quantiles_size_mismatch()
+    case ("stats_trim_mean_bad_prop")
+        call scenario_stats_trim_mean_bad_prop()
+    case ("stats_score_not_finite")
+        call scenario_stats_score_not_finite()
+    case ("stats_score_bad_kind")
+        call scenario_stats_score_bad_kind()
+    case ("stats_median_on_streaming")
+        call scenario_stats_median_on_streaming()
     case ("sorting_column_vector")
         call scenario_sorting_column_vector()
     case ("sorting_search_unsorted")
@@ -16737,6 +16751,91 @@ contains
         call pf_mean(c, m, is_valid=mask)       ! -> aborts (two sources of nullness)
         print '(a,es12.5)', "unexpectedly accepted is_valid= beside a column, mean=", m
     end subroutine scenario_stats_column_is_valid_conflict
+
+    !> A probability outside [0, 1] is misuse, not a data condition, so it aborts.
+    subroutine scenario_stats_quantile_bad_probability()
+        real(real64) :: x(4) = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        real(real64) :: q
+
+        call pf_quantile(x, 0.5_real64, q)          ! in range: accepted
+        if (q /= 2.5_real64) print '(a)', "the median of 1..4 was expected to be 2.5"
+        call pf_quantile(x, 1.5_real64, q)          ! -> aborts (probability out of range)
+        print '(a,es12.5)', "unexpectedly accepted p=1.5, q=", q
+    end subroutine scenario_stats_quantile_bad_probability
+
+    !> An unrecognised method token aborts listing all six, rather than silently picking one.
+    subroutine scenario_stats_quantile_bad_method()
+        real(real64) :: x(4) = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        real(real64) :: q
+
+        call pf_quantile(x, 0.5_real64, q, method="linear")   ! a real token: accepted
+        if (q /= 2.5_real64) print '(a)', "method=linear was expected to give 2.5"
+        call pf_quantile(x, 0.5_real64, q, method="type7")    ! -> aborts (unknown token)
+        print '(a,es12.5)', "unexpectedly accepted method=type7, q=", q
+    end subroutine scenario_stats_quantile_bad_method
+
+    !> `out` and `probs` must be the same size; a mismatch is a caller error.
+    subroutine scenario_stats_quantiles_size_mismatch()
+        real(real64) :: x(4) = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        real(real64) :: two(2), three(3)
+
+        call pf_quantiles(x, [0.25_real64, 0.75_real64], two)   ! matched: accepted
+        if (two(1) >= two(2)) print '(a)', "the quartiles came back out of order"
+        call pf_quantiles(x, [0.25_real64, 0.75_real64], three) ! -> aborts (size mismatch)
+        print '(a,es12.5)', "unexpectedly accepted a size mismatch, first=", three(1)
+    end subroutine scenario_stats_quantiles_size_mismatch
+
+    !> `prop` outside [0, 0.5) would trim everything away, which is a mistake rather than a request.
+    subroutine scenario_stats_trim_mean_bad_prop()
+        real(real64) :: x(4) = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        real(real64) :: m
+
+        call pf_trim_mean(x, 0.2_real64, m)   ! in range: accepted
+        if (m /= 2.5_real64) print '(a)', "trimming 0 from each end of 1..4 was expected to give 2.5"
+        call pf_trim_mean(x, 0.5_real64, m)   ! -> aborts (prop must be < 0.5)
+        print '(a,es12.5)', "unexpectedly accepted prop=0.5, m=", m
+    end subroutine scenario_stats_trim_mean_bad_prop
+
+    !> A NaN score can only come from the caller's own arithmetic, unlike a NaN in the population.
+    subroutine scenario_stats_score_not_finite()
+        use ieee_arithmetic, only : ieee_value, ieee_quiet_nan
+        real(real64) :: x(4) = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        real(real64) :: p
+
+        call pf_percentile_of_score(x, 2.0_real64, p)   ! finite: accepted
+        if (p < 0.0_real64 .or. p > 1.0_real64) print '(a)', "a percentile of score left [0, 1]"
+        call pf_percentile_of_score(x, ieee_value(1.0_real64, ieee_quiet_nan), p)  ! -> aborts
+        print '(a,es12.5)', "unexpectedly accepted a NaN score, p=", p
+    end subroutine scenario_stats_score_not_finite
+
+    !> An unrecognised `kind` token aborts listing all four.
+    subroutine scenario_stats_score_bad_kind()
+        real(real64) :: x(4) = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        real(real64) :: p
+
+        call pf_percentile_of_score(x, 2.0_real64, p, kind="weak")   ! a real token: accepted
+        if (p <= 0.0_real64) print '(a)', "kind=weak was expected to count at least one value"
+        call pf_percentile_of_score(x, 2.0_real64, p, kind="middle") ! -> aborts (unknown token)
+        print '(a,es12.5)', "unexpectedly accepted kind=middle, p=", p
+    end subroutine scenario_stats_score_bad_kind
+
+    !> A streaming accumulator kept no values, so it has nothing to order.
+    subroutine scenario_stats_median_on_streaming()
+        type(pf_stats) :: s, r
+        real(real64) :: x(4) = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        real(real64) :: m
+
+        ! A RETAINED accumulator answers, which is the negative control: the abort below is about
+        ! retain=.false., not about %median being broken.
+        call r%compute(x)
+        m = r%median()
+        if (m /= 2.5_real64) print '(a)', "a retained median of 1..4 was expected to be 2.5"
+
+        call s%init(retain=.false.)
+        call s%update(x)
+        m = s%median()                         ! -> aborts (nothing was retained to order)
+        print '(a,es12.5)', "unexpectedly took a median of a streaming accumulator, m=", m
+    end subroutine scenario_stats_median_on_streaming
 
     !> A vector column has no defined order on a whole row, so it cannot be a sort key -- the
     !! same rule parquet_table%sort_by applies, enforced here for a bare parquet_column.

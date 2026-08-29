@@ -32,6 +32,9 @@ module test_stats_golden
     character(len=8), parameter :: QNAME(NQ) = [character(len=8) :: &
         "sum", "mean", "var", "stddev", "sem", "skew", "kurt", "min", "max"]
 
+    !> How many probabilities each `Q_*` row carries.
+    integer, parameter :: NQP = 7
+
     !> The first 8 values `golden_fixture` must produce. A recipe that has drifted from the
     !! generator's is reported here, as a fixture mismatch, rather than as an unexplained
     !! tolerance failure in every case at once.
@@ -170,5 +173,56 @@ module test_stats_golden
         0.0_real64, 0.0_real64, 0.0_real64]
     logical, parameter :: G_ALLZEROW_DEF(NQ) = [.true., .false., .false., .false., .false., .false., .false., .false., .false.]
     integer(int64), parameter :: G_ALLZEROW_N(3) = [0_int64, 0_int64, 0_int64]
+
+    !> The probabilities every Q_* row below is evaluated at.
+    real(real64), parameter :: G_QPROBS(NQP) = [0.0_real64, 0.10000000000000001_real64, 0.25_real64, 0.5_real64, 0.75_real64,  &
+        0.90000000000000002_real64, 1.0_real64]
+
+    !> the default rule at n=32: Hyndman-Fan type 7, numpy's and pandas' default
+    real(real64), parameter :: Q_U32_LINEAR(NQP) = [-468.4931640625_real64, -402.93837890625002_real64,  &
+        -319.21826171875_real64, -114.283203125_real64, 154.67626953125_real64, 333.04912109374999_real64,  &
+        459.5146484375_real64]
+
+    !> method=lower: the order statistic at or below the position
+    real(real64), parameter :: Q_U32_LOWER(NQP) = [-468.4931640625_real64, -406.6259765625_real64, -339.1826171875_real64,  &
+        -131.2763671875_real64, 150.1787109375_real64, 297.11328125_real64, 459.5146484375_real64]
+
+    !> method=higher: the order statistic at or above it
+    real(real64), parameter :: Q_U32_HIGHER(NQP) = [-468.4931640625_real64, -369.75_real64, -312.5634765625_real64,  &
+        -97.2900390625_real64, 168.1689453125_real64, 337.0419921875_real64, 459.5146484375_real64]
+
+    !> method=nearest: whichever of the two is closer
+    real(real64), parameter :: Q_U32_NEAREST(NQP) = [-468.4931640625_real64, -406.6259765625_real64, -312.5634765625_real64,  &
+        -97.2900390625_real64, 150.1787109375_real64, 337.0419921875_real64, 459.5146484375_real64]
+
+    !> method=midpoint: their mean
+    real(real64), parameter :: Q_U32_MIDPOINT(NQP) = [-468.4931640625_real64, -388.18798828125_real64, -325.873046875_real64,  &
+        -114.283203125_real64, 159.173828125_real64, 317.07763671875_real64, 459.5146484375_real64]
+
+    !> method=inverted_cdf: a step function on the plain cumulative scale
+    real(real64), parameter :: Q_U32_ICDF(NQP) = [-468.4931640625_real64, -406.6259765625_real64, -339.1826171875_real64,  &
+        -131.2763671875_real64, 150.1787109375_real64, 337.0419921875_real64, 459.5146484375_real64]
+
+    !> odd length, so the median is an element rather than an interpolation
+    real(real64), parameter :: Q_U33_LINEAR(NQP) = [-468.4931640625_real64, -399.25078124999999_real64, -312.5634765625_real64,  &
+        -97.2900390625_real64, 150.1787109375_real64, 329.05624999999998_real64, 459.5146484375_real64]
+
+    !> every weight 3: must equal U32_LINEAR EXACTLY -- the equal-weight reduction
+    real(real64), parameter :: Q_W3_LINEAR(NQP) = [-468.4931640625_real64, -402.93837890625002_real64, -319.21826171875_real64,  &
+        -114.283203125_real64, 154.67626953125_real64, 333.04912109374999_real64, 459.5146484375_real64]
+
+    !> unequal weights: the derived rule, with no library to cross-check against
+    real(real64), parameter :: Q_WVAR_LINEAR(NQP) = [-468.4931640625_real64, -381.06422008167613_real64,  &
+        -291.5205078125_real64, 11.49196337090164_real64, 133.34337573366116_real64, 304.89545898437501_real64,  &
+        459.5146484375_real64]
+
+    !> the same weights on the cumulative scale, which numpy DOES implement
+    real(real64), parameter :: Q_WVAR_ICDF(NQP) = [-468.4931640625_real64, -406.6259765625_real64, -291.5205078125_real64,  &
+        18.7109375_real64, 150.1787109375_real64, 337.0419921875_real64, 459.5146484375_real64]
+
+    !> one element in three null: the quantiles are of what survives
+    real(real64), parameter :: Q_NULLS_LINEAR(NQP) = [-468.4931640625_real64, -437.73867187500002_real64,  &
+        -307.302734375_real64, -138.56201171875_real64, 156.029541015625_real64, 359.86367187500002_real64,  &
+        459.5146484375_real64]
 
 end module test_stats_golden ! GCOVR_EXCL_LINE

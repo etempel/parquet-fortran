@@ -302,6 +302,54 @@ contains
             excess=excess, n_null=n_null, threads=threads)
     end procedure moments_i32
 
+    module procedure median_i32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call median_f64(wide, med, is_valid=is_valid, weights=weights, weight_type=weight_type, &
+            method=method, n_null=n_null, ok=ok, threads=threads)
+    end procedure median_i32
+
+    module procedure quantile_i32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call quantile_f64(wide, p, q, is_valid=is_valid, weights=weights, weight_type=weight_type, &
+            method=method, n_null=n_null, ok=ok, threads=threads)
+    end procedure quantile_i32
+
+    module procedure quantiles_i32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call quantiles_f64(wide, probs, out, is_valid=is_valid, weights=weights, weight_type=weight_type, &
+            method=method, n_null=n_null, ok=ok, threads=threads)
+    end procedure quantiles_i32
+
+    module procedure iqr_i32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call iqr_f64(wide, r, is_valid=is_valid, weights=weights, weight_type=weight_type, method=method, &
+            n_null=n_null, ok=ok, threads=threads)
+    end procedure iqr_i32
+
+    module procedure trim_mean_i32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call trim_mean_f64(wide, prop, m, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok, &
+            threads=threads)
+    end procedure trim_mean_i32
+
+    module procedure percentile_of_score_i32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call percentile_of_score_f64(wide, score, p, is_valid=is_valid, weights=weights, kind=kind, &
+            n_null=n_null, ok=ok, threads=threads)
+    end procedure percentile_of_score_i32
+
     module procedure sum_i64
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
@@ -365,6 +413,54 @@ contains
             is_valid=is_valid, weights=weights, weight_type=weight_type, ddof=ddof, bias=bias, &
             excess=excess, n_null=n_null, threads=threads)
     end procedure moments_i64
+
+    module procedure median_i64
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call median_f64(wide, med, is_valid=is_valid, weights=weights, weight_type=weight_type, &
+            method=method, n_null=n_null, ok=ok, threads=threads)
+    end procedure median_i64
+
+    module procedure quantile_i64
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call quantile_f64(wide, p, q, is_valid=is_valid, weights=weights, weight_type=weight_type, &
+            method=method, n_null=n_null, ok=ok, threads=threads)
+    end procedure quantile_i64
+
+    module procedure quantiles_i64
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call quantiles_f64(wide, probs, out, is_valid=is_valid, weights=weights, weight_type=weight_type, &
+            method=method, n_null=n_null, ok=ok, threads=threads)
+    end procedure quantiles_i64
+
+    module procedure iqr_i64
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call iqr_f64(wide, r, is_valid=is_valid, weights=weights, weight_type=weight_type, method=method, &
+            n_null=n_null, ok=ok, threads=threads)
+    end procedure iqr_i64
+
+    module procedure trim_mean_i64
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call trim_mean_f64(wide, prop, m, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok, &
+            threads=threads)
+    end procedure trim_mean_i64
+
+    module procedure percentile_of_score_i64
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call percentile_of_score_f64(wide, score, p, is_valid=is_valid, weights=weights, kind=kind, &
+            n_null=n_null, ok=ok, threads=threads)
+    end procedure percentile_of_score_i64
 
     module procedure sum_f32
         real(real64), allocatable :: wide(:)
@@ -432,6 +528,54 @@ contains
             excess=excess, skipnan=skipnan, n_null=n_null, n_nan=n_nan, threads=threads)
     end procedure moments_f32
 
+    module procedure median_f32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call median_f64(wide, med, is_valid=is_valid, weights=weights, weight_type=weight_type, &
+            skipnan=skipnan, method=method, n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
+    end procedure median_f32
+
+    module procedure quantile_f32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call quantile_f64(wide, p, q, is_valid=is_valid, weights=weights, weight_type=weight_type, &
+            skipnan=skipnan, method=method, n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
+    end procedure quantile_f32
+
+    module procedure quantiles_f32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call quantiles_f64(wide, probs, out, is_valid=is_valid, weights=weights, weight_type=weight_type, &
+            skipnan=skipnan, method=method, n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
+    end procedure quantiles_f32
+
+    module procedure iqr_f32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call iqr_f64(wide, r, is_valid=is_valid, weights=weights, weight_type=weight_type, skipnan=skipnan, &
+            method=method, n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
+    end procedure iqr_f32
+
+    module procedure trim_mean_f32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call trim_mean_f64(wide, prop, m, is_valid=is_valid, weights=weights, skipnan=skipnan, &
+            n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
+    end procedure trim_mean_f32
+
+    module procedure percentile_of_score_f32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call percentile_of_score_f64(wide, score, p, is_valid=is_valid, weights=weights, skipnan=skipnan, &
+            kind=kind, n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
+    end procedure percentile_of_score_f32
+
     module procedure sum_bool
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
@@ -495,6 +639,54 @@ contains
             is_valid=is_valid, weights=weights, weight_type=weight_type, ddof=ddof, bias=bias, &
             excess=excess, n_null=n_null, threads=threads)
     end procedure moments_bool
+
+    module procedure median_bool
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = merge(1.0_real64, 0.0_real64, values)
+        call median_f64(wide, med, is_valid=is_valid, weights=weights, weight_type=weight_type, &
+            method=method, n_null=n_null, ok=ok, threads=threads)
+    end procedure median_bool
+
+    module procedure quantile_bool
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = merge(1.0_real64, 0.0_real64, values)
+        call quantile_f64(wide, p, q, is_valid=is_valid, weights=weights, weight_type=weight_type, &
+            method=method, n_null=n_null, ok=ok, threads=threads)
+    end procedure quantile_bool
+
+    module procedure quantiles_bool
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = merge(1.0_real64, 0.0_real64, values)
+        call quantiles_f64(wide, probs, out, is_valid=is_valid, weights=weights, weight_type=weight_type, &
+            method=method, n_null=n_null, ok=ok, threads=threads)
+    end procedure quantiles_bool
+
+    module procedure iqr_bool
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = merge(1.0_real64, 0.0_real64, values)
+        call iqr_f64(wide, r, is_valid=is_valid, weights=weights, weight_type=weight_type, method=method, &
+            n_null=n_null, ok=ok, threads=threads)
+    end procedure iqr_bool
+
+    module procedure trim_mean_bool
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = merge(1.0_real64, 0.0_real64, values)
+        call trim_mean_f64(wide, prop, m, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok, &
+            threads=threads)
+    end procedure trim_mean_bool
+
+    module procedure percentile_of_score_bool
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = merge(1.0_real64, 0.0_real64, values)
+        call percentile_of_score_f64(wide, score, p, is_valid=is_valid, weights=weights, kind=kind, &
+            n_null=n_null, ok=ok, threads=threads)
+    end procedure percentile_of_score_bool
 
     module procedure sum_col
         real(real64), allocatable :: wide(:)
@@ -561,6 +753,54 @@ contains
             is_valid=mask, weights=weights, weight_type=weight_type, ddof=ddof, bias=bias, &
             excess=excess, skipnan=skipnan, n_null=n_null, n_nan=n_nan, threads=threads)
     end procedure moments_col
+
+    module procedure median_col
+        real(real64), allocatable :: wide(:)
+        logical, allocatable :: mask(:)
+        call col_to_real64(values, "pf_median", is_valid, wide, mask)
+        call median_f64(wide, med, is_valid=mask, weights=weights, weight_type=weight_type, skipnan=skipnan, &
+            method=method, n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
+    end procedure median_col
+
+    module procedure quantile_col
+        real(real64), allocatable :: wide(:)
+        logical, allocatable :: mask(:)
+        call col_to_real64(values, "pf_quantile", is_valid, wide, mask)
+        call quantile_f64(wide, p, q, is_valid=mask, weights=weights, weight_type=weight_type, &
+            skipnan=skipnan, method=method, n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
+    end procedure quantile_col
+
+    module procedure quantiles_col
+        real(real64), allocatable :: wide(:)
+        logical, allocatable :: mask(:)
+        call col_to_real64(values, "pf_quantiles", is_valid, wide, mask)
+        call quantiles_f64(wide, probs, out, is_valid=mask, weights=weights, weight_type=weight_type, &
+            skipnan=skipnan, method=method, n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
+    end procedure quantiles_col
+
+    module procedure iqr_col
+        real(real64), allocatable :: wide(:)
+        logical, allocatable :: mask(:)
+        call col_to_real64(values, "pf_iqr", is_valid, wide, mask)
+        call iqr_f64(wide, r, is_valid=mask, weights=weights, weight_type=weight_type, skipnan=skipnan, &
+            method=method, n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
+    end procedure iqr_col
+
+    module procedure trim_mean_col
+        real(real64), allocatable :: wide(:)
+        logical, allocatable :: mask(:)
+        call col_to_real64(values, "pf_trim_mean", is_valid, wide, mask)
+        call trim_mean_f64(wide, prop, m, is_valid=mask, weights=weights, skipnan=skipnan, n_null=n_null, &
+            n_nan=n_nan, ok=ok, threads=threads)
+    end procedure trim_mean_col
+
+    module procedure percentile_of_score_col
+        real(real64), allocatable :: wide(:)
+        logical, allocatable :: mask(:)
+        call col_to_real64(values, "pf_percentile_of_score", is_valid, wide, mask)
+        call percentile_of_score_f64(wide, score, p, is_valid=mask, weights=weights, skipnan=skipnan, &
+            kind=kind, n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
+    end procedure percentile_of_score_col
 
     module procedure obj_compute_i32
         real(real64), allocatable :: wide(:)

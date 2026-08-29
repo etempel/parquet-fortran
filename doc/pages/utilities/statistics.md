@@ -211,6 +211,113 @@ Three things worth knowing before reaching for `threads=`:
 `bench/benchmark_stats.sh` measures all of this, and its `--mode=thread` refuses to report a
 timing until it has confirmed the bit-exactness above on the machine it is running on.
 
+## Order statistics: medians, quantiles and the rest
+
+```fortran
+call pf_median(mag, med)                                  ! interpolating
+call pf_quantile(mag, 0.9_real64, q90)
+call pf_quantiles(mag, [0.16_real64, 0.5_real64, 0.84_real64], q)   ! ONE ordering
+call pf_iqr(mag, r)
+call pf_trim_mean(mag, 0.1_real64, tm)                    ! middle 80%
+call pf_percentile_of_score(mag, 18.5_real64, share)
+```
+
+Probabilities are on a **0–1 scale**, never 0–100, matching every other probability in the library.
+Anything outside `[0, 1]` aborts.
+
+### `pf_median` is not `pf_nth_quantile`
+
+They answer different questions and both are worth having:
+
+| | `pf_nth_quantile` ([sorting](sorting.html)) | `pf_median` / `pf_quantile` (here) |
+|---|---|---|
+| element types | all ten, including `character` and dates | numeric only |
+| result | **an element of the input**, with `index=` saying which | an interpolated `real(real64)` |
+| even-length median | one of the two middle values | their mean |
+| all-null input | aborts | NaN with `ok = .false.` |
+| weights | no | yes |
+
+If you want to know *which row* the median was, use `pf_nth_quantile`. If you want the number a
+spreadsheet, numpy or pandas would give, use `pf_median`.
+
+### Choosing a method
+
+`method=` takes numpy's own spellings, so a cross-check is name for name:
+
+| token | rule |
+|---|---|
+| `"linear"` (default) | linear interpolation between the bracketing order statistics — Hyndman–Fan type 7, numpy's and pandas' default |
+| `"lower"` / `"higher"` | the order statistic below / above |
+| `"nearest"` | the nearer one; an exact tie goes to the even lower index, as numpy does |
+| `"midpoint"` | the mean of the two |
+| `"inverted_cdf"` | the smallest value whose cumulative share reaches `p` — a step function, and the only token numpy itself accepts weights with |
+
+Every unweighted method is checked against `np.quantile` at seven probabilities by
+`tools/generate_stats_vectors.py --self-test`, so these are not merely *named* after numpy's.
+
+### Weighted quantiles, and the one property to know
+
+A weighted quantile has a definitional choice in it, and this library's rule was chosen for one
+property: **at equal weights it reproduces the unweighted answer.** Adding uniform weights to a
+working script does not move its numbers.
+
+That matters because no reference library interpolates a weighted quantile at all — numpy accepts
+`weights=` only with `method="inverted_cdf"`, and statsmodels and Hmisc are step functions too. So
+the rule is this project's own, derived and pinned at 50 digits, and the equal-weight reduction is
+what stands in for a cross-check. `method="inverted_cdf"` is the numpy-comparable escape hatch.
+
+Two consequences worth knowing:
+
+- **`q(0)` and `q(1)` are exactly the minimum and the maximum**, weighted or not. No interpolation
+  happens at either end, by construction.
+- **`weight_type="frequency"` changes the default method to `"inverted_cdf"`.** That token *is*
+  frequency expansion: on `x = [1, 2, 3]` with `w = [1, 1, 2]` it agrees at every probability with
+  the expanded `[1, 2, 3, 3]`, where the interpolating rule does not. An explicit `method=` still
+  wins.
+
+### One ordering, many statistics
+
+This is the reason `pf_stats` exists:
+
+```fortran
+call s%compute(mag)
+med = s%median()          ! orders the retained values, once
+r   = s%iqr()             ! free
+q90 = s%quantile(0.9_real64)   ! free
+tm  = s%trim_mean(0.1_real64)  ! free
+```
+
+The retained values are sorted **in place**, so tier B costs no extra memory — and nothing in the
+API ever hands them back in their original order, because they no longer are in it.
+
+Three rules follow, and each is a real constraint rather than a note:
+
+- **Any mutation drops the ordering.** `%update` and `%merge` invalidate it, so the next order
+  statistic re-orders. A cached median that survived an update would be stale, and a stale median
+  is a perfectly plausible number — which is why the library asserts this with a counter rather
+  than by inspection.
+- **An order statistic needs `retain = .true.`**, which is `%compute`'s default. A streaming
+  accumulator kept no values and aborts with a message saying so.
+- **The lazy ordering is not thread-safe on a *shared* accumulator.** Two threads calling
+  `%median()` on the same object both find it unordered and both order it. Either give each thread
+  its own accumulator, or call `%prepare_order()` before the parallel region — the same escape
+  hatch, for the same reason, that `parquet_column%ensure_validity` provides.
+
+`%release_order()` drops the ordering and keeps the moments, for a long-lived summary whose
+quantiles have already been taken.
+
+### `pf_trim_mean` and `pf_percentile_of_score`
+
+`pf_trim_mean(values, prop, m)` removes `floor(prop * n_valid)` elements from **each** tail and
+averages the rest, matching scipy's `trim_mean` — so the answer changes in steps as `prop` grows,
+not continuously. `prop` must satisfy `0 <= prop < 0.5`; anything else aborts.
+
+`pf_percentile_of_score(values, score, p)` is the loose inverse of `pf_quantile`: it answers where a
+value sits rather than what value sits somewhere, on a 0–1 scale. `kind=` picks how a value exactly
+equal to `score` counts — `"rank"` (the default, scipy's too), `"weak"`, `"strict"` or `"mean"`. A
+NaN or infinite `score` **aborts**: unlike a NaN in the population, which is an ordinary data
+condition, a NaN score can only come from the caller's own arithmetic.
+
 ## `pf_stats` — summarise once, query as often as you like
 
 The one-shot procedures above each traverse the population. When a group needs more than one or two

@@ -67,9 +67,13 @@ module parquet_stats
     public :: pf_count_valid
     public :: pf_sum, pf_mean, pf_variance, pf_stddev, pf_sem
     public :: pf_skewness, pf_kurtosis, pf_moments
+    public :: pf_median, pf_quantile, pf_quantiles
+    public :: pf_iqr, pf_trim_mean, pf_percentile_of_score
     public :: pf_stats
     public :: parquet_debug_stats_scans, parquet_debug_reset_stats_scans
     public :: parquet_debug_stats_team, parquet_debug_set_stats_min_per_thread
+    public :: parquet_debug_stats_sorts, parquet_debug_reset_stats_sorts
+    public :: parquet_debug_set_stats_quantile_sort_min
     !
     ! ---- The tier-A accumulator, and the object that holds one ----
     !
@@ -145,7 +149,12 @@ module parquet_stats
         logical :: freq = .false.                !! frequency rather than reliability weights.
         logical :: wtd = .false.                 !! any weights have been supplied.
         logical :: skip = .true.                 !! `skipnan`, fixed at %init/%compute.
-        logical :: stale = .false.               !! retained moments need recomputing.
+        logical :: stale = .false.
+        logical :: ordered = .false.
+        !! tier B is built: `keep` (and `keep_w` with it) is in ascending order. **The retained
+        !! buffer is sorted IN PLACE**, so tier B costs no memory of its own -- which is also why
+        !! nothing in the public API ever hands the retained values back in their original order,
+        !! and why no binding should be added that does.               !! retained moments need recomputing.
     contains
         procedure :: init => obj_init !! Arms an empty accumulator for a loop of `%update`.
         procedure :: clear => obj_clear !! Returns the object to its default-initialised state.
@@ -189,6 +198,15 @@ module parquet_stats
         procedure :: vmin => obj_vmin !! The smallest value in the population.
         procedure :: vmax => obj_vmax !! The largest value in the population.
         procedure :: range => obj_range !! `vmax - vmin`.
+        procedure :: median => obj_median !! The interpolating median.
+        procedure :: quantile => obj_quantile !! One quantile, on a 0-1 scale.
+        procedure :: quantiles => obj_quantiles !! Several quantiles from the one ordering.
+        procedure :: iqr => obj_iqr !! The interquartile range.
+        procedure :: trim_mean => obj_trim_mean !! The mean with a share trimmed from each tail.
+        procedure :: percentile_of_score => obj_percentile_of_score !! Where a value sits, 0-1.
+        procedure :: prepare_order => obj_prepare_order !! Builds tier B now rather than lazily.
+        procedure :: release_order => obj_release_order !! Frees tier B, keeping tier A.
+        procedure :: is_ordered => obj_is_ordered !! Whether tier B is currently built.
     end type pf_stats
 
     !> How many elements of `values` are in the population -- pandas' `Series.count()`.
@@ -506,6 +524,197 @@ module parquet_stats
         module procedure moments_bool
         module procedure moments_col
     end interface pf_moments
+    !
+    !> The median of a population: the INTERPOLATING one, not an element of the input.
+    !>
+    !> For an even-length population this is the mean of the two middle values, which is what
+    !> numpy, pandas and every spreadsheet mean by `median` -- and is deliberately NOT what
+    !> `pf_nth_quantile(v, 0.5)` in `parquet_sorting` returns, which is one of the two. That
+    !> one answers `which element`, this one answers `what value`; both are useful and they
+    !> are different questions.
+    !>
+    !> `method=` selects the rule (see `pf_quantile`); `pf_median` is exactly
+    !> `pf_quantile(values, 0.5, med)`.
+    !>
+    !> Nulls, NaNs and zero-weight elements leave the population first, in that order, exactly as
+    !> they do for the moments, and `n_null`/`n_nan` report how many. An empty population gives a
+    !> quiet NaN with `ok = .false.` rather than an abort. What DOES abort is misuse: a probability
+    !> outside `[0, 1]`, an unrecognised `method`, a mismatched array size, or a weight that is
+    !> negative, NaN or infinite.
+    !>
+    !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
+    !> `logical` array, or a scalar numeric `type(parquet_column)`.
+    !>
+    !> **Reaching for several order statistics of one population? Use `pf_stats`.** It orders the
+    !> values once and answers every later query off that ordering, which `parquet_debug_stats_sorts()`
+    !> is what asserts.
+    interface pf_median
+        module procedure median_f64
+        module procedure median_i32
+        module procedure median_i64
+        module procedure median_f32
+        module procedure median_bool
+        module procedure median_col
+    end interface pf_median
+    !
+    !> One quantile of a population, interpolated between the bracketing order statistics.
+    !>
+    !> `p` is on a **0-1 scale**, not 0-100, and outside `[0, 1]` aborts. `method=` chooses how
+    !> a fractional position is resolved: `linear` (the default, Hyndman-Fan type 7 -- numpy's
+    !> and pandas' default), `lower`, `higher`, `nearest`, `midpoint`, or `inverted_cdf`.
+    !>
+    !> **Weighted, the position rule reduces EXACTLY to type 7 when the weights are equal**, so
+    !> adding uniform weights to a working script does not move its numbers. No reference
+    !> library implements an interpolating weighted quantile, so that invariant -- rather than
+    !> a cross-check -- is what pins it; `method="inverted_cdf"` is the numpy-comparable
+    !> escape hatch, and is what `weight_type="frequency"` selects by default.
+    !>
+    !> One call with one probability uses SELECTION rather than a sort where it can, so it is
+    !> O(n). Asking for several probabilities should use `pf_quantiles`, which sorts once.
+    !>
+    !> Nulls, NaNs and zero-weight elements leave the population first, in that order, exactly as
+    !> they do for the moments, and `n_null`/`n_nan` report how many. An empty population gives a
+    !> quiet NaN with `ok = .false.` rather than an abort. What DOES abort is misuse: a probability
+    !> outside `[0, 1]`, an unrecognised `method`, a mismatched array size, or a weight that is
+    !> negative, NaN or infinite.
+    !>
+    !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
+    !> `logical` array, or a scalar numeric `type(parquet_column)`.
+    !>
+    !> **Reaching for several order statistics of one population? Use `pf_stats`.** It orders the
+    !> values once and answers every later query off that ordering, which `parquet_debug_stats_sorts()`
+    !> is what asserts.
+    interface pf_quantile
+        module procedure quantile_f64
+        module procedure quantile_i32
+        module procedure quantile_i64
+        module procedure quantile_f32
+        module procedure quantile_bool
+        module procedure quantile_col
+    end interface pf_quantile
+    !
+    !> Several quantiles of one population, from ONE ordering of it.
+    !>
+    !> `probs(:)` on a 0-1 scale and `out(:)` the same size; `probs` need not be sorted and may
+    !> repeat. This is the form to reach for whenever more than one quantile is wanted --
+    !> `[0.16, 0.5, 0.84]` is one call and one sort, where three `pf_quantile` calls would
+    !> traverse the population three times.
+    !>
+    !> Every argument means what it does on `pf_quantile`, including `method=` and the weighted
+    !> position rule.
+    !>
+    !> Nulls, NaNs and zero-weight elements leave the population first, in that order, exactly as
+    !> they do for the moments, and `n_null`/`n_nan` report how many. An empty population gives a
+    !> quiet NaN with `ok = .false.` rather than an abort. What DOES abort is misuse: a probability
+    !> outside `[0, 1]`, an unrecognised `method`, a mismatched array size, or a weight that is
+    !> negative, NaN or infinite.
+    !>
+    !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
+    !> `logical` array, or a scalar numeric `type(parquet_column)`.
+    !>
+    !> **Reaching for several order statistics of one population? Use `pf_stats`.** It orders the
+    !> values once and answers every later query off that ordering, which `parquet_debug_stats_sorts()`
+    !> is what asserts.
+    interface pf_quantiles
+        module procedure quantiles_f64
+        module procedure quantiles_i32
+        module procedure quantiles_i64
+        module procedure quantiles_f32
+        module procedure quantiles_bool
+        module procedure quantiles_col
+    end interface pf_quantiles
+    !
+    !> The interquartile range: `pf_quantile(v, 0.75) - pf_quantile(v, 0.25)`, from one sort.
+    !>
+    !> NaN when either quartile is undefined, which for this family means an empty population.
+    !> `method=` is passed through to both quartiles, so the difference is always taken between
+    !> two quantiles computed the same way.
+    !>
+    !> Nulls, NaNs and zero-weight elements leave the population first, in that order, exactly as
+    !> they do for the moments, and `n_null`/`n_nan` report how many. An empty population gives a
+    !> quiet NaN with `ok = .false.` rather than an abort. What DOES abort is misuse: a probability
+    !> outside `[0, 1]`, an unrecognised `method`, a mismatched array size, or a weight that is
+    !> negative, NaN or infinite.
+    !>
+    !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
+    !> `logical` array, or a scalar numeric `type(parquet_column)`.
+    !>
+    !> **Reaching for several order statistics of one population? Use `pf_stats`.** It orders the
+    !> values once and answers every later query off that ordering, which `parquet_debug_stats_sorts()`
+    !> is what asserts.
+    interface pf_iqr
+        module procedure iqr_f64
+        module procedure iqr_i32
+        module procedure iqr_i64
+        module procedure iqr_f32
+        module procedure iqr_bool
+        module procedure iqr_col
+    end interface pf_iqr
+    !
+    !> The mean of the population with a share trimmed from EACH tail -- scipy's `trim_mean`.
+    !>
+    !> `prop` is the share removed at each end, so `prop=0.1` averages the middle 80%. It must
+    !> satisfy `0 <= prop < 0.5`; anything else aborts, since trimming everything is a mistake
+    !> rather than a request. `prop=0` is the ordinary mean and is allowed.
+    !>
+    !> The count trimmed from each end is `floor(prop * n_valid)`, matching scipy, so the
+    !> result changes in steps as `prop` grows rather than continuously.
+    !>
+    !> **Weights are supported and are trimmed with their values**: the same elements leave the
+    !> population, and the mean of what remains is weighted.
+    !>
+    !> Nulls, NaNs and zero-weight elements leave the population first, in that order, exactly as
+    !> they do for the moments, and `n_null`/`n_nan` report how many. An empty population gives a
+    !> quiet NaN with `ok = .false.` rather than an abort. What DOES abort is misuse: a probability
+    !> outside `[0, 1]`, an unrecognised `method`, a mismatched array size, or a weight that is
+    !> negative, NaN or infinite.
+    !>
+    !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
+    !> `logical` array, or a scalar numeric `type(parquet_column)`.
+    !>
+    !> **Reaching for several order statistics of one population? Use `pf_stats`.** It orders the
+    !> values once and answers every later query off that ordering, which `parquet_debug_stats_sorts()`
+    !> is what asserts.
+    interface pf_trim_mean
+        module procedure trim_mean_f64
+        module procedure trim_mean_i32
+        module procedure trim_mean_i64
+        module procedure trim_mean_f32
+        module procedure trim_mean_bool
+        module procedure trim_mean_col
+    end interface pf_trim_mean
+    !
+    !> The share of the population at or below a given value -- scipy's `percentileofscore`,
+    !> on a **0-1 scale** rather than 0-100, matching every other probability in this module.
+    !>
+    !> The inverse of `pf_quantile` in the loose sense: it answers `where does this value sit`
+    !> rather than `what value sits here`. `kind=` chooses how a value exactly EQUAL to `score`
+    !> is counted -- `rank` (the default; ties count half), `weak` (`<=`), `strict` (`<`), or
+    !> `mean` (the average of weak and strict).
+    !>
+    !> A NaN or infinite `score` aborts: unlike a NaN in the population, which is an ordinary
+    !> data condition this module excludes, a NaN score can only be the caller's own mistake.
+    !>
+    !> Nulls, NaNs and zero-weight elements leave the population first, in that order, exactly as
+    !> they do for the moments, and `n_null`/`n_nan` report how many. An empty population gives a
+    !> quiet NaN with `ok = .false.` rather than an abort. What DOES abort is misuse: a probability
+    !> outside `[0, 1]`, an unrecognised `method`, a mismatched array size, or a weight that is
+    !> negative, NaN or infinite.
+    !>
+    !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
+    !> `logical` array, or a scalar numeric `type(parquet_column)`.
+    !>
+    !> **Reaching for several order statistics of one population? Use `pf_stats`.** It orders the
+    !> values once and answers every later query off that ordering, which `parquet_debug_stats_sorts()`
+    !> is what asserts.
+    interface pf_percentile_of_score
+        module procedure percentile_of_score_f64
+        module procedure percentile_of_score_i32
+        module procedure percentile_of_score_i64
+        module procedure percentile_of_score_f32
+        module procedure percentile_of_score_bool
+        module procedure percentile_of_score_col
+    end interface pf_percentile_of_score
     !
     ! ---- Shared argument guards (implemented in parquet_stats_core) ----
     interface
@@ -874,6 +1083,345 @@ module parquet_stats
         end subroutine moments_f64
     end interface
     !
+    ! ---- The real64 order core (implemented in parquet_stats_order) ----
+    interface
+        !> The median of a population: the INTERPOLATING one, not an element of the input.
+        !>
+        !> For an even-length population this is the mean of the two middle values, which is what
+        !> numpy, pandas and every spreadsheet mean by `median` -- and is deliberately NOT what
+        !> `pf_nth_quantile(v, 0.5)` in `parquet_sorting` returns, which is one of the two. That
+        !> one answers `which element`, this one answers `what value`; both are useful and they
+        !> are different questions.
+        !>
+        !> `method=` selects the rule (see `pf_quantile`); `pf_median` is exactly
+        !> `pf_quantile(values, 0.5, med)`.
+        module subroutine median_f64(values, med, is_valid, weights, weight_type, skipnan, method, n_null, n_nan, &
+                ok, threads)
+            real(real64), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: med !! the median; NaN when the population is empty.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine median_f64
+        !> One quantile of a population, interpolated between the bracketing order statistics.
+        !>
+        !> `p` is on a **0-1 scale**, not 0-100, and outside `[0, 1]` aborts. `method=` chooses how
+        !> a fractional position is resolved: `linear` (the default, Hyndman-Fan type 7 -- numpy's
+        !> and pandas' default), `lower`, `higher`, `nearest`, `midpoint`, or `inverted_cdf`.
+        !>
+        !> **Weighted, the position rule reduces EXACTLY to type 7 when the weights are equal**, so
+        !> adding uniform weights to a working script does not move its numbers. No reference
+        !> library implements an interpolating weighted quantile, so that invariant -- rather than
+        !> a cross-check -- is what pins it; `method="inverted_cdf"` is the numpy-comparable
+        !> escape hatch, and is what `weight_type="frequency"` selects by default.
+        !>
+        !> One call with one probability uses SELECTION rather than a sort where it can, so it is
+        !> O(n). Asking for several probabilities should use `pf_quantiles`, which sorts once.
+        module subroutine quantile_f64(values, p, q, is_valid, weights, weight_type, skipnan, method, n_null, n_nan, &
+                ok, threads)
+            real(real64), intent(in) :: values(:) !! the population.
+            real(real64), intent(in) :: p
+            !! the probability, on a 0-1 scale rather than 0-100. Outside [0, 1] aborts.
+            real(real64), intent(out) :: q !! the quantile; NaN when the population is empty.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine quantile_f64
+        !> Several quantiles of one population, from ONE ordering of it.
+        !>
+        !> `probs(:)` on a 0-1 scale and `out(:)` the same size; `probs` need not be sorted and may
+        !> repeat. This is the form to reach for whenever more than one quantile is wanted --
+        !> `[0.16, 0.5, 0.84]` is one call and one sort, where three `pf_quantile` calls would
+        !> traverse the population three times.
+        !>
+        !> Every argument means what it does on `pf_quantile`, including `method=` and the weighted
+        !> position rule.
+        module subroutine quantiles_f64(values, probs, out, is_valid, weights, weight_type, skipnan, method, n_null, &
+                n_nan, ok, threads)
+            real(real64), intent(in) :: values(:) !! the population.
+            real(real64), intent(in) :: probs(:)
+            !! the probabilities, each on a 0-1 scale. Any outside [0, 1] aborts. Need not be sorted.
+            real(real64), intent(out) :: out(:) !! one quantile per entry of `probs`, same size. ONE sort serves all of them.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine quantiles_f64
+        !> The interquartile range: `pf_quantile(v, 0.75) - pf_quantile(v, 0.25)`, from one sort.
+        !>
+        !> NaN when either quartile is undefined, which for this family means an empty population.
+        !> `method=` is passed through to both quartiles, so the difference is always taken between
+        !> two quantiles computed the same way.
+        module subroutine iqr_f64(values, r, is_valid, weights, weight_type, skipnan, method, n_null, n_nan, &
+                ok, threads)
+            real(real64), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: r !! the interquartile range, `q(0.75) - q(0.25)`; NaN when either quartile is.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine iqr_f64
+        !> The mean of the population with a share trimmed from EACH tail -- scipy's `trim_mean`.
+        !>
+        !> `prop` is the share removed at each end, so `prop=0.1` averages the middle 80%. It must
+        !> satisfy `0 <= prop < 0.5`; anything else aborts, since trimming everything is a mistake
+        !> rather than a request. `prop=0` is the ordinary mean and is allowed.
+        !>
+        !> The count trimmed from each end is `floor(prop * n_valid)`, matching scipy, so the
+        !> result changes in steps as `prop` grows rather than continuously.
+        !>
+        !> **Weights are supported and are trimmed with their values**: the same elements leave the
+        !> population, and the mean of what remains is weighted.
+        module subroutine trim_mean_f64(values, prop, m, is_valid, weights, skipnan, n_null, n_nan, ok, threads)
+            real(real64), intent(in) :: values(:) !! the population.
+            real(real64), intent(in) :: prop
+            !! the share trimmed from EACH tail, so `prop=0.1` drops 10% at each end and averages the
+            !! middle 80%. Must satisfy `0 <= prop < 0.5`; anything else aborts, because a caller who asks
+            !! to trim everything has made a mistake rather than expressed a preference.
+            real(real64), intent(out) :: m !! the trimmed mean; NaN when nothing survives the trim.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine trim_mean_f64
+        !> The share of the population at or below a given value -- scipy's `percentileofscore`,
+        !> on a **0-1 scale** rather than 0-100, matching every other probability in this module.
+        !>
+        !> The inverse of `pf_quantile` in the loose sense: it answers `where does this value sit`
+        !> rather than `what value sits here`. `kind=` chooses how a value exactly EQUAL to `score`
+        !> is counted -- `rank` (the default; ties count half), `weak` (`<=`), `strict` (`<`), or
+        !> `mean` (the average of weak and strict).
+        !>
+        !> A NaN or infinite `score` aborts: unlike a NaN in the population, which is an ordinary
+        !> data condition this module excludes, a NaN score can only be the caller's own mistake.
+        module subroutine percentile_of_score_f64(values, score, p, is_valid, weights, skipnan, kind, n_null, n_nan, ok, threads)
+            real(real64), intent(in) :: values(:) !! the population.
+            real(real64), intent(in) :: score
+            !! the value to locate. NaN or infinite aborts -- unlike a NaN in the population, which is an
+            !! ordinary data condition, a NaN score can only come from the caller's own arithmetic.
+            real(real64), intent(out) :: p !! the share of the population at or below `score`, on a 0-1 scale; NaN when empty.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            character(len=*), intent(in), optional :: kind
+            !! which convention counts a value EQUAL to `score`, in scipy's spelling: "rank" (the
+            !! default; ties count half), "weak" (a value <= score counts), "strict" (only < score)
+            !! or "mean" (the average of weak and strict). Any other token aborts, listing all
+            !! four. Matched case-insensitively.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine percentile_of_score_f64
+        !> Applies the exclusion rules and hands back the surviving values, without the moments.
+        !!
+        !! Pass one of `stats_engine` and nothing else: an order statistic needs the survivors and
+        !! their weights, and computing four central moments it will discard would roughly double
+        !! the cost of every `pf_median`.
+        module subroutine stats_compact(values, what, is_valid, weights, skipnan, keep_x, keep_w, &
+                n_valid, n_null, n_nan)
+            real(real64), intent(in) :: values(:) !! the population, before exclusions.
+            character(len=*), intent(in) :: what !! the public procedure's name, for messages.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            real(real64), intent(in), optional :: weights(:) !! per element weight.
+            logical, intent(in), optional :: skipnan !! .true. (default) excludes a NaN.
+            real(real64), allocatable, intent(out) :: keep_x(:)
+            !! the survivors, in input order. `n_valid` of them are live and the rest of the array
+            !! is spare capacity, exactly as `stats_engine`'s own hand-off leaves it.
+            real(real64), allocatable, intent(out) :: keep_w(:)
+            !! their weights, allocated only when `weights` was supplied.
+            integer(int64), intent(out) :: n_valid !! how many survived.
+            integer(int64), intent(out) :: n_null !! how many `is_valid` excluded.
+            integer(int64), intent(out) :: n_nan !! how many were excluded as NaN.
+        end subroutine stats_compact
+        !> A quiet NaN, the value every undefined statistic in this module returns.
+        !!
+        !! Built with `ieee_value` rather than by arithmetic: `0.0/0.0` and anything routed through
+        !! `anint`/`int` raise under nagfor's default `-ieee=stop`, which terminates the process.
+        pure module function stats_nan() result(res)
+            real(real64) :: res !! a quiet NaN.
+        end function stats_nan
+        !> Resolves `weight_type` to the one bit the formulas actually branch on.
+        module subroutine stats_weight_kind(what, weight_type, freq)
+            character(len=*), intent(in) :: what !! the public procedure's name, for the message.
+            character(len=*), intent(in), optional :: weight_type !! the caller's token, if any.
+            logical, intent(out) :: freq !! .true. for frequency weights.
+        end subroutine stats_weight_kind
+        !> Completes a deferred tier-A recomputation, if one is pending.
+        module subroutine stats_ensure(self)
+            class(pf_stats), intent(inout) :: self !! the accumulator.
+        end subroutine stats_ensure
+    end interface
+    !
     ! ---- The per-kind entry layer (implemented in parquet_stats_kernel) ----
     interface
         !> `pf_sum` over a 32-bit integer array.
@@ -1131,6 +1679,211 @@ module parquet_stats
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
             !! bits. It is a speed control and never an accuracy one.
         end subroutine moments_i32
+        !> `pf_median` over a 32-bit integer array.
+        module subroutine median_i32(values, med, is_valid, weights, weight_type, method, n_null, ok, threads)
+            integer(int32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: med !! the median; NaN when the population is empty.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine median_i32
+        !> `pf_quantile` over a 32-bit integer array.
+        module subroutine quantile_i32(values, p, q, is_valid, weights, weight_type, method, n_null, ok, threads)
+            integer(int32), intent(in) :: values(:) !! the population.
+            real(real64), intent(in) :: p
+            !! the probability, on a 0-1 scale rather than 0-100. Outside [0, 1] aborts.
+            real(real64), intent(out) :: q !! the quantile; NaN when the population is empty.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine quantile_i32
+        !> `pf_quantiles` over a 32-bit integer array.
+        module subroutine quantiles_i32(values, probs, out, is_valid, weights, weight_type, method, n_null, ok, &
+                threads)
+            integer(int32), intent(in) :: values(:) !! the population.
+            real(real64), intent(in) :: probs(:)
+            !! the probabilities, each on a 0-1 scale. Any outside [0, 1] aborts. Need not be sorted.
+            real(real64), intent(out) :: out(:) !! one quantile per entry of `probs`, same size. ONE sort serves all of them.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine quantiles_i32
+        !> `pf_iqr` over a 32-bit integer array.
+        module subroutine iqr_i32(values, r, is_valid, weights, weight_type, method, n_null, ok, threads)
+            integer(int32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: r !! the interquartile range, `q(0.75) - q(0.25)`; NaN when either quartile is.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine iqr_i32
+        !> `pf_trim_mean` over a 32-bit integer array.
+        module subroutine trim_mean_i32(values, prop, m, is_valid, weights, n_null, ok, threads)
+            integer(int32), intent(in) :: values(:) !! the population.
+            real(real64), intent(in) :: prop
+            !! the share trimmed from EACH tail, so `prop=0.1` drops 10% at each end and averages the
+            !! middle 80%. Must satisfy `0 <= prop < 0.5`; anything else aborts, because a caller who asks
+            !! to trim everything has made a mistake rather than expressed a preference.
+            real(real64), intent(out) :: m !! the trimmed mean; NaN when nothing survives the trim.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine trim_mean_i32
+        !> `pf_percentile_of_score` over a 32-bit integer array.
+        module subroutine percentile_of_score_i32(values, score, p, is_valid, weights, kind, n_null, ok, threads)
+            integer(int32), intent(in) :: values(:) !! the population.
+            real(real64), intent(in) :: score
+            !! the value to locate. NaN or infinite aborts -- unlike a NaN in the population, which is an
+            !! ordinary data condition, a NaN score can only come from the caller's own arithmetic.
+            real(real64), intent(out) :: p !! the share of the population at or below `score`, on a 0-1 scale; NaN when empty.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: kind
+            !! which convention counts a value EQUAL to `score`, in scipy's spelling: "rank" (the
+            !! default; ties count half), "weak" (a value <= score counts), "strict" (only < score)
+            !! or "mean" (the average of weak and strict). Any other token aborts, listing all
+            !! four. Matched case-insensitively.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine percentile_of_score_i32
         !> `pf_sum` over a 64-bit integer array.
         !>
         !> **An `integer(int64)` above 2**53 loses exactness** on the way into the real64 buffer
@@ -1426,6 +2179,241 @@ module parquet_stats
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
             !! bits. It is a speed control and never an accuracy one.
         end subroutine moments_i64
+        !> `pf_median` over a 64-bit integer array.
+        !>
+        !> **An `integer(int64)` above 2**53 loses exactness** on the way into the real64 buffer
+        !> every statistic here is computed in. That is unavoidable for a mean and irrelevant for
+        !> the workloads this serves -- nobody averages an object ID -- but it is NOT irrelevant
+        !> for a median, which `pf_nth_quantile` computes exactly on the original array.
+        module subroutine median_i64(values, med, is_valid, weights, weight_type, method, n_null, ok, threads)
+            integer(int64), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: med !! the median; NaN when the population is empty.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine median_i64
+        !> `pf_quantile` over a 64-bit integer array.
+        !>
+        !> **An `integer(int64)` above 2**53 loses exactness** on the way into the real64 buffer
+        !> every statistic here is computed in. That is unavoidable for a mean and irrelevant for
+        !> the workloads this serves -- nobody averages an object ID -- but it is NOT irrelevant
+        !> for a median, which `pf_nth_quantile` computes exactly on the original array.
+        module subroutine quantile_i64(values, p, q, is_valid, weights, weight_type, method, n_null, ok, threads)
+            integer(int64), intent(in) :: values(:) !! the population.
+            real(real64), intent(in) :: p
+            !! the probability, on a 0-1 scale rather than 0-100. Outside [0, 1] aborts.
+            real(real64), intent(out) :: q !! the quantile; NaN when the population is empty.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine quantile_i64
+        !> `pf_quantiles` over a 64-bit integer array.
+        !>
+        !> **An `integer(int64)` above 2**53 loses exactness** on the way into the real64 buffer
+        !> every statistic here is computed in. That is unavoidable for a mean and irrelevant for
+        !> the workloads this serves -- nobody averages an object ID -- but it is NOT irrelevant
+        !> for a median, which `pf_nth_quantile` computes exactly on the original array.
+        module subroutine quantiles_i64(values, probs, out, is_valid, weights, weight_type, method, n_null, ok, &
+                threads)
+            integer(int64), intent(in) :: values(:) !! the population.
+            real(real64), intent(in) :: probs(:)
+            !! the probabilities, each on a 0-1 scale. Any outside [0, 1] aborts. Need not be sorted.
+            real(real64), intent(out) :: out(:) !! one quantile per entry of `probs`, same size. ONE sort serves all of them.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine quantiles_i64
+        !> `pf_iqr` over a 64-bit integer array.
+        !>
+        !> **An `integer(int64)` above 2**53 loses exactness** on the way into the real64 buffer
+        !> every statistic here is computed in. That is unavoidable for a mean and irrelevant for
+        !> the workloads this serves -- nobody averages an object ID -- but it is NOT irrelevant
+        !> for a median, which `pf_nth_quantile` computes exactly on the original array.
+        module subroutine iqr_i64(values, r, is_valid, weights, weight_type, method, n_null, ok, threads)
+            integer(int64), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: r !! the interquartile range, `q(0.75) - q(0.25)`; NaN when either quartile is.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine iqr_i64
+        !> `pf_trim_mean` over a 64-bit integer array.
+        !>
+        !> **An `integer(int64)` above 2**53 loses exactness** on the way into the real64 buffer
+        !> every statistic here is computed in. That is unavoidable for a mean and irrelevant for
+        !> the workloads this serves -- nobody averages an object ID -- but it is NOT irrelevant
+        !> for a median, which `pf_nth_quantile` computes exactly on the original array.
+        module subroutine trim_mean_i64(values, prop, m, is_valid, weights, n_null, ok, threads)
+            integer(int64), intent(in) :: values(:) !! the population.
+            real(real64), intent(in) :: prop
+            !! the share trimmed from EACH tail, so `prop=0.1` drops 10% at each end and averages the
+            !! middle 80%. Must satisfy `0 <= prop < 0.5`; anything else aborts, because a caller who asks
+            !! to trim everything has made a mistake rather than expressed a preference.
+            real(real64), intent(out) :: m !! the trimmed mean; NaN when nothing survives the trim.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine trim_mean_i64
+        !> `pf_percentile_of_score` over a 64-bit integer array.
+        !>
+        !> **An `integer(int64)` above 2**53 loses exactness** on the way into the real64 buffer
+        !> every statistic here is computed in. That is unavoidable for a mean and irrelevant for
+        !> the workloads this serves -- nobody averages an object ID -- but it is NOT irrelevant
+        !> for a median, which `pf_nth_quantile` computes exactly on the original array.
+        module subroutine percentile_of_score_i64(values, score, p, is_valid, weights, kind, n_null, ok, threads)
+            integer(int64), intent(in) :: values(:) !! the population.
+            real(real64), intent(in) :: score
+            !! the value to locate. NaN or infinite aborts -- unlike a NaN in the population, which is an
+            !! ordinary data condition, a NaN score can only come from the caller's own arithmetic.
+            real(real64), intent(out) :: p !! the share of the population at or below `score`, on a 0-1 scale; NaN when empty.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: kind
+            !! which convention counts a value EQUAL to `score`, in scipy's spelling: "rank" (the
+            !! default; ties count half), "weak" (a value <= score counts), "strict" (only < score)
+            !! or "mean" (the average of weak and strict). Any other token aborts, listing all
+            !! four. Matched case-insensitively.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine percentile_of_score_i64
         !> `pf_sum` over a 32-bit real array.
         module subroutine sum_f32(values, s, is_valid, weights, skipnan, n_null, n_nan, ok, threads)
             real(real32), intent(in) :: values(:) !! the population.
@@ -1729,6 +2717,250 @@ module parquet_stats
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
             !! bits. It is a speed control and never an accuracy one.
         end subroutine moments_f32
+        !> `pf_median` over a 32-bit real array.
+        module subroutine median_f32(values, med, is_valid, weights, weight_type, skipnan, method, n_null, n_nan, &
+                ok, threads)
+            real(real32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: med !! the median; NaN when the population is empty.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine median_f32
+        !> `pf_quantile` over a 32-bit real array.
+        module subroutine quantile_f32(values, p, q, is_valid, weights, weight_type, skipnan, method, n_null, n_nan, &
+                ok, threads)
+            real(real32), intent(in) :: values(:) !! the population.
+            real(real64), intent(in) :: p
+            !! the probability, on a 0-1 scale rather than 0-100. Outside [0, 1] aborts.
+            real(real64), intent(out) :: q !! the quantile; NaN when the population is empty.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine quantile_f32
+        !> `pf_quantiles` over a 32-bit real array.
+        module subroutine quantiles_f32(values, probs, out, is_valid, weights, weight_type, skipnan, method, n_null, &
+                n_nan, ok, threads)
+            real(real32), intent(in) :: values(:) !! the population.
+            real(real64), intent(in) :: probs(:)
+            !! the probabilities, each on a 0-1 scale. Any outside [0, 1] aborts. Need not be sorted.
+            real(real64), intent(out) :: out(:) !! one quantile per entry of `probs`, same size. ONE sort serves all of them.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine quantiles_f32
+        !> `pf_iqr` over a 32-bit real array.
+        module subroutine iqr_f32(values, r, is_valid, weights, weight_type, skipnan, method, n_null, n_nan, &
+                ok, threads)
+            real(real32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: r !! the interquartile range, `q(0.75) - q(0.25)`; NaN when either quartile is.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine iqr_f32
+        !> `pf_trim_mean` over a 32-bit real array.
+        module subroutine trim_mean_f32(values, prop, m, is_valid, weights, skipnan, n_null, n_nan, ok, threads)
+            real(real32), intent(in) :: values(:) !! the population.
+            real(real64), intent(in) :: prop
+            !! the share trimmed from EACH tail, so `prop=0.1` drops 10% at each end and averages the
+            !! middle 80%. Must satisfy `0 <= prop < 0.5`; anything else aborts, because a caller who asks
+            !! to trim everything has made a mistake rather than expressed a preference.
+            real(real64), intent(out) :: m !! the trimmed mean; NaN when nothing survives the trim.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine trim_mean_f32
+        !> `pf_percentile_of_score` over a 32-bit real array.
+        module subroutine percentile_of_score_f32(values, score, p, is_valid, weights, skipnan, kind, n_null, n_nan, ok, threads)
+            real(real32), intent(in) :: values(:) !! the population.
+            real(real64), intent(in) :: score
+            !! the value to locate. NaN or infinite aborts -- unlike a NaN in the population, which is an
+            !! ordinary data condition, a NaN score can only come from the caller's own arithmetic.
+            real(real64), intent(out) :: p !! the share of the population at or below `score`, on a 0-1 scale; NaN when empty.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            character(len=*), intent(in), optional :: kind
+            !! which convention counts a value EQUAL to `score`, in scipy's spelling: "rank" (the
+            !! default; ties count half), "weak" (a value <= score counts), "strict" (only < score)
+            !! or "mean" (the average of weak and strict). Any other token aborts, listing all
+            !! four. Matched case-insensitively.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine percentile_of_score_f32
         !> `pf_sum` over a logical array.
         !>
         !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
@@ -2008,6 +3240,229 @@ module parquet_stats
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
             !! bits. It is a speed control and never an accuracy one.
         end subroutine moments_bool
+        !> `pf_median` over a logical array.
+        !>
+        !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
+        !> fraction that are true.
+        module subroutine median_bool(values, med, is_valid, weights, weight_type, method, n_null, ok, threads)
+            logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
+            real(real64), intent(out) :: med !! the median; NaN when the population is empty.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine median_bool
+        !> `pf_quantile` over a logical array.
+        !>
+        !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
+        !> fraction that are true.
+        module subroutine quantile_bool(values, p, q, is_valid, weights, weight_type, method, n_null, ok, threads)
+            logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
+            real(real64), intent(in) :: p
+            !! the probability, on a 0-1 scale rather than 0-100. Outside [0, 1] aborts.
+            real(real64), intent(out) :: q !! the quantile; NaN when the population is empty.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine quantile_bool
+        !> `pf_quantiles` over a logical array.
+        !>
+        !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
+        !> fraction that are true.
+        module subroutine quantiles_bool(values, probs, out, is_valid, weights, weight_type, method, n_null, ok, &
+                threads)
+            logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
+            real(real64), intent(in) :: probs(:)
+            !! the probabilities, each on a 0-1 scale. Any outside [0, 1] aborts. Need not be sorted.
+            real(real64), intent(out) :: out(:) !! one quantile per entry of `probs`, same size. ONE sort serves all of them.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine quantiles_bool
+        !> `pf_iqr` over a logical array.
+        !>
+        !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
+        !> fraction that are true.
+        module subroutine iqr_bool(values, r, is_valid, weights, weight_type, method, n_null, ok, threads)
+            logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
+            real(real64), intent(out) :: r !! the interquartile range, `q(0.75) - q(0.25)`; NaN when either quartile is.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine iqr_bool
+        !> `pf_trim_mean` over a logical array.
+        !>
+        !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
+        !> fraction that are true.
+        module subroutine trim_mean_bool(values, prop, m, is_valid, weights, n_null, ok, threads)
+            logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
+            real(real64), intent(in) :: prop
+            !! the share trimmed from EACH tail, so `prop=0.1` drops 10% at each end and averages the
+            !! middle 80%. Must satisfy `0 <= prop < 0.5`; anything else aborts, because a caller who asks
+            !! to trim everything has made a mistake rather than expressed a preference.
+            real(real64), intent(out) :: m !! the trimmed mean; NaN when nothing survives the trim.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine trim_mean_bool
+        !> `pf_percentile_of_score` over a logical array.
+        !>
+        !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
+        !> fraction that are true.
+        module subroutine percentile_of_score_bool(values, score, p, is_valid, weights, kind, n_null, ok, threads)
+            logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
+            real(real64), intent(in) :: score
+            !! the value to locate. NaN or infinite aborts -- unlike a NaN in the population, which is an
+            !! ordinary data condition, a NaN score can only come from the caller's own arithmetic.
+            real(real64), intent(out) :: p !! the share of the population at or below `score`, on a 0-1 scale; NaN when empty.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: kind
+            !! which convention counts a value EQUAL to `score`, in scipy's spelling: "rank" (the
+            !! default; ties count half), "weak" (a value <= score counts), "strict" (only < score)
+            !! or "mean" (the average of weak and strict). Any other token aborts, listing all
+            !! four. Matched case-insensitively.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine percentile_of_score_bool
         !> `pf_sum` over a scalar numeric `parquet_column`.
         !>
         !> Dispatched on the column's kind at run time, and **scalar numeric columns only**:
@@ -2367,6 +3822,292 @@ module parquet_stats
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
             !! bits. It is a speed control and never an accuracy one.
         end subroutine moments_col
+        !> `pf_median` over a scalar numeric `parquet_column`.
+        !>
+        !> Dispatched on the column's kind at run time, and **scalar numeric columns only**:
+        !> int32, int64, float32, float64 and logical. A string, temporal or container column
+        !> aborts naming its kind, and so does a column more than one element wide -- flattening
+        !> a vector column into one population is a different statistic and nobody should get it
+        !> by accident. **The column's own validity is the only source of nullness**, so passing
+        !> `is_valid=` alongside one aborts rather than silently preferring one of two sources.
+        module subroutine median_col(values, med, is_valid, weights, weight_type, skipnan, method, n_null, n_nan, &
+                ok, threads)
+            type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
+            real(real64), intent(out) :: med !! the median; NaN when the population is empty.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine median_col
+        !> `pf_quantile` over a scalar numeric `parquet_column`.
+        !>
+        !> Dispatched on the column's kind at run time, and **scalar numeric columns only**:
+        !> int32, int64, float32, float64 and logical. A string, temporal or container column
+        !> aborts naming its kind, and so does a column more than one element wide -- flattening
+        !> a vector column into one population is a different statistic and nobody should get it
+        !> by accident. **The column's own validity is the only source of nullness**, so passing
+        !> `is_valid=` alongside one aborts rather than silently preferring one of two sources.
+        module subroutine quantile_col(values, p, q, is_valid, weights, weight_type, skipnan, method, n_null, n_nan, &
+                ok, threads)
+            type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
+            real(real64), intent(in) :: p
+            !! the probability, on a 0-1 scale rather than 0-100. Outside [0, 1] aborts.
+            real(real64), intent(out) :: q !! the quantile; NaN when the population is empty.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine quantile_col
+        !> `pf_quantiles` over a scalar numeric `parquet_column`.
+        !>
+        !> Dispatched on the column's kind at run time, and **scalar numeric columns only**:
+        !> int32, int64, float32, float64 and logical. A string, temporal or container column
+        !> aborts naming its kind, and so does a column more than one element wide -- flattening
+        !> a vector column into one population is a different statistic and nobody should get it
+        !> by accident. **The column's own validity is the only source of nullness**, so passing
+        !> `is_valid=` alongside one aborts rather than silently preferring one of two sources.
+        module subroutine quantiles_col(values, probs, out, is_valid, weights, weight_type, skipnan, method, n_null, &
+                n_nan, ok, threads)
+            type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
+            real(real64), intent(in) :: probs(:)
+            !! the probabilities, each on a 0-1 scale. Any outside [0, 1] aborts. Need not be sorted.
+            real(real64), intent(out) :: out(:) !! one quantile per entry of `probs`, same size. ONE sort serves all of them.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine quantiles_col
+        !> `pf_iqr` over a scalar numeric `parquet_column`.
+        !>
+        !> Dispatched on the column's kind at run time, and **scalar numeric columns only**:
+        !> int32, int64, float32, float64 and logical. A string, temporal or container column
+        !> aborts naming its kind, and so does a column more than one element wide -- flattening
+        !> a vector column into one population is a different statistic and nobody should get it
+        !> by accident. **The column's own validity is the only source of nullness**, so passing
+        !> `is_valid=` alongside one aborts rather than silently preferring one of two sources.
+        module subroutine iqr_col(values, r, is_valid, weights, weight_type, skipnan, method, n_null, n_nan, &
+                ok, threads)
+            type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
+            real(real64), intent(out) :: r !! the interquartile range, `q(0.75) - q(0.25)`; NaN when either quartile is.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine iqr_col
+        !> `pf_trim_mean` over a scalar numeric `parquet_column`.
+        !>
+        !> Dispatched on the column's kind at run time, and **scalar numeric columns only**:
+        !> int32, int64, float32, float64 and logical. A string, temporal or container column
+        !> aborts naming its kind, and so does a column more than one element wide -- flattening
+        !> a vector column into one population is a different statistic and nobody should get it
+        !> by accident. **The column's own validity is the only source of nullness**, so passing
+        !> `is_valid=` alongside one aborts rather than silently preferring one of two sources.
+        module subroutine trim_mean_col(values, prop, m, is_valid, weights, skipnan, n_null, n_nan, ok, threads)
+            type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
+            real(real64), intent(in) :: prop
+            !! the share trimmed from EACH tail, so `prop=0.1` drops 10% at each end and averages the
+            !! middle 80%. Must satisfy `0 <= prop < 0.5`; anything else aborts, because a caller who asks
+            !! to trim everything has made a mistake rather than expressed a preference.
+            real(real64), intent(out) :: m !! the trimmed mean; NaN when nothing survives the trim.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine trim_mean_col
+        !> `pf_percentile_of_score` over a scalar numeric `parquet_column`.
+        !>
+        !> Dispatched on the column's kind at run time, and **scalar numeric columns only**:
+        !> int32, int64, float32, float64 and logical. A string, temporal or container column
+        !> aborts naming its kind, and so does a column more than one element wide -- flattening
+        !> a vector column into one population is a different statistic and nobody should get it
+        !> by accident. **The column's own validity is the only source of nullness**, so passing
+        !> `is_valid=` alongside one aborts rather than silently preferring one of two sources.
+        module subroutine percentile_of_score_col(values, score, p, is_valid, weights, skipnan, kind, n_null, n_nan, ok, threads)
+            type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
+            real(real64), intent(in) :: score
+            !! the value to locate. NaN or infinite aborts -- unlike a NaN in the population, which is an
+            !! ordinary data condition, a NaN score can only come from the caller's own arithmetic.
+            real(real64), intent(out) :: p !! the share of the population at or below `score`, on a 0-1 scale; NaN when empty.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            character(len=*), intent(in), optional :: kind
+            !! which convention counts a value EQUAL to `score`, in scipy's spelling: "rank" (the
+            !! default; ties count half), "weak" (a value <= score counts), "strict" (only < score)
+            !! or "mean" (the average of weak and strict). Any other token aborts, listing all
+            !! four. Matched case-insensitively.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
+            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
+            !! does not depend on this argument** -- the block decomposition is a function of the
+            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
+            !! bits. It is a speed control and never an accuracy one.
+        end subroutine percentile_of_score_col
         !> `%compute` over a 32-bit integer array.
         module subroutine obj_compute_i32(self, values, retain, is_valid, weights, weight_type, threads)
             class(pf_stats), intent(inout) :: self
@@ -2912,6 +4653,152 @@ module parquet_stats
         module subroutine parquet_debug_set_stats_min_per_thread(n)
             integer(int64), intent(in) :: n !! survivors per thread; 0 forces, negative restores.
         end subroutine parquet_debug_set_stats_min_per_thread
+        !> How many times any `pf_stats` has built its sorted buffer.
+        !!
+        !! Test-only, and the **only** observable that can tell a working order cache from one
+        !! that never invalidates. Every equality assertion about a median passes just as happily
+        !! against a stale answer -- a stale median is a plausible number -- so `sorts == 1` across
+        !! four different order statistics, and `sorts == 2` after an intervening `%update`, is
+        !! what the caching contract is actually pinned by.
+        !!
+        !! Process-global and unsynchronised, which is why the `stats` suite is excluded from the
+        !! per-suite parallelism in `test/run_tester.f90`.
+        module function parquet_debug_stats_sorts() result(res)
+            integer(int64) :: res !! sorted-buffer builds since the last reset.
+        end function parquet_debug_stats_sorts
+        !> Resets the sorted-buffer counter to zero.
+        module subroutine parquet_debug_reset_stats_sorts()
+        end subroutine parquet_debug_reset_stats_sorts
+        !> Overrides the probability count at which `pf_quantiles` sorts instead of selecting.
+        !!
+        !! Test-only. The shipped threshold is small but not 1, so a unit test asking for two or
+        !! three probabilities would only ever exercise one of the two paths; this is what reaches
+        !! the other (CLAUDE.md's size-threshold rule). `0` always sorts, a huge value always
+        !! selects, and a negative value restores the shipped threshold.
+        module subroutine parquet_debug_set_stats_quantile_sort_min(n)
+            integer(int64), intent(in) :: n !! probabilities; 0 forces the sort, negative restores.
+        end subroutine parquet_debug_set_stats_quantile_sort_min
+    end interface
+    !
+    ! ---- pf_stats tier B (implemented in parquet_stats_order) ----
+    interface
+        !> The interpolating median of the population.
+        !!
+        !! Builds tier B on first use and reads it thereafter, so a median followed by an IQR and
+        !! three quantiles is ONE ordering; `parquet_debug_stats_sorts()` is what asserts it.
+        !!
+        !! **Aborts on a streaming accumulator** (`retain = .false.`), because no values were
+        !! kept and there is nothing to order. The message says so and names the fix.
+        module function obj_median(self, method) result(res)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; the first order statistic builds its sorted buffer.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            real(real64) :: res !! the median, or NaN for an empty population.
+        end function obj_median
+        !> One quantile of the population, on a 0-1 scale.
+        module function obj_quantile(self, p, method) result(res)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; the first order statistic builds its sorted buffer.
+            real(real64), intent(in) :: p !! the probability, 0 to 1. Outside that aborts.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            real(real64) :: res !! the quantile, or NaN for an empty population.
+        end function obj_quantile
+        !> Several quantiles of the population, from the one ordering.
+        !!
+        !! A subroutine rather than a function because the result is an array whose size the
+        !! caller already knows; `out` must be the same size as `probs`.
+        module subroutine obj_quantiles(self, probs, out, method)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; the first order statistic builds its sorted buffer.
+            real(real64), intent(in) :: probs(:) !! the probabilities, each 0 to 1.
+            real(real64), intent(out) :: out(:) !! one quantile each; same size as `probs`.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+        end subroutine obj_quantiles
+        !> The interquartile range of the population.
+        module function obj_iqr(self, method) result(res)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; the first order statistic builds its sorted buffer.
+            character(len=*), intent(in), optional :: method
+            !! how a fractional position between two order statistics is resolved, in numpy's
+            !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
+            !! "lower", "higher", "nearest", "midpoint", or "inverted_cdf" (a step function on the
+            !! plain cumulative scale, and the only token numpy itself accepts weights with). Any
+            !! other token aborts, listing all six. Matched case-insensitively.
+            !! **`weight_type="frequency"` changes the default to "inverted_cdf"**, because that
+            !! token IS frequency expansion; an explicit `method=` still wins.
+            real(real64) :: res !! `q(0.75) - q(0.25)`, or NaN for an empty population.
+        end function obj_iqr
+        !> The mean with `prop` trimmed from each tail.
+        module function obj_trim_mean(self, prop) result(res)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; the first order statistic builds its sorted buffer.
+            real(real64), intent(in) :: prop
+            !! the share trimmed from EACH tail; `0 <= prop < 0.5`, anything else aborts.
+            real(real64) :: res !! the trimmed mean, or NaN when nothing survives the trim.
+        end function obj_trim_mean
+        !> Where `score` sits in the population, on a 0-1 scale.
+        module function obj_percentile_of_score(self, score, kind) result(res)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; the first order statistic builds its sorted buffer.
+            real(real64), intent(in) :: score !! the value to locate. NaN or infinite aborts.
+            character(len=*), intent(in), optional :: kind
+            !! which convention counts a value EQUAL to `score`, in scipy's spelling: "rank" (the
+            !! default; ties count half), "weak" (a value <= score counts), "strict" (only < score)
+            !! or "mean" (the average of weak and strict). Any other token aborts, listing all
+            !! four. Matched case-insensitively.
+            real(real64) :: res !! the share at or below `score`, or NaN for an empty population.
+        end function obj_percentile_of_score
+        !> Builds tier B now, rather than leaving it to the first order statistic.
+        !!
+        !! **The escape hatch for concurrency, and the reason it exists.** The lazy fill is NOT
+        !! thread-safe on a SHARED accumulator: two threads calling `%median()` on the same object
+        !! both find tier B absent and both build it. This type takes no lock -- it is a value-like
+        !! summary, not a container with an ownership model -- so either the object is
+        !! thread-private, or the caller runs this before the parallel region. That is exactly the
+        !! trade `parquet_column%ensure_validity` makes, for exactly the same reason.
+        !!
+        !! Idempotent, and free when tier B is already built.
+        module subroutine obj_prepare_order(self)
+            class(pf_stats), intent(inout) :: self !! the accumulator.
+        end subroutine obj_prepare_order
+        !> Frees tier B, keeping tier A.
+        !!
+        !! The retained values are kept -- they ARE tier A's exactness -- but the object stops
+        !! claiming they are ordered, so the next order statistic sorts again. Use it when a
+        !! long-lived summary has had the quantiles taken off it and only the moments are wanted
+        !! afterwards; `%clear` is what gives the memory back.
+        module subroutine obj_release_order(self)
+            class(pf_stats), intent(inout) :: self !! the accumulator.
+        end subroutine obj_release_order
+        !> Whether tier B is currently built.
+        !!
+        !! Test-facing more than user-facing: it is how `%update` dropping the ordering is
+        !! asserted without reading the sort counter.
+        module function obj_is_ordered(self) result(res)
+            class(pf_stats), intent(in) :: self !! the accumulator.
+            logical :: res !! .true. when the retained values are in ascending order.
+        end function obj_is_ordered
     end interface
     !
 end module parquet_stats ! GCOVR_EXCL_LINE

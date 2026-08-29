@@ -259,6 +259,54 @@ def self_test():
     xs = [v + 1.0e9 for v in fixture(1000)]
     ok &= close(model(xs)["variance"], model(fixture(1000))["variance"], "shift invariance")
 
+    # ---- The quantile model against numpy, at five probabilities and not only at the median ----
+    #
+    # Every UNWEIGHTED method is checked against `np.quantile`, whose token spellings this module
+    # borrowed deliberately so the comparison is name for name. The weighted linear rule has no
+    # counterpart anywhere -- numpy accepts `weights=` only with `inverted_cdf` -- so what is
+    # checked instead is the property it was designed for: at EQUAL weights it must reproduce the
+    # unweighted answer exactly. Checking only the median would have passed the earlier, wrong
+    # rule, which agreed there and nowhere else.
+    npmethods = {"linear": "linear", "lower": "lower", "higher": "higher",
+                 "nearest": "nearest", "midpoint": "midpoint", "inverted_cdf": "inverted_cdf"}
+    base = fixture(32)
+    for meth, npname in npmethods.items():
+        got = quantile_model(base, method=meth)
+        for p, g in zip(QPROBS, got):
+            ok &= close(g, np.quantile(np.array(base, dtype=float), p, method=npname),
+                        "quantile %s at p=%g" % (meth, p))
+
+    # The equal-weight reduction: the invariant the whole weighted rule exists to preserve.
+    #
+    # It is an ALGEBRAIC identity -- with every weight equal, `S_{i-1}/(W - w_i)` is exactly
+    # `(i-1)/(m-1)` -- and it is asserted to a tight tolerance rather than with `==`, because the
+    # two are reached by different expressions and floating point does not promise that identical
+    # values arrive by identical roundings. What the user is promised is that adding uniform
+    # weights introduces no DISCONTINUITY, and a few ulp is not one. `close` already carries a
+    # loose tolerance for the cancelling libraries; this comparison is between two of our own
+    # exact-arithmetic paths, so it gets a much tighter one.
+    eq = quantile_model(base, weights=[3.0] * 32, method="linear")
+    un = quantile_model(base, method="linear")
+    for p, a, b in zip(QPROBS, eq, un):
+        rel = abs(a - b) / max(mpf(1), abs(b))
+        if rel > mpf("1e-40"):
+            print("--self-test: equal weights must reproduce the unweighted quantile at p=%g "
+                  "(%s vs %s, rel %s)" % (p, a, b, rel), file=sys.stderr)
+            ok = False
+        checks += 1
+
+    # The weighted inverted_cdf rule IS frequency expansion, and numpy implements that one, so it
+    # can be cross-checked directly against the expanded population.
+    wv = weights_mod5(32)
+    if all(float(w).is_integer() and w >= 0 for w in wv):
+        expanded = []
+        for x, w in zip(base, wv):
+            expanded.extend([float(x)] * int(w))
+        got = quantile_model(base, weights=wv, method="inverted_cdf")
+        for p, g in zip(QPROBS, got):
+            ok &= close(g, np.quantile(np.array(expanded, dtype=float), p, method="inverted_cdf"),
+                        "weighted inverted_cdf at p=%g" % p)
+
     if not ok:
         return 1
     print("generate_stats_vectors.py --self-test: %d model/library comparisons agree "
@@ -337,6 +385,127 @@ CASES = [
 ]
 
 
+#: The quantile cases. Separate from CASES because they answer a different question and carry a
+#: different shape: one array of quantiles per (population, method) pair rather than one row of
+#: tier-A quantities.
+#:
+#: **The unweighted rows are cross-checked against numpy** by `--self-test`, at five probabilities
+#: rather than at the median alone -- which is exactly where an earlier draft of the weighted rule
+#: hid its error. The weighted rows cannot be: no reference library interpolates a weighted
+#: quantile, so they come from the derivation in `feature_pandas_S4.md` at 50 digits, and what
+#: pins THEM is the equal-weight reduction, which `Q_W3_LINEAR` asserts by being required to equal
+#: `Q_U32_LINEAR` exactly.
+QPROBS = [0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0]
+
+QCASES = [
+    ("U32_LINEAR", "the default rule at n=32: Hyndman-Fan type 7, numpy's and pandas' default",
+     dict(values=fixture(32), method="linear")),
+    ("U32_LOWER", "method=lower: the order statistic at or below the position",
+     dict(values=fixture(32), method="lower")),
+    ("U32_HIGHER", "method=higher: the order statistic at or above it",
+     dict(values=fixture(32), method="higher")),
+    ("U32_NEAREST", "method=nearest: whichever of the two is closer",
+     dict(values=fixture(32), method="nearest")),
+    ("U32_MIDPOINT", "method=midpoint: their mean",
+     dict(values=fixture(32), method="midpoint")),
+    ("U32_ICDF", "method=inverted_cdf: a step function on the plain cumulative scale",
+     dict(values=fixture(32), method="inverted_cdf")),
+    ("U33_LINEAR", "odd length, so the median is an element rather than an interpolation",
+     dict(values=fixture(33), method="linear")),
+    ("W3_LINEAR", "every weight 3: must equal U32_LINEAR EXACTLY -- the equal-weight reduction",
+     dict(values=fixture(32), weights=[3.0] * 32, method="linear")),
+    ("WVAR_LINEAR", "unequal weights: the derived rule, with no library to cross-check against",
+     dict(values=fixture(32), weights=weights_mod5(32), method="linear")),
+    ("WVAR_ICDF", "the same weights on the cumulative scale, which numpy DOES implement",
+     dict(values=fixture(32), weights=weights_mod5(32), method="inverted_cdf")),
+    ("NULLS_LINEAR", "one element in three null: the quantiles are of what survives",
+     dict(values=fixture(32), is_valid=[(i % 3) != 0 for i in range(1, 33)], method="linear")),
+]
+
+
+def quantile_model(values, is_valid=None, weights=None, skipnan=True, method="linear"):
+    """Every probability in QPROBS for one population, at 50 digits."""
+    keep, _, _ = select(values, is_valid, weights, skipnan)
+    if not keep:
+        return [None] * len(QPROBS)
+    pairs = sorted(keep, key=lambda t: t[0])
+    xs = [x for x, _ in pairs]
+    ws = [w for _, w in pairs]
+    return [quantile_at(xs, ws, mpf(repr(p)), method, weights is not None) for p in QPROBS]
+
+
+def positions(ws, weighted):
+    """The 0-1 position of each sorted value: `(i-1)/(m-1)`, or `S_{i-1}/(W - w_i)` weighted.
+
+    The weighted form collapses to the unweighted one exactly when every weight is equal, which is
+    the property the rule was chosen for and the one `W3_LINEAR` asserts.
+    """
+    m = len(ws)
+    if m == 1:
+        return [mpf(0)]
+    if not weighted:
+        return [mpf(i) / mpf(m - 1) for i in range(m)]
+    total = sum(ws, mpf(0))
+    pos, run = [], mpf(0)
+    for i in range(m):
+        denom = total - ws[i]
+        pos.append(run / denom if denom > 0 else mpf(0))
+        run += ws[i]
+    pos[-1] = mpf(1)
+    return pos
+
+
+def quantile_at(xs, ws, p, method, weighted):
+    """One quantile of an already-sorted population, by the same rules the Fortran applies."""
+    m = len(xs)
+    if m == 1:
+        return xs[0]
+    if method == "inverted_cdf":
+        total = sum(ws, mpf(0)) if weighted else mpf(m)
+        want, run = p * total, mpf(0)
+        for i in range(m):
+            run += ws[i] if weighted else mpf(1)
+            if run >= want:
+                return xs[i]
+        return xs[-1]
+    if not weighted:
+        # The RANK scale, `g = p*(m-1)`, which is numpy's own formulation and what the Fortran
+        # computes. Deriving `t` from two entries of a position array instead is algebraically the
+        # same and numerically is not: it lands a few ulp either side of an exact tie, which is
+        # exactly what `nearest` reads.
+        g = p * mpf(m - 1)
+        lo = min(m - 1, int(g))
+        t = g - mpf(lo)
+        hi = min(lo + 1, m - 1)
+    else:
+        pos = positions(ws, weighted)
+        lo = 0
+        for i in range(m):
+            if pos[i] <= p:
+                lo = i
+            else:
+                break
+        hi = min(lo + 1, m - 1)
+        t = (p - pos[lo]) / (pos[hi] - pos[lo]) if pos[hi] > pos[lo] else mpf(0)
+    if method == "linear":
+        return xs[lo] + t * (xs[hi] - xs[lo])
+    if method == "lower":
+        return xs[lo]
+    if method == "higher":
+        return xs[hi] if t > 0 else xs[lo]
+    if method == "nearest":
+        # numpy breaks an exact tie to the EVEN lower index; see `apply_method` in
+        # src/parquet_stats_order.f90 for why the tie is reachable and why it matters.
+        if t > mpf("0.5"):
+            return xs[hi]
+        if t < mpf("0.5"):
+            return xs[lo]
+        return xs[lo] if lo % 2 == 0 else xs[hi]
+    if method == "midpoint":
+        return (xs[lo] + xs[hi]) / 2 if t > 0 else xs[lo]
+    raise SystemExit("generate_stats_vectors.py: unknown method %r" % method)
+
+
 def fortran_real(v):
     """`v` as a round-trip-exact Fortran real64 literal."""
     if v is None or v != v:
@@ -395,6 +564,9 @@ module test_stats_golden
     !> What each slot of a `G_*` array holds, in order.
     character(len=8), parameter :: QNAME(NQ) = [character(len=8) :: &
         "sum", "mean", "var", "stddev", "sem", "skew", "kurt", "min", "max"]
+
+    !> How many probabilities each `Q_*` row carries.
+    integer, parameter :: NQP = 7
 '''
 
 
@@ -422,6 +594,18 @@ def emit():
                           [".true." if v is not None and v == v else ".false." for v in vals])
         out.append("    integer(int64), parameter :: G_%s_N(3) = [%d_int64, %d_int64, %d_int64]"
                    % (name, m["n_valid"], m["n_null"], m["n_nan"]))
+        out.append("")
+
+    out.append("    !> The probabilities every Q_* row below is evaluated at.")
+    out += wrap_array("    real(real64), parameter :: G_QPROBS(NQP) =",
+                      [fortran_real(mpf(repr(p))) for p in QPROBS])
+    out.append("")
+    for name, doc, case in QCASES:
+        kwargs = dict(case)
+        vals = quantile_model(kwargs.pop("values"), **kwargs)
+        out.append("    !> %s" % doc)
+        out += wrap_array("    real(real64), parameter :: Q_%s(NQP) =" % name,
+                          [fortran_real(v) for v in vals])
         out.append("")
 
     out.append("end module test_stats_golden ! GCOVR_EXCL_LINE")

@@ -229,11 +229,11 @@ Every layer underneath is importable on its own, and several cost a great deal l
 | `parquet_map` | 11 | no | `parquet_map_column`: string-keyed `key -> value` entries per row |
 | `parquet_logging` | 1 | no | `pf_logger` and `pf_log_*`: leveled logging to several destinations, safe from an OpenMP region |
 | `parquet_sorting` | 21 | no | the whole sorting API, every element type |
-| `parquet_stats` | 24 | no | the `pf_*` array-statistics family over plain Fortran arrays |
+| `parquet_stats` | 25 | no | the `pf_*` array-statistics family over plain Fortran arrays |
 | `parquet_settings` | 3 | **yes** | the process-global knobs, and `parquet_get_arrow_version` |
 | `parquet_io` | 53 | **yes** | reading and writing files, without the table layer |
 | `parquet_tables` | 72 | **yes** | the `parquet_table` container |
-| `parquet` | 91 | **yes** | everything, through one `use` |
+| `parquet` | 92 | **yes** | everything, through one `use` |
 
 **One caveat, and it is the one that matters: no import makes the *package* Arrow-free.** `link` is a package-level key in `fpm.toml` and fpm cannot prune a C++ translation unit, so depending on parquet-fortran compiles `src/parquet_wrapper.cpp` and links `-larrow -larrow_compute -lparquet` whichever module you name — `use parquet_temporal` included. Without Arrow's headers the build fails at `arrow/api.h` regardless. What the *Arrow-free* rows guarantee is narrower and is about the Fortran graph: none of the modules fpm compiles for that import names `parquet_bindings`.
 

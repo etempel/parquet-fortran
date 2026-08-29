@@ -68,7 +68,26 @@ contains
             new_unittest("the mean of a constant array is that constant, exactly", test_mean_of_constant), &
             new_unittest("ok is .true. exactly when the answer is not NaN", test_ok_tracks_the_answer), &
             new_unittest("an empty population sums to 0 while every other answer is NaN", &
-                test_empty_sums_to_zero) &
+                test_empty_sums_to_zero), &
+            new_unittest("pf_stats agrees with the one-shot family bit for bit", &
+                test_object_matches_one_shot), &
+            new_unittest("%compute costs two traversals and every later query costs none", &
+                test_compute_costs_two_scans), &
+            new_unittest("a retained %update loop equals %compute over the concatenation", &
+                test_retained_update_equals_compute), &
+            new_unittest("%merge of two halves equals %compute over the whole", test_merge_equals_compute), &
+            new_unittest("the array %merge folds in index order and recomputes once", &
+                test_merge_many_recomputes_once), &
+            new_unittest("a streaming update costs one traversal and keeps nothing", &
+                test_streaming_costs_one_scan), &
+            new_unittest("a streaming %merge agrees with %compute over the whole", &
+                test_streaming_merge_agrees), &
+            new_unittest("pf_stats applies the same null, NaN and weight policy", &
+                test_object_carries_the_exclusion_policy), &
+            new_unittest("an empty pf_stats is computed, and differs from an uncomputed one", &
+                test_object_empty_and_cleared), &
+            new_unittest("weights arriving part-way through a retained stream backfill as 1", &
+                test_weights_arriving_late_backfill) &
             ]
     end subroutine collect_tests_parquet_stats
 
@@ -662,5 +681,377 @@ contains
         if (allocated(error)) return
         call check(error, nv == 0_int64, "an empty population has n_valid 0")
     end subroutine test_empty_sums_to_zero
+
+    ! ==============================================================================================
+    ! pf_stats
+    !
+    ! Two things are being asserted here and they are easy to conflate. One is that the OBJECT
+    ! agrees with the one-shot procedures, which the golden vectors already pin -- so those tests
+    ! compare with `==` rather than a tolerance, because anything less would pass against an object
+    ! that quietly reached a different engine. The other is the WORK the object promises to avoid,
+    ! which no comparison of answers can see: `parquet_debug_stats_scans()` is the only observable
+    ! for it, and every test that reads it also shows the counter moving, so a hook that had stopped
+    ! counting could not pass for a query that had stopped traversing.
+    ! ==============================================================================================
+
+    !> Fills `got` with every quantity `check_case` compares, read off a `pf_stats`.
+    subroutine object_row(s, got)
+        type(pf_stats), intent(inout) :: s   !! the accumulator to read.
+        real(real64), intent(out) :: got(NQ) !! [sum, mean, var, stddev, sem, skew, kurt, min, max].
+        got(1) = s%sum()
+        got(2) = s%mean()
+        got(3) = s%variance()
+        got(4) = s%stddev()
+        got(5) = s%sem()
+        got(6) = s%skewness()
+        got(7) = s%kurtosis()
+        got(8) = s%vmin()
+        got(9) = s%vmax()
+    end subroutine object_row
+
+    !> `%compute` and the one-shot family are the same engine, so they must agree EXACTLY.
+    subroutine test_object_matches_one_shot(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: v(:)
+        real(real64) :: got(NQ), want(NQ)
+        type(pf_stats) :: s
+        integer :: q
+
+        call golden_fixture(1000_int64, v)
+        call s%compute(v)
+        call object_row(s, got)
+        call pf_sum(v, want(1))
+        call pf_mean(v, want(2))
+        call pf_variance(v, want(3))
+        call pf_stddev(v, want(4))
+        call pf_sem(v, want(5))
+        call pf_skewness(v, want(6))
+        call pf_kurtosis(v, want(7))
+        call pf_moments(v, vmin=want(8), vmax=want(9))
+        do q = 1, NQ
+            call check(error, got(q) == want(q), &
+                "pf_stats%" // trim(QNAME(q)) // " must equal the one-shot form bit for bit")
+            if (allocated(error)) return
+        end do
+        call check(error, s%n() == 1000_int64 .and. s%n_valid() == 1000_int64, &
+            "a clean population must report every element as seen and valid")
+    end subroutine test_object_matches_one_shot
+
+    !> The whole point of the type: two traversals, however many statistics are asked for.
+    subroutine test_compute_costs_two_scans(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: v(:)
+        real(real64) :: junk
+        type(pf_stats) :: s
+        integer(int64) :: after_compute
+
+        call golden_fixture(1000_int64, v)
+        call parquet_debug_reset_stats_scans()
+        call check(error, parquet_debug_stats_scans() == 0_int64, &
+            "the traversal counter must read 0 after a reset")
+        if (allocated(error)) return
+
+        call s%compute(v)
+        after_compute = parquet_debug_stats_scans()
+        call check(error, after_compute == 2_int64, "%compute must cost exactly two traversals")
+        if (allocated(error)) return
+
+        ! Five different tier-A queries, none of which may traverse anything.
+        junk = s%mean()
+        junk = s%variance()
+        junk = s%skewness()
+        junk = s%kurtosis()
+        junk = s%vmax()
+        call check(error, parquet_debug_stats_scans() == after_compute, &
+            "five tier-A queries after %compute must cost no further traversal")
+        if (allocated(error)) return
+
+        ! The negative control for the counter itself: it has to be capable of moving, or the
+        ! assertion above would hold just as well against a hook that had stopped counting.
+        call s%compute(v)
+        call check(error, parquet_debug_stats_scans() == 4_int64, &
+            "a second %compute must take the traversal count to four")
+    end subroutine test_compute_costs_two_scans
+
+    !> A retained `%update` loop is EXACTLY `%compute` over the concatenation, and defers its work.
+    subroutine test_retained_update_equals_compute(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: v(:)
+        real(real64) :: got(NQ), want(NQ)
+        type(pf_stats) :: s, whole
+        integer :: q
+        integer(int64) :: after_updates
+
+        call golden_fixture(1000_int64, v)
+        call whole%compute(v)
+        call object_row(whole, want)
+
+        call parquet_debug_reset_stats_scans()
+        call s%init()
+        call s%update(v(1:300))
+        call s%update(v(301:700))
+        call s%update(v(701:1000))
+        after_updates = parquet_debug_stats_scans()
+        call check(error, after_updates == 3_int64, &
+            "three retained updates must cost one traversal each and defer the recomputation")
+        if (allocated(error)) return
+
+        call object_row(s, got)
+        call check(error, parquet_debug_stats_scans() == 5_int64, &
+            "the first query after a retained update loop must cost ONE recomputation, not three")
+        if (allocated(error)) return
+        do q = 1, NQ
+            call check(error, got(q) == want(q), "a retained %update loop must equal %compute " // &
+                "over the concatenation, bit for bit: " // trim(QNAME(q)))
+            if (allocated(error)) return
+        end do
+        call check(error, s%n() == 1000_int64, "the update loop must have seen every element")
+    end subroutine test_retained_update_equals_compute
+
+    !> `%merge` of two halves is `%compute` over the whole, exactly, in retained mode.
+    subroutine test_merge_equals_compute(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: v(:)
+        real(real64) :: got(NQ), want(NQ)
+        type(pf_stats) :: lo, hi, whole
+        integer :: q
+
+        call golden_fixture(1000_int64, v)
+        call whole%compute(v)
+        call object_row(whole, want)
+
+        call lo%compute(v(1:400))
+        call hi%compute(v(401:1000))
+        call lo%merge(hi)
+        call object_row(lo, got)
+        do q = 1, NQ
+            call check(error, got(q) == want(q), &
+                "a retained %merge must equal %compute over the concatenation: " // trim(QNAME(q)))
+            if (allocated(error)) return
+        end do
+        call check(error, lo%n_valid() == 1000_int64, "the merged population must hold every element")
+        if (allocated(error)) return
+        call check(error, hi%n_valid() == 600_int64, &
+            "a source merged without consume= must be left untouched")
+    end subroutine test_merge_equals_compute
+
+    !> The array form folds in INDEX order and recomputes once, which is what threading needs.
+    subroutine test_merge_many_recomputes_once(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: v(:)
+        real(real64) :: got(NQ), want(NQ)
+        type(pf_stats) :: part(4), total, whole
+        integer :: q, k
+        integer(int64) :: lo, hi, after_merge
+
+        call golden_fixture(1000_int64, v)
+        call whole%compute(v)
+        call object_row(whole, want)
+
+        do k = 1, 4
+            lo = (k - 1) * 250_int64 + 1_int64
+            hi = k * 250_int64
+            call part(k)%compute(v(lo:hi))
+        end do
+        call total%init()
+        call parquet_debug_reset_stats_scans()
+        call total%merge(part, consume=.true.)
+        after_merge = parquet_debug_stats_scans()
+        call check(error, after_merge == 0_int64, "%merge itself must traverse nothing")
+        if (allocated(error)) return
+
+        call object_row(total, got)
+        call check(error, parquet_debug_stats_scans() == 2_int64, &
+            "folding four partials must cost ONE recomputation, not four")
+        if (allocated(error)) return
+        do q = 1, NQ
+            call check(error, got(q) == want(q), &
+                "the array %merge must equal %compute over the whole: " // trim(QNAME(q)))
+            if (allocated(error)) return
+        end do
+        call check(error, .not. part(1)%is_computed() .and. .not. part(4)%is_computed(), &
+            "consume=.true. must clear every source it folded in")
+    end subroutine test_merge_many_recomputes_once
+
+    !> Streaming is one traversal per batch, O(1) memory, and close rather than exact.
+    subroutine test_streaming_costs_one_scan(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: v(:)
+        real(real64) :: got(NQ), want(NQ)
+        type(pf_stats) :: s, whole
+        integer :: q, k
+        integer(int64) :: lo, hi
+
+        call golden_fixture(1000_int64, v)
+        call whole%compute(v)
+        call object_row(whole, want)
+
+        call parquet_debug_reset_stats_scans()
+        call s%init(retain=.false.)
+        do k = 1, 5
+            lo = (k - 1) * 200_int64 + 1_int64
+            hi = k * 200_int64
+            call s%update(v(lo:hi))
+        end do
+        call check(error, parquet_debug_stats_scans() == 5_int64, &
+            "five streaming updates must cost exactly one traversal each")
+        if (allocated(error)) return
+
+        call object_row(s, got)
+        call check(error, parquet_debug_stats_scans() == 5_int64, &
+            "a streaming accumulator has no buffer to re-walk, so a query must traverse nothing")
+        if (allocated(error)) return
+        call check(error, .not. s%retains(), "%init(retain=.false.) must report retains() = .false.")
+        if (allocated(error)) return
+
+        ! The combination formulas are accurate, not exact: comparing with `==` here would be
+        ! asserting something this lifecycle deliberately does not promise.
+        do q = 1, NQ
+            call check(error, abs(got(q) - want(q)) <= 1.0e-12_real64 * max(1.0_real64, abs(want(q))), &
+                "streaming must agree with %compute to the formulas' own accuracy: " // trim(QNAME(q)))
+            if (allocated(error)) return
+        end do
+        call check(error, s%n_valid() == 1000_int64, "the streamed population must count every element")
+    end subroutine test_streaming_costs_one_scan
+
+    !> A streaming `%merge` is the same Chan fold as a streaming `%update`, so it agrees too.
+    subroutine test_streaming_merge_agrees(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: v(:)
+        real(real64) :: got(NQ), want(NQ)
+        type(pf_stats) :: lo, hi, whole
+        integer :: q
+
+        call golden_fixture(1000_int64, v)
+        call whole%compute(v)
+        call object_row(whole, want)
+
+        call lo%init(retain=.false.)
+        call hi%init(retain=.false.)
+        call lo%update(v(1:400))
+        call hi%update(v(401:1000))
+        call lo%merge(hi)
+        call object_row(lo, got)
+        do q = 1, NQ
+            call check(error, abs(got(q) - want(q)) <= 1.0e-12_real64 * max(1.0_real64, abs(want(q))), &
+                "a streaming %merge must agree with %compute over the whole: " // trim(QNAME(q)))
+            if (allocated(error)) return
+        end do
+        call check(error, lo%n_valid() == 1000_int64, "the merged stream must count every element")
+    end subroutine test_streaming_merge_agrees
+
+    !> Weights, nulls and NaNs reach the object exactly as they reach the one-shot family.
+    subroutine test_object_carries_the_exclusion_policy(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: v(:), w(:)
+        real(real64) :: got(NQ)
+        type(pf_stats) :: s
+        logical, allocatable :: mask(:)
+        integer(int64) :: i
+
+        ! WVAR is the oracle's unequal-weight case: 32 elements, weights mod 5, so every fifth is
+        ! zero and leaves the population. Going through the object must reach the same numbers.
+        call golden_fixture(32_int64, v)
+        call golden_weights_mod5(32_int64, w)
+        call s%compute(v, weights=w)
+        call object_row(s, got)
+        call check_case(error, "WVAR via pf_stats", got, G_WVAR, G_WVAR_DEF, 1.0e-13_real64)
+        if (allocated(error)) return
+        call check(error, s%n_valid() == G_WVAR_N(1), "the object must exclude the zero-weighted rows")
+        if (allocated(error)) return
+
+        ! Nulls and NaNs, counted rather than merely removed, and carried across an update loop.
+        deallocate(v)
+        call golden_fixture(1000_int64, v)
+        allocate(mask(1000))
+        mask = .true.
+        do i = 1_int64, 1000_int64, 7_int64
+            mask(i) = .false.
+        end do
+        mask(3) = .false.   ! deliberately null AND NaN; see the n_nan assertion below
+        v(3) = ieee_value(1.0_real64, ieee_quiet_nan)
+        v(500) = ieee_value(1.0_real64, ieee_quiet_nan)
+        call s%init()
+        call s%update(v(1:500), is_valid=mask(1:500))
+        call s%update(v(501:1000), is_valid=mask(501:1000))
+        call check(error, s%n() == 1000_int64, "%n must count every element offered")
+        if (allocated(error)) return
+        call check(error, s%n_null() == count(.not. mask, kind=int64), &
+            "%n_null must carry the nulls across an update loop")
+        if (allocated(error)) return
+        ! Element 3 is null as well as NaN, and nullness is examined first, so only one of the two
+        ! NaNs is ever counted as one. That ordering is the whole content of this assertion.
+        call check(error, s%n_nan() == 1_int64, &
+            "a null element must be counted as null and never reach the NaN test")
+        if (allocated(error)) return
+        call check(error, s%n_valid() == 1000_int64 - s%n_null() - 1_int64, &
+            "the counts must partition the elements offered")
+    end subroutine test_object_carries_the_exclusion_policy
+
+    !> An empty population is a state, not a failure -- and it is not the same as an uncomputed one.
+    subroutine test_object_empty_and_cleared(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        type(pf_stats) :: s
+        real(real64) :: m, t
+
+        call check(error, .not. s%is_computed(), &
+            "a default-initialised pf_stats must report that it holds no population")
+        if (allocated(error)) return
+
+        call s%init()
+        call check(error, s%is_computed(), "%init must leave the object computed, over an empty population")
+        if (allocated(error)) return
+        call check(error, s%n() == 0_int64 .and. s%n_valid() == 0_int64, "an empty population counts 0")
+        if (allocated(error)) return
+        t = s%sum()
+        call check(error, t == 0.0_real64, "an empty population must sum to exactly 0")
+        if (allocated(error)) return
+        m = s%mean()
+        call check(error, m /= m, "the mean of an empty population must be a quiet NaN")
+        if (allocated(error)) return
+
+        call s%compute([1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64])
+        call check(error, s%mean() == 2.5_real64, "%compute must overwrite whatever the object held")
+        if (allocated(error)) return
+        call s%clear()
+        call check(error, .not. s%is_computed(), "%clear must return the object to its initial state")
+    end subroutine test_object_empty_and_cleared
+
+    !> An unweighted element and a weight-1 element are the same thing, so mixing them must work.
+    !!
+    !! Nothing forces a caller streaming a file to have weights for the first row group, and the
+    !! retained buffer has to hold a weight per value once any weight exists. Without the backfill
+    !! the weights would silently be shorter than the values beside them, which is a wrong answer
+    !! rather than a crash: the moments would be computed against whatever the buffer's spare
+    !! capacity happened to contain.
+    subroutine test_weights_arriving_late_backfill(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: v(:), w(:)
+        real(real64) :: got(NQ), want(NQ)
+        type(pf_stats) :: s, whole
+        integer :: q
+        integer(int64) :: i
+
+        call golden_fixture(1000_int64, v)
+        allocate(w(1000))
+        w(1:400) = 1.0_real64
+        do i = 401_int64, 1000_int64, 1_int64
+            w(i) = 1.0_real64 + real(mod(i, 4_int64), real64)
+        end do
+        call whole%compute(v, weights=w)
+        call object_row(whole, want)
+
+        call s%init()
+        call s%update(v(1:400))                          ! no weights at all
+        call s%update(v(401:1000), weights=w(401:1000))  ! weighted from here on
+        call object_row(s, got)
+        do q = 1, NQ
+            call check(error, got(q) == want(q), "an unweighted update followed by a weighted one " // &
+                "must equal one weighted %compute with the missing weights as 1: " // trim(QNAME(q)))
+            if (allocated(error)) return
+        end do
+        call check(error, s%sum_weights() == whole%sum_weights(), &
+            "the backfilled weights must sum to the same total")
+    end subroutine test_weights_arriving_late_backfill
 
 end module test_stats

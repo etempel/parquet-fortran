@@ -23,7 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counts, the sum and the extremes in one pair of passes. They are weighted (`weights=`,
   `weight_type=`), take `ddof=`/`bias=`/`excess=` with pandas' defaults rather than numpy's, are
   computed two-pass over a fixed pairwise block tree so that the variance is shift-invariant, and
-  return a quiet NaN with `ok=.false.` wherever a statistic is undefined. See
+  return a quiet NaN with `ok=.false.` wherever a statistic is undefined. A `pf_stats` accumulator
+  summarises a population once and answers any number of queries off it: `%compute` for a resident
+  array, `%init` plus `%update` for one arriving in pieces, and `%merge` — whose array form folds in
+  index order — for accumulating in parallel. See
   [Array statistics](doc/pages/utilities/statistics.md).
 - **`parquet_logging`: general-purpose logging for the calling program.** A `pf_logger` type and a
   matching set of `pf_log_*` procedures on a process-wide default logger: eight ascending severity

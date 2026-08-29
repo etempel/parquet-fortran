@@ -54,6 +54,110 @@ module parquet_stats
     public :: pf_count_valid
     public :: pf_sum, pf_mean, pf_variance, pf_stddev, pf_sem
     public :: pf_skewness, pf_kurtosis, pf_moments
+    public :: pf_stats
+    public :: parquet_debug_stats_scans, parquet_debug_reset_stats_scans
+    !
+    ! ---- The tier-A accumulator, and the object that holds one ----
+    !
+    !> Everything tier A holds about one population: the counts, the weight sums and the central
+    !! moments about the mean.
+    !!
+    !! Private: it is the engine's currency, not part of the public surface.
+    type :: stats_acc
+        integer(int64) :: n_valid = 0_int64 !! elements that survived every exclusion.
+        integer(int64) :: n_null = 0_int64  !! elements `is_valid` excluded.
+        integer(int64) :: n_nan = 0_int64   !! excluded as NaN, and not already null.
+        real(real64) :: w_sum = 0.0_real64  !! `sum(w)`; the population size when unweighted.
+        real(real64) :: w_sq = 0.0_real64   !! `sum(w**2)`, which the reliability count needs.
+        real(real64) :: vsum = 0.0_real64   !! `sum(w*x)`; exactly 0 for an empty population.
+        real(real64) :: mean = 0.0_real64   !! `vsum / w_sum`.
+        real(real64) :: m2 = 0.0_real64     !! `sum(w*(x-mean)**2)`.
+        real(real64) :: m3 = 0.0_real64     !! `sum(w*(x-mean)**3)`.
+        real(real64) :: m4 = 0.0_real64     !! `sum(w*(x-mean)**4)`.
+        real(real64) :: vmin = 0.0_real64   !! the smallest surviving value.
+        real(real64) :: vmax = 0.0_real64   !! the largest surviving value.
+        logical :: empty = .true.           !! .true. when nothing survived; every moment is NaN.
+        logical :: saw_nan = .false.        !! a NaN entered the population under skipnan=.false.
+    end type stats_acc
+
+    !> One population, summarised once and queried as often as you like.
+    !>
+    !> The reason to reach for this type rather than the one-shot `pf_*` procedures is that the
+    !> work is done **once**: `%compute` traverses the values twice, and every tier-A query after
+    !> that is an O(1) read of what it left behind. Asking for eight statistics costs what asking
+    !> for one costs, and `parquet_debug_stats_scans()` is what that promise is asserted with.
+    !>
+    !> Three lifecycles, and the choice between them is `retain`:
+    !>
+    !> - **`%compute(values, ...)`** summarises a resident array. `retain = .true.` (the default)
+    !>   keeps a copy of the surviving values, which is what the order statistics of a later phase
+    !>   will need; `retain = .false.` keeps nothing but the accumulator.
+    !> - **`%init(retain=.false.)` then a loop of `%update`** streams a population that never
+    !>   exists in memory at once -- a row-group loop over a file larger than RAM. Each `%update`
+    !>   is ONE traversal and O(1) memory, using the Chan/Pebay combination formulas.
+    !> - **`%init` per thread, then `%merge`** accumulates in parallel, folded afterwards in index
+    !>   order so the answer does not depend on which thread finished first.
+    !>
+    !> **In retained mode `%merge` and `%update` are EXACT**: the moments are recomputed by the
+    !> same two-pass algorithm over the concatenated survivors, so `%merge` equals `%compute` over
+    !> the concatenation bit for bit, not merely to the accuracy a combination formula claims. The
+    !> recomputation is lazy, so folding k partials costs one recomputation rather than k. In
+    !> streaming mode there is no buffer to re-walk and the formulas' own accuracy is what you get.
+    !>
+    !> **Memory.** `retain = .false.` is O(1) whatever the input size. `retain = .true.` costs 8
+    !> bytes per surviving element, and 8 more when weighted. `%clear` gives all of it back.
+    !>
+    !> **Threading.** This is a value-like summary object and takes no lock, so a shared one must
+    !> not be mutated concurrently. It also has allocatable components, which puts it in the class
+    !> ifx miscompiles when declared in a `block` lexically inside a parallel region: declare an
+    !> ARRAY of `pf_stats` before the region, one slot per thread, and index it by
+    !> `omp_get_thread_num() + 1` -- the shape `%merge`'s array form exists to make natural.
+    !>
+    !> A query may complete a deferred recomputation, so every one of them takes the object as
+    !> `intent(inout)` and none is `pure`. That is the same trade `parquet_table`'s value
+    !> accessors make for lazy materialization.
+    type :: pf_stats
+        private
+        type(stats_acc) :: acc                   !! the tier-A quantities.
+        real(real64), allocatable :: keep(:)     !! retained survivors; `keep_n` of them are live.
+        real(real64), allocatable :: keep_w(:)   !! their weights, allocated only when weighted.
+        integer(int64) :: keep_n = 0_int64       !! live length of `keep`/`keep_w`.
+        integer(int64) :: n_seen = 0_int64       !! elements offered, including every excluded one.
+        integer(int64) :: c_valid = 0_int64      !! survivors, carried exactly across updates.
+        integer(int64) :: c_null = 0_int64       !! nulls, likewise.
+        integer(int64) :: c_nan = 0_int64        !! NaNs excluded, likewise.
+        logical :: hold = .true.                 !! `retain`: whether survivors are kept.
+        logical :: live = .false.                !! %init or %compute has run.
+        logical :: freq = .false.                !! frequency rather than reliability weights.
+        logical :: wtd = .false.                 !! any weights have been supplied.
+        logical :: skip = .true.                 !! `skipnan`, fixed at %init/%compute.
+        logical :: stale = .false.               !! retained moments need recomputing.
+    contains
+        procedure :: compute => obj_compute !! Summarises a resident array; the usual entry point.
+        procedure :: init => obj_init !! Arms an empty accumulator for a loop of `%update`.
+        procedure :: update => obj_update !! Folds one more batch into the population.
+        procedure :: clear => obj_clear !! Returns the object to its default-initialised state.
+        procedure, private :: obj_merge_one !! `%merge` over one other accumulator.
+        procedure, private :: obj_merge_many !! `%merge` over an array of them, in index order.
+        generic :: merge => obj_merge_one, obj_merge_many !! Folds other accumulators into this one.
+        procedure :: is_computed => obj_is_computed !! Whether %compute or %init has run.
+        procedure :: retains => obj_retains !! Whether the surviving values are being kept.
+        procedure :: n => obj_n !! Elements offered, including every excluded one.
+        procedure :: n_valid => obj_n_valid !! Elements in the population.
+        procedure :: n_null => obj_n_null !! Elements `is_valid` excluded.
+        procedure :: n_nan => obj_n_nan !! Elements excluded as NaN.
+        procedure :: sum_weights => obj_sum_weights !! `sum(w)` over the population.
+        procedure :: sum => obj_sum !! `sum(w*x)` over the population.
+        procedure :: mean => obj_mean !! The weighted mean.
+        procedure :: variance => obj_variance !! The variance, at `ddof` degrees of freedom.
+        procedure :: stddev => obj_stddev !! The standard deviation.
+        procedure :: sem => obj_sem !! The standard error of the mean.
+        procedure :: skewness => obj_skewness !! The third standardised moment.
+        procedure :: kurtosis => obj_kurtosis !! The fourth standardised moment.
+        procedure :: vmin => obj_vmin !! The smallest value in the population.
+        procedure :: vmax => obj_vmax !! The largest value in the population.
+        procedure :: range => obj_range !! `vmax - vmin`.
+    end type pf_stats
 
     !> How many elements of `values` are in the population -- pandas' `Series.count()`.
     !>
@@ -560,6 +664,297 @@ module parquet_stats
             integer(int64), intent(out), optional :: n_nan
             !! how many were excluded as NaN and were not already null.
         end subroutine moments_f64
+    end interface
+    !
+    ! ---- pf_stats (implemented in parquet_stats_core) ----
+    interface
+        !> Summarises a resident array: the usual way to build a `pf_stats`.
+        !!
+        !! Two traversals, whatever is asked of the result afterwards. Any previous contents of
+        !! `self` are discarded, so an object may be reused across a loop of groups without
+        !! `%clear` in between.
+        module subroutine obj_compute(self, values, retain, is_valid, weights, weight_type, skipnan)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; any previous contents are discarded.
+            real(real64), intent(in) :: values(:) !! the population, before exclusions.
+            logical, intent(in), optional :: retain
+            !! .true. by default: keep a copy of the surviving values, which costs 8 bytes per
+            !! survivor (16 when weighted) and is what makes `%update` and `%merge` EXACT rather
+            !! than approximate. .false. keeps nothing but the accumulator, which is O(1) whatever
+            !! the population size and is what a row-group loop over a file larger than RAM wants.
+            !! Fixed for the object's lifetime; every accumulator in one `%merge` must agree.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+        end subroutine obj_compute
+        !> Arms an empty accumulator for a loop of `%update`, or for a `%merge`.
+        !!
+        !! The population is EMPTY afterwards, which is a different state from uncomputed: every
+        !! count answers `0`, every moment is NaN, and `%is_computed()` is `.true.`. `weight_type`
+        !! and `skipnan` are fixed here because the queries do not take them.
+        module subroutine obj_init(self, retain, weight_type, skipnan)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; any previous contents are discarded.
+            logical, intent(in), optional :: retain
+            !! .true. by default: keep a copy of the surviving values, which costs 8 bytes per
+            !! survivor (16 when weighted) and is what makes `%update` and `%merge` EXACT rather
+            !! than approximate. .false. keeps nothing but the accumulator, which is O(1) whatever
+            !! the population size and is what a row-group loop over a file larger than RAM wants.
+            !! Fixed for the object's lifetime; every accumulator in one `%merge` must agree.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+        end subroutine obj_init
+        !> Folds one more batch of values into the population.
+        !!
+        !! In retained mode the survivors are appended and the moments are marked for
+        !! recomputation, so a loop of k updates costs k traversals and ONE recomputation --
+        !! and the result is bit for bit what `%compute` over the concatenated batches gives.
+        !! In streaming mode this is one traversal and O(1) memory, combining by the Chan/Pebay
+        !! formulas, and the accuracy is theirs.
+        module subroutine obj_update(self, values, is_valid, weights)
+            class(pf_stats), intent(inout) :: self !! the accumulator.
+            real(real64), intent(in) :: values(:) !! the batch, before exclusions.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+        end subroutine obj_update
+        !> Folds one other accumulator into this one.
+        !!
+        !! Both must agree on `retain` and on the weight convention, and the source must have been
+        !! computed; a mismatch aborts, naming which. A source with no elements at all is a no-op.
+        module subroutine obj_merge_one(self, other, consume)
+            class(pf_stats), intent(inout) :: self !! the destination.
+            type(pf_stats), intent(inout) :: other
+            !! the source. `intent(inout)` because `consume` clears it; it is unchanged otherwise.
+            logical, intent(in), optional :: consume
+            !! .false. by default: the sources are left intact. .true. clears each source as it is
+            !! folded in, which is what the threaded shape wants -- the partials are dead after the
+            !! region, and keeping them doubles the peak memory for nothing.
+        end subroutine obj_merge_one
+        !> Folds an array of accumulators into this one, **in index order**.
+        !!
+        !! This is the form threading should use: the fold order is the array's, not the order the
+        !! threads happened to finish in, so the answer is reproducible. Folding k retained
+        !! partials costs one recomputation rather than k, because it is deferred until something
+        !! is asked of the result.
+        module subroutine obj_merge_many(self, others, consume)
+            class(pf_stats), intent(inout) :: self !! the destination.
+            type(pf_stats), intent(inout) :: others(:) !! the sources, folded in ascending index.
+            logical, intent(in), optional :: consume
+            !! .false. by default: the sources are left intact. .true. clears each source as it is
+            !! folded in, which is what the threaded shape wants -- the partials are dead after the
+            !! region, and keeping them doubles the peak memory for nothing.
+        end subroutine obj_merge_many
+        !> Returns the object to its default-initialised state, freeing everything it held.
+        !!
+        !! `%is_computed()` is `.false.` afterwards. Calling it on an object that was never
+        !! computed is legal and does nothing.
+        module subroutine obj_clear(self)
+            class(pf_stats), intent(inout) :: self !! the accumulator.
+        end subroutine obj_clear
+        !> Whether this accumulator holds a population yet.
+        !>
+        !> `.false.` only for a default-initialised object and for one `%clear` has reset. An
+        !> accumulator armed by `%init` and never updated holds an EMPTY population, which is a
+        !> different thing: it answers `.true.` here and `0` to every count.
+        module function obj_is_computed(self) result(res)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; a query may complete a deferred recomputation.
+            logical :: res !! `.true.` once `%compute` or `%init` has run.
+        end function obj_is_computed
+        !> Whether this accumulator keeps the surviving values.
+        !>
+        !> Fixed by `retain` at `%compute`/`%init` and never changes. It decides whether `%merge` and
+        !> `%update` are exact or approximate, and whether the order statistics of a later phase are
+        !> available at all.
+        module function obj_retains(self) result(res)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; a query may complete a deferred recomputation.
+            logical :: res !! `.true.` when the surviving values are being kept.
+        end function obj_retains
+        !> How many elements have been offered to this accumulator.
+        !>
+        !> Counts nulls, NaNs and zero-weight elements too, so `%n() - %n_valid()` is everything the
+        !> exclusion rules removed. pandas' `size` rather than its `count`.
+        module function obj_n(self) result(res)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; a query may complete a deferred recomputation.
+            integer(int64) :: res !! elements offered, including every excluded one.
+        end function obj_n
+        !> How many elements are in the population -- pandas' `count`.
+        !>
+        !> Carried across `%update` and `%merge` as an integer rather than re-derived, so it is exact
+        !> and needs no recomputation to answer.
+        module function obj_n_valid(self) result(res)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; a query may complete a deferred recomputation.
+            integer(int64) :: res !! elements in the population.
+        end function obj_n_valid
+        !> How many elements were excluded as null.
+        module function obj_n_null(self) result(res)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; a query may complete a deferred recomputation.
+            integer(int64) :: res !! elements `is_valid` excluded.
+        end function obj_n_null
+        !> How many elements were excluded as NaN and were not already null.
+        !>
+        !> Always `0` under `skipnan = .false.`, where a NaN stays in the population.
+        module function obj_n_nan(self) result(res)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; a query may complete a deferred recomputation.
+            integer(int64) :: res !! elements excluded as NaN.
+        end function obj_n_nan
+        !> The total weight of the population.
+        !>
+        !> Exactly `real(%n_valid())` when no weights were supplied. This is `sum(w)` and NOT the
+        !> effective size the reliability convention charges `ddof` against; those differ whenever the
+        !> weights are unequal.
+        module function obj_sum_weights(self) result(res)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; a query may complete a deferred recomputation.
+            real(real64) :: res !! `sum(w)` over the population.
+        end function obj_sum_weights
+        !> The sum of the population.
+        !>
+        !> Weighted, this is `sum(w*x)`. An empty population sums to exactly `0`: it is the one
+        !> quantity here that emptiness still defines, and it is what numpy and pandas both return.
+        module function obj_sum(self) result(res)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; a query may complete a deferred recomputation.
+            real(real64) :: res !! `sum(w*x)`; exactly 0 for an empty population.
+        end function obj_sum
+        !> The mean of the population.
+        module function obj_mean(self) result(res)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; a query may complete a deferred recomputation.
+            real(real64) :: res !! the weighted mean, or NaN for an empty population.
+        end function obj_mean
+        !> The variance of the population.
+        !>
+        !> `ddof` at or above the effective size gives a NaN rather than a division -- including the
+        !> single-element case at the default `ddof = 1`, which is a data condition, not an error.
+        module function obj_variance(self, ddof) result(res)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; a query may complete a deferred recomputation.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            real(real64) :: res !! the variance, or NaN when it is undefined.
+        end function obj_variance
+        !> The standard deviation: the square root of `%variance(ddof)`.
+        module function obj_stddev(self, ddof) result(res)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; a query may complete a deferred recomputation.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            real(real64) :: res !! the standard deviation, or NaN when it is undefined.
+        end function obj_stddev
+        !> The standard error of the mean: `%stddev(ddof)` over the root of the effective size.
+        !>
+        !> `scipy.stats.sem` at its default `ddof = 1`, which is this library's default too.
+        module function obj_sem(self, ddof) result(res)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; a query may complete a deferred recomputation.
+            integer, intent(in), optional :: ddof
+            !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
+            !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
+            !! A plain default-kind integer deliberately: it is bounded by the population size,
+            !! so there is no int64 form to provide. `ddof >= n_valid` gives NaN, not a division.
+            real(real64) :: res !! the standard error, or NaN when it is undefined.
+        end function obj_sem
+        !> The skewness of the population.
+        !>
+        !> NaN for a constant population, and -- bias-corrected, which is the default -- for one with
+        !> fewer than three elements.
+        module function obj_skewness(self, bias) result(res)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; a query may complete a deferred recomputation.
+            logical, intent(in), optional :: bias
+            !! .false. by default: the bias-CORRECTED G1/G2, which is what pandas returns.
+            !! .true. gives the uncorrected g1/g2, which is what scipy returns by default.
+            real(real64) :: res !! the skewness, or NaN when it is undefined.
+        end function obj_skewness
+        !> The kurtosis of the population.
+        !>
+        !> NaN for a constant population, and -- bias-corrected, which is the default -- for one with
+        !> fewer than four elements. Excess by default, so a normal population gives 0.
+        module function obj_kurtosis(self, bias, excess) result(res)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; a query may complete a deferred recomputation.
+            logical, intent(in), optional :: bias
+            !! .false. by default: the bias-CORRECTED G1/G2, which is what pandas returns.
+            !! .true. gives the uncorrected g1/g2, which is what scipy returns by default.
+            logical, intent(in), optional :: excess
+            !! .true. by default: EXCESS kurtosis, which is 0 for a normal population.
+            !! .false. adds 3 back, giving the raw fourth-moment ratio.
+            real(real64) :: res !! the kurtosis, or NaN when it is undefined.
+        end function obj_kurtosis
+        !> The smallest value in the population.
+        module function obj_vmin(self) result(res)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; a query may complete a deferred recomputation.
+            real(real64) :: res !! the smallest value, or NaN for an empty population.
+        end function obj_vmin
+        !> The largest value in the population.
+        module function obj_vmax(self) result(res)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; a query may complete a deferred recomputation.
+            real(real64) :: res !! the largest value, or NaN for an empty population.
+        end function obj_vmax
+        !> The spread of the population: `%vmax() - %vmin()`.
+        module function obj_range(self) result(res)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; a query may complete a deferred recomputation.
+            real(real64) :: res !! `vmax - vmin`, or NaN for an empty population.
+        end function obj_range
+        !> How many full traversals of a population's values this process has performed.
+        !!
+        !! Test-only, and nothing in the library reads it. It counts TRAVERSALS, not calls:
+        !! `%compute` costs **two** -- one to apply the exclusion rules and find the mean, one to
+        !! accumulate the central moments about it -- and every tier-A query after that costs
+        !! none, which is the promise this type exists to make. A streaming `%update` costs
+        !! **one**. A retained `%update` costs one to append and defers the two-traversal
+        !! recomputation until something is asked of the object, so folding k batches and then
+        !! querying costs `k + 2` rather than `3k`.
+        !!
+        !! Process-global, which is why the `stats` suite is excluded from the per-suite
+        !! parallelism in `test/run_tester.f90`.
+        module function parquet_debug_stats_scans() result(res)
+            integer(int64) :: res !! traversals since the last reset.
+        end function parquet_debug_stats_scans
+        !> Resets the traversal counter to zero.
+        !!
+        !! A counter is only usable as an assertion if a test can re-arm it: a once-per-process
+        !! observable with no reset makes every test after the first vacuous.
+        module subroutine parquet_debug_reset_stats_scans()
+        end subroutine parquet_debug_reset_stats_scans
     end interface
     !
 end module parquet_stats ! GCOVR_EXCL_LINE

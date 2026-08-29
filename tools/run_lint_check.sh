@@ -6,9 +6,9 @@
 #   tools/run_lint_check.sh --fail-fast  # stop at the first failing check
 #
 # Exits 0 only if every check passed, so this is usable as a pre-commit/pre-push
-# gate. Needs nothing but python3 and bash -- no fpm, no gfortran, no Arrow --
-# and takes well under a second, which is why the CI job it mirrors overrides
-# the pipeline's own heavyweight before_script.
+# gate. Needs nothing but python3, mpmath and bash -- no fpm, no gfortran, no
+# Arrow -- which is why the CI job it mirrors overrides the pipeline's own
+# heavyweight before_script.
 #
 # By default every check runs even after one fails, and the failures are listed
 # together at the end. That deliberately differs from CI, whose `script:` stops
@@ -23,26 +23,21 @@
 # one added only here would give false confidence. The list is kept in the same
 # order the CI job runs them.
 # ---------------------------------------------------------------------------------------------
-# Runs the same checks as `.gitlab-ci.yml`'s `lint` stage, locally --
-# `tools/check_bindc_boundary.py`, `tools/check_doc_anchors.py`,
-# `tools/check_source_conventions.py`, the five generated-file `--check` calls
-# (`generate_parquet_columns.py`, `generate_parquet_tables.py`, `generate_parquet_sorting.py`,
-# `generate_parquet_stats.py`,
-# `generate_parquet_ziggurat.py`, `generate_parquet_maml.sh base`), `generate_user_table_code.py`'s
-# own `--self-test` plus the `--check` for this project's committed generated table type, and
-# `generate_random_golden_vectors.py`'s, `generate_random_perm_vectors.py`'s and
-# `generate_parquet_ziggurat.py`'s `--self-test` and `--check`.
+# Runs the same checks as `.gitlab-ci.yml`'s `lint` stage, locally: the three static checks
+# (`check_bindc_boundary.py`, `check_doc_anchors.py`, `check_source_conventions.py`), then each
+# generator's `--check` -- which re-derives its committed output and fails if the file on disk has
+# drifted from it -- and, for the generators that also verify their own model, its `--self-test`.
+# The `CHECKS` array below is the list; it is not enumerated here as well, because a second copy of
+# it would go stale the first time one was added.
 #
-# ONE ENTRY IS DELIBERATELY NOT IN CI: `generate_stats_vectors.py --check`, which needs `mpmath`
-# to re-derive `parquet_stats`' golden expectations at 50 digits. The CI lint job has no such
-# dependency and adding one is the maintainer's call, so this runner carries the check and the
-# pipeline does not -- which means a hand-edit to test/test_stats_golden.f90 is caught HERE and
-# nowhere else. That is the only exception to the "keep the two lists in step" rule above, and it
-# is written down rather than left to be inferred. Its `--self-test`, which validates the model
-# against numpy/pandas/scipy, is heavier still and is a step to run when the MODEL changes, not on
-# every push.
+# ONE ENTRY NEEDS A PYTHON LIBRARY RATHER THAN JUST THE INTERPRETER: `generate_stats_vectors.py
+# --check` re-derives `parquet_stats`' golden expectations at 50 digits, so it needs `mpmath`
+# (`pip install mpmath`; CI's lint job installs Ubuntu's `python3-mpmath` for the same reason).
+# Without it that one check fails and the rest still run. Its `--self-test`, which validates the
+# model against numpy/pandas/scipy, is heavier still and is deliberately in neither list -- it is a
+# step to run when the MODEL changes, not on every push.
 #
-# Apart from that one check it needs nothing but `python3` and
+# Apart from that one dependency it needs nothing but `python3` and
 # `bash` -- no fpm, no gfortran, no Arrow -- and takes about ten seconds, so it is worth running
 # before every push. Most of that is three checks doing real arithmetic rather than pattern
 # matching: `check_source_conventions.py` walks every source file, and the ziggurat and golden-
@@ -90,6 +85,7 @@ CHECKS=(
     "python3 tools/generate_parquet_sorting.py --check"
     "python3 tools/generate_parquet_stats.py --self-test"
     "python3 tools/generate_parquet_stats.py --check"
+    "python3 tools/generate_stats_vectors.py --check"
     "bash tools/generate_parquet_maml.sh base --check"
     "python3 tools/generate_user_table_code.py --self-test"
     "python3 tools/generate_user_table_code.py --check"
@@ -99,7 +95,6 @@ CHECKS=(
     "python3 tools/generate_random_golden_vectors.py --check"
     "python3 tools/generate_random_perm_vectors.py --self-test"
     "python3 tools/generate_random_perm_vectors.py --check"
-    "python3 tools/generate_stats_vectors.py --check"
 )
 
 if ! command -v python3 >/dev/null 2>&1; then

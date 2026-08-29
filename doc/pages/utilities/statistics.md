@@ -122,6 +122,98 @@ exactly when the value beside it is not a NaN.
 The empty sum is `0` rather than NaN because that is the additive identity and what numpy and pandas
 both return; `n_valid` sits beside it, so nothing is hidden by it.
 
+## `pf_stats` — summarise once, query as often as you like
+
+The one-shot procedures above each traverse the population. When a group needs more than one or two
+statistics, or when the values arrive in pieces, build a `pf_stats` instead: it does the work once
+and every later query is a read.
+
+```fortran
+use parquet_stats
+
+type(pf_stats) :: s
+real(real64) :: mag(1000)
+
+call s%compute(mag)
+print *, s%n_valid(), s%mean(), s%stddev(), s%skewness(), s%vmin(), s%vmax()
+```
+
+That whole line costs the same two traversals `s%mean()` alone would.
+
+### Three lifecycles
+
+**`%compute(values, [retain], [is_valid], [weights], [weight_type], [skipnan])`** summarises a
+resident array. This is the usual entry point, and it discards whatever the object held, so one
+`pf_stats` can be reused across a loop of groups without `%clear` in between.
+
+**`%init([retain], [weight_type], [skipnan])` then a loop of `%update(values, [is_valid],
+[weights])`** accumulates a population that never exists in memory at once — a row-group loop over
+a file larger than RAM. `%init` leaves the object holding an **empty** population, which is not the
+same as an uncomputed one: every count answers 0, every moment is NaN, and `%is_computed()` is
+`.true.`.
+
+**`%merge(other, [consume])`**, or `%merge(others(:), [consume])` over an array, folds separately
+built accumulators together. The array form folds in **index order**, so a threaded accumulation
+gives the same answer whatever order the threads finish in. `consume=.true.` clears each source as
+it is folded, which is what the threaded shape wants.
+
+```fortran
+type(pf_stats) :: part(nthreads), total
+
+!$omp parallel do
+do k = 1, nthreads
+    call part(k)%compute(chunk_of(k))
+end do
+!$omp end parallel do
+call total%init()
+call total%merge(part, consume=.true.)
+```
+
+Note the array is declared **before** the parallel region and indexed per thread. That is required
+rather than stylistic — see [Thread safety](../operating/thread-safety.html) — because a `pf_stats`
+declared inside the region is miscompiled by at least one supported compiler.
+
+### `retain` decides whether the object is exact or merely accurate
+
+| | `retain = .true.` (default) | `retain = .false.` |
+|---|---|---|
+| memory | 8 bytes per surviving element, 16 when weighted | O(1), whatever the input size |
+| `%update` | appends; one traversal, recomputation deferred | one traversal, O(1) memory |
+| `%merge` | concatenates; recomputation deferred | combines in O(1) |
+| accuracy after `%update`/`%merge` | **exactly** `%compute` over the concatenation | the combination formulas' own |
+| order statistics (a later release) | available | never |
+
+The exactness is worth being concrete about: a retained `%update` loop and a retained `%merge` both
+recompute the moments by the same two-pass algorithm over the concatenated survivors, so the result
+is bit for bit what `%compute` over the concatenated input gives — not "as close as the merge formula
+claims". The recomputation is **deferred until something is asked of the object**, so folding a
+hundred partials costs one recomputation rather than a hundred.
+
+Every accumulator in one `%merge` must agree on `retain`, and on `weight_type`; a mismatch aborts.
+Merging an accumulator that holds no population aborts too, while merging one that holds an *empty*
+population is a no-op — which is what lets a threaded fold run over slots a short loop never filled.
+
+### The queries
+
+`%n`, `%n_valid`, `%n_null` and `%n_nan` return `integer(int64)`; everything else returns
+`real(real64)`. `%is_computed` and `%retains` return a `logical`.
+
+| group | bindings |
+|---|---|
+| counts | `%n()`, `%n_valid()`, `%n_null()`, `%n_nan()`, `%sum_weights()` |
+| moments | `%sum()`, `%mean()`, `%variance([ddof])`, `%stddev([ddof])`, `%sem([ddof])`, `%skewness([bias])`, `%kurtosis([bias], [excess])` |
+| extremes | `%vmin()`, `%vmax()`, `%range()` |
+| state | `%is_computed()`, `%retains()`, `%clear()` |
+
+The arguments mean exactly what they mean on the one-shot procedures, including every default in
+the table above, and the exclusion rules are the same ones. `weight_type` and `skipnan` are fixed at
+`%compute`/`%init` rather than passed per query, because a population cannot be two populations.
+
+A query may complete a deferred recomputation, so each takes the object as `intent(inout)`: a
+`pf_stats` passed as `intent(in)` cannot be queried. **Reading a statistic off an object that was
+never `%compute`d or `%init`ed aborts** — that is a forgotten call, not a data condition, and
+answering NaN would hide it.
+
 ## What "in the population" means, and why it is worth reading once
 
 Every reduction in this module removes the same three classes of element, in the same order, and

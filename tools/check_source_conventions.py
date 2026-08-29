@@ -1775,12 +1775,14 @@ def check_stats_optional_argument_order():
     module with no procedures at all, so on the day it is written it proves nothing: swap two
     optionals in one interface body and confirm it fails before trusting a green run.
     """
-    # The tier-A OUTPUT prefix, which `pf_moments` and anything shaped like it declares before the
-    # input block. It is a fixed order of its own, so the subsequence rule still generates the
-    # whole signature -- see feature_pandas_S4.md's signature matrix, which names this as the one
-    # documented exception.
+    # Three blocks, in this order. The tier-A OUTPUT prefix, which `pf_moments` and anything
+    # shaped like it declares before the input block; then the OBJECT-LIFECYCLE pair `retain` and
+    # `consume`, which only `pf_stats`' own bindings take; then the population arguments every
+    # reduction shares. Each is a fixed order of its own, so the subsequence rule still generates
+    # the whole signature -- see feature_pandas_S4.md's signature matrix.
     canonical = ["n_valid", "mean", "variance", "stddev", "sem", "skewness", "kurtosis",
                  "vsum", "vmin", "vmax",
+                 "retain", "consume",
                  "is_valid", "weights", "weight_type", "ddof", "bias", "excess", "skipnan",
                  "method", "scale", "center", "out_valid", "converged", "n_null", "n_nan",
                  "ok", "threads"]

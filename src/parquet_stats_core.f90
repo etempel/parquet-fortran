@@ -20,8 +20,17 @@
 !! **Two traversals of the population, however many statistics are asked for.** Pass one applies the
 !! exclusion rules, compacts the survivors and reduces the block sums; pass two accumulates the
 !! central moments against the mean pass one produced. Two-pass is both more accurate and faster
-!! than a Welford update over a resident array -- the streaming form arrives with `%update` in P3,
-!! where there is no buffer to re-walk and nothing else is possible.
+!! than a Welford update over a resident array.
+!!
+!! **`pf_stats` is that engine plus a place to keep the answer, and its two lifecycles are two
+!! different promises.** A RETAINED accumulator keeps the surviving values, so `%update` and
+!! `%merge` append and defer, and the deferred recomputation is the same two-pass walk over the
+!! concatenation -- which makes them EXACT, equal to `%compute` over the concatenated input bit for
+!! bit, and costs one recomputation however many batches were folded. A STREAMING accumulator has
+!! no buffer to re-walk, so it combines by the Chan/Pebay formulas in `stats_chan`, one traversal
+!! per batch and O(1) memory, and its accuracy is theirs. `stats_chan` is the only implementation
+!! of those formulas here, reused for the per-element step, the carry tree and `%merge` alike,
+!! because they are the part of this file a reader cannot check by inspection.
 !!
 !! **The accuracy claim is testable and is tested**: `pf_variance(x + 1e9)` agrees with
 !! `pf_variance(x)` to a few ulp, which the textbook `sum(x**2) - sum(x)**2/n` misses by orders of
@@ -47,24 +56,18 @@ submodule (parquet_stats) parquet_stats_core
     !! bits**, so it is a frozen constant rather than a tuning knob.
     integer(int64), parameter :: STATS_BLOCK = 128_int64
 
-    !> Everything tier A holds about one population: the counts, the weight sums and the central
-    !! moments about the mean, all accumulated over the block tree.
-    type :: stats_acc
-        integer(int64) :: n_valid = 0_int64 !! elements that survived every exclusion.
-        integer(int64) :: n_null = 0_int64  !! elements `is_valid` excluded.
-        integer(int64) :: n_nan = 0_int64   !! excluded as NaN, and not already null.
-        real(real64) :: w_sum = 0.0_real64  !! `sum(w)`; the population size when unweighted.
-        real(real64) :: w_sq = 0.0_real64   !! `sum(w**2)`, which the reliability count needs.
-        real(real64) :: vsum = 0.0_real64   !! `sum(w*x)`; exactly 0 for an empty population.
-        real(real64) :: mean = 0.0_real64   !! `vsum / w_sum`.
-        real(real64) :: m2 = 0.0_real64     !! `sum(w*(x-mean)**2)`.
-        real(real64) :: m3 = 0.0_real64     !! `sum(w*(x-mean)**3)`.
-        real(real64) :: m4 = 0.0_real64     !! `sum(w*(x-mean)**4)`.
-        real(real64) :: vmin = 0.0_real64   !! the smallest surviving value.
-        real(real64) :: vmax = 0.0_real64   !! the largest surviving value.
-        logical :: empty = .true.           !! .true. when nothing survived; every moment is then NaN.
-        logical :: saw_nan = .false.        !! a NaN entered the population under `skipnan = .false.`.
-    end type stats_acc
+    !> How many full traversals of a population's values this process has performed.
+    !!
+    !! Read by `parquet_debug_stats_scans()` and by nothing else. Process-global and deliberately
+    !! unsynchronised: it is a test observable, not library state, and the `stats` suite is
+    !! excluded from `test/run_tester.f90`'s per-suite parallelism for exactly this reason.
+    integer(int64), save :: stats_scan_count = 0_int64
+
+    !> The deepest carry level the streaming combiner can need.
+    !!
+    !! One level per bit of an `integer(int64)` block count, so it cannot be reached.
+    integer, parameter :: STATS_MAXLEV = 63
+
 
 contains
 
@@ -181,13 +184,19 @@ contains
     !! The unweighted, mask-free, NaN-skipping case gets its own compaction loop. It is the shape
     !! nearly every call has, and giving it a loop with no per-element `present` test or weight
     !! branch is the difference between a tight copy and a predicted branch per element.
-    subroutine stats_engine(values, what, is_valid, weights, skipnan, acc)
+    subroutine stats_engine(values, what, is_valid, weights, skipnan, acc, keep_x, keep_w)
         real(real64), intent(in) :: values(:)                 !! the population, before exclusions.
         character(len=*), intent(in) :: what                  !! the public procedure's name.
         logical, intent(in), optional :: is_valid(:)          !! per element: .false. marks a null.
         real(real64), intent(in), optional :: weights(:)      !! per element weight.
         logical, intent(in), optional :: skipnan              !! .true. (default) excludes a NaN.
         type(stats_acc), intent(out) :: acc                   !! everything tier A holds.
+        real(real64), allocatable, intent(out), optional :: keep_x(:)
+        !! when present, receives pass one's compacted survivors. `acc%n_valid` of them are live
+        !! and the rest of the array is spare capacity -- handing the buffer over rather than
+        !! re-deriving it is what lets a retaining `%compute` cost two traversals rather than three.
+        real(real64), allocatable, intent(out), optional :: keep_w(:)
+        !! likewise their weights, allocated only when `weights` was supplied.
 
         real(real64), allocatable :: xb(:), wb(:), pw(:), px(:), q1(:), q2(:), q3(:), q4(:)
         real(real64) :: x, w, d, dd, sw, sx, s1, s2, s3, s4, mu, delta
@@ -196,6 +205,7 @@ contains
 
         nv = size(values, kind=int64)
         call stats_check_sizes(nv, what, is_valid, weights)
+        stats_scan_count = stats_scan_count + 1_int64   ! pass one
         skip = .true.
         if (present(skipnan)) skip = skipnan
         weighted = present(weights)
@@ -301,6 +311,7 @@ contains
             ! sits beside it, so nothing is hidden by answering 0 rather than NaN here.
             acc%vsum = 0.0_real64
             call stats_undefine(acc)
+            call stats_hand_over(xb, wb, keep_x, keep_w)
             return
         end if
         if (acc%saw_nan) then
@@ -309,6 +320,7 @@ contains
             ! (in P8) the transcendentals away from it.
             acc%vsum = stats_nan()
             call stats_undefine(acc)
+            call stats_hand_over(xb, wb, keep_x, keep_w)
             return
         end if
 
@@ -323,6 +335,7 @@ contains
             acc%w_sq = real(m, real64)
         end if
         mu = acc%vsum / acc%w_sum
+        stats_scan_count = stats_scan_count + 1_int64   ! pass two
 
         ! ---- Pass two: the central moments, against the mean pass one produced ----
         !
@@ -378,7 +391,25 @@ contains
         acc%m3 = q3(1) - 3.0_real64 * delta * q2(1) + 2.0_real64 * delta**3 * acc%w_sum
         acc%m4 = q4(1) - 4.0_real64 * delta * q3(1) + 6.0_real64 * delta * delta * q2(1) &
             - 3.0_real64 * delta**4 * acc%w_sum
+        call stats_hand_over(xb, wb, keep_x, keep_w)
     end subroutine stats_engine
+
+    !> Hands pass one's compacted buffers to a caller that asked for them, or lets them go.
+    !!
+    !! `move_alloc` rather than a copy: the arrays are sized to the whole input, so copying them
+    !! would put an O(n) allocation back on the path this hand-off exists to remove. `wb` is
+    !! unallocated for an unweighted population, and `move_alloc` of an unallocated source leaves
+    !! the destination unallocated, which is exactly the state `pf_stats` records as unweighted.
+    subroutine stats_hand_over(xb, wb, keep_x, keep_w)
+        real(real64), allocatable, intent(inout) :: xb(:) !! pass one's survivors.
+        real(real64), allocatable, intent(inout) :: wb(:) !! their weights, if any.
+        real(real64), allocatable, intent(out), optional :: keep_x(:) !! the caller's buffer.
+        real(real64), allocatable, intent(out), optional :: keep_w(:) !! the caller's weights.
+        if (present(keep_x)) call move_alloc(xb, keep_x)
+        if (present(keep_w)) then
+            if (allocated(wb)) call move_alloc(wb, keep_w)
+        end if
+    end subroutine stats_hand_over
 
     !> Marks every moment of `acc` undefined, leaving the counts and `vsum` alone.
     pure subroutine stats_undefine(acc)
@@ -669,5 +700,636 @@ contains
         if (present(vmin)) vmin = acc%vmin
         if (present(vmax)) vmax = acc%vmax
     end procedure moments_f64
+
+    ! ==================================================================================
+    ! Combining populations
+    !
+    ! One routine folds one accumulator into another, and everything that is not a two-pass walk
+    ! of a resident array is built from it: the per-element step of a streaming update, the carry
+    ! tree that combines its blocks, and `%merge` in streaming mode. Having exactly one
+    ! implementation of the Chan/Pebay formulas is the point -- they are the part of this file a
+    ! reader cannot check by inspection, so they are tested once and reused rather than restated.
+    ! ==================================================================================
+
+    !> Folds `b` into `a`, combining the counts and the first four central moments.
+    !!
+    !! The Chan/Pebay parallel-update formulas, with the element counts replaced by weight sums,
+    !! which is the weighted generalisation and reduces to the textbook form at unit weights. The
+    !! assignment ORDER below is load-bearing: `m4` reads the old `m2` and `m3`, and `m3` reads the
+    !! old `m2`, so computing them in any other order silently uses already-updated inputs.
+    !!
+    !! Three states short-circuit, and each is a real case rather than a guard against nothing: an
+    !! accumulator already poisoned by a NaN cannot be un-poisoned; an empty source contributes
+    !! only its counts; and an empty destination takes the source's moments wholesale, which is
+    !! what makes `%init` followed by one `%update` exact rather than a combination of an empty
+    !! population with a full one.
+    pure subroutine stats_chan(a, b)
+        type(stats_acc), intent(inout) :: a !! the destination; folded in place.
+        type(stats_acc), intent(in) :: b    !! the source, left alone.
+        real(real64) :: wa, wb, w, d, d2
+
+        a%n_null = a%n_null + b%n_null
+        a%n_nan = a%n_nan + b%n_nan
+        a%n_valid = a%n_valid + b%n_valid
+        if (a%saw_nan) return
+        if (b%saw_nan) then
+            a%saw_nan = .true.
+            a%empty = a%empty .and. b%empty
+            a%vsum = stats_nan()
+            call stats_undefine(a)
+            return
+        end if
+        if (b%empty) return
+        if (a%empty) then
+            a%w_sum = b%w_sum
+            a%w_sq = b%w_sq
+            a%vsum = b%vsum
+            a%mean = b%mean
+            a%m2 = b%m2
+            a%m3 = b%m3
+            a%m4 = b%m4
+            a%vmin = b%vmin
+            a%vmax = b%vmax
+            a%empty = .false.
+            return
+        end if
+
+        wa = a%w_sum
+        wb = b%w_sum
+        w = wa + wb
+        d = b%mean - a%mean
+        d2 = d * d
+        a%m4 = a%m4 + b%m4 + d2 * d2 * wa * wb * (wa * wa - wa * wb + wb * wb) / (w * w * w) &
+            + 6.0_real64 * d2 * (wa * wa * b%m2 + wb * wb * a%m2) / (w * w) &
+            + 4.0_real64 * d * (wa * b%m3 - wb * a%m3) / w
+        a%m3 = a%m3 + b%m3 + d2 * d * wa * wb * (wa - wb) / (w * w) &
+            + 3.0_real64 * d * (wa * b%m2 - wb * a%m2) / w
+        a%m2 = a%m2 + b%m2 + d2 * wa * wb / w
+        a%mean = a%mean + d * wb / w
+        a%vsum = a%vsum + b%vsum
+        a%w_sq = a%w_sq + b%w_sq
+        a%w_sum = w
+        if (b%vmin < a%vmin) a%vmin = b%vmin
+        if (b%vmax > a%vmax) a%vmax = b%vmax
+    end subroutine stats_chan
+
+    !> The accumulator describing one element: the identity every streaming fold starts from.
+    pure subroutine stats_single(x, w, acc)
+        real(real64), intent(in) :: x       !! the value.
+        real(real64), intent(in) :: w       !! its weight.
+        type(stats_acc), intent(out) :: acc !! the one-element accumulator.
+        acc%n_valid = 1_int64
+        acc%w_sum = w
+        acc%w_sq = w * w
+        acc%vsum = w * x
+        acc%mean = x
+        acc%vmin = x
+        acc%vmax = x
+        acc%empty = .false.
+    end subroutine stats_single
+
+    !> Reduces one batch to an accumulator in ONE traversal, for the streaming lifecycle.
+    !!
+    !! Elements are folded into a block accumulator, and completed blocks are combined by a CARRY
+    !! TREE -- level `k` holds the combination of `2**k` consecutive blocks, and a new block
+    !! carries upward exactly as a binary increment does. That gives the same balanced tree
+    !! `pair_reduce` builds for the two-pass path, so a batch's result does not depend on where the
+    !! caller happened to split it into blocks, while costing `STATS_MAXLEV` accumulators of memory
+    !! rather than one per block. The stack is folded highest level first, which is earliest first.
+    !!
+    !! The accuracy is the combination formulas' own, and is not the two-pass path's. That is the
+    !! trade streaming makes: there is no buffer to walk a second time.
+    subroutine stats_stream(values, what, is_valid, weights, skip, acc)
+        real(real64), intent(in) :: values(:)            !! the batch, before exclusions.
+        character(len=*), intent(in) :: what             !! the caller's name, for a message.
+        logical, intent(in), optional :: is_valid(:)     !! per element: .false. marks a null.
+        real(real64), intent(in), optional :: weights(:) !! per element weight.
+        logical, intent(in) :: skip                      !! .true. excludes a NaN.
+        type(stats_acc), intent(out) :: acc              !! this batch's contribution.
+
+        type(stats_acc) :: blk, one, stack(0:STATS_MAXLEV), cur
+        logical :: busy(0:STATS_MAXLEV)
+        real(real64) :: x, w
+        integer(int64) :: nv, i, c, nblocks, q
+        integer :: lev
+        logical :: weighted, masked
+
+        nv = size(values, kind=int64)
+        call stats_check_sizes(nv, what, is_valid, weights)
+        stats_scan_count = stats_scan_count + 1_int64
+        weighted = present(weights)
+        masked = present(is_valid)
+        busy = .false.
+        c = 0_int64
+        nblocks = 0_int64
+
+        do i = 1_int64, nv
+            ! The family's exclusion order: nullness, then NaN, then weight.
+            if (masked) then
+                if (.not. is_valid(i)) then
+                    acc%n_null = acc%n_null + 1_int64
+                    cycle
+                end if
+            end if
+            x = values(i)
+            if (skip) then
+                if (x /= x) then
+                    acc%n_nan = acc%n_nan + 1_int64
+                    cycle
+                end if
+            else if (x /= x) then
+                acc%saw_nan = .true.
+            end if
+            w = 1.0_real64
+            if (weighted) then
+                call stats_check_weight(weights(i), i, what)
+                if (weights(i) <= 0.0_real64) cycle
+                w = weights(i)
+            end if
+            call stats_single(x, w, one)
+            call stats_chan(blk, one)
+            c = c + 1_int64
+            if (c == STATS_BLOCK) then
+                call stats_push(blk, stack, busy, nblocks)
+                c = 0_int64
+            end if
+        end do
+        if (c > 0_int64) call stats_push(blk, stack, busy, nblocks)
+
+        ! Fold the carry stack highest level first: a higher level holds an earlier, larger group,
+        ! so this combines the batch in index order.
+        !
+        ! **This order is a DETERMINISM choice, not an accuracy one, and no test can tell it from
+        ! the reverse.** A mutation reversing it (same levels, opposite direction) was applied and
+        ! SURVIVED the whole suite: both orders are equally deterministic and equally accurate, and
+        ! they differ only in the last bits. It still must not be changed casually -- doing so moves
+        ! every streaming answer this module has published -- but do not go looking for the test
+        ! that would catch it, and do not read the survival as a coverage gap.
+        do lev = STATS_MAXLEV, 0, -1
+            if (busy(lev)) then
+                cur = stack(lev)
+                exit
+            end if
+        end do
+        q = acc%n_null
+        do lev = lev - 1, 0, -1
+            if (busy(lev)) call stats_chan(cur, stack(lev))
+        end do
+        if (nblocks > 0_int64) then
+            blk = cur
+        else
+            call stats_clear_acc(blk)
+        end if
+        blk%n_null = q
+        blk%n_nan = acc%n_nan
+        blk%saw_nan = blk%saw_nan .or. acc%saw_nan
+        if (blk%saw_nan) then
+            blk%vsum = stats_nan()
+            call stats_undefine(blk)
+        end if
+        acc = blk
+    end subroutine stats_stream
+
+    !> Pushes one completed block onto the carry stack and resets it.
+    !!
+    !! `nblocks` doubles as the binary counter that decides how far the carry runs, so the tree is
+    !! a function of the block index alone.
+    pure subroutine stats_push(blk, stack, busy, nblocks)
+        type(stats_acc), intent(inout) :: blk                    !! the completed block; reset here.
+        type(stats_acc), intent(inout) :: stack(0:STATS_MAXLEV)  !! the carry stack.
+        logical, intent(inout) :: busy(0:STATS_MAXLEV)           !! which levels are occupied.
+        integer(int64), intent(inout) :: nblocks                 !! blocks pushed so far.
+        type(stats_acc) :: cur
+        integer :: lev
+
+        cur = blk
+        lev = 0
+        do while (busy(lev))
+            call stats_chan(stack(lev), cur)   ! earlier group first, later second
+            cur = stack(lev)
+            busy(lev) = .false.
+            lev = lev + 1
+        end do
+        stack(lev) = cur
+        busy(lev) = .true.
+        nblocks = nblocks + 1_int64
+        call stats_clear_acc(blk)
+    end subroutine stats_push
+
+    !> Returns one accumulator to its default-initialised state.
+    !!
+    !! `intent(out)` already default-initialises every component, and the two LOGICALs are
+    !! nonetheless assigned explicitly: this repository has one confirmed gfortran case where a
+    !! scalar logical relying solely on that implicit reset read back stale, and both of these are
+    !! correctness-critical -- `empty` decides whether a merge takes the source's moments wholesale,
+    !! and `saw_nan` decides whether the answer is a number at all.
+    pure subroutine stats_clear_acc(acc)
+        type(stats_acc), intent(out) :: acc !! the accumulator to blank.
+        acc%empty = .true.
+        acc%saw_nan = .false.
+    end subroutine stats_clear_acc
+
+    ! ==================================================================================
+    ! pf_stats
+    !
+    ! The object is a thin shell over the two routines above: `%compute` is the two-pass engine,
+    ! a streaming `%update` is `stats_stream`, and a retained `%update` appends and defers. The
+    ! counts (`c_valid`, `c_null`, `c_nan`, `n_seen`) are carried on the OBJECT as integers rather
+    ! than read back out of the accumulator, so they are exact across any number of updates and
+    ! merges and need no recomputation to answer.
+    ! ==================================================================================
+
+    !> Returns a `pf_stats` to its default-initialised state.
+    subroutine stats_reset(self)
+        class(pf_stats), intent(inout) :: self !! the accumulator.
+        if (allocated(self%keep)) deallocate(self%keep)
+        if (allocated(self%keep_w)) deallocate(self%keep_w)
+        call stats_clear_acc(self%acc)
+        self%keep_n = 0_int64
+        self%n_seen = 0_int64
+        self%c_valid = 0_int64
+        self%c_null = 0_int64
+        self%c_nan = 0_int64
+        self%hold = .true.
+        self%live = .false.
+        self%freq = .false.
+        self%wtd = .false.
+        self%skip = .true.
+        self%stale = .false.
+    end subroutine stats_reset
+
+    !> Aborts unless `%compute` or `%init` has run.
+    !!
+    !! Using an accumulator that holds nothing is misuse, not a data condition, so it aborts where
+    !! an empty POPULATION -- which `%init` produces and which is a perfectly ordinary thing for a
+    !! per-group loop to meet -- answers NaN.
+    subroutine stats_require_live(self, what)
+        class(pf_stats), intent(in) :: self  !! the accumulator.
+        character(len=*), intent(in) :: what !! the binding's name, for the message.
+        if (.not. self%live) error stop what // ": this pf_stats holds no population; " // &
+            "call %compute or %init on it first"
+    end subroutine stats_require_live
+
+    !> Grows the retained buffers to hold at least `need` elements, preserving what is live.
+    !!
+    !! Geometric growth by 1.5, matching `parquet_column`'s own rule, so a loop of `%update` costs
+    !! amortised O(1) per element rather than O(n) per batch. The weight buffer is BACKFILLED with
+    !! 1 when weights appear for the first time part-way through a stream: an unweighted element
+    !! and a weight-1 element are the same thing, and without the backfill the retained weights
+    !! would silently be shorter than the values beside them.
+    subroutine stats_reserve(self, need)
+        class(pf_stats), intent(inout) :: self !! the accumulator.
+        integer(int64), intent(in) :: need     !! the capacity required.
+        real(real64), allocatable :: tmp(:)
+        integer(int64) :: cap, want
+
+        cap = 0_int64
+        if (allocated(self%keep)) cap = size(self%keep, kind=int64)
+        if (cap < need) then
+            want = max(need, cap + cap / 2_int64)
+            allocate(tmp(want))
+            if (self%keep_n > 0_int64) tmp(1:self%keep_n) = self%keep(1:self%keep_n)
+            call move_alloc(tmp, self%keep)
+        end if
+        if (.not. self%wtd) return
+        cap = 0_int64
+        if (allocated(self%keep_w)) cap = size(self%keep_w, kind=int64)
+        if (cap < need) then
+            want = max(need, cap + cap / 2_int64)
+            allocate(tmp(want))
+            if (cap > 0_int64 .and. self%keep_n > 0_int64) then
+                tmp(1:self%keep_n) = self%keep_w(1:self%keep_n)
+            else if (self%keep_n > 0_int64) then
+                tmp(1:self%keep_n) = 1.0_real64
+            end if
+            call move_alloc(tmp, self%keep_w)
+        end if
+    end subroutine stats_reserve
+
+    !> Appends one batch's survivors to the retained buffers, in ONE traversal.
+    subroutine stats_append(self, values, what, is_valid, weights)
+        class(pf_stats), intent(inout) :: self           !! the accumulator.
+        real(real64), intent(in) :: values(:)            !! the batch, before exclusions.
+        character(len=*), intent(in) :: what             !! the binding's name, for a message.
+        logical, intent(in), optional :: is_valid(:)     !! per element: .false. marks a null.
+        real(real64), intent(in), optional :: weights(:) !! per element weight.
+        real(real64) :: x
+        integer(int64) :: nv, i
+        logical :: weighted, masked
+
+        nv = size(values, kind=int64)
+        call stats_check_sizes(nv, what, is_valid, weights)
+        stats_scan_count = stats_scan_count + 1_int64
+        weighted = present(weights)
+        masked = present(is_valid)
+        if (weighted) self%wtd = .true.
+        call stats_reserve(self, self%keep_n + nv)
+
+        do i = 1_int64, nv
+            ! The family's exclusion order: nullness, then NaN, then weight.
+            if (masked) then
+                if (.not. is_valid(i)) then
+                    self%c_null = self%c_null + 1_int64
+                    cycle
+                end if
+            end if
+            x = values(i)
+            if (self%skip) then
+                if (x /= x) then
+                    self%c_nan = self%c_nan + 1_int64
+                    cycle
+                end if
+            end if
+            if (weighted) then
+                call stats_check_weight(weights(i), i, what)
+                if (weights(i) <= 0.0_real64) cycle
+            end if
+            self%keep_n = self%keep_n + 1_int64
+            self%keep(self%keep_n) = x
+            if (self%wtd) then
+                if (weighted) then
+                    self%keep_w(self%keep_n) = weights(i)
+                else
+                    self%keep_w(self%keep_n) = 1.0_real64
+                end if
+            end if
+        end do
+        self%n_seen = self%n_seen + nv
+        self%c_valid = self%keep_n
+    end subroutine stats_append
+
+    !> Completes a deferred recomputation, if one is outstanding.
+    !!
+    !! Re-running the two-pass engine over the retained survivors is what makes a retained
+    !! `%update`/`%merge` EXACT: pass one's compaction is a no-op over an already-compacted buffer,
+    !! so the block boundaries, the tree and every partial sum are the ones `%compute` over the
+    !! concatenated input would have produced. The counts are restored afterwards because the
+    !! retained buffer no longer contains the excluded elements that produced them.
+    subroutine stats_ensure(self)
+        class(pf_stats), intent(inout) :: self !! the accumulator.
+        if (.not. self%stale) return
+        self%stale = .false.
+        if (self%wtd) then
+            call stats_engine(self%keep(1:self%keep_n), "pf_stats", weights=self%keep_w(1:self%keep_n), &
+                skipnan=self%skip, acc=self%acc)
+        else
+            call stats_engine(self%keep(1:self%keep_n), "pf_stats", skipnan=self%skip, acc=self%acc)
+        end if
+        self%acc%n_valid = self%c_valid
+        self%acc%n_null = self%c_null
+        self%acc%n_nan = self%c_nan
+    end subroutine stats_ensure
+
+    !> Folds one source accumulator into `self`; the worker both `%merge` forms share.
+    subroutine stats_merge_worker(self, other, consume)
+        class(pf_stats), intent(inout) :: self  !! the destination.
+        type(pf_stats), intent(inout) :: other  !! the source.
+        logical, intent(in) :: consume          !! whether to clear the source afterwards.
+        integer(int64) :: i
+
+        if (.not. other%live) error stop "pf_stats%merge: the source holds no population; " // &
+            "call %compute or %init on it first"
+        if (other%hold .neqv. self%hold) error stop "pf_stats%merge: the destination and the " // &
+            "source disagree on retain; merging a streaming accumulator into a retained one " // &
+            "would leave the retained values describing only part of its own population"
+        if (other%freq .neqv. self%freq) error stop "pf_stats%merge: the destination and the " // &
+            "source disagree on weight_type"
+
+        if (other%n_seen /= 0_int64) then
+            if (self%hold) then
+                if (other%wtd) self%wtd = .true.
+                call stats_reserve(self, self%keep_n + other%keep_n)
+                do i = 1_int64, other%keep_n
+                    self%keep(self%keep_n + i) = other%keep(i)
+                end do
+                if (self%wtd) then
+                    if (other%wtd) then
+                        do i = 1_int64, other%keep_n
+                            self%keep_w(self%keep_n + i) = other%keep_w(i)
+                        end do
+                    else
+                        do i = 1_int64, other%keep_n
+                            self%keep_w(self%keep_n + i) = 1.0_real64
+                        end do
+                    end if
+                end if
+                self%keep_n = self%keep_n + other%keep_n
+                self%stale = .true.
+            else
+                call stats_chan(self%acc, other%acc)
+                if (other%wtd) self%wtd = .true.
+            end if
+            self%n_seen = self%n_seen + other%n_seen
+            self%c_valid = self%c_valid + other%c_valid
+            self%c_null = self%c_null + other%c_null
+            self%c_nan = self%c_nan + other%c_nan
+            self%acc%n_valid = self%c_valid
+            self%acc%n_null = self%c_null
+            self%acc%n_nan = self%c_nan
+        end if
+        if (consume) call stats_reset(other)
+    end subroutine stats_merge_worker
+
+    ! ---- The lifecycle bindings ----
+
+    module procedure obj_clear
+        call stats_reset(self)
+    end procedure obj_clear
+
+    module procedure obj_init
+        call stats_reset(self)
+        if (present(retain)) self%hold = retain
+        if (present(skipnan)) self%skip = skipnan
+        call stats_weight_kind("pf_stats%init", weight_type, self%freq)
+        ! An empty population, not an uncomputed object: every moment is NaN from here, and the
+        ! sum is the additive identity, exactly as `%compute` over an empty array would leave it.
+        call stats_undefine(self%acc)
+        self%acc%vsum = 0.0_real64
+        self%live = .true.
+    end procedure obj_init
+
+    module procedure obj_compute
+        call stats_reset(self)
+        if (present(retain)) self%hold = retain
+        if (present(skipnan)) self%skip = skipnan
+        call stats_weight_kind("pf_stats%compute", weight_type, self%freq)
+        self%wtd = present(weights)
+        if (self%hold) then
+            call stats_engine(values, "pf_stats%compute", is_valid, weights, skipnan, self%acc, &
+                self%keep, self%keep_w)
+            self%keep_n = self%acc%n_valid
+        else
+            call stats_engine(values, "pf_stats%compute", is_valid, weights, skipnan, self%acc)
+        end if
+        self%n_seen = size(values, kind=int64)
+        self%c_valid = self%acc%n_valid
+        self%c_null = self%acc%n_null
+        self%c_nan = self%acc%n_nan
+        self%live = .true.
+    end procedure obj_compute
+
+    module procedure obj_update
+        type(stats_acc) :: batch
+        call stats_require_live(self, "pf_stats%update")
+        if (self%hold) then
+            call stats_append(self, values, "pf_stats%update", is_valid, weights)
+            self%stale = .true.
+            self%acc%n_valid = self%c_valid
+            self%acc%n_null = self%c_null
+            self%acc%n_nan = self%c_nan
+        else
+            call stats_stream(values, "pf_stats%update", is_valid, weights, self%skip, batch)
+            call stats_chan(self%acc, batch)
+            if (present(weights)) self%wtd = .true.
+            self%n_seen = self%n_seen + size(values, kind=int64)
+            self%c_valid = self%acc%n_valid
+            self%c_null = self%acc%n_null
+            self%c_nan = self%acc%n_nan
+        end if
+    end procedure obj_update
+
+    module procedure obj_merge_one
+        logical :: eat
+        call stats_require_live(self, "pf_stats%merge")
+        eat = .false.
+        if (present(consume)) eat = consume
+        call stats_merge_worker(self, other, eat)
+    end procedure obj_merge_one
+
+    module procedure obj_merge_many
+        logical :: eat
+        integer :: k
+        call stats_require_live(self, "pf_stats%merge")
+        eat = .false.
+        if (present(consume)) eat = consume
+        ! Ascending index, always: the whole reason this form exists is that the answer must not
+        ! depend on which thread filled which slot first.
+        do k = 1, size(others)
+            call stats_merge_worker(self, others(k), eat)
+        end do
+    end procedure obj_merge_many
+
+    ! ---- The tier-A queries ----
+
+    module procedure obj_is_computed
+        res = self%live
+    end procedure obj_is_computed
+
+    module procedure obj_retains
+        res = self%hold
+    end procedure obj_retains
+
+    module procedure obj_n
+        call stats_require_live(self, "pf_stats%n")
+        res = self%n_seen
+    end procedure obj_n
+
+    module procedure obj_n_valid
+        call stats_require_live(self, "pf_stats%n_valid")
+        res = self%c_valid
+    end procedure obj_n_valid
+
+    module procedure obj_n_null
+        call stats_require_live(self, "pf_stats%n_null")
+        res = self%c_null
+    end procedure obj_n_null
+
+    module procedure obj_n_nan
+        call stats_require_live(self, "pf_stats%n_nan")
+        res = self%c_nan
+    end procedure obj_n_nan
+
+    module procedure obj_sum_weights
+        call stats_require_live(self, "pf_stats%sum_weights")
+        call stats_ensure(self)
+        res = self%acc%w_sum
+    end procedure obj_sum_weights
+
+    module procedure obj_sum
+        call stats_require_live(self, "pf_stats%sum")
+        call stats_ensure(self)
+        res = self%acc%vsum
+    end procedure obj_sum
+
+    module procedure obj_mean
+        call stats_require_live(self, "pf_stats%mean")
+        call stats_ensure(self)
+        res = self%acc%mean
+    end procedure obj_mean
+
+    module procedure obj_variance
+        integer :: dd
+        call stats_require_live(self, "pf_stats%variance")
+        call stats_ensure(self)
+        dd = 1
+        if (present(ddof)) dd = ddof
+        res = stats_var(self%acc, dd, self%freq)
+    end procedure obj_variance
+
+    module procedure obj_stddev
+        integer :: dd
+        call stats_require_live(self, "pf_stats%stddev")
+        call stats_ensure(self)
+        dd = 1
+        if (present(ddof)) dd = ddof
+        res = stats_sqrt(stats_var(self%acc, dd, self%freq))
+    end procedure obj_stddev
+
+    module procedure obj_sem
+        integer :: dd
+        call stats_require_live(self, "pf_stats%sem")
+        call stats_ensure(self)
+        dd = 1
+        if (present(ddof)) dd = ddof
+        res = stats_sem(self%acc, dd, self%freq)
+    end procedure obj_sem
+
+    module procedure obj_skewness
+        logical :: bi
+        call stats_require_live(self, "pf_stats%skewness")
+        call stats_ensure(self)
+        bi = .false.
+        if (present(bias)) bi = bias
+        res = stats_skew(self%acc, bi, self%freq)
+    end procedure obj_skewness
+
+    module procedure obj_kurtosis
+        logical :: bi, ex
+        call stats_require_live(self, "pf_stats%kurtosis")
+        call stats_ensure(self)
+        bi = .false.
+        ex = .true.
+        if (present(bias)) bi = bias
+        if (present(excess)) ex = excess
+        res = stats_kurt(self%acc, bi, ex, self%freq)
+    end procedure obj_kurtosis
+
+    module procedure obj_vmin
+        call stats_require_live(self, "pf_stats%vmin")
+        call stats_ensure(self)
+        res = self%acc%vmin
+    end procedure obj_vmin
+
+    module procedure obj_vmax
+        call stats_require_live(self, "pf_stats%vmax")
+        call stats_ensure(self)
+        res = self%acc%vmax
+    end procedure obj_vmax
+
+    module procedure obj_range
+        call stats_require_live(self, "pf_stats%range")
+        call stats_ensure(self)
+        res = self%acc%vmax - self%acc%vmin
+    end procedure obj_range
+
+    ! ---- The traversal counter ----
+
+    module procedure parquet_debug_stats_scans
+        res = stats_scan_count
+    end procedure parquet_debug_stats_scans
+
+    module procedure parquet_debug_reset_stats_scans
+        stats_scan_count = 0_int64
+    end procedure parquet_debug_reset_stats_scans
 
 end submodule parquet_stats_core ! GCOVR_EXCL_LINE

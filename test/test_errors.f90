@@ -1724,7 +1724,13 @@ contains
             new_unittest("an infinite weight aborts, naming its index", &
                 test_stats_infinite_weight_aborts), &
             new_unittest("an unrecognised weight_type aborts, listing both accepted tokens", &
-                test_stats_unknown_weight_type_aborts) &
+                test_stats_unknown_weight_type_aborts), &
+            new_unittest("querying a pf_stats that holds no population aborts", &
+                test_stats_object_query_before_compute_aborts), &
+            new_unittest("merging across a retain mismatch aborts", &
+                test_stats_object_merge_retain_mismatch_aborts), &
+            new_unittest("merging a pf_stats that holds no population aborts", &
+                test_stats_object_merge_uncomputed_source_aborts) &
             ]
         testsuite = [p1, p2, p3, p4, p5, p6, p7, p8, p9]
     end subroutine collect_tests_parquet_errors
@@ -5959,6 +5965,43 @@ contains
             failure_message="an unrecognised weight_type was expected to abort", &
             required_stderr="pf_variance: weight_type ""inverse-variance"" is not recognised")
     end subroutine test_stats_unknown_weight_type_aborts
+
+    !> pf_stats abort path: see scenario_stats_object_query_before_compute in
+    !> test/error_scenarios.f90. The message has to say how to fix it, because the two states this
+    !> guard separates -- an empty population and an uncomputed object -- look identical from the
+    !> call site and only one of them is an error.
+    subroutine test_stats_object_query_before_compute_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_object_query_before_compute", &
+            expect_abort=.true., &
+            failure_message="querying an uncomputed pf_stats was expected to abort", &
+            required_stderr="pf_stats%mean: this pf_stats holds no population")
+    end subroutine test_stats_object_query_before_compute_aborts
+
+    !> pf_stats abort path: see scenario_stats_object_merge_retain_mismatch in
+    !> test/error_scenarios.f90. The message says what would go wrong rather than only that the
+    !> two disagree: the moments of such a merge would be perfectly correct, and only the retained
+    !> values -- which nothing in tier A reads -- would be short.
+    subroutine test_stats_object_merge_retain_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_object_merge_retain_mismatch", &
+            expect_abort=.true., &
+            failure_message="merging across a retain mismatch was expected to abort", &
+            required_stderr="pf_stats%merge: the destination and the source disagree on retain")
+    end subroutine test_stats_object_merge_retain_mismatch_aborts
+
+    !> pf_stats abort path: see scenario_stats_object_merge_uncomputed_source in
+    !> test/error_scenarios.f90.
+    subroutine test_stats_object_merge_uncomputed_source_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_object_merge_uncomputed_source", &
+            expect_abort=.true., &
+            failure_message="merging an uncomputed source was expected to abort", &
+            required_stderr="pf_stats%merge: the source holds no population")
+    end subroutine test_stats_object_merge_uncomputed_source_aborts
 
     !> pf_nth_quantile abort path: see scenario_sorting_quantile_out_of_range in
     !> test/error_scenarios.f90. The message names the scale, since 50 is exactly what a caller

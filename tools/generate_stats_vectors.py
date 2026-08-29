@@ -32,6 +32,15 @@ Usage:
     python3 tools/generate_stats_vectors.py --check      # assert the committed file is current
 
 `--self-test` needs numpy, scipy and pandas; plain generation and `--check` need only `mpmath`.
+`--check` runs in CI's lint stage, which installs Ubuntu's `python3-mpmath` for exactly that.
+
+**The emitted digits do not depend on the `mpmath` version, and that was measured rather than
+assumed** -- 1.3.0 (what Ubuntu 24.04 packages) and 1.4.1 reproduce the committed file byte for
+byte. They cannot easily differ: every operation here is `+`, `*`, `/` or `sqrt` at `mp.dps = 50`,
+all correctly rounded, and the emitted literal is the round-to-nearest `float` of that. It is worth
+knowing because the alternative -- a `--check` that fails on a machine whose oracle is a minor
+version behind -- would look exactly like a real drift in the committed expectations.
+
 Maintainer-only: it is never run at build time and is stripped from the fpm-published package.
 """
 

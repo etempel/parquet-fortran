@@ -749,6 +749,12 @@ program error_scenarios
         call scenario_stats_infinite_weight()
     case ("stats_unknown_weight_type")
         call scenario_stats_unknown_weight_type()
+    case ("stats_object_query_before_compute")
+        call scenario_stats_object_query_before_compute()
+    case ("stats_object_merge_retain_mismatch")
+        call scenario_stats_object_merge_retain_mismatch()
+    case ("stats_object_merge_uncomputed_source")
+        call scenario_stats_object_merge_uncomputed_source()
     case ("sorting_column_vector")
         call scenario_sorting_column_vector()
     case ("sorting_search_unsorted")
@@ -16626,6 +16632,57 @@ contains
         call pf_variance(v, var, weights=w, weight_type="inverse-variance")   ! -> aborts
         print '(a,es12.5)', "unexpectedly accepted an unknown weight_type, var=", var
     end subroutine scenario_stats_unknown_weight_type
+
+    !> Reading a statistic off an accumulator that holds nothing is MISUSE, not a data condition.
+    !!
+    !! The distinction this scenario pins is the one a reader is most likely to get wrong: an
+    !! accumulator armed by `%init` holds an EMPTY population and answers NaN, because a per-group
+    !! loop meets an empty group on real data. A default-initialised one holds no population at
+    !! all, and answering NaN there would silently turn a forgotten `%compute` into a plausible
+    !! result. The `%init` call below is the negative control -- it proves the guard is keyed on
+    !! the object having been armed and not simply on the population being empty.
+    subroutine scenario_stats_object_query_before_compute()
+        type(pf_stats) :: armed, fresh
+        real(real64) :: m
+
+        call armed%init()
+        m = armed%mean()               ! an EMPTY population: NaN, no abort
+        if (m == m) print '(a)', "the mean of an empty population was expected to be NaN"
+        m = fresh%mean()               ! -> aborts (never computed, never armed)
+        print '(a,es12.5)', "unexpectedly read a statistic off an uncomputed pf_stats, mean=", m
+    end subroutine scenario_stats_object_query_before_compute
+
+    !> Merging a streaming accumulator into a retained one would corrupt the retained population.
+    !!
+    !! The destination would go on believing its retained values describe its whole population
+    !! while they described only the part that came from retained sources -- so the moments would
+    !! be right and every order statistic of a later phase silently wrong. That is precisely the
+    !! class this library refuses rather than documents.
+    subroutine scenario_stats_object_merge_retain_mismatch()
+        type(pf_stats) :: keeper, streamer
+
+        call keeper%compute([1.0_real64, 2.0_real64, 3.0_real64])
+        call streamer%init(retain=.false.)
+        call streamer%update([4.0_real64, 5.0_real64])
+        call keeper%merge(streamer)    ! -> aborts (retain disagrees)
+        print '(a,i0)', "unexpectedly merged across a retain mismatch, n=", keeper%n()
+    end subroutine scenario_stats_object_merge_retain_mismatch
+
+    !> A source that was never computed contributes nothing and almost certainly means a bug.
+    !!
+    !! An EMPTY source is a no-op and must stay one -- a threaded fold over slots a short loop
+    !! never filled is ordinary -- so the guard is on the source never having been armed, and the
+    !! armed-but-empty merge below is the negative control for that distinction.
+    subroutine scenario_stats_object_merge_uncomputed_source()
+        type(pf_stats) :: total, empty, never
+
+        call total%compute([1.0_real64, 2.0_real64, 3.0_real64])
+        call empty%init()
+        call total%merge(empty)        ! an armed but empty source: a no-op
+        if (total%n() /= 3_int64) print '(a)', "merging an empty source was expected to change nothing"
+        call total%merge(never)        ! -> aborts (never computed, never armed)
+        print '(a,i0)', "unexpectedly merged an uncomputed source, n=", total%n()
+    end subroutine scenario_stats_object_merge_uncomputed_source
 
     !> A vector column has no defined order on a whole row, so it cannot be a sort key -- the
     !! same rule parquet_table%sort_by applies, enforced here for a bare parquet_column.

@@ -5636,6 +5636,27 @@ contains
         integer(int32), allocatable :: ser(:), par(:)
         integer :: n, t, k
 
+        ! **Precondition, declared rather than assumed.** Without a team this test's
+        ! positive control (`threaded_split_ran`/`threaded_design_was`) cannot be
+        ! satisfied, and the identity oracle beneath it would compare the serial answer
+        ! with itself -- passing against a library that had stopped threading entirely.
+        ! Skipping says so out loud; a silent pass would not. Same shape as the engine
+        ! tests above. It was flang that found this: it builds with no OpenMP at all
+        ! (MacPorts flang-mp-22 ships no omp_lib.mod), so every one of these failed there
+        ! the moment the control was added -- which is the control working, not a defect.
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it the bucket split is preprocessed out " // &
+            "entirely, so no team is ever opened, the threaded design is never entered " // &
+            "and every assertion below would be vacuous")
+        return
+#else
+        if (omp_get_num_procs() < 2) then
+            call skip_test(error, "needs at least two processors: the engine clamps an " // &
+                "explicit threads= to omp_get_num_procs(), so it resolves to 1 here and " // &
+                "no threaded design is entered")
+            return
+        end if
+#endif
         do n = 2, 400
             allocate(v(n))
             call ties_fixture(v)
@@ -5706,6 +5727,27 @@ contains
         logical, allocatable :: seen(:)
         integer :: n, t, k
 
+        ! **Precondition, declared rather than assumed.** Without a team this test's
+        ! positive control (`threaded_split_ran`/`threaded_design_was`) cannot be
+        ! satisfied, and the identity oracle beneath it would compare the serial answer
+        ! with itself -- passing against a library that had stopped threading entirely.
+        ! Skipping says so out loud; a silent pass would not. Same shape as the engine
+        ! tests above. It was flang that found this: it builds with no OpenMP at all
+        ! (MacPorts flang-mp-22 ships no omp_lib.mod), so every one of these failed there
+        ! the moment the control was added -- which is the control working, not a defect.
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it the bucket split is preprocessed out " // &
+            "entirely, so no team is ever opened, the threaded design is never entered " // &
+            "and every assertion below would be vacuous")
+        return
+#else
+        if (omp_get_num_procs() < 2) then
+            call skip_test(error, "needs at least two processors: the engine clamps an " // &
+                "explicit threads= to omp_get_num_procs(), so it resolves to 1 here and " // &
+                "no threaded design is entered")
+            return
+        end if
+#endif
         call force_fortran_bucket_split(2_int64)
         do n = 2, 400
             allocate(v(n), seen(n))
@@ -5752,6 +5794,27 @@ contains
         integer(int32), allocatable :: ser(:), par(:)
         integer :: shape_id, k, t
 
+        ! **Precondition, declared rather than assumed.** Without a team this test's
+        ! positive control (`threaded_split_ran`/`threaded_design_was`) cannot be
+        ! satisfied, and the identity oracle beneath it would compare the serial answer
+        ! with itself -- passing against a library that had stopped threading entirely.
+        ! Skipping says so out loud; a silent pass would not. Same shape as the engine
+        ! tests above. It was flang that found this: it builds with no OpenMP at all
+        ! (MacPorts flang-mp-22 ships no omp_lib.mod), so every one of these failed there
+        ! the moment the control was added -- which is the control working, not a defect.
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it the bucket split is preprocessed out " // &
+            "entirely, so no team is ever opened, the threaded design is never entered " // &
+            "and every assertion below would be vacuous")
+        return
+#else
+        if (omp_get_num_procs() < 2) then
+            call skip_test(error, "needs at least two processors: the engine clamps an " // &
+                "explicit threads= to omp_get_num_procs(), so it resolves to 1 here and " // &
+                "no threaded design is entered")
+            return
+        end if
+#endif
         do shape_id = 1, 4
             select case (shape_id)
             case (1)
@@ -5806,6 +5869,27 @@ contains
         integer(int32), allocatable :: ser(:), par(:)
         integer :: k, t
 
+        ! **Precondition, declared rather than assumed.** Without a team this test's
+        ! positive control (`threaded_split_ran`/`threaded_design_was`) cannot be
+        ! satisfied, and the identity oracle beneath it would compare the serial answer
+        ! with itself -- passing against a library that had stopped threading entirely.
+        ! Skipping says so out loud; a silent pass would not. Same shape as the engine
+        ! tests above. It was flang that found this: it builds with no OpenMP at all
+        ! (MacPorts flang-mp-22 ships no omp_lib.mod), so every one of these failed there
+        ! the moment the control was added -- which is the control working, not a defect.
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it the threaded LSD chain and the bucket split is preprocessed out " // &
+            "entirely, so no team is ever opened, the threaded design is never entered " // &
+            "and every assertion below would be vacuous")
+        return
+#else
+        if (omp_get_num_procs() < 2) then
+            call skip_test(error, "needs at least two processors: the engine clamps an " // &
+                "explicit threads= to omp_get_num_procs(), so it resolves to 1 here and " // &
+                "no threaded design is entered")
+            return
+        end if
+#endif
         do k = 1, n
             write(s(k), '(i8.8)') mod(k * 7919, 137)   ! heavy ties, lexicographic order
             a(k) = real(mod(k * 7919, 53), real64)
@@ -5867,6 +5951,27 @@ contains
         logical, allocatable :: seen(:)
         integer :: n, t, k
 
+        ! **Precondition, declared rather than assumed.** Without a team this test's
+        ! positive control (`threaded_split_ran`/`threaded_design_was`) cannot be
+        ! satisfied, and the identity oracle beneath it would compare the serial answer
+        ! with itself -- passing against a library that had stopped threading entirely.
+        ! Skipping says so out loud; a silent pass would not. Same shape as the engine
+        ! tests above. It was flang that found this: it builds with no OpenMP at all
+        ! (MacPorts flang-mp-22 ships no omp_lib.mod), so every one of these failed there
+        ! the moment the control was added -- which is the control working, not a defect.
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it the threaded LSD chain is preprocessed out " // &
+            "entirely, so no team is ever opened, the threaded design is never entered " // &
+            "and every assertion below would be vacuous")
+        return
+#else
+        if (omp_get_num_procs() < 2) then
+            call skip_test(error, "needs at least two processors: the engine clamps an " // &
+                "explicit threads= to omp_get_num_procs(), so it resolves to 1 here and " // &
+                "no threaded design is entered")
+            return
+        end if
+#endif
         do n = 2, 400
             allocate(s(n), seen(n))
             do k = 1, n
@@ -5920,6 +6025,27 @@ contains
         integer :: k, t, variant
         logical :: nf
 
+        ! **Precondition, declared rather than assumed.** Without a team this test's
+        ! positive control (`threaded_split_ran`/`threaded_design_was`) cannot be
+        ! satisfied, and the identity oracle beneath it would compare the serial answer
+        ! with itself -- passing against a library that had stopped threading entirely.
+        ! Skipping says so out loud; a silent pass would not. Same shape as the engine
+        ! tests above. It was flang that found this: it builds with no OpenMP at all
+        ! (MacPorts flang-mp-22 ships no omp_lib.mod), so every one of these failed there
+        ! the moment the control was added -- which is the control working, not a defect.
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it the bucket split is preprocessed out " // &
+            "entirely, so no team is ever opened, the threaded design is never entered " // &
+            "and every assertion below would be vacuous")
+        return
+#else
+        if (omp_get_num_procs() < 2) then
+            call skip_test(error, "needs at least two processors: the engine clamps an " // &
+                "explicit threads= to omp_get_num_procs(), so it resolves to 1 here and " // &
+                "no threaded design is entered")
+            return
+        end if
+#endif
         do k = 1, n
             v(k) = real(mod(k * 7919, 41), real64)
             if (mod(k, 7) == 0) v(k) = ieee_value(1.0_real64, ieee_quiet_nan)

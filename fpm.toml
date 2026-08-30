@@ -132,6 +132,16 @@ nagfor.flags = "-f2018 -nan -colour -w=unused -Warn=unkind_real_literal -Warn=do
 #                    curated run_tester_noundef list. It exports OMP_STACKSIZE, which is load-
 #                    bearing rather than a tuning knob -- an OpenMP worker's stack is that
 #                    variable, not the process limit, and the default is below the measured floor.
+#                        RUNNING THIS PROFILE BY HAND NEEDS THAT VARIABLE TOO, and the symptom of
+#                    forgetting it names nothing: `fpm test run_tester_pf --profile nagundef --
+#                    healpix_tier_b` dies with NO MESSAGE, and fpm reports it as "exit code 10" --
+#                    which is the SIGNAL, not a status (SIGBUS is 10 on macOS; the process exits
+#                    128+10 = 138). It is a worker thread hitting its stack guard page.
+#                    `-C=undefined` inflates every frame, that suite needs about 1 MB of worker
+#                    stack under it, and nagfor's default is below that; the same suite passes
+#                    under every other profile without the variable, which is what makes the
+#                    failure look like a defect in the suite. So: `OMP_STACKSIZE=2M fpm test ...`,
+#                    or just use the wrapper, which is there for exactly this.
 #                    Standalone report, with the generated C and the compiler matrix:
 #                    feature_nag_bindc_undefined.md; the runner split: feature_tests.md.
 #                Note -C=all does NOT imply -C=undefined, so the nagdeb set below is unaffected.

@@ -1437,6 +1437,23 @@ contains
     !! (the flush forces it), while "record NOT yet on disk" depends on the runtime's buffer size
     !! and write-through policy and would be a flaky test on some compiler. The never-flush arm is
     !! therefore asserted through %flush recovering the records, not through their prior absence.
+    !!
+    !! **The flush is observed with INQUIRE, never by reading the file back while the sink still
+    !! holds it open.** F2018 12.5.1 forbids connecting one file to two units at once, so an
+    !! `open(..., status="old")` on a path a sink is writing is non-conforming -- gfortran, ifx and
+    !! nagfor allow it as an extension and flang refuses it outright, with `iostat = 1037`, which
+    !! `read_back` reports as "no lines" and the assertion then blames the library for. Enquiring
+    !! about a file BY NAME is allowed whether or not it is connected, so `size=` gives the same
+    !! observation conformingly: it moves only as bytes actually reach the file.
+    !!
+    !! **It is exactly as sensitive as the read-back was -- no more.** Measured, because the
+    !! temptation is to claim the size check is stronger and it is not: with the `flush` statement
+    !! removed from `deliver`, `size` while open reads 0 under nagfor and this test fails, while
+    !! under gfortran and flang it reads the full record and the test passes. Those two runtimes
+    !! write each record straight through, so NO instrument can observe the flush there -- the
+    !! read-back could not either. So the flush property is asserted on whichever runtime buffers,
+    !! and is vacuous on the ones that do not; that is a property of the runtimes, not of the
+    !! assertion, and it is the same caveat the paragraph above already makes about absence.
     subroutine test_flush_level(error)
         type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
         character(len=*), parameter :: pa = "test_run/log_flush_all.txt"
@@ -1445,14 +1462,21 @@ contains
         type(pf_logger) :: lg
         character(len=512), allocatable :: lines(:)
         integer :: n
+        integer :: sz_open, sz_closed
 
         ! flush_level = ALL: every record visible immediately.
         call lg%init(console = .false.)
         call lg%add_file(pa, append = .false., format = "{message}", flush_level = PF_LEVEL_ALL)
         call lg%info("immediately visible")
+        inquire (file = pa, size = sz_open)
+        call lg%close()
+        inquire (file = pa, size = sz_closed)
+        call check(error, sz_open > 0 .and. sz_open == sz_closed, &
+            "flush_level = PF_LEVEL_ALL flushes every record")
+        if (allocated(error)) return
         call read_back(pa, lines, n)
         call check(error, n == 1 .and. has(lines(1), "immediately visible"), &
-            "flush_level = PF_LEVEL_ALL flushes every record")
+            "and the record it flushed is the one that was logged")
         if (allocated(error)) return
 
         ! The default (WARNING): a WARNING record pushes itself AND the buffered INFO before it.
@@ -1460,8 +1484,14 @@ contains
         call lg%add_file(pw, append = .false., format = "{message}")
         call lg%info("quieter, buffered")
         call lg%warning("trouble, flushes")
+        inquire (file = pw, size = sz_open)
+        call lg%close()
+        inquire (file = pw, size = sz_closed)
+        call check(error, sz_open > 0 .and. sz_open == sz_closed, &
+            "a WARNING record's flush pushes the buffered INFO before it")
+        if (allocated(error)) return
         call read_back(pw, lines, n)
-        call check(error, n == 2, "a WARNING record's flush pushes the buffered INFO before it")
+        call check(error, n == 2, "and both records are on disk")
         if (allocated(error)) return
         call check(error, has(lines(1), "quieter") .and. has(lines(2), "trouble"), &
             "and the records arrive in order")
@@ -1472,11 +1502,15 @@ contains
         call lg%add_file(pn, append = .false., format = "{message}", flush_level = PF_LEVEL_OFF)
         call lg%critical("even this does not flush")
         call lg%flush()
-        call read_back(pn, lines, n)
-        call check(error, n == 1 .and. has(lines(1), "even this"), &
+        inquire (file = pn, size = sz_open)
+        call lg%close()
+        inquire (file = pn, size = sz_closed)
+        call check(error, sz_open > 0 .and. sz_open == sz_closed, &
             "flush_level = PF_LEVEL_OFF still delivers through an explicit %flush")
         if (allocated(error)) return
-        call lg%close()
+        call read_back(pn, lines, n)
+        call check(error, n == 1 .and. has(lines(1), "even this"), &
+            "and what %flush delivered is the record that was logged")
     end subroutine test_flush_level
 
     !> The clock fields are gathered only when some attached sink's template renders them, the

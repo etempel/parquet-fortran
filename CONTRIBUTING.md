@@ -192,11 +192,18 @@ That is deliberate: it is what makes every runner except `run_tester_errors` a p
 nothing, which is what lets the two undef-safe runners exist at all.
 
 **`run_tester_noundef`'s membership is decided by a person, never by a tool.** It holds suites that
-reach no C++ and still cannot run under `-C=undefined` — today `columns` (it reads a null row's
-deliberately unspecified value bytes, which is `%init`'s documented contract) and `sorting` (a
-segfault inside NAG's own instrumentation; see the comment at its registration).
-`tools/check_nag_undefined.sh` re-tries them and *reports* any that now pass, but moving one out is
-an edit someone makes after looking at why the result changed.
+reach no C++ and still cannot run under `-C=undefined` — today just `sorting`, which segfaults
+inside NAG's own instrumentation on a character key; the comment at its registration carries the
+whole diagnosis, including the measurement that only three of its 117 tests are affected.
+`tools/check_nag_undefined.sh` re-tries the list and *reports* any suite that now passes, but moving
+one out is an edit someone makes after looking at why the result changed — which is how `columns`
+left it.
+
+**Run that profile through the wrapper, or export `OMP_STACKSIZE` yourself.** `-C=undefined` inflates
+every stack frame, and `healpix_tier_b` then needs about 1 MB of OpenMP *worker* stack — which is
+`OMP_STACKSIZE`, not the process limit, and is above nagfor's default. Without it the run dies with
+no message at all, and fpm reports the signal as `exit code 10`, which reads like an ordinary status.
+No other profile needs it.
 
 `tools/check_source_conventions.py`'s `check_test_runner_partition` enforces the split in CI: every
 suite in exactly one runner, no undef-safe runner reaching `parquet_bindings` or declaring its own

@@ -332,7 +332,7 @@ Output is committed; re-run the generator and its `--check` after editing one.
 |---|---|
 | `machine_report.sh` | Identifies a machine and its toolchain. Run it at the start of every benchmarking run. |
 | `fpm_lto.sh` | **Sourced, not executed** — an LTO-aware `fpm` wrapper. See [above](#building-with-link-time-optimisation). |
-| `nagfor_fpm_shim/nagfor` | Makes `fpm build` work with NAG despite fpm 0.13's NAG link-line defects. |
+| `nagfor_fpm_shim/nagfor` | Makes `fpm build` and `fpm install` work with NAG despite fpm 0.13's NAG link-line defects. |
 | `build_ci_test_image.sh` | Bakes the CI environment into a local Docker image. **Maintainer-only** — see below. |
 | `run_ci_test_image.sh` | Runs this working tree against that image. |
 | `prep_fpm_publish.sh` | Prepares the disposable branch `fpm publish` packages. **Consumer-facing.** |

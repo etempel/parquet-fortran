@@ -19,9 +19,22 @@
 #      "clang: error: no such file or directory: 'arrow'".
 #   3. The macOS-only `-Wl,-headerpad,0x200` (gcc syntax for handing ld an
 #      option) reaches clang as a raw ld option through nagfor's -Wl, and is
-#      rejected. It only reserves Mach-O header padding for a later
-#      install_name_tool edit, so dropping it is safe. Upstream fix pending:
-#      fortran-lang/fpm PR #1312.
+#      rejected with "clang: error: unknown argument: '-headerpad'". It is
+#      TRANSLATED here rather than dropped, into the -Xlinker spelling clang
+#      does accept. Upstream fix pending: fortran-lang/fpm PR #1312.
+#
+#      **Dropping it is NOT safe, although it looks it.** The flag reserves
+#      Mach-O header padding for a later install_name_tool edit, and nothing
+#      in `fpm build` or `fpm test` ever performs one -- but `fpm install`
+#      does, adding two rpaths (`@executable_path/../lib` and
+#      `@executable_path`) to the installed copy. Each LC_RPATH costs 40
+#      bytes; without the flag ld64 leaves its default 32-byte pad plus
+#      alignment slack, which measured 56 bytes on this project. The first
+#      rpath fits, the second does not, and `fpm install` dies with
+#      "larger updated load commands do not fit (the program must be
+#      relinked, and you may need to use -headerpad or
+#      -headerpad_max_install_names)". The translated flag reserves 0x200
+#      (512) bytes, which measured as a 520-byte pad -- room for both.
 #
 # Usage: prepend this directory to PATH before running fpm with FPM_FC=nagfor
 # (e.g. from the shell script that activates the NAG environment):
@@ -111,8 +124,10 @@ for a in "$@"; do
             seen_openmp=1
             ;;
         -Wl,-headerpad,0x200)
-            continue
-            ;;
+            # fpm's gcc spelling; clang rejects a bare -headerpad, but takes
+            # it through -Xlinker. Dropping it instead breaks `fpm install`
+            # -- see item 3 above.
+            a="-Wl,-Xlinker,-headerpad,-Xlinker,0x200" ;;
         -Wl,-*)
             : ;;                 # other dash passthroughs: leave untouched
         -Wl,*)

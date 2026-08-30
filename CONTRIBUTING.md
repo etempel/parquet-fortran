@@ -340,7 +340,7 @@ Output is committed; re-run the generator and its `--check` after editing one.
 | `convert_fits_to_parquet.py` | A FITS binary table into a `.parquet` file. **Consumer-facing.** |
 | `parquet_metadata_to_md.py` | A `.parquet` file's metadata as markdown, via `pyarrow`. **Consumer-facing.** |
 | `philox_reference.py` | An independent Philox model, for `check_philox_compliance.sh`. |
-| `count_lines.py` | Code/comment/blank line counts per source group. |
+| `count_lines.py` | Code/comment/blank counts per source group, Markdown counts, and a code-vs-documentation summary. |
 | `count_tests.sh` | Unit tests per suite, read from source without building. |
 | `check_nag_undefined.sh` | Runs the undef-safe test runners under nagfor's `-C=undefined`. |
 | `doc_review_process.md` | The procedure for reviewing the `doc/pages/` user guide one page at a time: the passes, the report, and what a review may change. Prose, not a script. |

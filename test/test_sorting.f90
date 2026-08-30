@@ -195,6 +195,12 @@ contains
             new_unittest("merge handles an empty input", test_merge_empty), &
             new_unittest("merge widens two string lengths", test_merge_string_widths), &
             new_unittest("pf_minmax: every type", test_minmax_every_specific), &
+            new_unittest("a selection's two routes agree, and both are reachable", &
+                test_selection_routes_agree), &
+            new_unittest("pf_minmax ok= reports an empty population, every type", &
+                test_minmax_ok_every_specific), &
+            new_unittest("pf_nth_quantile ok= reports an empty population, every type", &
+                test_quantile_ok_every_specific), &
             new_unittest("pf_argminmax: every type x both index kinds", test_argminmax_every_specific), &
             new_unittest("pf_merge: every type", test_merge_every_specific), &
             new_unittest("a threaded sort equals the serial one", test_threads_identical), &
@@ -4287,6 +4293,476 @@ contains
                 "parquet_string_column pf_minmax must report the lexicographic ends")
         end block
     end subroutine test_minmax_every_specific
+    !
+    !> **A selection answers by quickselecting or by ordering, and the two must agree.**
+    !> `SORT_NTH_ORDER_MIN` is 256 rows, far above every fixture in this suite, so without the
+    !> debug override only the quickselect arm would ever run — and the arm that SHIPS for any
+    !> array worth selecting from would be untested. That is `feature_risks.md` Risk-49's shape
+    !> exactly: a size threshold hiding a whole code path from the tests written for everything
+    !> else.
+    !>
+    !> Both arms are forced on the same fixture and their answers compared **element for element,
+    !> at every rank** — not at one probe, because a routing bug that returned a neighbouring rank
+    !> would survive a single-probe check. The comparison is against the full sort's own
+    !> permutation, so it is an independent expectation rather than one route vouching for the
+    !> other.
+    !>
+    !> The negative control is the last block: with the floor forced high the quickselect arm must
+    !> still answer correctly, so a test that had accidentally forced ordering in both arms fails.
+    subroutine test_selection_routes_agree(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer, parameter :: NSEL = 64
+        real(real64) :: v(NSEL), q_sel, q_ord
+        integer(int64), allocatable :: perm(:)
+        integer(int64) :: i_sel, i_ord, r
+        integer :: k
+
+        ! Deliberately not sorted, with a duplicated value at ranks that differ, so a route that
+        ! broke ties differently would report a different INDEX for the same VALUE.
+        do k = 1, NSEL
+            v(k) = real(mod(k * 37, NSEL), real64)
+        end do
+        v(7) = v(19)
+        call pf_argsort(v, perm)
+
+        do r = 1_int64, int(NSEL, int64)
+            call parquet_debug_set_sort_nth_order_min(huge(0_int64))   ! force quickselect
+            call pf_nth_element(v, r, q_sel, i_sel)
+            call parquet_debug_set_sort_nth_order_min(1_int64)         ! force the ordering route
+            call pf_nth_element(v, r, q_ord, i_ord)
+            call parquet_debug_set_sort_nth_order_min(-1_int64)
+            call check(error, i_sel == perm(r) .and. i_ord == perm(r), &
+                "both selection routes must report the index the full sort puts at that rank")
+            if (allocated(error)) return
+            call check(error, q_sel == v(perm(r)) .and. q_ord == v(perm(r)), &
+                "both selection routes must report the value at that rank")
+            if (allocated(error)) return
+        end do
+
+        ! **The answers alone cannot say WHICH route ran** -- both are correct by construction, so
+        ! a change that disabled the routing entirely would pass every assertion above. Confirmed
+        ! by mutation: forcing the branch to `.false.` leaves this test green up to here. The radix
+        ! pass count is the observable that separates them: the ordering route drives the engine's
+        ! radix path, quickselect never touches it.
+        call parquet_debug_set_sort_nth_order_min(1_int64)             ! force the ordering route
+        ! The radix path has a floor of its own (SORT_RADIX_MIN_ROWS, 128 rows), well above this
+        ! 64-row fixture, so it has to be lowered too or the observable reads 0 for the wrong
+        ! reason -- which is the same Risk-49 trap one level down.
+        call parquet_debug_set_sort_radix_min_rows(2_int64)
+        call parquet_debug_reset_sort_radix_passes()
+        call pf_nth_element(v, 1_int64, q_ord, i_ord)
+        call parquet_debug_set_sort_radix_min_rows(-1_int64)
+        call check(error, parquet_debug_sort_radix_passes() > 0_int64, &
+            "the ordering route must reach the radix path, which is how it is told from quickselect")
+        if (allocated(error)) return
+
+        ! Negative control, in both senses: the quickselect arm really is reachable, it is what
+        ! runs below the floor, and it answers correctly there.
+        call parquet_debug_set_sort_nth_order_min(huge(0_int64))
+        call parquet_debug_set_sort_radix_min_rows(2_int64)
+        call parquet_debug_reset_sort_radix_passes()
+        call pf_nth_element(v, 1_int64, q_sel, i_sel)
+        call parquet_debug_set_sort_radix_min_rows(-1_int64)
+        call check(error, parquet_debug_sort_radix_passes() == 0_int64, &
+            "quickselect must reach no radix pass at all")
+        if (allocated(error)) return
+        call parquet_debug_set_sort_nth_order_min(-1_int64)
+        call check(error, i_sel == perm(1) .and. q_sel == minval(v), &
+            "the quickselect arm must still answer correctly when the ordering floor is out of reach")
+    end subroutine test_selection_routes_agree
+    !
+    !> **`pf_minmax`'s `ok=` on every specific, in BOTH directions.** The all-null arm asserts the
+    !> report; the one-value arm is the negative control, without which a guard that answered
+    !> `.false.` unconditionally would pass every assertion above it.
+    !>
+    !> The abort direction -- `ok` absent, same input, message unchanged -- is not here and cannot
+    !> be: it kills the process. It is the `sorting_minmax_all_null*` error scenarios, which
+    !> predate this argument and are what makes "omitting `ok` restores the abort" a tested claim
+    !> rather than a stated one.
+    !>
+    !> Nothing reads `lo`/`hi` after a `.false.`: the contract says they were not written.
+    subroutine test_minmax_ok_every_specific(error)
+        type(error_type), allocatable, intent(out) :: error
+        logical :: ok
+        logical :: mask(2)
+
+        mask = [.false., .false.]
+        block
+            integer(int32) :: v(2), lo, hi
+            v = [7_int32, 9_int32]
+            call pf_minmax(v, lo, hi, is_valid=mask, ok=ok)
+            call check(error, .not. ok, "int32 pf_minmax must report ok=.false. for an all-null array")
+            if (allocated(error)) return
+            call pf_minmax(v, lo, hi, ok=ok)
+            call check(error, ok .and. lo == 7_int32 .and. hi == 9_int32, &
+                "int32 pf_minmax must report ok=.true. and the extremes when a value exists")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int64) :: v(2), lo, hi
+            v = [7_int64, 9_int64]
+            call pf_minmax(v, lo, hi, is_valid=mask, ok=ok)
+            call check(error, .not. ok, "int64 pf_minmax must report ok=.false. for an all-null array")
+            if (allocated(error)) return
+            call pf_minmax(v, lo, hi, ok=ok)
+            call check(error, ok .and. lo == 7_int64 .and. hi == 9_int64, &
+                "int64 pf_minmax must report ok=.true. and the extremes when a value exists")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32) :: v(2), lo, hi
+            ! A NaN is excluded from this population exactly as a null is, so an all-NaN array
+            ! with no mask at all must report .false. too -- the other half of "null or NaN".
+            v = ieee_value(1.0_real32, ieee_quiet_nan)
+            call pf_minmax(v, lo, hi, ok=ok)
+            call check(error, .not. ok, "real32 pf_minmax must report ok=.false. for an all-NaN array")
+            if (allocated(error)) return
+            v = [7.5_real32, 9.5_real32]
+            call pf_minmax(v, lo, hi, ok=ok)
+            call check(error, ok .and. lo == 7.5_real32 .and. hi == 9.5_real32, &
+                "real32 pf_minmax must report ok=.true. and the extremes when a value exists")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64) :: v(2), lo, hi
+            v = ieee_value(1.0_real64, ieee_quiet_nan)
+            call pf_minmax(v, lo, hi, ok=ok)
+            call check(error, .not. ok, "real64 pf_minmax must report ok=.false. for an all-NaN array")
+            if (allocated(error)) return
+            v = [7.5_real64, 9.5_real64]
+            call pf_minmax(v, lo, hi, is_valid=[.true., .false.], ok=ok)
+            call check(error, ok .and. lo == 7.5_real64 .and. hi == 7.5_real64, &
+                "real64 pf_minmax must report ok=.true. when only PART of the array is null")
+        end block
+        if (allocated(error)) return
+        block
+            character(len=2) :: v(2)
+            character(len=:), allocatable :: lo, hi
+            v = ["aa", "bb"]
+            call pf_minmax(v, lo, hi, is_valid=mask, ok=ok)
+            call check(error, .not. ok, "character pf_minmax must report ok=.false. for an all-null array")
+            if (allocated(error)) return
+            call check(error, .not. allocated(lo) .and. .not. allocated(hi), &
+                "character pf_minmax must leave its results unallocated when ok is .false.")
+            if (allocated(error)) return
+            call pf_minmax(v, lo, hi, ok=ok)
+            call check(error, ok .and. lo == "aa" .and. hi == "bb", &
+                "character pf_minmax must report ok=.true. and the ends when a value exists")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_date) :: v(2), lo, hi, nulls(2)
+            ! A temporal element carries its own nullness, so there is no `is_valid` to pass:
+            ! a default-initialised array IS the all-null population.
+            call v%set_raw([1001_int32, 1006_int32])
+            call pf_minmax(nulls, lo, hi, ok=ok)
+            call check(error, .not. ok, "parquet_date pf_minmax must report ok=.false. for an all-null array")
+            if (allocated(error)) return
+            call check(error, lo%is_null() .and. hi%is_null(), &
+                "parquet_date pf_minmax must leave its results default-initialised when ok is .false.")
+            if (allocated(error)) return
+            call pf_minmax(v, lo, hi, ok=ok)
+            call check(error, ok .and. lo%raw() == 1001_int32 .and. hi%raw() == 1006_int32, &
+                "parquet_date pf_minmax must report ok=.true. and the ends when a value exists")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_time) :: v(2), lo, hi, nulls(2)
+            call v%set_raw([2001_int64, 2006_int64])
+            call pf_minmax(nulls, lo, hi, ok=ok)
+            call check(error, .not. ok, "parquet_time pf_minmax must report ok=.false. for an all-null array")
+            if (allocated(error)) return
+            call pf_minmax(v, lo, hi, ok=ok)
+            call check(error, ok .and. lo%raw() == 2001_int64 .and. hi%raw() == 2006_int64, &
+                "parquet_time pf_minmax must report ok=.true. and the ends when a value exists")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_timestamp) :: v(2), lo, hi, nulls(2)
+            integer(int64) :: gs1, gs2
+            integer(int32) :: gn1, gn2
+            call v%set_raw([3001_int64, 3006_int64], 7_int32)
+            call pf_minmax(nulls, lo, hi, ok=ok)
+            call check(error, .not. ok, &
+                "parquet_timestamp pf_minmax must report ok=.false. for an all-null array")
+            if (allocated(error)) return
+            call pf_minmax(v, lo, hi, ok=ok)
+            call lo%get_raw(gs1, gn1)
+            call hi%get_raw(gs2, gn2)
+            call check(error, ok .and. gs1 == 3001_int64 .and. gs2 == 3006_int64, &
+                "parquet_timestamp pf_minmax must report ok=.true. and the ends when a value exists")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_string_column) :: sc
+            character(len=:), allocatable :: lo, hi
+            ! The packed store owns its own validity, so the nulls are appended rather than masked.
+            call sc%append_null()
+            call sc%append_null()
+            call pf_minmax(sc, lo, hi, ok=ok)
+            call check(error, .not. ok, &
+                "parquet_string_column pf_minmax must report ok=.false. for an all-null column")
+            if (allocated(error)) return
+            call sc%append_string("aa")
+            call pf_minmax(sc, lo, hi, ok=ok)
+            call check(error, ok .and. lo == "aa" .and. hi == "aa", &
+                "parquet_string_column pf_minmax must report ok=.true. once one value is present")
+        end block
+    end subroutine test_minmax_ok_every_specific
+    !
+    !> **`pf_nth_quantile`'s `ok=` on every specific, in BOTH directions**, plus the two things the
+    !> minmax twin has no counterpart for: `n_null` is set even when `ok` is `.false.` (so a caller
+    !> taking the reporting route still learns why), and the index forms return without touching
+    !> `index`, which is what the `i32`/`i64` specifics would otherwise read from an unset local.
+    !>
+    !> The abort direction is `sorting_quantile_all_null`, as above.
+    subroutine test_quantile_ok_every_specific(error)
+        type(error_type), allocatable, intent(out) :: error
+        logical :: ok
+        logical :: mask(2)
+        integer(int64) :: nn
+
+        mask = [.false., .false.]
+        block
+            integer(int32) :: v(2), q
+            integer(int32) :: idx32
+            v = [7_int32, 9_int32]
+            call pf_nth_quantile(v, 0.5_real64, q, is_valid=mask, n_null=nn, ok=ok)
+            call check(error, .not. ok, "int32 pf_nth_quantile must report ok=.false. for an all-null array")
+            if (allocated(error)) return
+            call check(error, nn == 2_int64, &
+                "pf_nth_quantile must still report n_null on the ok=.false. path")
+            if (allocated(error)) return
+            call pf_nth_quantile(v, 0.0_real64, q, idx32, is_valid=mask, ok=ok)
+            call check(error, .not. ok, &
+                "the int32-index pf_nth_quantile specific must report ok=.false. too")
+            if (allocated(error)) return
+            call pf_nth_quantile(v, 0.0_real64, q, ok=ok)
+            call check(error, ok .and. q == 7_int32, &
+                "int32 pf_nth_quantile must report ok=.true. and the value when one exists")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int64) :: v(2), q, idx64
+            v = [7_int64, 9_int64]
+            call pf_nth_quantile(v, 0.5_real64, q, is_valid=mask, ok=ok)
+            call check(error, .not. ok, "int64 pf_nth_quantile must report ok=.false. for an all-null array")
+            if (allocated(error)) return
+            call pf_nth_quantile(v, 1.0_real64, q, idx64, is_valid=mask, ok=ok)
+            call check(error, .not. ok, &
+                "the int64-index pf_nth_quantile specific must report ok=.false. too")
+            if (allocated(error)) return
+            call pf_nth_quantile(v, 1.0_real64, q, idx64, ok=ok)
+            call check(error, ok .and. q == 9_int64 .and. idx64 == 2_int64, &
+                "int64 pf_nth_quantile must report ok=.true., the value and its index when one exists")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32) :: v(2), q
+            v = [7.5_real32, 9.5_real32]
+            call pf_nth_quantile(v, 0.5_real64, q, is_valid=mask, ok=ok)
+            call check(error, .not. ok, "real32 pf_nth_quantile must report ok=.false. for an all-null array")
+            if (allocated(error)) return
+            call pf_nth_quantile(v, 0.0_real64, q, ok=ok)
+            call check(error, ok .and. q == 7.5_real32, &
+                "real32 pf_nth_quantile must report ok=.true. and the value when one exists")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64) :: v(2), q
+            v = [7.5_real64, 9.5_real64]
+            call pf_nth_quantile(v, 0.5_real64, q, is_valid=mask, ok=ok)
+            call check(error, .not. ok, "real64 pf_nth_quantile must report ok=.false. for an all-null array")
+            if (allocated(error)) return
+            ! A NaN is a VALUE here, unlike in pf_minmax: pf_nth_quantile excludes nulls only.
+            call pf_nth_quantile(v, 0.0_real64, q, is_valid=[.true., .false.], n_null=nn, ok=ok)
+            call check(error, ok .and. q == 7.5_real64 .and. nn == 1_int64, &
+                "real64 pf_nth_quantile must report ok=.true. when only PART of the array is null")
+        end block
+        if (allocated(error)) return
+        block
+            logical :: v(2), q
+            v = [.true., .true.]
+            call pf_nth_quantile(v, 0.5_real64, q, is_valid=mask, ok=ok)
+            call check(error, .not. ok, "logical pf_nth_quantile must report ok=.false. for an all-null array")
+            if (allocated(error)) return
+            call pf_nth_quantile(v, 0.5_real64, q, ok=ok)
+            call check(error, ok .and. q, &
+                "logical pf_nth_quantile must report ok=.true. and the value when one exists")
+        end block
+        if (allocated(error)) return
+        block
+            character(len=2) :: v(2)
+            character(len=:), allocatable :: q
+            v = ["aa", "bb"]
+            call pf_nth_quantile(v, 0.5_real64, q, is_valid=mask, ok=ok)
+            call check(error, .not. ok, &
+                "character pf_nth_quantile must report ok=.false. for an all-null array")
+            if (allocated(error)) return
+            call check(error, .not. allocated(q), &
+                "character pf_nth_quantile must leave its result unallocated when ok is .false.")
+            if (allocated(error)) return
+            call pf_nth_quantile(v, 0.0_real64, q, ok=ok)
+            call check(error, ok .and. q == "aa", &
+                "character pf_nth_quantile must report ok=.true. and the value when one exists")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_date) :: v(2), q, nulls(2)
+            call v%set_raw([1001_int32, 1006_int32])
+            call pf_nth_quantile(nulls, 0.5_real64, q, ok=ok)
+            call check(error, .not. ok, &
+                "parquet_date pf_nth_quantile must report ok=.false. for an all-null array")
+            if (allocated(error)) return
+            call check(error, q%is_null(), &
+                "parquet_date pf_nth_quantile must leave its result default-initialised when ok is .false.")
+            if (allocated(error)) return
+            call pf_nth_quantile(v, 0.0_real64, q, ok=ok)
+            call check(error, ok .and. q%raw() == 1001_int32, &
+                "parquet_date pf_nth_quantile must report ok=.true. and the value when one exists")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_time) :: v(2), q, nulls(2)
+            call v%set_raw([2001_int64, 2006_int64])
+            call pf_nth_quantile(nulls, 0.5_real64, q, ok=ok)
+            call check(error, .not. ok, &
+                "parquet_time pf_nth_quantile must report ok=.false. for an all-null array")
+            if (allocated(error)) return
+            call pf_nth_quantile(v, 0.0_real64, q, ok=ok)
+            call check(error, ok .and. q%raw() == 2001_int64, &
+                "parquet_time pf_nth_quantile must report ok=.true. and the value when one exists")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_timestamp) :: v(2), q, nulls(2)
+            integer(int64) :: gs
+            integer(int32) :: gn
+            call v%set_raw([3001_int64, 3006_int64], 7_int32)
+            call pf_nth_quantile(nulls, 0.5_real64, q, ok=ok)
+            call check(error, .not. ok, &
+                "parquet_timestamp pf_nth_quantile must report ok=.false. for an all-null array")
+            if (allocated(error)) return
+            call pf_nth_quantile(v, 0.0_real64, q, ok=ok)
+            call q%get_raw(gs, gn)
+            call check(error, ok .and. gs == 3001_int64, &
+                "parquet_timestamp pf_nth_quantile must report ok=.true. and the value when one exists")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_string_column) :: sc
+            character(len=:), allocatable :: q
+            call sc%append_null()
+            call sc%append_null()
+            call pf_nth_quantile(sc, 0.5_real64, q, n_null=nn, ok=ok)
+            call check(error, .not. ok, &
+                "parquet_string_column pf_nth_quantile must report ok=.false. for an all-null column")
+            if (allocated(error)) return
+            call check(error, nn == 2_int64, &
+                "parquet_string_column pf_nth_quantile must still report n_null on the ok=.false. path")
+            if (allocated(error)) return
+            call sc%append_string("aa")
+            call pf_nth_quantile(sc, 0.0_real64, q, ok=ok)
+            call check(error, ok .and. q == "aa", &
+                "parquet_string_column pf_nth_quantile must report ok=.true. once one value is present")
+        end block
+        ! **Every INDEX specific's own `ok` path, all twenty of them.** The blocks above cover the
+        ! no-index form for all ten element types and two index forms besides; the remaining
+        ! eighteen `if (.not. ok) return` lines are in specifics nothing else calls with `ok`, and
+        ! a coverage run is what found them. Each one guards a read of an index the worker never
+        ! set, so an omitted guard is a use of an undefined value rather than a wrong answer --
+        ! which is exactly the class no assertion elsewhere would notice.
+        block
+            integer(int32) :: xi(2), qi, i32
+            integer(int64) :: xl(2), ql, i64
+            real(real32) :: xs(2), qs
+            real(real64) :: xd(2), qd
+            logical :: xb(2), qb
+            character(len=2) :: xc(2)
+            character(len=:), allocatable :: qc
+            type(parquet_date) :: dnull(2), qdt
+            type(parquet_time) :: tnull(2), qtm
+            type(parquet_timestamp) :: snull(2), qts
+            type(parquet_string_column) :: sc
+
+            xi = [7_int32, 9_int32]
+            xl = [7_int64, 9_int64]
+            xs = [7.5_real32, 9.5_real32]
+            xd = [7.5_real64, 9.5_real64]
+            xb = [.true., .true.]
+            xc = ["aa", "bb"]
+            call sc%append_null()
+            call sc%append_null()
+
+            call pf_nth_quantile(xi, 0.5_real64, qi, i32, is_valid=mask, ok=ok)
+            call check(error, .not. ok, "quantile_i32_i32 must report ok=.false.")
+            if (allocated(error)) return
+            call pf_nth_quantile(xi, 0.5_real64, qi, i64, is_valid=mask, ok=ok)
+            call check(error, .not. ok, "quantile_i32_i64 must report ok=.false.")
+            if (allocated(error)) return
+            call pf_nth_quantile(xl, 0.5_real64, ql, i32, is_valid=mask, ok=ok)
+            call check(error, .not. ok, "quantile_i64_i32 must report ok=.false.")
+            if (allocated(error)) return
+            call pf_nth_quantile(xl, 0.5_real64, ql, i64, is_valid=mask, ok=ok)
+            call check(error, .not. ok, "quantile_i64_i64 must report ok=.false.")
+            if (allocated(error)) return
+            call pf_nth_quantile(xs, 0.5_real64, qs, i32, is_valid=mask, ok=ok)
+            call check(error, .not. ok, "quantile_f32_i32 must report ok=.false.")
+            if (allocated(error)) return
+            call pf_nth_quantile(xs, 0.5_real64, qs, i64, is_valid=mask, ok=ok)
+            call check(error, .not. ok, "quantile_f32_i64 must report ok=.false.")
+            if (allocated(error)) return
+            call pf_nth_quantile(xd, 0.5_real64, qd, i32, is_valid=mask, ok=ok)
+            call check(error, .not. ok, "quantile_f64_i32 must report ok=.false.")
+            if (allocated(error)) return
+            call pf_nth_quantile(xd, 0.5_real64, qd, i64, is_valid=mask, ok=ok)
+            call check(error, .not. ok, "quantile_f64_i64 must report ok=.false.")
+            if (allocated(error)) return
+            call pf_nth_quantile(xb, 0.5_real64, qb, i32, is_valid=mask, ok=ok)
+            call check(error, .not. ok, "quantile_bool_i32 must report ok=.false.")
+            if (allocated(error)) return
+            call pf_nth_quantile(xb, 0.5_real64, qb, i64, is_valid=mask, ok=ok)
+            call check(error, .not. ok, "quantile_bool_i64 must report ok=.false.")
+            if (allocated(error)) return
+            call pf_nth_quantile(xc, 0.5_real64, qc, i32, is_valid=mask, ok=ok)
+            call check(error, .not. ok, "quantile_chr_i32 must report ok=.false.")
+            if (allocated(error)) return
+            call pf_nth_quantile(xc, 0.5_real64, qc, i64, is_valid=mask, ok=ok)
+            call check(error, .not. ok, "quantile_chr_i64 must report ok=.false.")
+            if (allocated(error)) return
+            call pf_nth_quantile(dnull, 0.5_real64, qdt, i32, ok=ok)
+            call check(error, .not. ok, "quantile_date_i32 must report ok=.false.")
+            if (allocated(error)) return
+            call pf_nth_quantile(dnull, 0.5_real64, qdt, i64, ok=ok)
+            call check(error, .not. ok, "quantile_date_i64 must report ok=.false.")
+            if (allocated(error)) return
+            call pf_nth_quantile(tnull, 0.5_real64, qtm, i32, ok=ok)
+            call check(error, .not. ok, "quantile_time_i32 must report ok=.false.")
+            if (allocated(error)) return
+            call pf_nth_quantile(tnull, 0.5_real64, qtm, i64, ok=ok)
+            call check(error, .not. ok, "quantile_time_i64 must report ok=.false.")
+            if (allocated(error)) return
+            call pf_nth_quantile(snull, 0.5_real64, qts, i32, ok=ok)
+            call check(error, .not. ok, "quantile_ts_i32 must report ok=.false.")
+            if (allocated(error)) return
+            call pf_nth_quantile(snull, 0.5_real64, qts, i64, ok=ok)
+            call check(error, .not. ok, "quantile_ts_i64 must report ok=.false.")
+            if (allocated(error)) return
+            call pf_nth_quantile(sc, 0.5_real64, qc, i32, ok=ok)
+            call check(error, .not. ok, "quantile_strcol_i32 must report ok=.false.")
+            if (allocated(error)) return
+            call pf_nth_quantile(sc, 0.5_real64, qc, i64, ok=ok)
+            call check(error, .not. ok, "quantile_strcol_i64 must report ok=.false.")
+            if (allocated(error)) return
+
+            ! The control for the whole block: with a value present, an index form must report
+            ! `.true.` AND set the index. Without this, a guard that returned unconditionally
+            ! would satisfy every assertion above.
+            call pf_nth_quantile(xd, 0.0_real64, qd, i64, ok=ok)
+            call check(error, ok .and. i64 == 1_int64 .and. qd == 7.5_real64, &
+                "an index form must still report ok=.true., the value and the index when one exists")
+        end block
+    end subroutine test_quantile_ok_every_specific
     !
     !> **Every `pf_argminmax` specific, once each** -- ten families times the two index kinds.
     !> `parquet_column` is here although `pf_minmax` excludes it, for the reason given on that

@@ -118,6 +118,7 @@ module parquet_argsort
     public :: parquet_debug_set_sort_track_shift
     public :: parquet_debug_sort_max_insertion_shift
     public :: parquet_debug_set_sort_radix_min_rows
+    public :: parquet_debug_set_sort_nth_order_min
     public :: parquet_debug_set_sort_task_floor
     public :: parquet_debug_set_sort_tail_min_rows
     public :: parquet_debug_set_sort_engine_min_rows
@@ -201,6 +202,15 @@ module parquet_argsort
     !! describes. Both are the `feature_risks.md` Risk-49 shape -- a size threshold hiding a code
     !! path from the tests written for everything else.
     integer(int64), save :: dbg_sort_radix_min_rows = -1_int64
+    !> Overrides the row floor above which a SELECTION orders instead; NEGATIVE restores
+    !! `SORT_NTH_ORDER_MIN`.
+    !!
+    !! Risk-49 again, and here the threshold hides not a tuning choice but a whole second answer
+    !! path: below the floor `sort_nth_index` quickselects, above it the same question is answered
+    !! by the ordering engine. Every fixture in the suite is small, so without this override only
+    !! the quickselect arm would ever run and the routing would be untested in the direction that
+    !! ships. Driven in BOTH directions by `test_selection_routes_agree`.
+    integer(int64), save :: dbg_sort_nth_order_min = -1_int64
     !> Overrides the balanced split's smallest task size; NEGATIVE restores `SORT_TASK_FLOOR`.
     !!
     !! Risk-49 again, and the sharpest instance of it in this module: the floor binds only when
@@ -1060,11 +1070,12 @@ module parquet_argsort
         !! Deterministic because the comparator is a total order: there is exactly one row at
         !! that rank, so this and a full sort cannot disagree. `idx` is 0 for an out-of-range
         !! rank, which every caller has already rejected.
-        module subroutine sort_nth_index(keys, n, nth, idx)
+        module subroutine sort_nth_index(keys, n, nth, idx, threads)
             type(sort_key_buf), intent(in) :: keys(:) !! the keys, in precedence order.
             integer(int64), intent(in) :: n           !! rows.
             integer(int64), intent(in) :: nth         !! 1-based rank wanted.
             integer(int64), intent(out) :: idx        !! 1-based row index at that rank.
+            integer, intent(in), optional :: threads  !! thread request for the ORDERING route.
         end subroutine sort_nth_index
         !> Are rows `1..n` already in order under every key?
         !!
@@ -1152,6 +1163,16 @@ module parquet_argsort
         module subroutine parquet_debug_set_sort_radix_min_rows(n)
             integer(int64), intent(in) :: n !! forced floor, or a negative value to restore.
         end subroutine parquet_debug_set_sort_radix_min_rows
+        !> Test-only override for the row floor above which a SELECTION orders instead of
+        !! quickselecting; NEGATIVE restores the built-in `SORT_NTH_ORDER_MIN`.
+        !!
+        !! Both arms answer identically -- the rank the engine's own stable order puts there
+        !! is what a selection is DEFINED as -- so this exists to make each arm reachable
+        !! from a small fixture, not to change any answer. A huge value forces quickselect;
+        !! 1 forces the ordering route. Has no effect on the C++ engine.
+        module subroutine parquet_debug_set_sort_nth_order_min(n)
+            integer(int64), intent(in) :: n !! forced floor, or a negative value to restore.
+        end subroutine parquet_debug_set_sort_nth_order_min
         !> Test-only override for the balanced split's task floor; NEGATIVE restores the
         !! built-in `SORT_TASK_FLOOR`.
         !!

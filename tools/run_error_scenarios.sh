@@ -748,6 +748,7 @@ scenarios=(
     "sorting_quantile_out_of_range:1"
     "sorting_quantile_bad_rounding:1"
     "sorting_quantile_all_null:1"
+    "sorting_quantile_ok_still_checks_range:1"
     "sorting_permute_index_out_of_range:1"
     "sorting_permute_duplicate_index:1"
     "sorting_permute_length_mismatch:1"

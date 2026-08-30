@@ -32,14 +32,14 @@ declares.
 | `pf_partial_sort(values, sorted, n)` | the first `n` in order, without sorting the rest |
 | `pf_partial_argsort(values, perm, n)` | their indices instead |
 | `pf_nth_element(values, nth, p_value, [index])` | the value a full sort puts at rank `nth` |
-| `pf_nth_quantile(values, quantile, p_value, [index])` | a quantile of the non-null values |
+| `pf_nth_quantile(values, quantile, p_value, [index], [ok])` | a quantile of the non-null values |
 | `pf_lower_bound(values, target, pos)` | where `target` belongs in an already-sorted array |
 | `pf_upper_bound(values, target, pos)` | one past the last element equal to `target` |
 | `pf_equal_range(values, target, first, last)` | both bounds, as an inclusive range |
 | `pf_unique_count(values, count, [n_null])` | how many distinct non-null values there are |
 | `pf_unique(values, distinct, [n_null])` | those values themselves, in order |
 | `pf_rank(values, ranks, [method])` | the rank of every element, in place order |
-| `pf_minmax(values, vmin, vmax)` | the smallest and largest value |
+| `pf_minmax(values, vmin, vmax, [ok])` | the smallest and largest value |
 | `pf_argminmax(values, imin, imax)` | where those two are |
 | `pf_merge(a, b, merged)` | merges two already-sorted arrays in linear time |
 
@@ -397,12 +397,23 @@ call pf_partial_sort(flux, brightest, n=10, descending=.true.)
 On a whole table the same operation is `parquet_table%top_n`, which keeps the `n` best rows of every
 column together — see [Keeping only the best rows](../tables/table-mutate.html#keeping-only-the-best-rows).
 
-**The complexity claim, with its caveat.** `pf_partial_sort` is `O(n log k)` for `k` results and
-`pf_nth_element` is `O(n)`, against `O(n log n)` for a full sort — but `pf_partial_sort` stops
-paying as `k` approaches the array size, and at `k = size` it is strictly *worse* than calling
-`pf_sort`. Use it when you want a small slice of a large array; use `pf_sort` when you want most of
-it. (One case gets both for free: a low-cardinality integer key takes a counting-sort path that is
-already `O(n)` and already fully ordered, so partial and full cost the same there.)
+**The complexity claim, with its caveat.** `pf_partial_sort` is `O(n log k)` for `k` results,
+against `O(n log n)` for a full sort — but it stops paying as `k` approaches the array size, and at
+`k = size` it is strictly *worse* than calling `pf_sort`. Use it when you want a small slice of a
+large array; use `pf_sort` when you want most of it. (One case gets both for free: a low-cardinality
+integer key takes a counting-sort path that is already `O(n)` and already fully ordered, so partial
+and full cost the same there.)
+
+**`pf_nth_element` is the exception, and its asymptotics are deliberately not what it does.** An
+`O(n)` selection scan exists and is used on a small array, but above a few hundred elements the
+procedure orders the array instead and reads off the rank — which is `O(n log n)` on paper and
+*faster* in practice at every size measured, by two to four times on a million elements. Two
+reasons compound: the ordering engine's radix path never calls the comparator at all, while a
+selection scan compares through an index permutation and takes a cache miss for nearly every
+comparison; and the ordering engine threads, where a selection scan has no threaded form. So
+`pf_nth_element` costs about what `pf_argsort` costs, and asking for one order statistic is not
+cheaper than asking for all of them. If you want several ranks, ask for them in separate calls
+only when the array is small; otherwise sort once yourself.
 
 ### The index `pf_nth_element` reports
 
@@ -445,10 +456,27 @@ where that is true, and the reason it takes neither `descending` nor `nulls_firs
 null tier to position, and a descending quantile is just `1 - quantile`. `n_null` reports how many
 values were dropped, so you can decide whether the answer is trustworthy.
 
-**An all-null array aborts.** There is no value to return and no sentinel that works across all ten
-supported types, so returning an undefined `p_value` would hand back something that looks like data.
-`n_null` is for *partial* nullness; guard with `count(mask)` (or a column's own null count) if the
-all-null case can happen.
+**An all-null array has no quantile, and `ok` decides what happens then.** There is no value to
+return and no sentinel that works across all ten supported types, so returning an undefined
+`p_value` would hand back something that looks like data. Two behaviours are available and the
+caller picks one by passing the argument or not:
+
+```fortran
+call pf_nth_quantile(flux, 0.5_real64, median)                 ! aborts if every value is null
+call pf_nth_quantile(flux, 0.5_real64, median, ok=have_it)     ! returns, with ok = .false.
+if (have_it) print *, median                                   ! ... and median must not be read
+```
+
+`ok` is `.true.` whenever a value was produced — **partial nullness is not a failure**, so a mostly
+null array still answers `.true.`. When it is `.false.`, `p_value` and `index` were not written and
+must not be read: a `character(len=:), allocatable` result comes back unallocated and a
+date/time/timestamp comes back default-initialised, which is the state they were in on entry.
+`n_null` *is* set either way, so a caller taking the `ok` route still learns how many values were
+excluded. It is `n_null` that answers "how much was missing"; `ok` answers only "was there anything
+at all".
+
+`ok` reports an empty **population**, never a bad **argument**: a `quantile` outside 0–1, or an
+unrecognized `rounding=` token, still aborts whether or not `ok` was passed.
 
 A fractional position is resolved by `rounding=`, matched case-insensitively:
 
@@ -592,9 +620,22 @@ not the minimum or maximum of anything. Both report the **first** occurrence of 
 either end. Neither takes `descending`/`nulls_first`: a minimum and a maximum are absolute, and
 reversing the order would only exchange the two answers.
 
-**Both abort when every value is null or NaN.** There is nothing to return and no sentinel that
-works across all nine types — the same decision `pf_nth_quantile` makes for the same unanswerable
-question. Guard with `count(is_valid)` where that can happen.
+**When every value is null or NaN there is no minimum or maximum**, and `pf_minmax` lets the caller
+choose what happens then, exactly as `pf_nth_quantile` does for the same unanswerable question:
+
+```fortran
+call pf_minmax(v, vmin, vmax)              ! aborts if every value is null or NaN
+call pf_minmax(v, vmin, vmax, ok=have_it)  ! returns, with ok = .false.
+```
+
+`ok` is `.true.` whenever a value was produced, so partial nullness is not a failure. When it is
+`.false.`, `vmin` and `vmax` were not written and must not be read — there is no sentinel that works
+across all nine types, which is why this is a separate argument rather than a magic value.
+
+**`pf_argminmax` takes no `ok` and still aborts**, which is deliberate rather than an omission: `ok`
+exists because no *value* sentinel spans the element types, and an index has one available. Reporting
+rather than aborting there would need its own contract for what `imin`/`imax` come back as, and that
+decision has not been taken. Guard with `count(is_valid)` where an all-null input can reach it.
 
 ## Merging two sorted arrays
 
@@ -753,11 +794,18 @@ All four selection operations accept `threads=` — `pf_partial_sort`, `pf_parti
 `pf_nth_element` and `pf_nth_quantile` — with the same meaning and the same defaults as everywhere
 else, and with the same guarantee that the answer never changes.
 
-**They thread less of the work than `pf_argsort` does, and it is worth knowing which part.** A
+**How much of the work threads depends on which operation, and on how big the array is.** A
 selection has three stages: reading the values into the engine's key form, choosing the elements
-that belong at the requested positions, and handing the result back. **Only the first is threaded.**
-It walks every element, so it is usually most of the cost; the choosing in the middle is what makes
-a selection cheaper than a full sort and has no threaded form.
+that belong at the requested positions, and handing the result back. The **read is always
+threaded**, and it walks every element, so it is usually most of the cost.
+
+The middle stage differs by operation. `pf_partial_sort`/`pf_partial_argsort` keep a heap of the
+`n` best seen so far — one comparison per remaining element, and no threaded form. `pf_nth_element`
+and `pf_nth_quantile` **answer a large array by ordering it**, which is threaded, and only fall back
+to an unthreaded selection scan on a small one, where the whole call is microseconds either way.
+That is not a compromise: ordering is *faster* than selecting here at every size worth threading,
+because the engine's radix path never calls the comparator at all while a selection scan compares
+through an index permutation and takes a cache miss for nearly every comparison.
 
 So `threads=` helps here in proportion to the *array*, not in proportion to how much you asked for:
 
@@ -775,12 +823,21 @@ Exactly what each one leaves serial, since the answer differs a little:
 |---|---|---|
 | `pf_partial_argsort` | the read, and the int32 narrowing | the selection |
 | `pf_partial_sort` | the read | the selection, and the `n`-element gather that builds the result |
-| `pf_nth_element` | the read | the selection |
-| `pf_nth_quantile` | the read | the selection, and the pass that counts the non-null population |
+| `pf_nth_element` | the read, and the ordering that answers a large array | the selection scan a small array takes instead |
+| `pf_nth_quantile` | the read, and the ordering | the small-array selection scan, and the pass that counts the non-null population |
 
 On a large array and a small `n` the read is most of the cost, which is exactly the case this
 argument exists for. On a plain integer array it is cheap already and `threads=` will buy little;
-on a string or a `parquet_column` key it is the dominant term.
+on a string or a `parquet_column` key it is the dominant term. The last two rows are the exception
+and get more from `threads=` than the first two: what they leave serial applies only below a few
+hundred elements, where the whole call is microseconds.
+
+**One consequence of the last two rows is worth stating outright: `pf_nth_element` and
+`pf_nth_quantile` now cost what a full sort costs, in time and in peak memory alike.** Asking for one
+order statistic is not cheaper than asking for all of them, and it allocates the same scratch the
+radix path allocates. `pf_partial_sort`/`pf_partial_argsort` are the ones that stay genuinely cheap
+for a small `n`, so reach for those when the array is large and you want a handful of extremes;
+reach for `pf_nth_element` because it says what you mean, not to save anything.
 
 One specific takes the argument and can do nothing with it: `pf_partial_argsort(keys, perm, n)` on a
 `pf_sort_keys` producing an **int64** permutation. Its keys were already built by `%add`, so there

@@ -233,7 +233,7 @@ They answer different questions and both are worth having:
 | element types | all ten, including `character` and dates | numeric only |
 | result | **an element of the input**, with `index=` saying which | an interpolated `real(real64)` |
 | even-length median | one of the two middle values | their mean |
-| all-null input | aborts | NaN with `ok = .false.` |
+| all-null input | `ok = .false.`, or aborts when `ok` is omitted; the result must not be read | NaN with `ok = .false.` |
 | weights | no | yes |
 
 If you want to know *which row* the median was, use `pf_nth_quantile`. If you want the number a

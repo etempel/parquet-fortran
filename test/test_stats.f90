@@ -2103,9 +2103,15 @@ contains
     !!
     !! The two are different code paths -- `pf_nth_element` twice against one `pf_argsort` -- and
     !! nothing else in the suite would notice if one of them were wrong, because the shipped
-    !! threshold puts every small test on the same side of it. CLAUDE.md's size-threshold rule is
-    !! what this exists for, and `parquet_debug_set_stats_quantile_sort_min` is what reaches the
-    !! other side.
+    !! threshold puts every test on the same side of it. CLAUDE.md's size-threshold rule is what
+    !! this exists for, and `parquet_debug_set_stats_quantile_sort_min` is what reaches the other
+    !! side.
+    !!
+    !! **`QUANTILE_SORT_MIN` is now 1, so the selection route never runs by default and THIS TEST
+    !! is the only thing that exercises it at all.** That is deliberate rather than dead code --
+    !! see the constant's own comment -- so do not delete either the route or this test on the
+    !! grounds that nothing reaches it: the override is how the question gets re-asked on a machine
+    !! with a different core count, and an unexercised route could not be trusted when it is.
     subroutine test_selection_and_sort_paths_agree(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
         real(real64), allocatable :: x(:)

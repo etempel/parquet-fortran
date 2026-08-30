@@ -198,6 +198,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under gfortran; a disc returned in the NEST scheme is about 3x faster in either compiler;
   `pf_query_disc_alloc` is about 2x faster; and `pf_ang2pix_ring`/`pf_ang2pix_nest`/`pf_vec2pix_*`
   are 1.1-1.3x faster. Results are unchanged.
+- **`pf_nth_element` and `pf_nth_quantile` are 2.5-3.9x faster on a large array**, and
+  `pf_minmax`/`pf_argminmax` are faster too. A selection above a few hundred elements is now
+  answered by ordering rather than by quickselecting, which reaches the radix path and the thread
+  team. Answers are unchanged. `pf_quantiles`, `pf_median` and `pf_iqr` follow suit and now always
+  order.
+- **`pf_minmax` and `pf_nth_quantile` take an optional `ok=`, so an all-null population can be
+  reported instead of aborting.** `ok` is `.true.` whenever a value was produced — partial nullness
+  is not a failure — and `.false.` only when every value is null (and, for `pf_minmax`, NaN), in
+  which case the value arguments were not written and must not be read. Omitting the argument
+  restores the abort, so existing callers are unaffected. `pf_argminmax` is unchanged and still
+  aborts.
 - **`parquet_write_table`'s `copy_metadata=`/`metadata_keys=` no longer carry a key the writer
   generates itself** — `DATE`, `name`, the two `IVOA.VOTable-Parquet.*` keys and every
   `column.<name>.<attr>` entry. `copy_metadata=.true.` skips them; `metadata_keys=` naming one is

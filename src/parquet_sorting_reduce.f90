@@ -32,7 +32,12 @@ contains
     module procedure minmax_i32
         integer(int64) :: i1, i2
         !
-        call minmax_impl_i32(values, "pf_minmax", i1, i2, is_valid=is_valid)
+        call minmax_impl_i32(values, "pf_minmax", i1, i2, is_valid=is_valid, ok=ok)
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit, so a single
+        ! `if (present(ok) .and. .not. ok)` would read an absent argument.
+        if (present(ok)) then
+            if (.not. ok) return   ! i1/i2 are undefined on this path
+        end if
         vmin = values(i1)
         vmax = values(i2)
     end procedure minmax_i32
@@ -40,7 +45,12 @@ contains
     module procedure minmax_i64
         integer(int64) :: i1, i2
         !
-        call minmax_impl_i64(values, "pf_minmax", i1, i2, is_valid=is_valid)
+        call minmax_impl_i64(values, "pf_minmax", i1, i2, is_valid=is_valid, ok=ok)
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit, so a single
+        ! `if (present(ok) .and. .not. ok)` would read an absent argument.
+        if (present(ok)) then
+            if (.not. ok) return   ! i1/i2 are undefined on this path
+        end if
         vmin = values(i1)
         vmax = values(i2)
     end procedure minmax_i64
@@ -48,7 +58,12 @@ contains
     module procedure minmax_f32
         integer(int64) :: i1, i2
         !
-        call minmax_impl_f32(values, "pf_minmax", i1, i2, is_valid=is_valid)
+        call minmax_impl_f32(values, "pf_minmax", i1, i2, is_valid=is_valid, ok=ok)
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit, so a single
+        ! `if (present(ok) .and. .not. ok)` would read an absent argument.
+        if (present(ok)) then
+            if (.not. ok) return   ! i1/i2 are undefined on this path
+        end if
         vmin = values(i1)
         vmax = values(i2)
     end procedure minmax_f32
@@ -56,7 +71,12 @@ contains
     module procedure minmax_f64
         integer(int64) :: i1, i2
         !
-        call minmax_impl_f64(values, "pf_minmax", i1, i2, is_valid=is_valid)
+        call minmax_impl_f64(values, "pf_minmax", i1, i2, is_valid=is_valid, ok=ok)
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit, so a single
+        ! `if (present(ok) .and. .not. ok)` would read an absent argument.
+        if (present(ok)) then
+            if (.not. ok) return   ! i1/i2 are undefined on this path
+        end if
         vmin = values(i1)
         vmax = values(i2)
     end procedure minmax_f64
@@ -64,7 +84,12 @@ contains
     module procedure minmax_chr
         integer(int64) :: i1, i2
         !
-        call minmax_impl_chr(values, "pf_minmax", i1, i2, is_valid=is_valid)
+        call minmax_impl_chr(values, "pf_minmax", i1, i2, is_valid=is_valid, ok=ok)
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit, so a single
+        ! `if (present(ok) .and. .not. ok)` would read an absent argument.
+        if (present(ok)) then
+            if (.not. ok) return   ! i1/i2 are undefined on this path
+        end if
         vmin = values(i1)
         vmax = values(i2)
     end procedure minmax_chr
@@ -72,7 +97,12 @@ contains
     module procedure minmax_date
         integer(int64) :: i1, i2
         !
-        call minmax_impl_date(values, "pf_minmax", i1, i2)
+        call minmax_impl_date(values, "pf_minmax", i1, i2, ok=ok)
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit, so a single
+        ! `if (present(ok) .and. .not. ok)` would read an absent argument.
+        if (present(ok)) then
+            if (.not. ok) return   ! i1/i2 are undefined on this path
+        end if
         vmin = values(i1)
         vmax = values(i2)
     end procedure minmax_date
@@ -80,7 +110,12 @@ contains
     module procedure minmax_time
         integer(int64) :: i1, i2
         !
-        call minmax_impl_time(values, "pf_minmax", i1, i2)
+        call minmax_impl_time(values, "pf_minmax", i1, i2, ok=ok)
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit, so a single
+        ! `if (present(ok) .and. .not. ok)` would read an absent argument.
+        if (present(ok)) then
+            if (.not. ok) return   ! i1/i2 are undefined on this path
+        end if
         vmin = values(i1)
         vmax = values(i2)
     end procedure minmax_time
@@ -88,7 +123,12 @@ contains
     module procedure minmax_ts
         integer(int64) :: i1, i2
         !
-        call minmax_impl_ts(values, "pf_minmax", i1, i2)
+        call minmax_impl_ts(values, "pf_minmax", i1, i2, ok=ok)
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit, so a single
+        ! `if (present(ok) .and. .not. ok)` would read an absent argument.
+        if (present(ok)) then
+            if (.not. ok) return   ! i1/i2 are undefined on this path
+        end if
         vmin = values(i1)
         vmax = values(i2)
     end procedure minmax_ts
@@ -96,7 +136,12 @@ contains
     module procedure minmax_strcol
         integer(int64) :: i1, i2
         !
-        call minmax_impl_strcol(values, "pf_minmax", i1, i2)
+        call minmax_impl_strcol(values, "pf_minmax", i1, i2, ok=ok)
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit, so a single
+        ! `if (present(ok) .and. .not. ok)` would read an absent argument.
+        if (present(ok)) then
+            if (.not. ok) return   ! i1/i2 are undefined on this path
+        end if
         call values%get(i1, vmin, allow_null=.true.)
         call values%get(i2, vmax, allow_null=.true.)
     end procedure minmax_strcol
@@ -655,12 +700,13 @@ contains
     end procedure merge_ts
     !
     !> Shared worker behind pf_minmax and pf_argminmax for a 32-bit integer array.
-    subroutine minmax_impl_i32(values, proc, imin, imax, is_valid)
+    subroutine minmax_impl_i32(values, proc, imin, imax, is_valid, ok)
         integer(int32), intent(in) :: values(:)
         character(len=*), intent(in) :: proc !! calling procedure, for messages.
         integer(int64), intent(out) :: imin  !! where the smallest value is.
         integer(int64), intent(out) :: imax  !! where the largest value is.
         logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        logical, intent(out), optional :: ok !! .false. when there was no value at all.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: n, n_value
         !
@@ -669,7 +715,16 @@ contains
         ! ranks 1 and n_value address them and nothing else.
         call extract_i32(values, buf, .false., .false., proc, is_valid=is_valid)
         call key_value_count(buf, n, n_value)
+        if (present(ok)) ok = .true.
         if (n_value < 1_int64) then
+            ! The caller chose which of the two behaviours it wants by passing `ok`
+            ! or not. `pf_argminmax` never passes it, so its abort is unchanged --
+            ! and a type that has ONLY pf_argminmax (parquet_column) has no `ok`
+            ! dummy here at all, rather than an arm no caller can reach.
+            if (present(ok)) then
+                ok = .false.
+                return
+            end if
             error stop EP // proc // ": every value is null or NaN, so there is no " // &
                 "minimum or maximum; guard with count(is_valid) (or the column's own " // &
                 "null count) if that can happen"
@@ -687,12 +742,13 @@ contains
     end subroutine minmax_impl_i32
     !
     !> Shared worker behind pf_minmax and pf_argminmax for a 64-bit integer array.
-    subroutine minmax_impl_i64(values, proc, imin, imax, is_valid)
+    subroutine minmax_impl_i64(values, proc, imin, imax, is_valid, ok)
         integer(int64), intent(in) :: values(:)
         character(len=*), intent(in) :: proc !! calling procedure, for messages.
         integer(int64), intent(out) :: imin  !! where the smallest value is.
         integer(int64), intent(out) :: imax  !! where the largest value is.
         logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        logical, intent(out), optional :: ok !! .false. when there was no value at all.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: n, n_value
         !
@@ -701,7 +757,16 @@ contains
         ! ranks 1 and n_value address them and nothing else.
         call extract_i64(values, buf, .false., .false., proc, is_valid=is_valid)
         call key_value_count(buf, n, n_value)
+        if (present(ok)) ok = .true.
         if (n_value < 1_int64) then
+            ! The caller chose which of the two behaviours it wants by passing `ok`
+            ! or not. `pf_argminmax` never passes it, so its abort is unchanged --
+            ! and a type that has ONLY pf_argminmax (parquet_column) has no `ok`
+            ! dummy here at all, rather than an arm no caller can reach.
+            if (present(ok)) then
+                ok = .false.
+                return
+            end if
             error stop EP // proc // ": every value is null or NaN, so there is no " // &
                 "minimum or maximum; guard with count(is_valid) (or the column's own " // &
                 "null count) if that can happen"
@@ -719,12 +784,13 @@ contains
     end subroutine minmax_impl_i64
     !
     !> Shared worker behind pf_minmax and pf_argminmax for a 32-bit real array.
-    subroutine minmax_impl_f32(values, proc, imin, imax, is_valid)
+    subroutine minmax_impl_f32(values, proc, imin, imax, is_valid, ok)
         real(real32), intent(in) :: values(:)
         character(len=*), intent(in) :: proc !! calling procedure, for messages.
         integer(int64), intent(out) :: imin  !! where the smallest value is.
         integer(int64), intent(out) :: imax  !! where the largest value is.
         logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        logical, intent(out), optional :: ok !! .false. when there was no value at all.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: n, n_value
         !
@@ -733,7 +799,16 @@ contains
         ! ranks 1 and n_value address them and nothing else.
         call extract_f32(values, buf, .false., .false., proc, is_valid=is_valid)
         call key_value_count(buf, n, n_value)
+        if (present(ok)) ok = .true.
         if (n_value < 1_int64) then
+            ! The caller chose which of the two behaviours it wants by passing `ok`
+            ! or not. `pf_argminmax` never passes it, so its abort is unchanged --
+            ! and a type that has ONLY pf_argminmax (parquet_column) has no `ok`
+            ! dummy here at all, rather than an arm no caller can reach.
+            if (present(ok)) then
+                ok = .false.
+                return
+            end if
             error stop EP // proc // ": every value is null or NaN, so there is no " // &
                 "minimum or maximum; guard with count(is_valid) (or the column's own " // &
                 "null count) if that can happen"
@@ -751,12 +826,13 @@ contains
     end subroutine minmax_impl_f32
     !
     !> Shared worker behind pf_minmax and pf_argminmax for a 64-bit real array.
-    subroutine minmax_impl_f64(values, proc, imin, imax, is_valid)
+    subroutine minmax_impl_f64(values, proc, imin, imax, is_valid, ok)
         real(real64), intent(in) :: values(:)
         character(len=*), intent(in) :: proc !! calling procedure, for messages.
         integer(int64), intent(out) :: imin  !! where the smallest value is.
         integer(int64), intent(out) :: imax  !! where the largest value is.
         logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        logical, intent(out), optional :: ok !! .false. when there was no value at all.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: n, n_value
         !
@@ -765,7 +841,16 @@ contains
         ! ranks 1 and n_value address them and nothing else.
         call extract_f64(values, buf, .false., .false., proc, is_valid=is_valid)
         call key_value_count(buf, n, n_value)
+        if (present(ok)) ok = .true.
         if (n_value < 1_int64) then
+            ! The caller chose which of the two behaviours it wants by passing `ok`
+            ! or not. `pf_argminmax` never passes it, so its abort is unchanged --
+            ! and a type that has ONLY pf_argminmax (parquet_column) has no `ok`
+            ! dummy here at all, rather than an arm no caller can reach.
+            if (present(ok)) then
+                ok = .false.
+                return
+            end if
             error stop EP // proc // ": every value is null or NaN, so there is no " // &
                 "minimum or maximum; guard with count(is_valid) (or the column's own " // &
                 "null count) if that can happen"
@@ -783,12 +868,13 @@ contains
     end subroutine minmax_impl_f64
     !
     !> Shared worker behind pf_minmax and pf_argminmax for a string array.
-    subroutine minmax_impl_chr(values, proc, imin, imax, is_valid)
+    subroutine minmax_impl_chr(values, proc, imin, imax, is_valid, ok)
         character(len=*), intent(in) :: values(:)
         character(len=*), intent(in) :: proc !! calling procedure, for messages.
         integer(int64), intent(out) :: imin  !! where the smallest value is.
         integer(int64), intent(out) :: imax  !! where the largest value is.
         logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        logical, intent(out), optional :: ok !! .false. when there was no value at all.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: n, n_value
         !
@@ -797,7 +883,16 @@ contains
         ! ranks 1 and n_value address them and nothing else.
         call extract_chr(values, buf, .false., .false., proc, is_valid=is_valid)
         call key_value_count(buf, n, n_value)
+        if (present(ok)) ok = .true.
         if (n_value < 1_int64) then
+            ! The caller chose which of the two behaviours it wants by passing `ok`
+            ! or not. `pf_argminmax` never passes it, so its abort is unchanged --
+            ! and a type that has ONLY pf_argminmax (parquet_column) has no `ok`
+            ! dummy here at all, rather than an arm no caller can reach.
+            if (present(ok)) then
+                ok = .false.
+                return
+            end if
             error stop EP // proc // ": every value is null or NaN, so there is no " // &
                 "minimum or maximum; guard with count(is_valid) (or the column's own " // &
                 "null count) if that can happen"
@@ -815,11 +910,12 @@ contains
     end subroutine minmax_impl_chr
     !
     !> Shared worker behind pf_minmax and pf_argminmax for a date array.
-    subroutine minmax_impl_date(values, proc, imin, imax)
+    subroutine minmax_impl_date(values, proc, imin, imax, ok)
         type(parquet_date), intent(in) :: values(:)
         character(len=*), intent(in) :: proc !! calling procedure, for messages.
         integer(int64), intent(out) :: imin  !! where the smallest value is.
         integer(int64), intent(out) :: imax  !! where the largest value is.
+        logical, intent(out), optional :: ok !! .false. when there was no value at all.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: n, n_value
         !
@@ -828,7 +924,16 @@ contains
         ! ranks 1 and n_value address them and nothing else.
         call extract_date(values, buf, .false., .false., proc)
         call key_value_count(buf, n, n_value)
+        if (present(ok)) ok = .true.
         if (n_value < 1_int64) then
+            ! The caller chose which of the two behaviours it wants by passing `ok`
+            ! or not. `pf_argminmax` never passes it, so its abort is unchanged --
+            ! and a type that has ONLY pf_argminmax (parquet_column) has no `ok`
+            ! dummy here at all, rather than an arm no caller can reach.
+            if (present(ok)) then
+                ok = .false.
+                return
+            end if
             error stop EP // proc // ": every value is null or NaN, so there is no " // &
                 "minimum or maximum; guard with count(is_valid) (or the column's own " // &
                 "null count) if that can happen"
@@ -846,11 +951,12 @@ contains
     end subroutine minmax_impl_date
     !
     !> Shared worker behind pf_minmax and pf_argminmax for a time array.
-    subroutine minmax_impl_time(values, proc, imin, imax)
+    subroutine minmax_impl_time(values, proc, imin, imax, ok)
         type(parquet_time), intent(in) :: values(:)
         character(len=*), intent(in) :: proc !! calling procedure, for messages.
         integer(int64), intent(out) :: imin  !! where the smallest value is.
         integer(int64), intent(out) :: imax  !! where the largest value is.
+        logical, intent(out), optional :: ok !! .false. when there was no value at all.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: n, n_value
         !
@@ -859,7 +965,16 @@ contains
         ! ranks 1 and n_value address them and nothing else.
         call extract_time(values, buf, .false., .false., proc)
         call key_value_count(buf, n, n_value)
+        if (present(ok)) ok = .true.
         if (n_value < 1_int64) then
+            ! The caller chose which of the two behaviours it wants by passing `ok`
+            ! or not. `pf_argminmax` never passes it, so its abort is unchanged --
+            ! and a type that has ONLY pf_argminmax (parquet_column) has no `ok`
+            ! dummy here at all, rather than an arm no caller can reach.
+            if (present(ok)) then
+                ok = .false.
+                return
+            end if
             error stop EP // proc // ": every value is null or NaN, so there is no " // &
                 "minimum or maximum; guard with count(is_valid) (or the column's own " // &
                 "null count) if that can happen"
@@ -877,11 +992,12 @@ contains
     end subroutine minmax_impl_time
     !
     !> Shared worker behind pf_minmax and pf_argminmax for a timestamp array.
-    subroutine minmax_impl_ts(values, proc, imin, imax)
+    subroutine minmax_impl_ts(values, proc, imin, imax, ok)
         type(parquet_timestamp), intent(in) :: values(:)
         character(len=*), intent(in) :: proc !! calling procedure, for messages.
         integer(int64), intent(out) :: imin  !! where the smallest value is.
         integer(int64), intent(out) :: imax  !! where the largest value is.
+        logical, intent(out), optional :: ok !! .false. when there was no value at all.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: n, n_value
         !
@@ -890,7 +1006,16 @@ contains
         ! ranks 1 and n_value address them and nothing else.
         call extract_ts(values, buf, .false., .false., proc)
         call key_value_count(buf, n, n_value)
+        if (present(ok)) ok = .true.
         if (n_value < 1_int64) then
+            ! The caller chose which of the two behaviours it wants by passing `ok`
+            ! or not. `pf_argminmax` never passes it, so its abort is unchanged --
+            ! and a type that has ONLY pf_argminmax (parquet_column) has no `ok`
+            ! dummy here at all, rather than an arm no caller can reach.
+            if (present(ok)) then
+                ok = .false.
+                return
+            end if
             error stop EP // proc // ": every value is null or NaN, so there is no " // &
                 "minimum or maximum; guard with count(is_valid) (or the column's own " // &
                 "null count) if that can happen"
@@ -908,11 +1033,12 @@ contains
     end subroutine minmax_impl_ts
     !
     !> Shared worker behind pf_minmax and pf_argminmax for a packed string column array.
-    subroutine minmax_impl_strcol(values, proc, imin, imax)
+    subroutine minmax_impl_strcol(values, proc, imin, imax, ok)
         type(parquet_string_column), intent(in) :: values
         character(len=*), intent(in) :: proc !! calling procedure, for messages.
         integer(int64), intent(out) :: imin  !! where the smallest value is.
         integer(int64), intent(out) :: imax  !! where the largest value is.
+        logical, intent(out), optional :: ok !! .false. when there was no value at all.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: n, n_value
         !
@@ -921,7 +1047,16 @@ contains
         ! ranks 1 and n_value address them and nothing else.
         call extract_strcol(values, buf, .false., .false., proc)
         call key_value_count(buf, n, n_value)
+        if (present(ok)) ok = .true.
         if (n_value < 1_int64) then
+            ! The caller chose which of the two behaviours it wants by passing `ok`
+            ! or not. `pf_argminmax` never passes it, so its abort is unchanged --
+            ! and a type that has ONLY pf_argminmax (parquet_column) has no `ok`
+            ! dummy here at all, rather than an arm no caller can reach.
+            if (present(ok)) then
+                ok = .false.
+                return
+            end if
             error stop EP // proc // ": every value is null or NaN, so there is no " // &
                 "minimum or maximum; guard with count(is_valid) (or the column's own " // &
                 "null count) if that can happen"

@@ -338,6 +338,8 @@ contains
                 test_sorting_quantile_bad_rounding_aborts), &
             new_unittest("sorting: an all-null quantile aborts", &
                 test_sorting_quantile_all_null_aborts), &
+            new_unittest("sorting: ok= does not excuse an out-of-range quantile", &
+                test_sorting_quantile_ok_still_checks_range_aborts), &
             new_unittest("sorting: out-of-range permutation index aborts", &
                 test_sorting_permute_index_out_of_range_aborts), &
             new_unittest("sorting: duplicated permutation index aborts", &
@@ -6402,6 +6404,15 @@ contains
             failure_message="a quantile of an all-null array was expected to abort", &
             required_stderr="every value is null, so no quantile exists")
     end subroutine test_sorting_quantile_all_null_aborts
+
+    subroutine test_sorting_quantile_ok_still_checks_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_quantile_ok_still_checks_range", &
+            expect_abort=.true., &
+            failure_message="passing ok= was expected to leave the 0-1 range check in force", &
+            required_stderr="quantile must lie on a 0-1 scale")
+    end subroutine test_sorting_quantile_ok_still_checks_range_aborts
 
     !> pf_permute abort path: see scenario_sorting_permute_index_out_of_range in
     !> test/error_scenarios.f90 for what it does and why that state is rejected.

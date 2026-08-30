@@ -22,6 +22,15 @@
 # GCOVR_EXCL_STOP, are dropped from the counts the same way the real `gcovr`
 # (run by .gitlab-ci.yml) excludes them, so this script's percentages agree
 # with CI's rather than under-reporting genuinely-uncoverable lines.
+#
+# Reports FOUR things, and the percentage is the weakest of them:
+#   1. per-file and total line coverage;
+#   2. the uncovered line ranges, so a gap can be read without a browser;
+#   3. every procedure NO line of which ran -- see the note above that report
+#      for why a percentage cannot answer this and why it matters most on a
+#      generated layer;
+#   4. GCOVR_EXCL'd lines that nevertheless show a hit, i.e. candidates for a
+#      stale exclusion (artifact-tagged sites excepted).
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -150,7 +159,7 @@ while IFS= read -r dir; do
 done
 
 python3 - "$FPM_BUILD_DIR" <<'PY'
-import gzip, json, sys, glob, os
+import gzip, json, re, sys, glob, os
 
 build_dir = sys.argv[1]
 
@@ -323,6 +332,116 @@ for src in sorted(per_file):
         continue
     print(f"{src}:")
     print("  " + ", ".join(condense_ranges(uncovered)))
+
+# ---- Entirely-unreached procedures -------------------------------------------
+#
+# A percentage answers "how much of this file ran"; it cannot answer "which
+# procedures never ran at all", and the two come apart badly on a GENERATED
+# layer. src/parquet_stats_kernel.f90 read 30.23% at S4's release gate, which
+# is easy to wave through as "generated code, of course it is low" -- while the
+# number that actually mattered, 24 entirely-unreached public specifics
+# spanning three sub-stages, was invisible inside it. This report answers with
+# a list of NAMES instead of a number there is nothing to argue about.
+#
+# A procedure counts as unreached when every gcov-counted line attributed to it
+# has a zero hit count. Lines are attributed to the INNERMOST enclosing
+# procedure, so a covered contained procedure does not vouch for its host.
+# Excluded lines are already gone from `per_file` by this point, so a procedure
+# made entirely of GCOVR_EXCL'd lines has nothing counted and is skipped rather
+# than reported.
+
+OPEN_RE = re.compile(
+    r"^\s*(?:(?:module|pure|impure|elemental|recursive|non_recursive)\s+)*"
+    r"(?P<kind>subroutine|function|procedure)\s+(?P<name>[a-z_][a-z_0-9]*)",
+    re.IGNORECASE)
+END_RE = re.compile(r"^\s*end\s*(?:subroutine|function|procedure)\b", re.IGNORECASE)
+IFACE_RE = re.compile(r"^\s*(?:abstract\s+)?interface\b", re.IGNORECASE)
+ENDIFACE_RE = re.compile(r"^\s*end\s*interface\b", re.IGNORECASE)
+
+
+def strip_fortran_comment(line):
+    out = []
+    quote = None
+    for ch in line:
+        if quote:
+            out.append(ch)
+            if ch == quote:
+                quote = None
+        elif ch in "'\"":
+            quote = ch
+            out.append(ch)
+        elif ch == "!":
+            break
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def procedure_spans(path):
+    """[(name, first_line, last_line)] for every procedure BODY, innermost
+    first. Everything between `interface` and `end interface` is a declaration
+    rather than a body -- neither an opener nor an ender -- which is what keeps
+    a spec file full of interface bodies (src/parquet_stats.f90 and friends)
+    from reporting hundreds of never-executed "procedures"."""
+    spans = []
+    stack = []
+    iface = 0
+    try:
+        with open(path) as f:
+            raw = f.readlines()
+    except FileNotFoundError:
+        return spans
+    for i, line in enumerate(raw, start=1):
+        code = strip_fortran_comment(line)
+        if ENDIFACE_RE.match(code):
+            iface = max(0, iface - 1)
+            continue
+        if IFACE_RE.match(code):
+            iface += 1
+            continue
+        if iface:
+            continue
+        if END_RE.match(code):
+            if stack:
+                name, start = stack.pop()
+                spans.append((name, start, i))
+            continue
+        m = OPEN_RE.match(code)
+        if m:
+            stack.append((m.group("name"), i))
+    return spans
+
+
+unreached = {}   # src path -> [(name, first_line)]
+proc_total = 0
+proc_unreached = 0
+for src in sorted(per_file):
+    counted = per_file[src]
+    claimed = set()          # lines already attributed to an inner procedure
+    for name, start, end in procedure_spans(src):   # innermost first
+        mine = [ln for ln in range(start, end + 1) if ln in counted and ln not in claimed]
+        claimed.update(range(start, end + 1))
+        if not mine:
+            continue
+        proc_total += 1
+        if all(counted[ln] == 0 for ln in mine):
+            proc_unreached += 1
+            unreached.setdefault(src, []).append((name, start))
+
+print()
+print("Entirely-unreached procedures (no line in the body ran):")
+print("-" * (name_w + 26))
+if not unreached:
+    print("(none)")
+else:
+    for src in sorted(unreached):
+        print(f"{src}:")
+        for name, start in sorted(unreached[src], key=lambda t: t[1]):
+            print(f"  {src}:{start}  {name}")
+reached = proc_total - proc_unreached
+pct_p = 100.0 * reached / proc_total if proc_total else 0.0
+print("-" * (name_w + 26))
+print(f"TOTAL  {reached}/{proc_total} procedures reached  ({pct_p:6.2f}%)")
 
 print()
 print("Excluded lines with positive hits (candidates for a stale/no-longer-dead exclusion):")

@@ -113,6 +113,7 @@ module parquet_sorting
     public :: parquet_debug_set_sort_track_shift
     public :: parquet_debug_sort_max_insertion_shift
     public :: parquet_debug_set_sort_radix_min_rows
+    public :: parquet_debug_set_sort_nth_order_min
     public :: parquet_debug_set_sort_task_floor
     public :: parquet_debug_set_sort_tail_min_rows
     public :: parquet_debug_set_sort_engine_min_rows
@@ -348,8 +349,15 @@ module parquet_sorting
         module procedure partial_sort_ts
     end interface pf_partial_sort
     !
-    !> The element a full sort would place at 1-based rank `nth`, without sorting -- O(n)
-    !> rather than O(n log n). `index` optionally reports which element of `values` that was.
+    !> The element a full sort would place at 1-based rank `nth`. `index` optionally reports
+    !> which element of `values` that was.
+    !>
+    !> **It costs about what a full sort costs, and that is deliberate.** A small array is
+    !> answered by an O(n) selection scan; a larger one is answered by ordering the array and
+    !> reading off the rank, which is asymptotically worse and measurably faster -- the
+    !> ordering engine's radix path calls no comparator at all and threads, where a selection
+    !> scan does neither. So do not reach for this expecting a cheaper `pf_argsort`; reach for
+    !> it because it says what you mean.
     !>
     !> **The reported index is the one a full STABLE sort would give.** `std::nth_element`
     !> normally leaves an arbitrary member of an equal-comparing run at that position; here
@@ -433,9 +441,15 @@ module parquet_sorting
     !> `rounding=` selects how a fractional position is resolved: `"nearest"` (the default),
     !> `"down"` or `"up"`, matched case-insensitively. An unrecognized token aborts.
     !>
-    !> Aborts when EVERY value is null: there is no value to return, and no sentinel exists
-    !> across all ten types. `n_null` is for PARTIAL nullness; the all-null case never
-    !> reaches it. Guard with `count(mask)` (or a column's own null count) if that matters.
+    !> **When EVERY value is null there is no quantile**, and what happens then is the
+    !> caller's choice: pass `ok` and the call returns with `ok = .false.`, or omit it and
+    !> the call aborts. `n_null` is set either way, so a caller taking the `ok` route still
+    !> learns how many values were excluded. There is deliberately no sentinel value --
+    !> none exists across all ten types, which is the whole reason `ok` is a separate
+    !> argument. **`p_value` and `index` must not be read when `ok` is `.false.`**: they are
+    !> left as they were on entry to the call, which for a `character(len=:), allocatable`
+    !> result means unallocated and for a date/time/timestamp means default-initialised.
+    !> Partial nullness is NOT a failure -- `ok` is `.true.` whenever a value was produced.
     interface pf_nth_quantile
         module procedure quantile_i32
         module procedure quantile_i32_i32
@@ -674,9 +688,15 @@ module parquet_sorting
     !> Takes no `descending`/`nulls_first`: a minimum and a maximum are absolute, and reversing
     !> the order would only exchange the two answers.
     !>
-    !> **Aborts when every value is null or NaN** -- there is nothing to return, and no
-    !> sentinel exists across all nine types. This matches `pf_nth_quantile`'s decision for the
-    !> same degenerate case; guard with `count(is_valid)` where that can happen.
+    !> **When every value is null or NaN there is no minimum or maximum**, and what happens
+    !> then is the caller's choice: pass `ok` and the call returns with `ok = .false.`, or omit
+    !> it and the call aborts. There is deliberately no sentinel -- none exists across all nine
+    !> types, which is the whole reason `ok` is a separate argument. **`vmin` and `vmax` must
+    !> not be read when `ok` is `.false.`**: they are left as they were on entry to the call,
+    !> which for a `character(len=:), allocatable` result means unallocated and for a
+    !> date/time/timestamp means default-initialised. Partial nullness is NOT a failure -- `ok`
+    !> is `.true.` whenever a value was produced. `pf_nth_quantile` takes the same argument for
+    !> the same degenerate case.
     !>
     !> Use `pf_argminmax` when the positions matter rather than the values.
     interface pf_minmax
@@ -699,8 +719,14 @@ module parquet_sorting
     !> make a positional call ambiguous. A caller wanting both pays one extra call.
     !>
     !> Ties report the FIRST occurrence, which is the element a full stable sort would place at
-    !> either end. Aborts on an all-null-or-NaN input, exactly as `pf_minmax` does. Defined for
-    !> `parquet_column` as well, since an index needs no compile-time element type.
+    !> either end. Defined for `parquet_column` as well, since an index needs no compile-time
+    !> element type.
+    !>
+    !> **Aborts on an all-null-or-NaN input, and takes no `ok=` -- unlike `pf_minmax`.** That is
+    !> deliberate rather than an omission: `ok` exists because no VALUE sentinel spans the
+    !> eleven element types, and an index has one available (there is no 1-based index 0). So
+    !> reporting rather than aborting here is a different decision, needing its own contract for
+    !> what `imin`/`imax` come back as, and it has not been taken.
     interface pf_argminmax
         module procedure argminmax_i32_i32
         module procedure argminmax_i32_i64
@@ -923,12 +949,13 @@ module parquet_sorting
             integer(int64), allocatable, intent(out) :: perm(:) !! the first `count` 1-based indices.
         end subroutine drive_engine_partial
         !> The 1-based index a full stable sort would place at rank `nth`, without sorting.
-        module subroutine engine_nth_index(keys, nrows, nth, proc, idx)
+        module subroutine engine_nth_index(keys, nrows, nth, proc, idx, threads)
             type(sort_key_buf), intent(in), target :: keys(:)   !! the keys, primary first.
             integer(int64), intent(in) :: nrows                 !! rows each key describes.
             integer(int64), intent(in) :: nth                   !! 1-based rank wanted.
             character(len=*), intent(in) :: proc                !! calling procedure, for messages.
             integer(int64), intent(out) :: idx                  !! 1-based row index at that rank.
+            integer, intent(in), optional :: threads !! thread request; absent = serial.
         end subroutine engine_nth_index
         !> Clamps a requested count to the array size, aborting only on a negative one.
         module subroutine resolve_count(n, nrows, proc, count)
@@ -956,12 +983,16 @@ module parquet_sorting
             integer, intent(out) :: mode                       !! RND_NEAREST / RND_DOWN / RND_UP.
         end subroutine resolve_rounding
         !> The 1-based rank a quantile names within `n_valid` non-null values.
-        module subroutine quantile_rank(quantile, n_valid, mode, proc, rank)
+        module subroutine quantile_rank(quantile, n_valid, mode, proc, rank, ok)
             real(real64), intent(in) :: quantile   !! position on a 0-1 scale.
             integer(int64), intent(in) :: n_valid  !! non-null population size.
             integer, intent(in) :: mode            !! RND_* rounding of a fractional position.
             character(len=*), intent(in) :: proc   !! calling procedure, for messages.
             integer(int64), intent(out) :: rank    !! 1-based rank within the non-null values.
+            logical, intent(out), optional :: ok
+            !! `.false.` when `n_valid` is 0, leaving `rank` unset; absent restores the
+            !! abort. An out-of-range or NaN `quantile` aborts EITHER way -- this reports
+            !! an empty population, never a bad argument.
         end subroutine quantile_rank
         !> Whether every row is already in order under `keys`, using the same comparator
         !! `drive_engine` sorts with, so the two can never disagree.
@@ -3514,7 +3545,7 @@ module parquet_sorting
             !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_strcol_i64_i64
         !> pf_nth_quantile over a 32-bit integer array, with no index out-argument.
-        module subroutine quantile_i32(values, quantile, p_value, rounding, is_valid, n_null, threads)
+        module subroutine quantile_i32(values, quantile, p_value, rounding, is_valid, n_null, threads, ok)
         integer(int32), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             integer(int32), intent(out) :: p_value !! the value at that quantile.
@@ -3537,9 +3568,15 @@ module parquet_sorting
             !! sizes the non-null population this quantile is taken over, and the selection
             !! itself. Threading the count is possible and was deliberately not done here --
             !! it is a separate change needing its own measurement.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine quantile_i32
         !> pf_nth_quantile over a 32-bit integer array, with an int32 index.
-        module subroutine quantile_i32_i32(values, quantile, p_value, index, rounding, is_valid, n_null, threads)
+        module subroutine quantile_i32_i32(values, quantile, p_value, index, rounding, is_valid, n_null, threads, ok)
         integer(int32), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             integer(int32), intent(out) :: p_value !! the value at that quantile.
@@ -3563,9 +3600,15 @@ module parquet_sorting
             !! sizes the non-null population this quantile is taken over, and the selection
             !! itself. Threading the count is possible and was deliberately not done here --
             !! it is a separate change needing its own measurement.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine quantile_i32_i32
         !> pf_nth_quantile over a 32-bit integer array, with an int64 index.
-        module subroutine quantile_i32_i64(values, quantile, p_value, index, rounding, is_valid, n_null, threads)
+        module subroutine quantile_i32_i64(values, quantile, p_value, index, rounding, is_valid, n_null, threads, ok)
         integer(int32), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             integer(int32), intent(out) :: p_value !! the value at that quantile.
@@ -3589,9 +3632,15 @@ module parquet_sorting
             !! sizes the non-null population this quantile is taken over, and the selection
             !! itself. Threading the count is possible and was deliberately not done here --
             !! it is a separate change needing its own measurement.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine quantile_i32_i64
         !> pf_nth_quantile over a 64-bit integer array, with no index out-argument.
-        module subroutine quantile_i64(values, quantile, p_value, rounding, is_valid, n_null, threads)
+        module subroutine quantile_i64(values, quantile, p_value, rounding, is_valid, n_null, threads, ok)
         integer(int64), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             integer(int64), intent(out) :: p_value !! the value at that quantile.
@@ -3614,9 +3663,15 @@ module parquet_sorting
             !! sizes the non-null population this quantile is taken over, and the selection
             !! itself. Threading the count is possible and was deliberately not done here --
             !! it is a separate change needing its own measurement.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine quantile_i64
         !> pf_nth_quantile over a 64-bit integer array, with an int32 index.
-        module subroutine quantile_i64_i32(values, quantile, p_value, index, rounding, is_valid, n_null, threads)
+        module subroutine quantile_i64_i32(values, quantile, p_value, index, rounding, is_valid, n_null, threads, ok)
         integer(int64), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             integer(int64), intent(out) :: p_value !! the value at that quantile.
@@ -3640,9 +3695,15 @@ module parquet_sorting
             !! sizes the non-null population this quantile is taken over, and the selection
             !! itself. Threading the count is possible and was deliberately not done here --
             !! it is a separate change needing its own measurement.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine quantile_i64_i32
         !> pf_nth_quantile over a 64-bit integer array, with an int64 index.
-        module subroutine quantile_i64_i64(values, quantile, p_value, index, rounding, is_valid, n_null, threads)
+        module subroutine quantile_i64_i64(values, quantile, p_value, index, rounding, is_valid, n_null, threads, ok)
         integer(int64), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             integer(int64), intent(out) :: p_value !! the value at that quantile.
@@ -3666,9 +3727,15 @@ module parquet_sorting
             !! sizes the non-null population this quantile is taken over, and the selection
             !! itself. Threading the count is possible and was deliberately not done here --
             !! it is a separate change needing its own measurement.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine quantile_i64_i64
         !> pf_nth_quantile over a 32-bit real array, with no index out-argument.
-        module subroutine quantile_f32(values, quantile, p_value, rounding, is_valid, n_null, threads)
+        module subroutine quantile_f32(values, quantile, p_value, rounding, is_valid, n_null, threads, ok)
         real(real32), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             real(real32), intent(out) :: p_value !! the value at that quantile.
@@ -3691,9 +3758,15 @@ module parquet_sorting
             !! sizes the non-null population this quantile is taken over, and the selection
             !! itself. Threading the count is possible and was deliberately not done here --
             !! it is a separate change needing its own measurement.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine quantile_f32
         !> pf_nth_quantile over a 32-bit real array, with an int32 index.
-        module subroutine quantile_f32_i32(values, quantile, p_value, index, rounding, is_valid, n_null, threads)
+        module subroutine quantile_f32_i32(values, quantile, p_value, index, rounding, is_valid, n_null, threads, ok)
         real(real32), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             real(real32), intent(out) :: p_value !! the value at that quantile.
@@ -3717,9 +3790,15 @@ module parquet_sorting
             !! sizes the non-null population this quantile is taken over, and the selection
             !! itself. Threading the count is possible and was deliberately not done here --
             !! it is a separate change needing its own measurement.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine quantile_f32_i32
         !> pf_nth_quantile over a 32-bit real array, with an int64 index.
-        module subroutine quantile_f32_i64(values, quantile, p_value, index, rounding, is_valid, n_null, threads)
+        module subroutine quantile_f32_i64(values, quantile, p_value, index, rounding, is_valid, n_null, threads, ok)
         real(real32), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             real(real32), intent(out) :: p_value !! the value at that quantile.
@@ -3743,9 +3822,15 @@ module parquet_sorting
             !! sizes the non-null population this quantile is taken over, and the selection
             !! itself. Threading the count is possible and was deliberately not done here --
             !! it is a separate change needing its own measurement.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine quantile_f32_i64
         !> pf_nth_quantile over a 64-bit real array, with no index out-argument.
-        module subroutine quantile_f64(values, quantile, p_value, rounding, is_valid, n_null, threads)
+        module subroutine quantile_f64(values, quantile, p_value, rounding, is_valid, n_null, threads, ok)
         real(real64), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             real(real64), intent(out) :: p_value !! the value at that quantile.
@@ -3768,9 +3853,15 @@ module parquet_sorting
             !! sizes the non-null population this quantile is taken over, and the selection
             !! itself. Threading the count is possible and was deliberately not done here --
             !! it is a separate change needing its own measurement.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine quantile_f64
         !> pf_nth_quantile over a 64-bit real array, with an int32 index.
-        module subroutine quantile_f64_i32(values, quantile, p_value, index, rounding, is_valid, n_null, threads)
+        module subroutine quantile_f64_i32(values, quantile, p_value, index, rounding, is_valid, n_null, threads, ok)
         real(real64), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             real(real64), intent(out) :: p_value !! the value at that quantile.
@@ -3794,9 +3885,15 @@ module parquet_sorting
             !! sizes the non-null population this quantile is taken over, and the selection
             !! itself. Threading the count is possible and was deliberately not done here --
             !! it is a separate change needing its own measurement.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine quantile_f64_i32
         !> pf_nth_quantile over a 64-bit real array, with an int64 index.
-        module subroutine quantile_f64_i64(values, quantile, p_value, index, rounding, is_valid, n_null, threads)
+        module subroutine quantile_f64_i64(values, quantile, p_value, index, rounding, is_valid, n_null, threads, ok)
         real(real64), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             real(real64), intent(out) :: p_value !! the value at that quantile.
@@ -3820,9 +3917,15 @@ module parquet_sorting
             !! sizes the non-null population this quantile is taken over, and the selection
             !! itself. Threading the count is possible and was deliberately not done here --
             !! it is a separate change needing its own measurement.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine quantile_f64_i64
         !> pf_nth_quantile over a logical array, with no index out-argument.
-        module subroutine quantile_bool(values, quantile, p_value, rounding, is_valid, n_null, threads)
+        module subroutine quantile_bool(values, quantile, p_value, rounding, is_valid, n_null, threads, ok)
         logical, intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             logical, intent(out) :: p_value !! the value at that quantile.
@@ -3845,9 +3948,15 @@ module parquet_sorting
             !! sizes the non-null population this quantile is taken over, and the selection
             !! itself. Threading the count is possible and was deliberately not done here --
             !! it is a separate change needing its own measurement.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine quantile_bool
         !> pf_nth_quantile over a logical array, with an int32 index.
-        module subroutine quantile_bool_i32(values, quantile, p_value, index, rounding, is_valid, n_null, threads)
+        module subroutine quantile_bool_i32(values, quantile, p_value, index, rounding, is_valid, n_null, threads, ok)
         logical, intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             logical, intent(out) :: p_value !! the value at that quantile.
@@ -3871,9 +3980,15 @@ module parquet_sorting
             !! sizes the non-null population this quantile is taken over, and the selection
             !! itself. Threading the count is possible and was deliberately not done here --
             !! it is a separate change needing its own measurement.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine quantile_bool_i32
         !> pf_nth_quantile over a logical array, with an int64 index.
-        module subroutine quantile_bool_i64(values, quantile, p_value, index, rounding, is_valid, n_null, threads)
+        module subroutine quantile_bool_i64(values, quantile, p_value, index, rounding, is_valid, n_null, threads, ok)
         logical, intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             logical, intent(out) :: p_value !! the value at that quantile.
@@ -3897,9 +4012,15 @@ module parquet_sorting
             !! sizes the non-null population this quantile is taken over, and the selection
             !! itself. Threading the count is possible and was deliberately not done here --
             !! it is a separate change needing its own measurement.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine quantile_bool_i64
         !> pf_nth_quantile over a string array, with no index out-argument.
-        module subroutine quantile_chr(values, quantile, p_value, rounding, is_valid, n_null, threads)
+        module subroutine quantile_chr(values, quantile, p_value, rounding, is_valid, n_null, threads, ok)
         character(len=*), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             character(len=:), allocatable, intent(out) :: p_value !! the value at that quantile.
@@ -3922,9 +4043,15 @@ module parquet_sorting
             !! sizes the non-null population this quantile is taken over, and the selection
             !! itself. Threading the count is possible and was deliberately not done here --
             !! it is a separate change needing its own measurement.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine quantile_chr
         !> pf_nth_quantile over a string array, with an int32 index.
-        module subroutine quantile_chr_i32(values, quantile, p_value, index, rounding, is_valid, n_null, threads)
+        module subroutine quantile_chr_i32(values, quantile, p_value, index, rounding, is_valid, n_null, threads, ok)
         character(len=*), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             character(len=:), allocatable, intent(out) :: p_value !! the value at that quantile.
@@ -3948,9 +4075,15 @@ module parquet_sorting
             !! sizes the non-null population this quantile is taken over, and the selection
             !! itself. Threading the count is possible and was deliberately not done here --
             !! it is a separate change needing its own measurement.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine quantile_chr_i32
         !> pf_nth_quantile over a string array, with an int64 index.
-        module subroutine quantile_chr_i64(values, quantile, p_value, index, rounding, is_valid, n_null, threads)
+        module subroutine quantile_chr_i64(values, quantile, p_value, index, rounding, is_valid, n_null, threads, ok)
         character(len=*), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             character(len=:), allocatable, intent(out) :: p_value !! the value at that quantile.
@@ -3974,9 +4107,15 @@ module parquet_sorting
             !! sizes the non-null population this quantile is taken over, and the selection
             !! itself. Threading the count is possible and was deliberately not done here --
             !! it is a separate change needing its own measurement.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine quantile_chr_i64
         !> pf_nth_quantile over a date array, with no index out-argument.
-        module subroutine quantile_date(values, quantile, p_value, rounding, n_null, threads)
+        module subroutine quantile_date(values, quantile, p_value, rounding, n_null, threads, ok)
         type(parquet_date), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             type(parquet_date), intent(out) :: p_value !! the value at that quantile.
@@ -3998,9 +4137,15 @@ module parquet_sorting
             !! sizes the non-null population this quantile is taken over, and the selection
             !! itself. Threading the count is possible and was deliberately not done here --
             !! it is a separate change needing its own measurement.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine quantile_date
         !> pf_nth_quantile over a date array, with an int32 index.
-        module subroutine quantile_date_i32(values, quantile, p_value, index, rounding, n_null, threads)
+        module subroutine quantile_date_i32(values, quantile, p_value, index, rounding, n_null, threads, ok)
         type(parquet_date), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             type(parquet_date), intent(out) :: p_value !! the value at that quantile.
@@ -4023,9 +4168,15 @@ module parquet_sorting
             !! sizes the non-null population this quantile is taken over, and the selection
             !! itself. Threading the count is possible and was deliberately not done here --
             !! it is a separate change needing its own measurement.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine quantile_date_i32
         !> pf_nth_quantile over a date array, with an int64 index.
-        module subroutine quantile_date_i64(values, quantile, p_value, index, rounding, n_null, threads)
+        module subroutine quantile_date_i64(values, quantile, p_value, index, rounding, n_null, threads, ok)
         type(parquet_date), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             type(parquet_date), intent(out) :: p_value !! the value at that quantile.
@@ -4048,9 +4199,15 @@ module parquet_sorting
             !! sizes the non-null population this quantile is taken over, and the selection
             !! itself. Threading the count is possible and was deliberately not done here --
             !! it is a separate change needing its own measurement.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine quantile_date_i64
         !> pf_nth_quantile over a time array, with no index out-argument.
-        module subroutine quantile_time(values, quantile, p_value, rounding, n_null, threads)
+        module subroutine quantile_time(values, quantile, p_value, rounding, n_null, threads, ok)
         type(parquet_time), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             type(parquet_time), intent(out) :: p_value !! the value at that quantile.
@@ -4072,9 +4229,15 @@ module parquet_sorting
             !! sizes the non-null population this quantile is taken over, and the selection
             !! itself. Threading the count is possible and was deliberately not done here --
             !! it is a separate change needing its own measurement.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine quantile_time
         !> pf_nth_quantile over a time array, with an int32 index.
-        module subroutine quantile_time_i32(values, quantile, p_value, index, rounding, n_null, threads)
+        module subroutine quantile_time_i32(values, quantile, p_value, index, rounding, n_null, threads, ok)
         type(parquet_time), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             type(parquet_time), intent(out) :: p_value !! the value at that quantile.
@@ -4097,9 +4260,15 @@ module parquet_sorting
             !! sizes the non-null population this quantile is taken over, and the selection
             !! itself. Threading the count is possible and was deliberately not done here --
             !! it is a separate change needing its own measurement.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine quantile_time_i32
         !> pf_nth_quantile over a time array, with an int64 index.
-        module subroutine quantile_time_i64(values, quantile, p_value, index, rounding, n_null, threads)
+        module subroutine quantile_time_i64(values, quantile, p_value, index, rounding, n_null, threads, ok)
         type(parquet_time), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             type(parquet_time), intent(out) :: p_value !! the value at that quantile.
@@ -4122,9 +4291,15 @@ module parquet_sorting
             !! sizes the non-null population this quantile is taken over, and the selection
             !! itself. Threading the count is possible and was deliberately not done here --
             !! it is a separate change needing its own measurement.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine quantile_time_i64
         !> pf_nth_quantile over a timestamp array, with no index out-argument.
-        module subroutine quantile_ts(values, quantile, p_value, rounding, n_null, threads)
+        module subroutine quantile_ts(values, quantile, p_value, rounding, n_null, threads, ok)
         type(parquet_timestamp), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             type(parquet_timestamp), intent(out) :: p_value !! the value at that quantile.
@@ -4146,9 +4321,15 @@ module parquet_sorting
             !! sizes the non-null population this quantile is taken over, and the selection
             !! itself. Threading the count is possible and was deliberately not done here --
             !! it is a separate change needing its own measurement.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine quantile_ts
         !> pf_nth_quantile over a timestamp array, with an int32 index.
-        module subroutine quantile_ts_i32(values, quantile, p_value, index, rounding, n_null, threads)
+        module subroutine quantile_ts_i32(values, quantile, p_value, index, rounding, n_null, threads, ok)
         type(parquet_timestamp), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             type(parquet_timestamp), intent(out) :: p_value !! the value at that quantile.
@@ -4171,9 +4352,15 @@ module parquet_sorting
             !! sizes the non-null population this quantile is taken over, and the selection
             !! itself. Threading the count is possible and was deliberately not done here --
             !! it is a separate change needing its own measurement.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine quantile_ts_i32
         !> pf_nth_quantile over a timestamp array, with an int64 index.
-        module subroutine quantile_ts_i64(values, quantile, p_value, index, rounding, n_null, threads)
+        module subroutine quantile_ts_i64(values, quantile, p_value, index, rounding, n_null, threads, ok)
         type(parquet_timestamp), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             type(parquet_timestamp), intent(out) :: p_value !! the value at that quantile.
@@ -4196,9 +4383,15 @@ module parquet_sorting
             !! sizes the non-null population this quantile is taken over, and the selection
             !! itself. Threading the count is possible and was deliberately not done here --
             !! it is a separate change needing its own measurement.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine quantile_ts_i64
         !> pf_nth_quantile over a packed string column array, with no index out-argument.
-        module subroutine quantile_strcol(values, quantile, p_value, rounding, n_null, threads)
+        module subroutine quantile_strcol(values, quantile, p_value, rounding, n_null, threads, ok)
         type(parquet_string_column), intent(in) :: values
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             character(len=:), allocatable, intent(out) :: p_value !! the value at that quantile.
@@ -4220,9 +4413,15 @@ module parquet_sorting
             !! sizes the non-null population this quantile is taken over, and the selection
             !! itself. Threading the count is possible and was deliberately not done here --
             !! it is a separate change needing its own measurement.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine quantile_strcol
         !> pf_nth_quantile over a packed string column array, with an int32 index.
-        module subroutine quantile_strcol_i32(values, quantile, p_value, index, rounding, n_null, threads)
+        module subroutine quantile_strcol_i32(values, quantile, p_value, index, rounding, n_null, threads, ok)
         type(parquet_string_column), intent(in) :: values
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             character(len=:), allocatable, intent(out) :: p_value !! the value at that quantile.
@@ -4245,9 +4444,15 @@ module parquet_sorting
             !! sizes the non-null population this quantile is taken over, and the selection
             !! itself. Threading the count is possible and was deliberately not done here --
             !! it is a separate change needing its own measurement.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine quantile_strcol_i32
         !> pf_nth_quantile over a packed string column array, with an int64 index.
-        module subroutine quantile_strcol_i64(values, quantile, p_value, index, rounding, n_null, threads)
+        module subroutine quantile_strcol_i64(values, quantile, p_value, index, rounding, n_null, threads, ok)
         type(parquet_string_column), intent(in) :: values
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             character(len=:), allocatable, intent(out) :: p_value !! the value at that quantile.
@@ -4270,6 +4475,12 @@ module parquet_sorting
             !! sizes the non-null population this quantile is taken over, and the selection
             !! itself. Threading the count is possible and was deliberately not done here --
             !! it is a separate change needing its own measurement.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine quantile_strcol_i64
     end interface
     !
@@ -6086,63 +6297,117 @@ module parquet_sorting
     ! ---- Extremes and merging (parquet_sorting_reduce) ----
     interface
         !> pf_minmax over a 32-bit integer array: its smallest and largest value.
-        module subroutine minmax_i32(values, vmin, vmax, is_valid)
+        module subroutine minmax_i32(values, vmin, vmax, is_valid, ok)
         integer(int32), intent(in) :: values(:)
         integer(int32), intent(out) :: vmin !! the smallest value.
         integer(int32), intent(out) :: vmax !! the largest value.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine minmax_i32
         !> pf_minmax over a 64-bit integer array: its smallest and largest value.
-        module subroutine minmax_i64(values, vmin, vmax, is_valid)
+        module subroutine minmax_i64(values, vmin, vmax, is_valid, ok)
         integer(int64), intent(in) :: values(:)
         integer(int64), intent(out) :: vmin !! the smallest value.
         integer(int64), intent(out) :: vmax !! the largest value.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine minmax_i64
         !> pf_minmax over a 32-bit real array: its smallest and largest value.
-        module subroutine minmax_f32(values, vmin, vmax, is_valid)
+        module subroutine minmax_f32(values, vmin, vmax, is_valid, ok)
         real(real32), intent(in) :: values(:)
         real(real32), intent(out) :: vmin !! the smallest value.
         real(real32), intent(out) :: vmax !! the largest value.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine minmax_f32
         !> pf_minmax over a 64-bit real array: its smallest and largest value.
-        module subroutine minmax_f64(values, vmin, vmax, is_valid)
+        module subroutine minmax_f64(values, vmin, vmax, is_valid, ok)
         real(real64), intent(in) :: values(:)
         real(real64), intent(out) :: vmin !! the smallest value.
         real(real64), intent(out) :: vmax !! the largest value.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine minmax_f64
         !> pf_minmax over a string array: its smallest and largest value.
-        module subroutine minmax_chr(values, vmin, vmax, is_valid)
+        module subroutine minmax_chr(values, vmin, vmax, is_valid, ok)
         character(len=*), intent(in) :: values(:)
         character(len=:), allocatable, intent(out) :: vmin !! the smallest value.
         character(len=:), allocatable, intent(out) :: vmax !! the largest value.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine minmax_chr
         !> pf_minmax over a date array: its smallest and largest value.
-        module subroutine minmax_date(values, vmin, vmax)
+        module subroutine minmax_date(values, vmin, vmax, ok)
         type(parquet_date), intent(in) :: values(:)
         type(parquet_date), intent(out) :: vmin !! the smallest value.
         type(parquet_date), intent(out) :: vmax !! the largest value.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine minmax_date
         !> pf_minmax over a time array: its smallest and largest value.
-        module subroutine minmax_time(values, vmin, vmax)
+        module subroutine minmax_time(values, vmin, vmax, ok)
         type(parquet_time), intent(in) :: values(:)
         type(parquet_time), intent(out) :: vmin !! the smallest value.
         type(parquet_time), intent(out) :: vmax !! the largest value.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine minmax_time
         !> pf_minmax over a timestamp array: its smallest and largest value.
-        module subroutine minmax_ts(values, vmin, vmax)
+        module subroutine minmax_ts(values, vmin, vmax, ok)
         type(parquet_timestamp), intent(in) :: values(:)
         type(parquet_timestamp), intent(out) :: vmin !! the smallest value.
         type(parquet_timestamp), intent(out) :: vmax !! the largest value.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine minmax_ts
         !> pf_minmax over a packed string column array: its smallest and largest value.
-        module subroutine minmax_strcol(values, vmin, vmax)
+        module subroutine minmax_strcol(values, vmin, vmax, ok)
         type(parquet_string_column), intent(in) :: values
         character(len=:), allocatable, intent(out) :: vmin !! the smallest value.
         character(len=:), allocatable, intent(out) :: vmax !! the largest value.
+            logical, intent(out), optional :: ok
+            !! `.false.` when the population was empty -- every value null (and, for
+            !! `pf_minmax`, NaN) -- in which case the value arguments were not
+            !! written and must not be read. `.true.` whenever a value was produced;
+            !! partial nullness is not a failure. **Omitting this argument restores
+            !! the abort**, so existing callers are unaffected.
         end subroutine minmax_strcol
         !> pf_argminmax over a 32-bit integer array, with int32 indices.
         module subroutine argminmax_i32_i32(values, imin, imax, is_valid)

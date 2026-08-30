@@ -1364,230 +1364,410 @@ contains
     module procedure quantile_i32
         integer(int64) :: idx, nn
         !
-        call quantile_impl_i32(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
+        call quantile_impl_i32(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads, ok=ok)
+        ! `n_null` is set even on the ok=.false. path, so a caller taking the `ok`
+        ! route still learns how many values were excluded.
         if (present(n_null)) n_null = nn
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit.
+        if (present(ok)) then
+            if (.not. ok) return   ! idx is undefined on this path
+        end if
     end procedure quantile_i32
     !
     module procedure quantile_i32_i32
         integer(int64) :: idx, nn
         !
-        call quantile_impl_i32(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
+        call quantile_impl_i32(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads, ok=ok)
+        ! `n_null` is set even on the ok=.false. path, so a caller taking the `ok`
+        ! route still learns how many values were excluded.
         if (present(n_null)) n_null = nn
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit.
+        if (present(ok)) then
+            if (.not. ok) return   ! idx is undefined on this path
+        end if
         call narrow_index(idx, "pf_nth_quantile", index)
     end procedure quantile_i32_i32
     !
     module procedure quantile_i32_i64
         integer(int64) :: idx, nn
         !
-        call quantile_impl_i32(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
+        call quantile_impl_i32(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads, ok=ok)
+        ! `n_null` is set even on the ok=.false. path, so a caller taking the `ok`
+        ! route still learns how many values were excluded.
         if (present(n_null)) n_null = nn
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit.
+        if (present(ok)) then
+            if (.not. ok) return   ! idx is undefined on this path
+        end if
         index = idx
     end procedure quantile_i32_i64
     !
     module procedure quantile_i64
         integer(int64) :: idx, nn
         !
-        call quantile_impl_i64(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
+        call quantile_impl_i64(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads, ok=ok)
+        ! `n_null` is set even on the ok=.false. path, so a caller taking the `ok`
+        ! route still learns how many values were excluded.
         if (present(n_null)) n_null = nn
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit.
+        if (present(ok)) then
+            if (.not. ok) return   ! idx is undefined on this path
+        end if
     end procedure quantile_i64
     !
     module procedure quantile_i64_i32
         integer(int64) :: idx, nn
         !
-        call quantile_impl_i64(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
+        call quantile_impl_i64(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads, ok=ok)
+        ! `n_null` is set even on the ok=.false. path, so a caller taking the `ok`
+        ! route still learns how many values were excluded.
         if (present(n_null)) n_null = nn
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit.
+        if (present(ok)) then
+            if (.not. ok) return   ! idx is undefined on this path
+        end if
         call narrow_index(idx, "pf_nth_quantile", index)
     end procedure quantile_i64_i32
     !
     module procedure quantile_i64_i64
         integer(int64) :: idx, nn
         !
-        call quantile_impl_i64(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
+        call quantile_impl_i64(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads, ok=ok)
+        ! `n_null` is set even on the ok=.false. path, so a caller taking the `ok`
+        ! route still learns how many values were excluded.
         if (present(n_null)) n_null = nn
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit.
+        if (present(ok)) then
+            if (.not. ok) return   ! idx is undefined on this path
+        end if
         index = idx
     end procedure quantile_i64_i64
     !
     module procedure quantile_f32
         integer(int64) :: idx, nn
         !
-        call quantile_impl_f32(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
+        call quantile_impl_f32(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads, ok=ok)
+        ! `n_null` is set even on the ok=.false. path, so a caller taking the `ok`
+        ! route still learns how many values were excluded.
         if (present(n_null)) n_null = nn
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit.
+        if (present(ok)) then
+            if (.not. ok) return   ! idx is undefined on this path
+        end if
     end procedure quantile_f32
     !
     module procedure quantile_f32_i32
         integer(int64) :: idx, nn
         !
-        call quantile_impl_f32(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
+        call quantile_impl_f32(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads, ok=ok)
+        ! `n_null` is set even on the ok=.false. path, so a caller taking the `ok`
+        ! route still learns how many values were excluded.
         if (present(n_null)) n_null = nn
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit.
+        if (present(ok)) then
+            if (.not. ok) return   ! idx is undefined on this path
+        end if
         call narrow_index(idx, "pf_nth_quantile", index)
     end procedure quantile_f32_i32
     !
     module procedure quantile_f32_i64
         integer(int64) :: idx, nn
         !
-        call quantile_impl_f32(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
+        call quantile_impl_f32(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads, ok=ok)
+        ! `n_null` is set even on the ok=.false. path, so a caller taking the `ok`
+        ! route still learns how many values were excluded.
         if (present(n_null)) n_null = nn
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit.
+        if (present(ok)) then
+            if (.not. ok) return   ! idx is undefined on this path
+        end if
         index = idx
     end procedure quantile_f32_i64
     !
     module procedure quantile_f64
         integer(int64) :: idx, nn
         !
-        call quantile_impl_f64(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
+        call quantile_impl_f64(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads, ok=ok)
+        ! `n_null` is set even on the ok=.false. path, so a caller taking the `ok`
+        ! route still learns how many values were excluded.
         if (present(n_null)) n_null = nn
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit.
+        if (present(ok)) then
+            if (.not. ok) return   ! idx is undefined on this path
+        end if
     end procedure quantile_f64
     !
     module procedure quantile_f64_i32
         integer(int64) :: idx, nn
         !
-        call quantile_impl_f64(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
+        call quantile_impl_f64(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads, ok=ok)
+        ! `n_null` is set even on the ok=.false. path, so a caller taking the `ok`
+        ! route still learns how many values were excluded.
         if (present(n_null)) n_null = nn
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit.
+        if (present(ok)) then
+            if (.not. ok) return   ! idx is undefined on this path
+        end if
         call narrow_index(idx, "pf_nth_quantile", index)
     end procedure quantile_f64_i32
     !
     module procedure quantile_f64_i64
         integer(int64) :: idx, nn
         !
-        call quantile_impl_f64(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
+        call quantile_impl_f64(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads, ok=ok)
+        ! `n_null` is set even on the ok=.false. path, so a caller taking the `ok`
+        ! route still learns how many values were excluded.
         if (present(n_null)) n_null = nn
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit.
+        if (present(ok)) then
+            if (.not. ok) return   ! idx is undefined on this path
+        end if
         index = idx
     end procedure quantile_f64_i64
     !
     module procedure quantile_bool
         integer(int64) :: idx, nn
         !
-        call quantile_impl_bool(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
+        call quantile_impl_bool(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads, ok=ok)
+        ! `n_null` is set even on the ok=.false. path, so a caller taking the `ok`
+        ! route still learns how many values were excluded.
         if (present(n_null)) n_null = nn
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit.
+        if (present(ok)) then
+            if (.not. ok) return   ! idx is undefined on this path
+        end if
     end procedure quantile_bool
     !
     module procedure quantile_bool_i32
         integer(int64) :: idx, nn
         !
-        call quantile_impl_bool(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
+        call quantile_impl_bool(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads, ok=ok)
+        ! `n_null` is set even on the ok=.false. path, so a caller taking the `ok`
+        ! route still learns how many values were excluded.
         if (present(n_null)) n_null = nn
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit.
+        if (present(ok)) then
+            if (.not. ok) return   ! idx is undefined on this path
+        end if
         call narrow_index(idx, "pf_nth_quantile", index)
     end procedure quantile_bool_i32
     !
     module procedure quantile_bool_i64
         integer(int64) :: idx, nn
         !
-        call quantile_impl_bool(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
+        call quantile_impl_bool(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads, ok=ok)
+        ! `n_null` is set even on the ok=.false. path, so a caller taking the `ok`
+        ! route still learns how many values were excluded.
         if (present(n_null)) n_null = nn
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit.
+        if (present(ok)) then
+            if (.not. ok) return   ! idx is undefined on this path
+        end if
         index = idx
     end procedure quantile_bool_i64
     !
     module procedure quantile_chr
         integer(int64) :: idx, nn
         !
-        call quantile_impl_chr(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
+        call quantile_impl_chr(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads, ok=ok)
+        ! `n_null` is set even on the ok=.false. path, so a caller taking the `ok`
+        ! route still learns how many values were excluded.
         if (present(n_null)) n_null = nn
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit.
+        if (present(ok)) then
+            if (.not. ok) return   ! idx is undefined on this path
+        end if
     end procedure quantile_chr
     !
     module procedure quantile_chr_i32
         integer(int64) :: idx, nn
         !
-        call quantile_impl_chr(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
+        call quantile_impl_chr(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads, ok=ok)
+        ! `n_null` is set even on the ok=.false. path, so a caller taking the `ok`
+        ! route still learns how many values were excluded.
         if (present(n_null)) n_null = nn
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit.
+        if (present(ok)) then
+            if (.not. ok) return   ! idx is undefined on this path
+        end if
         call narrow_index(idx, "pf_nth_quantile", index)
     end procedure quantile_chr_i32
     !
     module procedure quantile_chr_i64
         integer(int64) :: idx, nn
         !
-        call quantile_impl_chr(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
+        call quantile_impl_chr(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads, ok=ok)
+        ! `n_null` is set even on the ok=.false. path, so a caller taking the `ok`
+        ! route still learns how many values were excluded.
         if (present(n_null)) n_null = nn
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit.
+        if (present(ok)) then
+            if (.not. ok) return   ! idx is undefined on this path
+        end if
         index = idx
     end procedure quantile_chr_i64
     !
     module procedure quantile_date
         integer(int64) :: idx, nn
         !
-        call quantile_impl_date(values, quantile, p_value, idx, nn, rounding, threads=threads)
+        call quantile_impl_date(values, quantile, p_value, idx, nn, rounding, threads=threads, ok=ok)
+        ! `n_null` is set even on the ok=.false. path, so a caller taking the `ok`
+        ! route still learns how many values were excluded.
         if (present(n_null)) n_null = nn
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit.
+        if (present(ok)) then
+            if (.not. ok) return   ! idx is undefined on this path
+        end if
     end procedure quantile_date
     !
     module procedure quantile_date_i32
         integer(int64) :: idx, nn
         !
-        call quantile_impl_date(values, quantile, p_value, idx, nn, rounding, threads=threads)
+        call quantile_impl_date(values, quantile, p_value, idx, nn, rounding, threads=threads, ok=ok)
+        ! `n_null` is set even on the ok=.false. path, so a caller taking the `ok`
+        ! route still learns how many values were excluded.
         if (present(n_null)) n_null = nn
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit.
+        if (present(ok)) then
+            if (.not. ok) return   ! idx is undefined on this path
+        end if
         call narrow_index(idx, "pf_nth_quantile", index)
     end procedure quantile_date_i32
     !
     module procedure quantile_date_i64
         integer(int64) :: idx, nn
         !
-        call quantile_impl_date(values, quantile, p_value, idx, nn, rounding, threads=threads)
+        call quantile_impl_date(values, quantile, p_value, idx, nn, rounding, threads=threads, ok=ok)
+        ! `n_null` is set even on the ok=.false. path, so a caller taking the `ok`
+        ! route still learns how many values were excluded.
         if (present(n_null)) n_null = nn
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit.
+        if (present(ok)) then
+            if (.not. ok) return   ! idx is undefined on this path
+        end if
         index = idx
     end procedure quantile_date_i64
     !
     module procedure quantile_time
         integer(int64) :: idx, nn
         !
-        call quantile_impl_time(values, quantile, p_value, idx, nn, rounding, threads=threads)
+        call quantile_impl_time(values, quantile, p_value, idx, nn, rounding, threads=threads, ok=ok)
+        ! `n_null` is set even on the ok=.false. path, so a caller taking the `ok`
+        ! route still learns how many values were excluded.
         if (present(n_null)) n_null = nn
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit.
+        if (present(ok)) then
+            if (.not. ok) return   ! idx is undefined on this path
+        end if
     end procedure quantile_time
     !
     module procedure quantile_time_i32
         integer(int64) :: idx, nn
         !
-        call quantile_impl_time(values, quantile, p_value, idx, nn, rounding, threads=threads)
+        call quantile_impl_time(values, quantile, p_value, idx, nn, rounding, threads=threads, ok=ok)
+        ! `n_null` is set even on the ok=.false. path, so a caller taking the `ok`
+        ! route still learns how many values were excluded.
         if (present(n_null)) n_null = nn
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit.
+        if (present(ok)) then
+            if (.not. ok) return   ! idx is undefined on this path
+        end if
         call narrow_index(idx, "pf_nth_quantile", index)
     end procedure quantile_time_i32
     !
     module procedure quantile_time_i64
         integer(int64) :: idx, nn
         !
-        call quantile_impl_time(values, quantile, p_value, idx, nn, rounding, threads=threads)
+        call quantile_impl_time(values, quantile, p_value, idx, nn, rounding, threads=threads, ok=ok)
+        ! `n_null` is set even on the ok=.false. path, so a caller taking the `ok`
+        ! route still learns how many values were excluded.
         if (present(n_null)) n_null = nn
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit.
+        if (present(ok)) then
+            if (.not. ok) return   ! idx is undefined on this path
+        end if
         index = idx
     end procedure quantile_time_i64
     !
     module procedure quantile_ts
         integer(int64) :: idx, nn
         !
-        call quantile_impl_ts(values, quantile, p_value, idx, nn, rounding, threads=threads)
+        call quantile_impl_ts(values, quantile, p_value, idx, nn, rounding, threads=threads, ok=ok)
+        ! `n_null` is set even on the ok=.false. path, so a caller taking the `ok`
+        ! route still learns how many values were excluded.
         if (present(n_null)) n_null = nn
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit.
+        if (present(ok)) then
+            if (.not. ok) return   ! idx is undefined on this path
+        end if
     end procedure quantile_ts
     !
     module procedure quantile_ts_i32
         integer(int64) :: idx, nn
         !
-        call quantile_impl_ts(values, quantile, p_value, idx, nn, rounding, threads=threads)
+        call quantile_impl_ts(values, quantile, p_value, idx, nn, rounding, threads=threads, ok=ok)
+        ! `n_null` is set even on the ok=.false. path, so a caller taking the `ok`
+        ! route still learns how many values were excluded.
         if (present(n_null)) n_null = nn
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit.
+        if (present(ok)) then
+            if (.not. ok) return   ! idx is undefined on this path
+        end if
         call narrow_index(idx, "pf_nth_quantile", index)
     end procedure quantile_ts_i32
     !
     module procedure quantile_ts_i64
         integer(int64) :: idx, nn
         !
-        call quantile_impl_ts(values, quantile, p_value, idx, nn, rounding, threads=threads)
+        call quantile_impl_ts(values, quantile, p_value, idx, nn, rounding, threads=threads, ok=ok)
+        ! `n_null` is set even on the ok=.false. path, so a caller taking the `ok`
+        ! route still learns how many values were excluded.
         if (present(n_null)) n_null = nn
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit.
+        if (present(ok)) then
+            if (.not. ok) return   ! idx is undefined on this path
+        end if
         index = idx
     end procedure quantile_ts_i64
     !
     module procedure quantile_strcol
         integer(int64) :: idx, nn
         !
-        call quantile_impl_strcol(values, quantile, p_value, idx, nn, rounding, threads=threads)
+        call quantile_impl_strcol(values, quantile, p_value, idx, nn, rounding, threads=threads, ok=ok)
+        ! `n_null` is set even on the ok=.false. path, so a caller taking the `ok`
+        ! route still learns how many values were excluded.
         if (present(n_null)) n_null = nn
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit.
+        if (present(ok)) then
+            if (.not. ok) return   ! idx is undefined on this path
+        end if
     end procedure quantile_strcol
     !
     module procedure quantile_strcol_i32
         integer(int64) :: idx, nn
         !
-        call quantile_impl_strcol(values, quantile, p_value, idx, nn, rounding, threads=threads)
+        call quantile_impl_strcol(values, quantile, p_value, idx, nn, rounding, threads=threads, ok=ok)
+        ! `n_null` is set even on the ok=.false. path, so a caller taking the `ok`
+        ! route still learns how many values were excluded.
         if (present(n_null)) n_null = nn
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit.
+        if (present(ok)) then
+            if (.not. ok) return   ! idx is undefined on this path
+        end if
         call narrow_index(idx, "pf_nth_quantile", index)
     end procedure quantile_strcol_i32
     !
     module procedure quantile_strcol_i64
         integer(int64) :: idx, nn
         !
-        call quantile_impl_strcol(values, quantile, p_value, idx, nn, rounding, threads=threads)
+        call quantile_impl_strcol(values, quantile, p_value, idx, nn, rounding, threads=threads, ok=ok)
+        ! `n_null` is set even on the ok=.false. path, so a caller taking the `ok`
+        ! route still learns how many values were excluded.
         if (present(n_null)) n_null = nn
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit.
+        if (present(ok)) then
+            if (.not. ok) return   ! idx is undefined on this path
+        end if
         index = idx
     end procedure quantile_strcol_i64
     !
@@ -1607,12 +1787,12 @@ contains
         nrows = size(values, kind=int64)
         call check_rank(nth, nrows, "pf_nth_element")
         call extract_i32(values, buf, descending, nulls_first, "pf_nth_element", is_valid=is_valid, threads=threads)
-        call engine_nth_index(buf, nrows, nth, "pf_nth_element", idx)
+        call engine_nth_index(buf, nrows, nth, "pf_nth_element", idx, threads=threads)
         p_value = values(idx)
     end subroutine nth_impl_i32
     !
     !> Shared worker behind every pf_nth_quantile specific for a 32-bit integer array.
-    subroutine quantile_impl_i32(values, quantile, p_value, idx, n_null, rounding, is_valid, threads)
+    subroutine quantile_impl_i32(values, quantile, p_value, idx, n_null, rounding, is_valid, threads, ok)
         integer(int32), intent(in) :: values(:)
         real(real64), intent(in) :: quantile !! position on a 0-1 scale.
         integer(int32), intent(out) :: p_value !! the value at that quantile.
@@ -1621,6 +1801,7 @@ contains
         character(len=*), intent(in), optional :: rounding !! rounding token.
         logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
         integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
+        logical, intent(out), optional :: ok !! .false. when every value was null.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: nrows, n_valid, rank
         integer :: mode
@@ -1632,8 +1813,14 @@ contains
         call extract_i32(values, buf, .false., .false., "pf_nth_quantile", is_valid=is_valid, threads=threads)
         call key_valid_count(buf, nrows, n_valid)
         n_null = nrows - n_valid
-        call quantile_rank(quantile, n_valid, mode, "pf_nth_quantile", rank)
-        call engine_nth_index(buf, nrows, rank, "pf_nth_quantile", idx)
+        ! quantile_rank owns BOTH the argument validation and the empty-population
+        ! decision, which is what keeps the abort's message in one place and keeps a
+        ! bad `quantile` aborting even when `ok` was passed.
+        call quantile_rank(quantile, n_valid, mode, "pf_nth_quantile", rank, ok=ok)
+        if (present(ok)) then
+            if (.not. ok) return   ! rank is unset on this path
+        end if
+        call engine_nth_index(buf, nrows, rank, "pf_nth_quantile", idx, threads=threads)
         p_value = values(idx)
     end subroutine quantile_impl_i32
     !
@@ -1653,12 +1840,12 @@ contains
         nrows = size(values, kind=int64)
         call check_rank(nth, nrows, "pf_nth_element")
         call extract_i64(values, buf, descending, nulls_first, "pf_nth_element", is_valid=is_valid, threads=threads)
-        call engine_nth_index(buf, nrows, nth, "pf_nth_element", idx)
+        call engine_nth_index(buf, nrows, nth, "pf_nth_element", idx, threads=threads)
         p_value = values(idx)
     end subroutine nth_impl_i64
     !
     !> Shared worker behind every pf_nth_quantile specific for a 64-bit integer array.
-    subroutine quantile_impl_i64(values, quantile, p_value, idx, n_null, rounding, is_valid, threads)
+    subroutine quantile_impl_i64(values, quantile, p_value, idx, n_null, rounding, is_valid, threads, ok)
         integer(int64), intent(in) :: values(:)
         real(real64), intent(in) :: quantile !! position on a 0-1 scale.
         integer(int64), intent(out) :: p_value !! the value at that quantile.
@@ -1667,6 +1854,7 @@ contains
         character(len=*), intent(in), optional :: rounding !! rounding token.
         logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
         integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
+        logical, intent(out), optional :: ok !! .false. when every value was null.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: nrows, n_valid, rank
         integer :: mode
@@ -1678,8 +1866,14 @@ contains
         call extract_i64(values, buf, .false., .false., "pf_nth_quantile", is_valid=is_valid, threads=threads)
         call key_valid_count(buf, nrows, n_valid)
         n_null = nrows - n_valid
-        call quantile_rank(quantile, n_valid, mode, "pf_nth_quantile", rank)
-        call engine_nth_index(buf, nrows, rank, "pf_nth_quantile", idx)
+        ! quantile_rank owns BOTH the argument validation and the empty-population
+        ! decision, which is what keeps the abort's message in one place and keeps a
+        ! bad `quantile` aborting even when `ok` was passed.
+        call quantile_rank(quantile, n_valid, mode, "pf_nth_quantile", rank, ok=ok)
+        if (present(ok)) then
+            if (.not. ok) return   ! rank is unset on this path
+        end if
+        call engine_nth_index(buf, nrows, rank, "pf_nth_quantile", idx, threads=threads)
         p_value = values(idx)
     end subroutine quantile_impl_i64
     !
@@ -1699,12 +1893,12 @@ contains
         nrows = size(values, kind=int64)
         call check_rank(nth, nrows, "pf_nth_element")
         call extract_f32(values, buf, descending, nulls_first, "pf_nth_element", is_valid=is_valid, threads=threads)
-        call engine_nth_index(buf, nrows, nth, "pf_nth_element", idx)
+        call engine_nth_index(buf, nrows, nth, "pf_nth_element", idx, threads=threads)
         p_value = values(idx)
     end subroutine nth_impl_f32
     !
     !> Shared worker behind every pf_nth_quantile specific for a 32-bit real array.
-    subroutine quantile_impl_f32(values, quantile, p_value, idx, n_null, rounding, is_valid, threads)
+    subroutine quantile_impl_f32(values, quantile, p_value, idx, n_null, rounding, is_valid, threads, ok)
         real(real32), intent(in) :: values(:)
         real(real64), intent(in) :: quantile !! position on a 0-1 scale.
         real(real32), intent(out) :: p_value !! the value at that quantile.
@@ -1713,6 +1907,7 @@ contains
         character(len=*), intent(in), optional :: rounding !! rounding token.
         logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
         integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
+        logical, intent(out), optional :: ok !! .false. when every value was null.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: nrows, n_valid, rank
         integer :: mode
@@ -1724,8 +1919,14 @@ contains
         call extract_f32(values, buf, .false., .false., "pf_nth_quantile", is_valid=is_valid, threads=threads)
         call key_valid_count(buf, nrows, n_valid)
         n_null = nrows - n_valid
-        call quantile_rank(quantile, n_valid, mode, "pf_nth_quantile", rank)
-        call engine_nth_index(buf, nrows, rank, "pf_nth_quantile", idx)
+        ! quantile_rank owns BOTH the argument validation and the empty-population
+        ! decision, which is what keeps the abort's message in one place and keeps a
+        ! bad `quantile` aborting even when `ok` was passed.
+        call quantile_rank(quantile, n_valid, mode, "pf_nth_quantile", rank, ok=ok)
+        if (present(ok)) then
+            if (.not. ok) return   ! rank is unset on this path
+        end if
+        call engine_nth_index(buf, nrows, rank, "pf_nth_quantile", idx, threads=threads)
         p_value = values(idx)
     end subroutine quantile_impl_f32
     !
@@ -1745,12 +1946,12 @@ contains
         nrows = size(values, kind=int64)
         call check_rank(nth, nrows, "pf_nth_element")
         call extract_f64(values, buf, descending, nulls_first, "pf_nth_element", is_valid=is_valid, threads=threads)
-        call engine_nth_index(buf, nrows, nth, "pf_nth_element", idx)
+        call engine_nth_index(buf, nrows, nth, "pf_nth_element", idx, threads=threads)
         p_value = values(idx)
     end subroutine nth_impl_f64
     !
     !> Shared worker behind every pf_nth_quantile specific for a 64-bit real array.
-    subroutine quantile_impl_f64(values, quantile, p_value, idx, n_null, rounding, is_valid, threads)
+    subroutine quantile_impl_f64(values, quantile, p_value, idx, n_null, rounding, is_valid, threads, ok)
         real(real64), intent(in) :: values(:)
         real(real64), intent(in) :: quantile !! position on a 0-1 scale.
         real(real64), intent(out) :: p_value !! the value at that quantile.
@@ -1759,6 +1960,7 @@ contains
         character(len=*), intent(in), optional :: rounding !! rounding token.
         logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
         integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
+        logical, intent(out), optional :: ok !! .false. when every value was null.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: nrows, n_valid, rank
         integer :: mode
@@ -1770,8 +1972,14 @@ contains
         call extract_f64(values, buf, .false., .false., "pf_nth_quantile", is_valid=is_valid, threads=threads)
         call key_valid_count(buf, nrows, n_valid)
         n_null = nrows - n_valid
-        call quantile_rank(quantile, n_valid, mode, "pf_nth_quantile", rank)
-        call engine_nth_index(buf, nrows, rank, "pf_nth_quantile", idx)
+        ! quantile_rank owns BOTH the argument validation and the empty-population
+        ! decision, which is what keeps the abort's message in one place and keeps a
+        ! bad `quantile` aborting even when `ok` was passed.
+        call quantile_rank(quantile, n_valid, mode, "pf_nth_quantile", rank, ok=ok)
+        if (present(ok)) then
+            if (.not. ok) return   ! rank is unset on this path
+        end if
+        call engine_nth_index(buf, nrows, rank, "pf_nth_quantile", idx, threads=threads)
         p_value = values(idx)
     end subroutine quantile_impl_f64
     !
@@ -1791,12 +1999,12 @@ contains
         nrows = size(values, kind=int64)
         call check_rank(nth, nrows, "pf_nth_element")
         call extract_bool(values, buf, descending, nulls_first, "pf_nth_element", is_valid=is_valid, threads=threads)
-        call engine_nth_index(buf, nrows, nth, "pf_nth_element", idx)
+        call engine_nth_index(buf, nrows, nth, "pf_nth_element", idx, threads=threads)
         p_value = values(idx)
     end subroutine nth_impl_bool
     !
     !> Shared worker behind every pf_nth_quantile specific for a logical array.
-    subroutine quantile_impl_bool(values, quantile, p_value, idx, n_null, rounding, is_valid, threads)
+    subroutine quantile_impl_bool(values, quantile, p_value, idx, n_null, rounding, is_valid, threads, ok)
         logical, intent(in) :: values(:)
         real(real64), intent(in) :: quantile !! position on a 0-1 scale.
         logical, intent(out) :: p_value !! the value at that quantile.
@@ -1805,6 +2013,7 @@ contains
         character(len=*), intent(in), optional :: rounding !! rounding token.
         logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
         integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
+        logical, intent(out), optional :: ok !! .false. when every value was null.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: nrows, n_valid, rank
         integer :: mode
@@ -1816,8 +2025,14 @@ contains
         call extract_bool(values, buf, .false., .false., "pf_nth_quantile", is_valid=is_valid, threads=threads)
         call key_valid_count(buf, nrows, n_valid)
         n_null = nrows - n_valid
-        call quantile_rank(quantile, n_valid, mode, "pf_nth_quantile", rank)
-        call engine_nth_index(buf, nrows, rank, "pf_nth_quantile", idx)
+        ! quantile_rank owns BOTH the argument validation and the empty-population
+        ! decision, which is what keeps the abort's message in one place and keeps a
+        ! bad `quantile` aborting even when `ok` was passed.
+        call quantile_rank(quantile, n_valid, mode, "pf_nth_quantile", rank, ok=ok)
+        if (present(ok)) then
+            if (.not. ok) return   ! rank is unset on this path
+        end if
+        call engine_nth_index(buf, nrows, rank, "pf_nth_quantile", idx, threads=threads)
         p_value = values(idx)
     end subroutine quantile_impl_bool
     !
@@ -1837,12 +2052,12 @@ contains
         nrows = size(values, kind=int64)
         call check_rank(nth, nrows, "pf_nth_element")
         call extract_chr(values, buf, descending, nulls_first, "pf_nth_element", is_valid=is_valid, threads=threads)
-        call engine_nth_index(buf, nrows, nth, "pf_nth_element", idx)
+        call engine_nth_index(buf, nrows, nth, "pf_nth_element", idx, threads=threads)
         p_value = values(idx)
     end subroutine nth_impl_chr
     !
     !> Shared worker behind every pf_nth_quantile specific for a string array.
-    subroutine quantile_impl_chr(values, quantile, p_value, idx, n_null, rounding, is_valid, threads)
+    subroutine quantile_impl_chr(values, quantile, p_value, idx, n_null, rounding, is_valid, threads, ok)
         character(len=*), intent(in) :: values(:)
         real(real64), intent(in) :: quantile !! position on a 0-1 scale.
         character(len=:), allocatable, intent(out) :: p_value !! the value at that quantile.
@@ -1851,6 +2066,7 @@ contains
         character(len=*), intent(in), optional :: rounding !! rounding token.
         logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
         integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
+        logical, intent(out), optional :: ok !! .false. when every value was null.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: nrows, n_valid, rank
         integer :: mode
@@ -1862,8 +2078,14 @@ contains
         call extract_chr(values, buf, .false., .false., "pf_nth_quantile", is_valid=is_valid, threads=threads)
         call key_valid_count(buf, nrows, n_valid)
         n_null = nrows - n_valid
-        call quantile_rank(quantile, n_valid, mode, "pf_nth_quantile", rank)
-        call engine_nth_index(buf, nrows, rank, "pf_nth_quantile", idx)
+        ! quantile_rank owns BOTH the argument validation and the empty-population
+        ! decision, which is what keeps the abort's message in one place and keeps a
+        ! bad `quantile` aborting even when `ok` was passed.
+        call quantile_rank(quantile, n_valid, mode, "pf_nth_quantile", rank, ok=ok)
+        if (present(ok)) then
+            if (.not. ok) return   ! rank is unset on this path
+        end if
+        call engine_nth_index(buf, nrows, rank, "pf_nth_quantile", idx, threads=threads)
         p_value = values(idx)
     end subroutine quantile_impl_chr
     !
@@ -1882,12 +2104,12 @@ contains
         nrows = size(values, kind=int64)
         call check_rank(nth, nrows, "pf_nth_element")
         call extract_date(values, buf, descending, nulls_first, "pf_nth_element", threads=threads)
-        call engine_nth_index(buf, nrows, nth, "pf_nth_element", idx)
+        call engine_nth_index(buf, nrows, nth, "pf_nth_element", idx, threads=threads)
         p_value = values(idx)
     end subroutine nth_impl_date
     !
     !> Shared worker behind every pf_nth_quantile specific for a date array.
-    subroutine quantile_impl_date(values, quantile, p_value, idx, n_null, rounding, threads)
+    subroutine quantile_impl_date(values, quantile, p_value, idx, n_null, rounding, threads, ok)
         type(parquet_date), intent(in) :: values(:)
         real(real64), intent(in) :: quantile !! position on a 0-1 scale.
         type(parquet_date), intent(out) :: p_value !! the value at that quantile.
@@ -1895,6 +2117,7 @@ contains
         integer(int64), intent(out) :: n_null  !! how many values were null.
         character(len=*), intent(in), optional :: rounding !! rounding token.
         integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
+        logical, intent(out), optional :: ok !! .false. when every value was null.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: nrows, n_valid, rank
         integer :: mode
@@ -1906,8 +2129,14 @@ contains
         call extract_date(values, buf, .false., .false., "pf_nth_quantile", threads=threads)
         call key_valid_count(buf, nrows, n_valid)
         n_null = nrows - n_valid
-        call quantile_rank(quantile, n_valid, mode, "pf_nth_quantile", rank)
-        call engine_nth_index(buf, nrows, rank, "pf_nth_quantile", idx)
+        ! quantile_rank owns BOTH the argument validation and the empty-population
+        ! decision, which is what keeps the abort's message in one place and keeps a
+        ! bad `quantile` aborting even when `ok` was passed.
+        call quantile_rank(quantile, n_valid, mode, "pf_nth_quantile", rank, ok=ok)
+        if (present(ok)) then
+            if (.not. ok) return   ! rank is unset on this path
+        end if
+        call engine_nth_index(buf, nrows, rank, "pf_nth_quantile", idx, threads=threads)
         p_value = values(idx)
     end subroutine quantile_impl_date
     !
@@ -1926,12 +2155,12 @@ contains
         nrows = size(values, kind=int64)
         call check_rank(nth, nrows, "pf_nth_element")
         call extract_time(values, buf, descending, nulls_first, "pf_nth_element", threads=threads)
-        call engine_nth_index(buf, nrows, nth, "pf_nth_element", idx)
+        call engine_nth_index(buf, nrows, nth, "pf_nth_element", idx, threads=threads)
         p_value = values(idx)
     end subroutine nth_impl_time
     !
     !> Shared worker behind every pf_nth_quantile specific for a time array.
-    subroutine quantile_impl_time(values, quantile, p_value, idx, n_null, rounding, threads)
+    subroutine quantile_impl_time(values, quantile, p_value, idx, n_null, rounding, threads, ok)
         type(parquet_time), intent(in) :: values(:)
         real(real64), intent(in) :: quantile !! position on a 0-1 scale.
         type(parquet_time), intent(out) :: p_value !! the value at that quantile.
@@ -1939,6 +2168,7 @@ contains
         integer(int64), intent(out) :: n_null  !! how many values were null.
         character(len=*), intent(in), optional :: rounding !! rounding token.
         integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
+        logical, intent(out), optional :: ok !! .false. when every value was null.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: nrows, n_valid, rank
         integer :: mode
@@ -1950,8 +2180,14 @@ contains
         call extract_time(values, buf, .false., .false., "pf_nth_quantile", threads=threads)
         call key_valid_count(buf, nrows, n_valid)
         n_null = nrows - n_valid
-        call quantile_rank(quantile, n_valid, mode, "pf_nth_quantile", rank)
-        call engine_nth_index(buf, nrows, rank, "pf_nth_quantile", idx)
+        ! quantile_rank owns BOTH the argument validation and the empty-population
+        ! decision, which is what keeps the abort's message in one place and keeps a
+        ! bad `quantile` aborting even when `ok` was passed.
+        call quantile_rank(quantile, n_valid, mode, "pf_nth_quantile", rank, ok=ok)
+        if (present(ok)) then
+            if (.not. ok) return   ! rank is unset on this path
+        end if
+        call engine_nth_index(buf, nrows, rank, "pf_nth_quantile", idx, threads=threads)
         p_value = values(idx)
     end subroutine quantile_impl_time
     !
@@ -1970,12 +2206,12 @@ contains
         nrows = size(values, kind=int64)
         call check_rank(nth, nrows, "pf_nth_element")
         call extract_ts(values, buf, descending, nulls_first, "pf_nth_element", threads=threads)
-        call engine_nth_index(buf, nrows, nth, "pf_nth_element", idx)
+        call engine_nth_index(buf, nrows, nth, "pf_nth_element", idx, threads=threads)
         p_value = values(idx)
     end subroutine nth_impl_ts
     !
     !> Shared worker behind every pf_nth_quantile specific for a timestamp array.
-    subroutine quantile_impl_ts(values, quantile, p_value, idx, n_null, rounding, threads)
+    subroutine quantile_impl_ts(values, quantile, p_value, idx, n_null, rounding, threads, ok)
         type(parquet_timestamp), intent(in) :: values(:)
         real(real64), intent(in) :: quantile !! position on a 0-1 scale.
         type(parquet_timestamp), intent(out) :: p_value !! the value at that quantile.
@@ -1983,6 +2219,7 @@ contains
         integer(int64), intent(out) :: n_null  !! how many values were null.
         character(len=*), intent(in), optional :: rounding !! rounding token.
         integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
+        logical, intent(out), optional :: ok !! .false. when every value was null.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: nrows, n_valid, rank
         integer :: mode
@@ -1994,8 +2231,14 @@ contains
         call extract_ts(values, buf, .false., .false., "pf_nth_quantile", threads=threads)
         call key_valid_count(buf, nrows, n_valid)
         n_null = nrows - n_valid
-        call quantile_rank(quantile, n_valid, mode, "pf_nth_quantile", rank)
-        call engine_nth_index(buf, nrows, rank, "pf_nth_quantile", idx)
+        ! quantile_rank owns BOTH the argument validation and the empty-population
+        ! decision, which is what keeps the abort's message in one place and keeps a
+        ! bad `quantile` aborting even when `ok` was passed.
+        call quantile_rank(quantile, n_valid, mode, "pf_nth_quantile", rank, ok=ok)
+        if (present(ok)) then
+            if (.not. ok) return   ! rank is unset on this path
+        end if
+        call engine_nth_index(buf, nrows, rank, "pf_nth_quantile", idx, threads=threads)
         p_value = values(idx)
     end subroutine quantile_impl_ts
     !
@@ -2014,12 +2257,12 @@ contains
         nrows = values%size()
         call check_rank(nth, nrows, "pf_nth_element")
         call extract_strcol(values, buf, descending, nulls_first, "pf_nth_element", threads=threads)
-        call engine_nth_index(buf, nrows, nth, "pf_nth_element", idx)
+        call engine_nth_index(buf, nrows, nth, "pf_nth_element", idx, threads=threads)
         call values%get(idx, p_value, allow_null=.true.)
     end subroutine nth_impl_strcol
     !
     !> Shared worker behind every pf_nth_quantile specific for a packed string column array.
-    subroutine quantile_impl_strcol(values, quantile, p_value, idx, n_null, rounding, threads)
+    subroutine quantile_impl_strcol(values, quantile, p_value, idx, n_null, rounding, threads, ok)
         type(parquet_string_column), intent(in) :: values
         real(real64), intent(in) :: quantile !! position on a 0-1 scale.
         character(len=:), allocatable, intent(out) :: p_value !! the value at that quantile.
@@ -2027,6 +2270,7 @@ contains
         integer(int64), intent(out) :: n_null  !! how many values were null.
         character(len=*), intent(in), optional :: rounding !! rounding token.
         integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
+        logical, intent(out), optional :: ok !! .false. when every value was null.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: nrows, n_valid, rank
         integer :: mode
@@ -2038,8 +2282,14 @@ contains
         call extract_strcol(values, buf, .false., .false., "pf_nth_quantile", threads=threads)
         call key_valid_count(buf, nrows, n_valid)
         n_null = nrows - n_valid
-        call quantile_rank(quantile, n_valid, mode, "pf_nth_quantile", rank)
-        call engine_nth_index(buf, nrows, rank, "pf_nth_quantile", idx)
+        ! quantile_rank owns BOTH the argument validation and the empty-population
+        ! decision, which is what keeps the abort's message in one place and keeps a
+        ! bad `quantile` aborting even when `ok` was passed.
+        call quantile_rank(quantile, n_valid, mode, "pf_nth_quantile", rank, ok=ok)
+        if (present(ok)) then
+            if (.not. ok) return   ! rank is unset on this path
+        end if
+        call engine_nth_index(buf, nrows, rank, "pf_nth_quantile", idx, threads=threads)
         call values%get(idx, p_value, allow_null=.true.)
     end subroutine quantile_impl_strcol
     !

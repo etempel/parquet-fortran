@@ -721,6 +721,8 @@ program error_scenarios
         call scenario_sorting_quantile_bad_rounding()
     case ("sorting_quantile_all_null")
         call scenario_sorting_quantile_all_null()
+    case ("sorting_quantile_ok_still_checks_range")
+        call scenario_sorting_quantile_ok_still_checks_range()
     case ("sorting_permute_index_out_of_range")
         call scenario_sorting_permute_index_out_of_range()
     case ("sorting_permute_duplicate_index")
@@ -16540,6 +16542,24 @@ contains
         call pf_nth_quantile(v, 0.5_real64, q, is_valid=none)   ! -> aborts
         print '(a,f0.3)', "unexpectedly quantiled an all-null array, q=", q
     end subroutine scenario_sorting_quantile_all_null
+
+    !> `ok=` reports an empty POPULATION; it never excuses a bad ARGUMENT. Passing it alongside a
+    !! quantile outside 0-1 must therefore still abort, and must abort even when the population is
+    !! empty too -- so a caller that has adopted `ok` still hears about its own bug rather than
+    !! being told, misleadingly, that everything was null. That ordering is the whole reason the
+    !! decision lives in `quantile_rank`, after the range check, rather than in the callers.
+    subroutine scenario_sorting_quantile_ok_still_checks_range()
+        real(real64) :: v(3) = [1.0_real64, 2.0_real64, 3.0_real64]
+        logical :: none(3) = [.false., .false., .false.]
+        real(real64) :: q
+        logical :: ok
+        ! Negative control: with `ok` present and the quantile in range, an all-null population
+        ! RETURNS. Without this line a range check that fired unconditionally would pass.
+        call pf_nth_quantile(v, 0.5_real64, q, is_valid=none, ok=ok)
+        print '(a,l1)', "an all-null population with ok= present returned, ok=", ok
+        call pf_nth_quantile(v, 50.0_real64, q, is_valid=none, ok=ok)   ! -> aborts anyway
+        print '(a,f0.3)', "unexpectedly accepted a 0-100 quantile because ok= was present, q=", q
+    end subroutine scenario_sorting_quantile_ok_still_checks_range
 
     !> An index outside 1..n would read past the array being permuted. Caught before anything is
     !! written, so the array is never left half-rearranged.

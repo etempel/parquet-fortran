@@ -66,11 +66,34 @@ submodule (parquet_stats) parquet_stats_order
 
     !> Probabilities at or above which `pf_quantiles` sorts instead of selecting one at a time.
     !!
-    !! Selection is O(n) per probe and a sort is O(n log n) once, so the crossover is around
-    !! `log2(n)` probes -- but the constant matters more than the asymptotics at the sizes this is
-    !! reached with, and a small fixed number is both defensible and cheap to reason about. Four is
-    !! deliberately above the two-probe case `pf_iqr` uses, so the quartiles select.
-    integer(int64), parameter :: QUANTILE_SORT_MIN = 4_int64
+    !! **One, i.e. never select -- and the reasoning that once said four was wrong about its
+    !! premise rather than about its arithmetic.** The premise was that selection is O(n) per probe
+    !! against O(n log n) once for a sort, putting the crossover near `log2(n)` probes. It is not:
+    !! `pf_nth_element` answers a large array by ORDERING it (`SORT_NTH_ORDER_MIN`,
+    !! `src/parquet_argsort_engine.f90`), because that is faster than quickselecting at every size
+    !! worth the question. So k probes cost k orderings where a sort costs one, and selecting can
+    !! never win for k > 1.
+    !!
+    !! Measured on machine A (gfortran 15.2) with `bench/benchmark_stats.sh --mode=iqr`, whose two
+    !! arms are this procedure with the constant moved either side of the probe count and whose
+    !! answers are compared bit for bit before any timing. sort/select, so below 1 means sorting
+    !! wins:
+    !!
+    !! | probes | n = 1 000 | n = 100 000 | n = 1 000 000 |
+    !! |---|---|---|---|
+    !! | 1 (`pf_median`) | 0.52 | 0.44 | 0.68-0.69 |
+    !! | 2 (`pf_iqr`) | 0.29 | 0.20 | 0.27-0.35 |
+    !!
+    !! **One probe loses too**, which is the part that looks wrong at a glance: `pf_median` on an
+    !! even-length population interpolates between TWO order statistics, so its "one probe" is two
+    !! selections. There is no probe count at which selecting is the cheaper route.
+    !!
+    !! Keeping the constant rather than deleting the branch is deliberate: the selection route is
+    !! still correct, `should_select` is still where the decision is written down, and the
+    !! `parquet_debug_set_stats_quantile_sort_min` override still drives both arms -- which is what
+    !! lets `bench/benchmark_stats.sh --mode=iqr` re-ask this question on a machine with a different
+    !! core count without a rebuild. See feature_pandas_S4.md, "X-2 is FIXED".
+    integer(int64), parameter :: QUANTILE_SORT_MIN = 1_int64
 
     !> Test-only override for `QUANTILE_SORT_MIN`; negative means the shipped value applies.
     integer(int64), save :: dbg_quantile_sort_min = -1_int64
@@ -510,9 +533,12 @@ contains
 
     !> Whether a one-shot call should SELECT rather than order the population.
     !!
-    !! Selection is O(n) per probe against O(n log n) once for a sort, so a single probe selects
-    !! and several order. Weights force the ordering whatever the count: the weighted position rule
-    !! needs the cumulative weight in sorted order, which selection does not produce.
+    !! **Answers `.false.` for every probe count as shipped**, because `QUANTILE_SORT_MIN` is 1 --
+    !! see its own comment for the measurement. The decision is still written here, and still
+    !! overridable, rather than the branch being deleted: the selection route is correct, and the
+    !! override is how the question gets re-asked on a machine with a different core count.
+    !! Weights force the ordering whatever the count in any case: the weighted position rule needs
+    !! the cumulative weight in sorted order, which selection does not produce.
     pure function should_select(nprobs, weighted) result(res)
         integer(int64), intent(in) :: nprobs !! how many probabilities are wanted.
         logical, intent(in) :: weighted      !! .true. when weights were supplied.

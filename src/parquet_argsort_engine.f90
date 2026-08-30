@@ -154,6 +154,38 @@ submodule (parquet_argsort) parquet_argsort_engine
     !! sits below their fixture sizes -- see `engine_only_introsort` (`test/test_sorting.f90`) and
     !! `feature_sort_radix.md`.
     integer(int64), parameter :: SORT_RADIX_MIN_ROWS = 128_int64
+    !> Rows at or above which a SELECTION answers by ORDERING rather than by quickselecting.
+    !!
+    !! **Quickselect is asymptotically cheaper and measurably slower, at every size that matters.**
+    !! `sort_nth_index`'s introselect is O(n) against the ordering engine's O(n log n), and it loses
+    !! anyway for two compounding reasons. It compares through an index permutation, so every one of
+    !! its ~2n comparisons is a random-access load into the key arrays, where the radix path never
+    !! calls the comparator at all and walks memory in order. And it has no threaded form, where the
+    !! ordering engine has had one since Stage 4. Measured on machine A (gfortran 15.2, real64,
+    !! rank n/2, best of 7), `pf_nth_element` against `pf_argsort` + one index:
+    !!
+    !! | n | select, 8 threads | order, 8 threads | select, serial | order, serial |
+    !! |---|---|---|---|---|
+    !! | 100 | 0.013 ms | 0.027 ms | 0.010 ms | 0.021 ms |
+    !! | 1 000 | 0.122 | 0.060 | 0.097 | 0.047 |
+    !! | 10 000 | 0.896 | 0.526 | 0.767 | 0.443 |
+    !! | 100 000 | 4.748 | 2.690 | 4.745 | 4.470 |
+    !! | 1 000 000 | 59.148 | 21.377 | 62.111 | 49.391 |
+    !! | 4 000 000 | 366.999 | 98.192 | 386.293 | 200.965 |
+    !! | 16 000 000 | 1123.567 | 315.330 | 1179.944 | 803.804 |
+    !!
+    !! Ordering wins everywhere from 1000 up, and by more as `n` grows; only at 100 does the
+    !! ordering engine's fixed setup cost dominate. The floor is therefore set inside that gap and
+    !! deliberately nearer the losing end, because below it the absolute numbers are microseconds
+    !! and nothing is at stake either way.
+    !!
+    !! **The two routes cannot disagree**, which is what makes this a pure performance choice: a
+    !! selection is DEFINED here as the row a full stable sort would place at that rank, and
+    !! `sort_row_less` ends in a row-index tiebreaker, so exactly one permutation is correct and
+    !! both routes must find the same element. Overridable in both directions by
+    !! `parquet_debug_set_sort_nth_order_min` -- needed because every fixture in the suite is far
+    !! below this floor, so the shipped route would otherwise never be exercised.
+    integer(int64), parameter :: SORT_NTH_ORDER_MIN = 256_int64
     !> Bytes of a string key that go into the radix; the rest is settled by the refine pass.
     integer(int64), parameter :: SORT_RADIX_PREFIX = 8_int64
     !> Rows a refine sub-bucket loop must have PER THREAD before it is worth opening a team.
@@ -3476,12 +3508,17 @@ contains
         perm(1:count) = heap(1:count)
     end procedure sort_partial_permutation
 
-    !> The row index a full sort would place at 1-based rank `nth`, by quickselect.
+    !> The row index a full sort would place at 1-based rank `nth`, by ORDERING or by quickselect.
     !!
-    !! `std::nth_element`'s introselect, over the same `sort_partition` the introsort uses: partition,
-    !! keep only the side holding `nth`, and stop at the insertion cutoff. Everything outside the
-    !! surviving range is already separated correctly by the partitions, so insertion-sorting just
-    !! that range puts rank `nth` in its place.
+    !! **Two routes, chosen by size at `SORT_NTH_ORDER_MIN`, answering identically.** At or above the
+    !! floor the array is ordered and the rank read off, which is asymptotically worse and measurably
+    !! faster -- see that constant's own comment for the table and the two reasons. Below it, the
+    !! quickselect here.
+    !!
+    !! The quickselect is `std::nth_element`'s introselect, over the same `sort_partition` the
+    !! introsort uses: partition, keep only the side holding `nth`, and stop at the insertion cutoff.
+    !! Everything outside the surviving range is already separated correctly by the partitions, so
+    !! insertion-sorting just that range puts rank `nth` in its place.
     !!
     !! The depth fallback is the shared `sort_heapsort`, which is the right call here -- it really is
     !! the introsort's fallback doing its job -- and it does bump `dbg_sort_heapsort_calls`.
@@ -3489,9 +3526,23 @@ contains
         integer(int64), allocatable :: work(:) !! the permutation being narrowed.
         integer(int64) :: lo, hi, cut, k       !! the surviving range, the partition point, a cursor.
         integer :: depth                       !! remaining depth before the heapsort fallback.
+        integer(int64) :: floor_rows, nt       !! the ordering floor in force, and the thread count.
         !
         idx = 0_int64
         if (n < 1_int64 .or. nth < 1_int64 .or. nth > n) return
+        floor_rows = SORT_NTH_ORDER_MIN
+        if (dbg_sort_nth_order_min >= 0_int64) floor_rows = dbg_sort_nth_order_min
+        if (n >= floor_rows) then
+            ! **The ORDERING route.** Not a fallback and not a heuristic about the data: it is
+            ! faster than quickselect at every size above the floor, for the reasons set out on
+            ! SORT_NTH_ORDER_MIN, and it answers identically by construction. It also picks up the
+            ! radix path and the thread team, neither of which the quickselect below can reach.
+            allocate(work(n))
+            call resolve_thread_count(threads, n, nt)
+            call sort_build_permutation_threaded(keys, n, nt, work)
+            idx = work(nth)
+            return
+        end if
         allocate(work(n))
         do k = 1_int64, n
             work(k) = k
@@ -3699,6 +3750,10 @@ contains
     module procedure parquet_debug_set_sort_radix_min_rows
         dbg_sort_radix_min_rows = n
     end procedure parquet_debug_set_sort_radix_min_rows
+
+    module procedure parquet_debug_set_sort_nth_order_min
+        dbg_sort_nth_order_min = n
+    end procedure parquet_debug_set_sort_nth_order_min
 
     module procedure parquet_debug_set_sort_task_floor
         dbg_sort_task_floor = n

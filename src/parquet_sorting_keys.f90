@@ -887,7 +887,7 @@ contains
             error stop EP // proc // ": no sort key was given" ! GCOVR_EXCL_LINE
         end if
         if (dbg_fortran_engine) then
-            call sort_nth_index(keys, nrows, nth, idx)
+            call sort_nth_index(keys, nrows, nth, idx, threads=threads)
             return
         end if
         ! **The C++ engine, reached through the pointer parquet_sorting_oracle bound.**
@@ -1006,7 +1006,15 @@ contains
             ! import here for one test, and this expression is exact with no arithmetic drift.
             error stop EP // proc // ": quantile must lie on a 0-1 scale (note: NOT 0-100)"
         end if
+        if (present(ok)) ok = .true.
         if (n_valid < 1_int64) then
+            ! Deliberately AFTER the `quantile` validation above: `ok` reports an empty
+            ! population, so a caller that passes both `ok` and a quantile outside 0-1 still
+            ! learns about its own bug rather than being told the population was empty.
+            if (present(ok)) then
+                ok = .false.
+                return
+            end if
             error stop EP // proc // ": every value is null, so no quantile exists; guard with " // &
                 "count(is_valid) (or the column's own null count) if that can happen"
         end if

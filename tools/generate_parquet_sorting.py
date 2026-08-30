@@ -182,6 +182,7 @@ DEBUG_HOOKS = [
     "parquet_debug_using_fortran_sort_engine", "parquet_debug_set_sort_depth_limit",
     "parquet_debug_sort_heapsort_calls", "parquet_debug_set_sort_track_shift",
     "parquet_debug_sort_max_insertion_shift", "parquet_debug_set_sort_radix_min_rows",
+    "parquet_debug_set_sort_nth_order_min",
     "parquet_debug_set_sort_task_floor", "parquet_debug_set_sort_tail_min_rows",
     "parquet_debug_set_sort_engine_min_rows", "parquet_debug_set_sort_counting_max_threads",
     "parquet_debug_sort_refine_runs", "parquet_debug_set_sort_split_min_card",
@@ -662,6 +663,7 @@ module parquet_sorting
     public :: parquet_debug_set_sort_track_shift
     public :: parquet_debug_sort_max_insertion_shift
     public :: parquet_debug_set_sort_radix_min_rows
+    public :: parquet_debug_set_sort_nth_order_min
     public :: parquet_debug_set_sort_task_floor
     public :: parquet_debug_set_sort_tail_min_rows
     public :: parquet_debug_set_sort_engine_min_rows
@@ -746,6 +748,15 @@ module parquet_sorting
     !! describes. Both are the `feature_risks.md` Risk-49 shape -- a size threshold hiding a code
     !! path from the tests written for everything else.
     integer(int64), save :: dbg_sort_radix_min_rows = -1_int64
+    !> Overrides the row floor above which a SELECTION orders instead; NEGATIVE restores
+    !! `SORT_NTH_ORDER_MIN`.
+    !!
+    !! Risk-49 again, and here the threshold hides not a tuning choice but a whole second answer
+    !! path: below the floor `sort_nth_index` quickselects, above it the same question is answered
+    !! by the ordering engine. Every fixture in the suite is small, so without this override only
+    !! the quickselect arm would ever run and the routing would be untested in the direction that
+    !! ships. Driven in BOTH directions by `test_selection_routes_agree`.
+    integer(int64), save :: dbg_sort_nth_order_min = -1_int64
     !> Overrides the balanced split's smallest task size; NEGATIVE restores `SORT_TASK_FLOOR`.
     !!
     !! Risk-49 again, and the sharpest instance of it in this module: the floor binds only when
@@ -1052,8 +1063,15 @@ module parquet_sorting
             w(f"        module procedure partial_sort_{t[0]}")
     w("    end interface pf_partial_sort")
     w("    !")
-    w("    !> The element a full sort would place at 1-based rank `nth`, without sorting -- O(n)")
-    w("    !> rather than O(n log n). `index` optionally reports which element of `values` that was.")
+    w("    !> The element a full sort would place at 1-based rank `nth`. `index` optionally reports")
+    w("    !> which element of `values` that was.")
+    w("    !>")
+    w("    !> **It costs about what a full sort costs, and that is deliberate.** A small array is")
+    w("    !> answered by an O(n) selection scan; a larger one is answered by ordering the array and")
+    w("    !> reading off the rank, which is asymptotically worse and measurably faster -- the")
+    w("    !> ordering engine's radix path calls no comparator at all and threads, where a selection")
+    w("    !> scan does neither. So do not reach for this expecting a cheaper `pf_argsort`; reach for")
+    w("    !> it because it says what you mean.")
     w("    !>")
     w("    !> **The reported index is the one a full STABLE sort would give.** `std::nth_element`")
     w("    !> normally leaves an arbitrary member of an equal-comparing run at that position; here")
@@ -1084,9 +1102,15 @@ module parquet_sorting
     w("    !> `rounding=` selects how a fractional position is resolved: `\"nearest\"` (the default),")
     w("    !> `\"down\"` or `\"up\"`, matched case-insensitively. An unrecognized token aborts.")
     w("    !>")
-    w("    !> Aborts when EVERY value is null: there is no value to return, and no sentinel exists")
-    w("    !> across all ten types. `n_null` is for PARTIAL nullness; the all-null case never")
-    w("    !> reaches it. Guard with `count(mask)` (or a column's own null count) if that matters.")
+    w("    !> **When EVERY value is null there is no quantile**, and what happens then is the")
+    w("    !> caller's choice: pass `ok` and the call returns with `ok = .false.`, or omit it and")
+    w("    !> the call aborts. `n_null` is set either way, so a caller taking the `ok` route still")
+    w("    !> learns how many values were excluded. There is deliberately no sentinel value --")
+    w("    !> none exists across all ten types, which is the whole reason `ok` is a separate")
+    w("    !> argument. **`p_value` and `index` must not be read when `ok` is `.false.`**: they are")
+    w("    !> left as they were on entry to the call, which for a `character(len=:), allocatable`")
+    w("    !> result means unallocated and for a date/time/timestamp means default-initialised.")
+    w("    !> Partial nullness is NOT a failure -- `ok` is `.true.` whenever a value was produced.")
     w("    interface pf_nth_quantile")
     for t in TYPES:
         if not has_nth(t):
@@ -1179,9 +1203,15 @@ module parquet_sorting
           "Takes no `descending`/`nulls_first`: a minimum and a maximum are absolute, and reversing",
           "the order would only exchange the two answers.",
           "",
-          "**Aborts when every value is null or NaN** -- there is nothing to return, and no",
-          "sentinel exists across all nine types. This matches `pf_nth_quantile`'s decision for the",
-          "same degenerate case; guard with `count(is_valid)` where that can happen.",
+          "**When every value is null or NaN there is no minimum or maximum**, and what happens",
+          "then is the caller's choice: pass `ok` and the call returns with `ok = .false.`, or omit",
+          "it and the call aborts. There is deliberately no sentinel -- none exists across all nine",
+          "types, which is the whole reason `ok` is a separate argument. **`vmin` and `vmax` must",
+          "not be read when `ok` is `.false.`**: they are left as they were on entry to the call,",
+          "which for a `character(len=:), allocatable` result means unallocated and for a",
+          "date/time/timestamp means default-initialised. Partial nullness is NOT a failure -- `ok`",
+          "is `.true.` whenever a value was produced. `pf_nth_quantile` takes the same argument for",
+          "the same degenerate case.",
           "",
           "Use `pf_argminmax` when the positions matter rather than the values."]),
         ("pf_argminmax",
@@ -1193,8 +1223,14 @@ module parquet_sorting
           "make a positional call ambiguous. A caller wanting both pays one extra call.",
           "",
           "Ties report the FIRST occurrence, which is the element a full stable sort would place at",
-          "either end. Aborts on an all-null-or-NaN input, exactly as `pf_minmax` does. Defined for",
-          "`parquet_column` as well, since an index needs no compile-time element type."]),
+          "either end. Defined for `parquet_column` as well, since an index needs no compile-time",
+          "element type.",
+          "",
+          "**Aborts on an all-null-or-NaN input, and takes no `ok=` -- unlike `pf_minmax`.** That is",
+          "deliberate rather than an omission: `ok` exists because no VALUE sentinel spans the",
+          "eleven element types, and an index has one available (there is no 1-based index 0). So",
+          "reporting rather than aborting here is a different decision, needing its own contract for",
+          "what `imin`/`imax` come back as, and it has not been taken."]),
         ("pf_merge",
          ["Merges two ALREADY-SORTED arrays into one sorted array, in O(size(a) + size(b)) rather",
           "than the O(n log n) of sorting their concatenation.",
@@ -1400,12 +1436,13 @@ module parquet_sorting
     w("            integer(int64), allocatable, intent(out) :: perm(:) !! the first `count` 1-based indices.")
     w("        end subroutine drive_engine_partial")
     w("        !> The 1-based index a full stable sort would place at rank `nth`, without sorting.")
-    w("        module subroutine engine_nth_index(keys, nrows, nth, proc, idx)")
+    w("        module subroutine engine_nth_index(keys, nrows, nth, proc, idx, threads)")
     w("            type(sort_key_buf), intent(in), target :: keys(:)   !! the keys, primary first.")
     w("            integer(int64), intent(in) :: nrows                 !! rows each key describes.")
     w("            integer(int64), intent(in) :: nth                   !! 1-based rank wanted.")
     w("            character(len=*), intent(in) :: proc                !! calling procedure, for messages.")
     w("            integer(int64), intent(out) :: idx                  !! 1-based row index at that rank.")
+    w("            integer, intent(in), optional :: threads !! thread request; absent = serial.")
     w("        end subroutine engine_nth_index")
     w("        !> Clamps a requested count to the array size, aborting only on a negative one.")
     w("        module subroutine resolve_count(n, nrows, proc, count)")
@@ -1433,12 +1470,16 @@ module parquet_sorting
     w("            integer, intent(out) :: mode                       !! RND_NEAREST / RND_DOWN / RND_UP.")
     w("        end subroutine resolve_rounding")
     w("        !> The 1-based rank a quantile names within `n_valid` non-null values.")
-    w("        module subroutine quantile_rank(quantile, n_valid, mode, proc, rank)")
+    w("        module subroutine quantile_rank(quantile, n_valid, mode, proc, rank, ok)")
     w("            real(real64), intent(in) :: quantile   !! position on a 0-1 scale.")
     w("            integer(int64), intent(in) :: n_valid  !! non-null population size.")
     w("            integer, intent(in) :: mode            !! RND_* rounding of a fractional position.")
     w("            character(len=*), intent(in) :: proc   !! calling procedure, for messages.")
     w("            integer(int64), intent(out) :: rank    !! 1-based rank within the non-null values.")
+    w("            logical, intent(out), optional :: ok")
+    w("            !! `.false.` when `n_valid` is 0, leaving `rank` unset; absent restores the")
+    w("            !! abort. An out-of-range or NaN `quantile` aborts EITHER way -- this reports")
+    w("            !! an empty population, never a bad argument.")
     w("        end subroutine quantile_rank")
     w("        !> Whether every row is already in order under `keys`, using the same comparator")
     w("        !! `drive_engine` sorts with, so the two can never disagree.")
@@ -1737,7 +1778,7 @@ module parquet_sorting
             w(f"        !> pf_nth_quantile over a {what} array" +
               (f", with an {iname} index." if ik else ", with no index out-argument."))
             w(f"        module subroutine quantile_{tag}{sfx}(values, quantile, p_value{iarg}, rounding" +
-              f"{', is_valid' if nulls == 'arg' else ''}, n_null, threads)")
+              f"{', is_valid' if nulls == 'arg' else ''}, n_null, threads, ok)")
             w(val_decl(t, "in"))
             w("            real(real64), intent(in) :: quantile !! position on a 0-1 scale.")
             w("    " + pval_decl(t) + " !! the value at that quantile.")
@@ -1753,6 +1794,7 @@ module parquet_sorting
             w("            !! so `rounding` at position 4 disambiguates them.")
             for line in QUANTILE_THREADS_DOC:
                 w(line)
+            w(OK_DOC)
             w(f"        end subroutine quantile_{tag}{sfx}")
     w("    end interface")
     w("    !")
@@ -1802,6 +1844,15 @@ module parquet_sorting
 DESC_DOC = "            logical, intent(in), optional :: descending !! .true. for high-to-low order."
 NLO_DOC = "            logical, intent(in), optional :: nulls_first !! .true. when nulls come first."
 VALID_DOC = "            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null."
+#: `pf_minmax`/`pf_nth_quantile`'s degenerate-population report. Appended LAST on every specific:
+#: that is the only position that cannot disturb an existing positional call, and it keeps
+#: `pf_nth_quantile`'s documented `rounding`/`index`/`n_null` ordering untouched.
+OK_DOC = ("            logical, intent(out), optional :: ok\n"
+          "            !! `.false.` when the population was empty -- every value null (and, for\n"
+          "            !! `pf_minmax`, NaN) -- in which case the value arguments were not\n"
+          "            !! written and must not be read. `.true.` whenever a value was produced;\n"
+          "            !! partial nullness is not a failure. **Omitting this argument restores\n"
+          "            !! the abort**, so existing callers are unaffected.")
 SORTED_DOC = ("            logical, intent(in), optional :: assume_sorted\n"
               "            !! .true. skips the O(n) sortedness check. Only pass it for an order you have\n"
               "            !! already established -- searching unsorted input answers with a plausible\n"
@@ -2171,12 +2222,14 @@ def emit_m3_interfaces(w):
         if not has_minmax(t):
             continue
         w(f"        !> pf_minmax over a {what} array: its smallest and largest value.")
-        w(f"        module subroutine minmax_{tag}(values, vmin, vmax{', is_valid' if nulls == 'arg' else ''})")
+        w(f"        module subroutine minmax_{tag}(values, vmin, vmax"
+          f"{', is_valid' if nulls == 'arg' else ''}, ok)")
         w(val_decl(t, "in"))
         w(pval_decl(t, "vmin") + " !! the smallest value.")
         w(pval_decl(t, "vmax") + " !! the largest value.")
         if nulls == "arg":
             w(VALID_DOC)
+        w(OK_DOC)
         w(f"        end subroutine minmax_{tag}")
     for t in TYPES:
         tag, decl, what, family, nulls, _, _ = t
@@ -2371,11 +2424,12 @@ def emit_engine_interfaces(w):
     w("        !! Deterministic because the comparator is a total order: there is exactly one row at")
     w("        !! that rank, so this and a full sort cannot disagree. `idx` is 0 for an out-of-range")
     w("        !! rank, which every caller has already rejected.")
-    w("        module subroutine sort_nth_index(keys, n, nth, idx)")
+    w("        module subroutine sort_nth_index(keys, n, nth, idx, threads)")
     w("            type(sort_key_buf), intent(in) :: keys(:) !! the keys, in precedence order.")
     w("            integer(int64), intent(in) :: n           !! rows.")
     w("            integer(int64), intent(in) :: nth         !! 1-based rank wanted.")
     w("            integer(int64), intent(out) :: idx        !! 1-based row index at that rank.")
+    w("            integer, intent(in), optional :: threads  !! thread request for the ORDERING route.")
     w("        end subroutine sort_nth_index")
     w("        !> Are rows `1..n` already in order under every key?")
     w("        !!")
@@ -2515,6 +2569,16 @@ def emit_engine_interfaces(w):
     w("        module subroutine parquet_debug_set_sort_radix_min_rows(n)")
     w("            integer(int64), intent(in) :: n !! forced floor, or a negative value to restore.")
     w("        end subroutine parquet_debug_set_sort_radix_min_rows")
+    w("        !> Test-only override for the row floor above which a SELECTION orders instead of")
+    w("        !! quickselecting; NEGATIVE restores the built-in `SORT_NTH_ORDER_MIN`.")
+    w("        !!")
+    w("        !! Both arms answer identically -- the rank the engine's own stable order puts there")
+    w("        !! is what a selection is DEFINED as -- so this exists to make each arm reachable")
+    w("        !! from a small fixture, not to change any answer. A huge value forces quickselect;")
+    w("        !! 1 forces the ordering route. Has no effect on the C++ engine.")
+    w("        module subroutine parquet_debug_set_sort_nth_order_min(n)")
+    w("            integer(int64), intent(in) :: n !! forced floor, or a negative value to restore.")
+    w("        end subroutine parquet_debug_set_sort_nth_order_min")
     w("        !> Test-only override for the balanced split's task floor; NEGATIVE restores the")
     w("        !! built-in `SORT_TASK_FLOOR`.")
     w("        !!")
@@ -3569,7 +3633,7 @@ contains
             error stop EP // proc // ": no sort key was given" ! GCOVR_EXCL_LINE
         end if
         if (dbg_fortran_engine) then
-            call sort_nth_index(keys, nrows, nth, idx)
+            call sort_nth_index(keys, nrows, nth, idx, threads=threads)
             return
         end if
         ! **The C++ engine, reached through the pointer parquet_sorting_oracle bound.**
@@ -3688,7 +3752,15 @@ contains
             ! import here for one test, and this expression is exact with no arithmetic drift.
             error stop EP // proc // ": quantile must lie on a 0-1 scale (note: NOT 0-100)"
         end if
+        if (present(ok)) ok = .true.
         if (n_valid < 1_int64) then
+            ! Deliberately AFTER the `quantile` validation above: `ok` reports an empty
+            ! population, so a caller that passes both `ok` and a quantile outside 0-1 still
+            ! learns about its own bug rather than being told the population was empty.
+            if (present(ok)) then
+                ok = .false.
+                return
+            end if
             error stop EP // proc // ": every value is null, so no quantile exists; guard with " // &
                 "count(is_valid) (or the column's own null count) if that can happen"
         end if
@@ -4661,8 +4733,14 @@ contains
             w("        integer(int64) :: idx, nn")
             w("        !")
             w("        call quantile_impl_" + tag + "(values, quantile, p_value, idx, nn, rounding" + iv +
-              ", threads=threads)")
+              ", threads=threads, ok=ok)")
+            w("        ! `n_null` is set even on the ok=.false. path, so a caller taking the `ok`")
+            w("        ! route still learns how many values were excluded.")
             w("        if (present(n_null)) n_null = nn")
+            w("        ! Nested rather than `.and.`-ed: Fortran does not short-circuit.")
+            w("        if (present(ok)) then")
+            w("            if (.not. ok) return   ! idx is undefined on this path")
+            w("        end if")
             if ik == "i32":
                 w("        call narrow_index(idx, \"pf_nth_quantile\", index)")
             elif ik == "i64":
@@ -4698,13 +4776,13 @@ contains
         w("        call check_rank(nth, nrows, \"pf_nth_element\")")
         w("        call extract_" + tag + "(values, buf, descending, nulls_first, \"pf_nth_element\"" + iv +
           ", threads=threads)")
-        w("        call engine_nth_index(buf, nrows, nth, \"pf_nth_element\", idx)")
+        w("        call engine_nth_index(buf, nrows, nth, \"pf_nth_element\", idx, threads=threads)")
         w(getval)
         w("    end subroutine nth_impl_" + tag)
         w("    !")
         w("    !> Shared worker behind every pf_nth_quantile specific for a " + what + " array.")
         w("    subroutine quantile_impl_" + tag + "(values, quantile, p_value, idx, n_null, rounding" + iarg +
-          ", threads)")
+          ", threads, ok)")
         w(val_decl(t, "in"))
         w("        real(real64), intent(in) :: quantile !! position on a 0-1 scale.")
         w(pval_decl(t) + " !! the value at that quantile.")
@@ -4714,6 +4792,7 @@ contains
         if nulls == "arg":
             w("        logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.")
         w("        integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.")
+        w("        logical, intent(out), optional :: ok !! .false. when every value was null.")
         w("        type(sort_key_buf), allocatable :: buf(:)")
         w("        integer(int64) :: nrows, n_valid, rank")
         w("        integer :: mode")
@@ -4726,8 +4805,14 @@ contains
           ", threads=threads)")
         w("        call key_valid_count(buf, nrows, n_valid)")
         w("        n_null = nrows - n_valid")
-        w("        call quantile_rank(quantile, n_valid, mode, \"pf_nth_quantile\", rank)")
-        w("        call engine_nth_index(buf, nrows, rank, \"pf_nth_quantile\", idx)")
+        w("        ! quantile_rank owns BOTH the argument validation and the empty-population")
+        w("        ! decision, which is what keeps the abort's message in one place and keeps a")
+        w("        ! bad `quantile` aborting even when `ok` was passed.")
+        w("        call quantile_rank(quantile, n_valid, mode, \"pf_nth_quantile\", rank, ok=ok)")
+        w("        if (present(ok)) then")
+        w("            if (.not. ok) return   ! rank is unset on this path")
+        w("        end if")
+        w("        call engine_nth_index(buf, nrows, rank, \"pf_nth_quantile\", idx, threads=threads)")
         w(getval)
         w("    end subroutine quantile_impl_" + tag)
         w("    !")
@@ -5117,7 +5202,12 @@ contains
         w(f"    module procedure minmax_{tag}")
         w("        integer(int64) :: i1, i2")
         w("        !")
-        w(f"        call minmax_impl_{tag}(values, \"pf_minmax\", i1, i2{iv})")
+        w(f"        call minmax_impl_{tag}(values, \"pf_minmax\", i1, i2{iv}, ok=ok)")
+        w("        ! Nested rather than `.and.`-ed: Fortran does not short-circuit, so a single")
+        w("        ! `if (present(ok) .and. .not. ok)` would read an absent argument.")
+        w("        if (present(ok)) then")
+        w("            if (.not. ok) return   ! i1/i2 are undefined on this path")
+        w("        end if")
         if family == "strcol":
             w("        call values%get(i1, vmin, allow_null=.true.)")
             w("        call values%get(i2, vmax, allow_null=.true.)")
@@ -5228,13 +5318,16 @@ contains
         iv = ", is_valid=is_valid" if nulls == "arg" else ""
         iarg = ", is_valid" if nulls == "arg" else ""
         w(f"    !> Shared worker behind pf_minmax and pf_argminmax for a {what} array.")
-        w(f"    subroutine minmax_impl_{tag}(values, proc, imin, imax{iarg})")
+        okarg = ", ok" if has_minmax(t) else ""
+        w(f"    subroutine minmax_impl_{tag}(values, proc, imin, imax{iarg}{okarg})")
         w(val_decl(t, "in"))
         w("        character(len=*), intent(in) :: proc !! calling procedure, for messages.")
         w("        integer(int64), intent(out) :: imin  !! where the smallest value is.")
         w("        integer(int64), intent(out) :: imax  !! where the largest value is.")
         if nulls == "arg":
             w("        logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.")
+        if okarg:
+            w("        logical, intent(out), optional :: ok !! .false. when there was no value at all.")
         w("        type(sort_key_buf), allocatable :: buf(:)")
         w("        integer(int64) :: n, n_value")
         w("        !")
@@ -5243,7 +5336,18 @@ contains
         w("        ! ranks 1 and n_value address them and nothing else.")
         w(f"        call extract_{tag}(values, buf, .false., .false., proc{iv})")
         w("        call key_value_count(buf, n, n_value)")
+        if okarg:
+            w("        if (present(ok)) ok = .true.")
         w("        if (n_value < 1_int64) then")
+        if okarg:
+            w("            ! The caller chose which of the two behaviours it wants by passing `ok`")
+            w("            ! or not. `pf_argminmax` never passes it, so its abort is unchanged --")
+            w("            ! and a type that has ONLY pf_argminmax (parquet_column) has no `ok`")
+            w("            ! dummy here at all, rather than an arm no caller can reach.")
+            w("            if (present(ok)) then")
+            w("                ok = .false.")
+            w("                return")
+            w("            end if")
         w("            error stop EP // proc // \": every value is null or NaN, so there is no \" // &")
         w("                \"minimum or maximum; guard with count(is_valid) (or the column's own \" // &")
         w("                \"null count) if that can happen\"")

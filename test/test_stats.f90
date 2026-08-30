@@ -1621,25 +1621,45 @@ contains
     end subroutine spiky
 
     !> A left-to-right running total: what the engine must NOT be doing.
+    !!
+    !! **The accumulator is `volatile`, and without it this helper does not compute what its own
+    !! name says.** A bare `res = res + x(i)` reduction is precisely the shape a compiler licensed
+    !! to reassociate splits into several partial accumulators and adds together at the end -- ifx
+    !! does it at its own `-O2` / `-fp-model=fast` defaults, and gfortran does under `-ffast-math`.
+    !! That is itself a pairwise-like order, so the "naive" reference silently stops being naive:
+    !! measured under ifx 2026.1.1, this function returned `1.0000000000000096e16` over the
+    !! 100-element `spiky` fixture where the true left-to-right total is exactly `1e16`, and the
+    !! first assertion of `test_block_tree_is_the_documented_one` failed against a correct engine.
+    !! `volatile` obliges a store and a reload per iteration, so the additions happen in the
+    !! written order on every conforming compiler -- the same barrier, for the same reason, as
+    !! `parquet_expkey`'s `ek_rnd`.
     function running_total(x) result(res)
         real(real64), intent(in) :: x(:) !! the population.
         real(real64) :: res              !! the naive total.
+        real(real64), volatile :: acc    !! the barrier: forces the additions to happen in order.
         integer(int64) :: i
 
-        res = 0.0_real64
+        acc = 0.0_real64
         do i = 1_int64, size(x, kind=int64)
-            res = res + x(i)
+            acc = acc + x(i)
         end do
+        res = acc
     end function running_total
 
     !> The engine's own decomposition: serial sums per block, combined by a fixed pairwise tree.
+    !!
+    !! **`s` is `volatile` for the reason spelled out on `running_total` above**, and it matters
+    !! here too: a block's sum is a serial left-to-right one inside the engine, so a reassociated
+    !! block sum would compare the engine against a tree it does not walk. Under ifx it made this
+    !! function return the same bits as `running_total` over the 1000-element fixture, which trips
+    !! the "the two summation orders disagree" vacuity guard rather than the assertion it protects.
     function pairwise_by_blocks(x, blk) result(res)
         real(real64), intent(in) :: x(:) !! the population.
         integer(int64), intent(in) :: blk !! elements per block.
         real(real64) :: res               !! the combined total.
         real(real64), allocatable :: p(:)
         integer(int64) :: n, nb, j, i, lo, hi, m, k
-        real(real64) :: s
+        real(real64), volatile :: s       !! one block's serial sum; `volatile` per the note above.
 
         n = size(x, kind=int64)
         nb = (n + blk - 1_int64) / blk

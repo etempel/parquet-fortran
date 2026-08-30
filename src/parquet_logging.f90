@@ -593,7 +593,13 @@ contains
     !> Appends `text(1:n)` to `out` at `pos` when `out` is present, and advances `pos` regardless.
     !! The single place the renderer writes, so that its measuring and writing passes cannot drift.
     subroutine put(out, pos, text)
-        character(len=*), intent(out), optional :: out  !! Absent while measuring, present while writing.
+        ! `intent(inout)`, NOT `intent(out)`: render_line calls this many times against the SAME
+        ! buffer, and an `intent(out)` character dummy is undefined on entry -- so every call would
+        ! un-define every byte its predecessors wrote, leaving only the last slice defined. The
+        ! bytes survive on every compiler in this project's fleet, which is why it stood; nagfor's
+        ! -C=undefined reports it as `Reference to undefined variable TEXT` at the WRITE in
+        ! `deliver`, a long way downstream. Nothing here ever reads `out`, so inout is exact.
+        character(len=*), intent(inout), optional :: out !! Absent while measuring, present while writing.
         integer, intent(inout) :: pos                   !! Next free position; advanced by `len(text)`.
         character(len=*), intent(in) :: text            !! The text to place.
 
@@ -620,7 +626,8 @@ contains
     !! measuring and writing passes of `render_line` cannot disagree -- see `put`, and the length
     !! contract `emit_to_sink`'s over-long fallback rests on.
     subroutine put_caller_text(out, pos, text, strip)
-        character(len=*), intent(out), optional :: out  !! Absent while measuring, present while writing.
+        ! `intent(inout)` for the same reason as `put` above -- see the comment there.
+        character(len=*), intent(inout), optional :: out !! Absent while measuring, present while writing.
         integer, intent(inout) :: pos                   !! Next free position; advanced by the retained length.
         character(len=*), intent(in) :: text            !! The caller-supplied text.
         logical, intent(in) :: strip                    !! Whether to remove ANSI escape sequences.

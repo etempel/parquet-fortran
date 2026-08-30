@@ -965,12 +965,25 @@ contains
         integer, parameter :: threadings(4) = [1, 2, 4, 8]
         integer(int64), parameter :: nside = 256_int64
         integer :: k, t, nbad
-        real(real64) :: theta(n), phi(n)
-        real(real64) :: s_vec(3, n), s_pvec(3, n), s_th(n), s_ph(n), s_vth(n), s_vph(n)
-        integer(int64) :: s_ring(n), s_nest(n), s_vring(n), s_vnest(n)
-        real(real64) :: g_vec(3, n), g_th(n), g_ph(n)
-        integer(int64) :: g_pix(n)
+        ! ALLOCATABLE, not automatic, and that is not a style choice. These fifteen arrays are
+        ! about 700 kB together, and test-drive runs this test on an OPENMP WORKER thread, whose
+        ! stack is `OMP_STACKSIZE` rather than the process limit. Under an ordinary build that
+        ! fits; under nagfor's `-C=undefined`, whose definedness tracking inflates every frame, it
+        ! does not -- the suite took SIGBUS (exit 138) at the default stack size while every test
+        ! in it passed when run individually by name, because a named run goes through
+        ! `run_selected` on the MAIN thread and never enters a parallel region. `OMP_STACKSIZE=16M`
+        ! also cures it, which is how it was diagnosed; moving the arrays to the heap fixes the
+        ! fragility itself and costs one allocation per test. See feature_tests.md §16.
+        real(real64), allocatable :: theta(:), phi(:)
+        real(real64), allocatable :: s_vec(:, :), s_pvec(:, :), s_th(:), s_ph(:), s_vth(:), s_vph(:)
+        integer(int64), allocatable :: s_ring(:), s_nest(:), s_vring(:), s_vnest(:)
+        real(real64), allocatable :: g_vec(:, :), g_th(:), g_ph(:)
+        integer(int64), allocatable :: g_pix(:)
         character(len=160) :: detail
+
+        allocate (theta(n), phi(n), s_th(n), s_ph(n), s_vth(n), s_vph(n), g_th(n), g_ph(n))
+        allocate (s_vec(3, n), s_pvec(3, n), g_vec(3, n))
+        allocate (s_ring(n), s_nest(n), s_vring(n), s_vnest(n), g_pix(n))
 
         ! A fixture spanning both caps, the belt, both poles and the seam. It is deliberately NOT
         ! perturbed away from pixel boundaries, unlike the reference vectors -- every comparison

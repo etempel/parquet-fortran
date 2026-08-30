@@ -2600,13 +2600,20 @@ contains
         call check(error, nnull == 2_int64, "n_null must report how many were excluded")
         if (allocated(error)) return
 
-        ! Every element excluded: ok=.false., count=0, and `m` untouched.
+        ! Every element excluded: ok=.false. and count=0.
+        !
+        ! `m` is deliberately NOT asserted here. It is `intent(out)` and `mode_i32` returns without
+        ! assigning it on this path, so F2018 leaves it undefined -- and pf_mode's own doc-comment
+        ! says so: "An empty population gives ok = .false. and count = 0, and `m` must not be
+        ! read." This test used to assert `m == -99_int32` after seeding it, i.e. it asserted the
+        ! opposite of the documented contract. gfortran, ifx and flang all leave the caller's prior
+        ! value in place, so it passed everywhere; nagfor's -C=undefined reports it as a reference
+        ! to an undefined variable, which is exactly right. `ok` is the flag a caller is supposed
+        ! to branch on, and it is what is asserted instead.
         m = -99_int32
         mask = .false.
         call pf_mode(pop, m, count=cnt, is_valid=mask, ok=ok, n_null=nnull)
         call check(error, (.not. ok) .and. cnt == 0_int64, "an empty population must not be ok")
-        if (allocated(error)) return
-        call check(error, m == -99_int32, "m must be left untouched when there is no mode")
         if (allocated(error)) return
         call check(error, nnull == 6_int64, "and every element must be counted as null")
     end subroutine test_mode_nulls_and_weights

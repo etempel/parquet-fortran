@@ -46,6 +46,8 @@ It is written to be read cold: no knowledge of the session that produced it is a
 - [10. Tracking progress](#10-tracking-progress)
 - [11. Where a convention belongs](#11-where-a-convention-belongs)
 - [12. Settings analysis](#12-settings-analysis)
+- [13. Scoping a campaign](#13-scoping-a-campaign)
+- [14. Release status decides what a review may recommend](#14-release-status-decides-what-a-review-may-recommend)
 
 ## 1. What a documentation review is for
 
@@ -64,6 +66,10 @@ that changes how the next page should be reviewed, and reviewing two pages under
 conventions wastes one of them.
 
 ## 2. The three-step loop
+
+**Starting a campaign:** before any of this, build the page list, fix the report aliases and
+record the baseline — [§13](#13-scoping-a-campaign). A campaign whose first review starts before
+its scope is agreed reviews whatever page happened to look urgent.
 
 **Starting a session:** take the first page whose step 1 is not yet done. If a page's step 1 is
 recorded but step 3 is not, that page is mid-loop and nothing new starts until it closes. Read that
@@ -402,7 +408,9 @@ Structure, in this order:
    maintainer should be able to stop reading after the *wrong* entries and have lost nothing
    important. Two *wrong* entries beat twenty cosmetic ones.
 5. **Looks like a code issue** — anything where the code itself appears wrong, missing or inconsistent
-   with its siblings, each with evidence and a recommended fix. Explicitly not acted on.
+   with its siblings, each with evidence and a recommended fix. Explicitly not acted on. **How far this
+   section may reach depends on whether the surface is released**, which is settled once per campaign
+   rather than per finding — see [§14](#14-release-status-decides-what-a-review-may-recommend).
 6. **Open questions** — after every finding, so the maintainer reads the diagnosis before being asked
    anything. Number them. **Propose a recommendation for each**, with the reasoning in a sentence or
    two; where none is defensible, say so and set out what each option costs. A bare question with no
@@ -556,13 +564,18 @@ permission**, and both are load-bearing:
   a reading task rather than a re-review.**
 - **Documentation-only.** Nothing that changes what the library *does*.
 
+**Neither bound moves when the surface under review is unreleased.** That widens what the report
+may *recommend* and nothing else — see
+[§14](#14-release-status-decides-what-a-review-may-recommend). A review that starts editing
+signatures because "it has not shipped yet" has stopped being a review.
+
 | target | what may be applied directly |
 |---|---|
 | the page under review | any doc-only fix within the two bounds |
 | its index entries | the bullet and its one-line description, when the page's title or scope changed |
 | other guide pages | any doc-only fix within the two bounds — **not just** links pointing at the page under review. A *wrong* claim is fixed wherever it is found, whatever its review order: leaving it is what makes two pages disagree, which reads to a user as a real distinction. The bounds still decide — a typo or a contradicted sentence is fixed anywhere; a new section or a rewrite still waits for that page's own turn, because that is *large*, not because it is elsewhere. Record such a fix naming the file, **and list in "Deferred" what you did NOT check on that page**, so its own review knows how much was covered and does not read the visit as a partial review |
 | README | an API-overview entry, a stale link into the guide, a claim the source contradicts |
-| contributor docs, changelog, standing-instructions file | a stale link or anchor — needed anyway when a heading rename breaks the anchor checker. In a changelog, a **published** section records what that release shipped: repoint a dead link, change nothing else |
+| contributor docs, changelog, standing-instructions file | a stale link or anchor — needed anyway when a heading rename breaks the anchor checker. In a changelog, a **published** section records what that release shipped: repoint a dead link, change nothing else. An **unpublished** section (`[Unreleased]`) is not a record of anything yet, so a *factual* correction to it — a bullet naming an argument the code does not have, a stated default the source contradicts — is within the two bounds and may be applied. Restructuring it, or moving an entry between its `### Added`/`### Changed`/`### Fixed` groups, is *large* and is proposed |
 | the standing-risk register (tracked) | a stale link or anchor only. **Never** a verdict, a risk number, a section move or a pruning |
 | source doc-comments | a wrong or stale doc-comment, within the two bounds |
 | **generated** sources | the same fix, made in the **generator's template** and regenerated — never in the emitted file. Check the file's banner first; CI runs each generator's `--check` and a hand-edit fails it |
@@ -692,6 +705,8 @@ structural change and need a `ford docs.md` build; a page-content review runs th
 
 A campaign needs a progress record. **It belongs in the campaign's own working document, not here** —
 this file must stay free of any page list so that it does not go stale.
+[§13](#13-scoping-a-campaign) says how that list is derived and what else the working document
+holds; this section says what the record itself needs.
 
 What that record needs:
 
@@ -759,3 +774,204 @@ knob, no environment variable.
 separate, explicitly requested task under `CLAUDE.md`'s rules — including the requirement that its own
 `feature_*.md` document carry a settings analysis. It is not covered by this one, and a reviewer must
 not treat this section as having answered it on that change's behalf.
+
+**Whether the feature under review got its own knobs right is a different question, and it is a
+review question rather than a settings decision taken here.** It belongs to
+[Pass 2](#33-pass-2--coverage): a module that threads internally, or that has a tunable the caller
+cannot reach, either has a `parquet_settings` knob or has a reason not to, and the page should let a
+reader tell which. Two asymmetries worth checking for by name, because both are invisible from the
+page alone — a module that threads but exposes no thread cap while a sibling exposes one, and a
+module that takes its configuration from its own environment reader rather than from
+`parquet_settings`. Either may be entirely deliberate. **Confirm it is, rather than assuming it**,
+and use `CLAUDE.md`'s admission test as the yardstick: a setting may change how fast, how large or
+how loud the library runs, never what it answers.
+
+## 13. Scoping a campaign
+
+**A campaign is a set of pages reviewed under one boundary.** Everything before this section assumes
+that set exists. This one says how to build it, and it is worth the effort: **the page list is the
+only part of a campaign nothing downstream can correct.** A wrong finding is caught in step 2 and a
+missed test is caught by Pass 3 on the next page, but a page nobody scheduled is simply never
+reviewed, and no check anywhere reports it.
+
+**The output is one working document**, git-ignored scratch in the repository root, holding the
+scope, the page list, the order, the progress record ([§10](#10-tracking-progress)) and the opening
+questions. It is the campaign's own file; this one stays free of any of it.
+
+### 13.1 Fix the boundary, and say what it is
+
+**Name a commit, not a feeling.** "Since the last release" is not a boundary until it is a tag and a
+hash: `git log <tag>..HEAD` is what every later derivation runs against, and two sessions
+disagreeing about where a campaign starts will produce two different page lists from the same
+repository. Record the tag, its commit and its date, and the baseline commit the campaign is scoped
+against.
+
+**Quantify what fell inside it**, in one table — commits, new source files, new pages, modified
+pages, inserted documentation lines. This costs one command each and is what tells the maintainer,
+before agreeing to anything, how large the campaign is.
+
+### 13.2 Derive the page list from the code, not from the diff
+
+**A documentation diff finds the pages someone remembered to update. It cannot find the ones they
+did not.** That is the same trap [§3.1](#31-pass-0--establish-the-source-of-truth-from-the-source)
+describes one level down — deriving a page's expected contents from the page can only confirm what
+is already there — and it has the same fix: derive from the source.
+
+So build the list from **three** independent sweeps, and expect them to disagree:
+
+- `git diff --name-status <boundary>..HEAD -- doc/` — what changed, split into added and modified.
+- The changelog's unpublished section, read as an **inventory of what has to be documented**. Each
+  entry is a claim that something exists; ask which page carries it, and a claim with no page is a
+  finding before the campaign has started.
+- **The new public surface**, from the source: new modules, new entry modules, new public procedures
+  and types. This is the sweep that finds a feature nobody wrote a changelog entry for.
+
+**Then ask the coverage question of every page the sweeps did *not* return**: what does the new
+surface add to *this page's own topic?* That question is what produces the third tier below, and it
+cannot be answered by any diff. A cheap, high-yield form of it is to count mentions — a page whose
+subject was extended and that mentions the extension zero times is a gap with its evidence already
+attached.
+
+### 13.3 Sort the pages into four tiers
+
+The tiers are not decoration: each one is reviewed differently, and saying which tier a page is in
+tells its reviewer how much of it to read.
+
+| tier | what it is | how it is reviewed |
+|---|---|---|
+| **new pages** | did not exist at the boundary; never reviewed | the full six passes over the whole page. These carry most of a campaign's value, and each is usually the only description of its subject in the guide, so nothing else will catch an omission |
+| **extended pages** | reviewed under an earlier boundary, since given new material | scoped to what is new **plus whatever the new material makes wrong elsewhere on the page**. Pass 0 still reads the whole page, because a new section frequently contradicts an old one — and that contradiction is the most valuable thing this tier finds |
+| **coverage-gap candidates** | untouched, but their subject was extended | scoped to one question: what does the new surface add to this page's topic? Cheapest reviews in the campaign, and a legitimate outcome is "nothing belongs here" — which is worth *recording* rather than assuming |
+| **index and landing pages** | group indexes, the guide's landing page, the front page | last, per [§10](#10-tracking-progress). Re-derive every bullet from its page's current opening paragraph |
+
+**State the tier a page is in beside the page**, with the evidence for the third tier attached — the
+count that showed the gap. A candidate tier is a *proposal*: it is the one the maintainer is most
+likely to trim, so make it trimmable by ordering it worst-first, like a report's findings.
+
+**"Modified" means modified substantively.** Check each modified page against its own diff and say
+so; a campaign that silently drops a page as a typo pass, and is wrong, has lost that page for good.
+If nothing was excluded, say that too — "nothing qualified" is information.
+
+**Give each page its line count.** It sizes the work. A page of several hundred lines is not a
+one-sitting review, and pretending otherwise is how [Pass 3](#34-pass-3--tests) gets skipped.
+
+### 13.4 Fix the report aliases up front
+
+Every page gets its report filename assigned in the working document **before the first review**,
+per [§10](#10-tracking-progress). Two properties matter and both are easy to lose:
+
+- **They share a prefix that the repository's ignore rules already cover**, so a report is scratch by
+  construction rather than by someone remembering. In this repository that means starting them with
+  the ignored planning-document prefix.
+- **They are unique and stable.** Cross-check the finished list mechanically — one alias per page,
+  no duplicates, and every page in the tier tables present in the order table and vice versa. That
+  is three lines of script and it catches the one error that would otherwise be found by two
+  sessions writing into the same file.
+
+### 13.5 Order, and when to deviate from reading order
+
+[§10](#10-tracking-progress)'s default is the guide's own reading order. **A campaign whose new
+material is concentrated in one group may deviate, and the argument for deviating is the same
+argument that gives the default**: terminology should settle on the pages that *own* it before the
+pages that *borrow* it are reviewed. When one group introduces a vocabulary — a set of new types and
+the words for their states — that several other pages then use, review that group first and keep
+reading order within every tier after it.
+
+Three rules for a deviation:
+
+- **Propose it, do not take it.** It is an opening question ([§13.7](#137-open-the-campaign-with-the-questions-that-block-it)),
+  with the reasoning stated, because the maintainer may have a reason to meet the guide in order.
+- **Say what it costs.** Here: a reader meets the guide in reading order, and the reviewer no longer
+  does — which matters for a reader, not for a reviewer.
+- **Index pages go after every content page**, not after their own group, whenever most groups have
+  a page in the campaign. Interleaving them means starting one group's index before another group's
+  review has settled a term it uses.
+
+### 13.6 Record a baseline before the first review
+
+[§9](#9-checks-to-run) says to run the checks before starting as well as after. A campaign records
+that once, in its working document, so that a failure appearing on page 20 belongs to page 20:
+
+- the **baseline commit** and whether the working tree is clean;
+- the **machine and toolchain**, because [§4](#4-the-review-report) requires every figure a report
+  quotes to name its machine and forbids comparing two machines' figures;
+- the **result of each check**, named, with its count where it prints one;
+- the **size of the guide** — content pages and index pages — since that is what a structural check
+  at the end is compared against.
+
+**Say which checks were *not* run and why.** A campaign that adds no page does not need a docs build
+for its baseline, and recording that decision is what stops a later session reading the absence as
+an oversight.
+
+### 13.7 Open the campaign with the questions that block it
+
+A campaign's opening questions are given and answered exactly as a report's are
+([§4](#4-the-review-report), [§5](#5-step-2-how-feedback-is-given)): numbered, each with a
+recommendation and its reasoning, answered by a `Comment:` line underneath. **Say which of them
+block the first review** — typically the order and the scope of the trimmable tier, since both
+change what the first page is — and start nothing until those are answered.
+
+**One question is worth asking in every campaign and is easy to leave out:** is there any part of
+the surface in scope that the maintainer considers settled and does not want relitigated? It costs
+one line to answer and saves several reports' worth of proposals, and it is the natural companion to
+[§14](#14-release-status-decides-what-a-review-may-recommend).
+
+### 13.8 Close the campaign
+
+**Run [§9](#9-checks-to-run)'s full list once, at the end** — including the docs build, the rendered
+page count and the guide-path grep — and record the result in the working document. Individual page
+reviews run the smaller subset; the structural checks are worth once per campaign rather than once
+per page, unless the campaign adds, moves or splits a page, in which case they belong to that
+change.
+
+**What is still outstanding stays where it was found.** Every page's report keeps its own "Deferred
+to the future" items, per [§4](#4-the-review-report); a campaign does not consolidate them into a
+tracked document, an issue tracker or the standing-risk register on its way out, and it does not
+delete a report to tidy up.
+
+## 14. Release status decides what a review may recommend
+
+**Before the first review, establish whether the surface under review has shipped.** It is one
+question per campaign, not one per finding, and it decides how far a report's "looks like a code
+issue" section ([§4](#4-the-review-report)) may reach. Getting it wrong is expensive in both
+directions: a reviewer who assumes everything is frozen swallows findings that were free to act on,
+and a reviewer who assumes nothing is frozen proposes breaking changes to code other people are
+already running.
+
+**An unreleased surface is still open.** Where a campaign covers functionality that sits in the
+changelog's unpublished section — not in any tagged release, with no user code written against it
+and no semantic-versioning promise attached — a finding of the form *"this API is awkward, is
+inconsistent with its siblings, is named wrongly, takes its arguments in the wrong order, or should
+not exist"* is **actionable and must be reported** rather than swallowed as arriving too late. All
+of the following are then in bounds as recommendations:
+
+- renaming a public procedure, type, constant, argument or type-bound binding;
+- changing an argument's kind, order, optionality or default;
+- adding, removing, merging or splitting a public procedure;
+- changing a documented behaviour — a default, a null/NaN convention, a tie-break, what aborts and
+  what returns quietly;
+- dropping a feature that has turned out not to earn its place.
+
+**This is a licence to recommend, never a licence to apply. Four bounds hold, and none is relaxed:**
+
+- **[§7](#7-what-a-review-may-edit) is unchanged.** The reviewer proposes; the maintainer decides. A
+  review applies documentation-only fixes within §7's two bounds and nothing else, whatever the
+  release status of what it describes.
+- **A released surface appearing on the same page is not unreleased.** A shipped procedure that
+  *gained* an optional argument is two things at once: the argument is open, the procedure is not,
+  and proposing to rename the procedure is a breaking change subject to the version promise. **Say
+  which of the two a recommendation is**, because the cost differs by an order of magnitude and the
+  maintainer is answering a different question in each case.
+- **An approved change is its own task, not part of that page's step 3.** It is exactly the case
+  [§2](#2-the-three-step-loop) warns about — a round-2 comment turning a page review into a feature
+  request — so it gets its own design write-up, its own settings analysis
+  ([§12](#12-settings-analysis)), its own tests and negative controls, and is scheduled separately.
+- **Its changelog entry folds into the feature's existing entry.** An unreleased feature never earns
+  a "changed" or "fixed" entry for its own subsequent changes: there is no released behaviour for it
+  to differ from, so the reader upgrading cannot observe the difference. Keep the feature's one
+  existing bullet current instead.
+
+**Whichever the answer, write it down in the campaign's working document.** A reviewer three pages
+in should not have to re-derive whether a signature is a finding or a fact of life, and a report
+written under the wrong assumption is not repairable by reading it — the findings that were never
+raised leave no trace.

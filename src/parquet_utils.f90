@@ -107,10 +107,12 @@ module parquet_utils
     !! because some reject a type-mismatched edit descriptor through `iostat` and others write
     !! asterisks themselves and report success.
     !!
-    !! **Padding follows the sign.** `-7` at `min_width=5` is `"-0007"`, not `"000-7"`, which is
-    !! the only spelling that reads back as the value. The rule is uniform, so a non-digit `pad`
-    !! follows it too (`" "` gives `"-   7"`); a caller wanting a blank-led field passes an
-    !! explicit `fmt` such as `'(i5)'`.
+    !! **Exactly one case puts padding between the sign and the digits: an INTEGER padded with
+    !! `"0"`.** `pf_to_str(-7, res, min_width=5)` is `"-0007"`, because zeros inserted after an
+    !! integer's sign do not change the value it reads back as. Everything else pads in front of
+    !! the sign -- `pad=" "` gives `"   -7"`, `pad="x"` gives `"xxx-7"`, and `pad="0"` on a
+    !! **real** gives `"0000-3.5"`, since there a leading zero run is alignment rather than part of
+    !! the number.
     !!
     !! **`pad` defaults to `"0"` for the two integer specifics** -- the zero-padded file counter is
     !! the case this exists for -- **and to `" "` for the real and logical ones**, where
@@ -256,12 +258,19 @@ contains
     ! Value to text
     ! ================================================================================
 
-    !> Pads `text` on the left to at least `min_width` characters, inserting the padding AFTER a
-    !! leading sign so that the result still reads back as the value.
-    pure subroutine pad_left(text, min_width, padc, res)
+    !> Pads `text` on the left to at least `min_width` characters.
+    !!
+    !! **Exactly one case puts the padding between the sign and the digits: an INTEGER padded with
+    !! `"0"`.** `-7` at `min_width=5` is `"-0007"` there, because inserting zeros immediately after
+    !! the sign of an integer does not change the value it reads back as. Every other combination
+    !! pads in front of the sign, including `pad=" "` (`"   -7"`), any other character
+    !! (`"xxx-7"`), and `"0"` on a real -- where a leading zero run is alignment rather than part
+    !! of the number, so it goes outside the sign like any other pad.
+    pure subroutine pad_left(text, min_width, padc, integer_value, res)
         character(len=*), intent(in) :: text !! the rendered text, used verbatim.
         integer, intent(in) :: min_width !! minimum total width; `<= len(text)` copies `text` through.
         character(len=1), intent(in) :: padc !! the padding character.
+        logical, intent(in) :: integer_value !! `.true.` only from the two integer specifics.
         character(len=:), allocatable, intent(out) :: res !! `text`, padded; always allocated.
         integer :: nadd
         logical :: signed
@@ -275,7 +284,7 @@ contains
         ! `if (len(text) > 0 .and. text(1:1) == "-")` would evaluate `text(1:1)` on an empty string.
         signed = .false.
         if (len(text) > 0) signed = (text(1:1) == "-" .or. text(1:1) == "+")
-        if (signed) then
+        if (signed .and. integer_value .and. padc == "0") then
             res = text(1:1)//repeat(padc, nadd)//text(2:)
         else
             res = repeat(padc, nadd)//text
@@ -294,12 +303,13 @@ contains
     !!
     !! Factored out because all five specifics share it exactly; `min_width` absent or `<= 0` and
     !! the text is copied through unchanged.
-    pure subroutine finish_to_str(text, res, min_width, pad, default_pad)
+    pure subroutine finish_to_str(text, res, min_width, pad, default_pad, integer_value)
         character(len=*), intent(in) :: text !! the rendered text.
         character(len=:), allocatable, intent(out) :: res !! the padded result; always allocated.
         integer, intent(in), optional :: min_width !! caller's minimum width, if any.
         character(len=1), intent(in), optional :: pad !! caller's padding character, if any.
         character(len=1), intent(in) :: default_pad !! this specific's default padding character.
+        logical, intent(in) :: integer_value !! `.true.` only from the two integer specifics; see `pad_left`.
         character(len=1) :: padc
 
         if (.not. present(min_width)) then
@@ -312,7 +322,7 @@ contains
         end if
         padc = default_pad
         if (present(pad)) padc = pad
-        call pad_left(text, min_width, padc, res)
+        call pad_left(text, min_width, padc, integer_value, res)
     end subroutine finish_to_str
 
     !> Renders one `integer(int32)` as text. See the `pf_to_str` interface for the full contract.
@@ -334,7 +344,7 @@ contains
             call bad_format_result(res)
             return
         end if
-        call finish_to_str(trim(buf), res, min_width, pad, "0")
+        call finish_to_str(trim(buf), res, min_width, pad, "0", .true.)
     end subroutine pf_to_str_i32
 
     !> Renders one `integer(int64)` as text. See the `pf_to_str` interface for the full contract.
@@ -356,7 +366,7 @@ contains
             call bad_format_result(res)
             return
         end if
-        call finish_to_str(trim(buf), res, min_width, pad, "0")
+        call finish_to_str(trim(buf), res, min_width, pad, "0", .true.)
     end subroutine pf_to_str_i64
 
     !> Renders one `real(real32)` as text. See the `pf_to_str` interface for the full contract, and
@@ -379,7 +389,7 @@ contains
             call bad_format_result(res)
             return
         end if
-        call finish_to_str(trim(buf), res, min_width, pad, " ")
+        call finish_to_str(trim(buf), res, min_width, pad, " ", .false.)
     end subroutine pf_to_str_r32
 
     !> Renders one `real(real64)` as text. See the `pf_to_str` interface for the full contract, and
@@ -402,7 +412,7 @@ contains
             call bad_format_result(res)
             return
         end if
-        call finish_to_str(trim(buf), res, min_width, pad, " ")
+        call finish_to_str(trim(buf), res, min_width, pad, " ", .false.)
     end subroutine pf_to_str_r64
 
     !> Renders one `logical` as `true` or `false` -- the TOML spelling, deliberately unlike
@@ -422,11 +432,11 @@ contains
                 call bad_format_result(res)
                 return
             end if
-            call finish_to_str(trim(buf), res, min_width, pad, " ")
+            call finish_to_str(trim(buf), res, min_width, pad, " ", .false.)
         else if (value) then
-            call finish_to_str("true", res, min_width, pad, " ")
+            call finish_to_str("true", res, min_width, pad, " ", .false.)
         else
-            call finish_to_str("false", res, min_width, pad, " ")
+            call finish_to_str("false", res, min_width, pad, " ", .false.)
         end if
     end subroutine pf_to_str_log
 

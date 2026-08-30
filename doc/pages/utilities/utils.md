@@ -84,9 +84,20 @@ refused.
 fight. `pad` defaults to `"0"` for the two integer types — the zero-padded file counter is the case
 this exists for — and to `" "` for the reals and the logical.
 
-**Padding follows the sign**: `-7` at `min_width=5` is `"-0007"`, which is the only spelling that
-reads back as the value. The rule is uniform, so a blank pad follows the sign too (`"-   7"`); if
-you want a blank-led field, ask for one with `fmt='(i5)'`.
+**Exactly one case puts padding between the sign and the digits: an integer padded with `"0"`.**
+Everything else pads in front of the sign.
+
+```fortran
+call pf_to_str(-7, res, min_width=5)                    ! "-0007"  (integer, default pad "0")
+call pf_to_str(-7, res, min_width=5, pad=" ")           ! "   -7"
+call pf_to_str(-7, res, min_width=5, pad="9")           ! "999-7"
+call pf_to_str(-3.5_real64, res, min_width=8, fmt='(f4.1)', pad="0")  ! "0000-3.5"
+```
+
+The reason is narrow and it is why the rule is narrow: zeros inserted immediately after an
+**integer's** sign do not change the value the text reads back as. That is not true of any other
+pad character, and it is not the way a leading zero run reads on a real — there it is alignment,
+so it goes outside the sign like a blank.
 
 **A format the runtime rejects gives you asterisks**, not a crash. How many asterisks is not part
 of the contract and differs between compilers, so test for "all asterisks" rather than a length.

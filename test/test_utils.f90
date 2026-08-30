@@ -238,7 +238,12 @@ contains
         call check(error, got == "xxx7", "pad must override the default padding character")
     end subroutine test_to_str_min_width
 
-    !> Padding follows the sign, so the padded text still reads back as the value.
+    !> Exactly one case pads between the sign and the digits: an INTEGER padded with `"0"`.
+    !!
+    !! All four discriminating cases are asserted, because each of the plausible simpler rules
+    !! passes some of them and fails others: "always after the sign" fails the blank pad, "always
+    !! before it" fails the default, "any digit" fails `pad="9"`, and "any pad character on any
+    !! type" fails `pad="0"` on a real. Only the four together pin the rule.
     subroutine test_to_str_sign(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
         character(len=:), allocatable :: got
@@ -254,7 +259,31 @@ contains
         if (allocated(error)) return
 
         call pf_to_str(-7_int32, got, min_width=5, pad=" ")
-        call check(error, got == "-   7", "the rule is uniform: a blank pad also follows the sign")
+        call check(error, got == "   -7", "a BLANK pad is alignment and goes OUTSIDE the sign")
+        if (allocated(error)) return
+        call check(error, got /= "-   7", "a blank pad must not be split across the sign")
+        if (allocated(error)) return
+
+        call pf_to_str(-7_int32, got, min_width=5, pad="9")
+        call check(error, got == "999-7", "only ""0"" may sit between the sign and the digits, not any digit")
+        if (allocated(error)) return
+
+        call pf_to_str(-7_int32, got, min_width=5, pad="x")
+        call check(error, got == "xxx-7", "a non-digit pad goes outside the sign")
+        if (allocated(error)) return
+
+        call pf_to_str(7_int32, got, min_width=5, pad=" ")
+        call check(error, got == "    7", "an unsigned value pads the same way whatever the pad character")
+        if (allocated(error)) return
+
+        ! The integer-only half of the rule. A leading zero run on a real is alignment rather than
+        ! part of the number, so it goes outside the sign exactly like a blank would.
+        call pf_to_str(-3.5_real64, got, min_width=8, fmt='(f4.1)', pad="0")
+        call check(error, got == "0000-3.5", "pad=""0"" on a REAL goes outside the sign: the rule is integer-only")
+        if (allocated(error)) return
+
+        call pf_to_str(-3.5_real64, got, min_width=8, fmt='(f4.1)', pad=" ")
+        call check(error, got == "    -3.5", "a real defaults to a blank pad, so it pads outside the sign")
     end subroutine test_to_str_sign
 
     !> Each real and logical specific renders, and `true`/`false` is a contract rather than a choice.

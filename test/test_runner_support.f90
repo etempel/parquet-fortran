@@ -259,6 +259,22 @@ contains
     !> regression check.
     logical function suite_is_safe_to_parallelize(name) result(safe)
         character(len=*), intent(in) :: name
+        ! **Every `*_errors` suite is excluded, BY SHAPE rather than by name.** Such a suite exists
+        ! precisely because its tests drive `test/error_scenarios.f90`, and a test that is not
+        ! answered from the primed cache spawns a subprocess -- so running several concurrently
+        ! forks from inside an OpenMP team, which is the hazard `prime_error_scenarios` is built
+        ! to avoid (see its own comment: exactly one fork, with no team active). Matching the
+        ! suffix rather than listing the four means the next split inherits this for free; listing
+        ! them is what a future split would forget. Both failures were observed, in order:
+        ! `writing_errors` segfaulted because 41 tests that had always run serially suddenly ran
+        ! concurrently, and `reading_errors` segfaulted with only FOUR tests, because all four
+        ! forked at once where before they had been spread thinly through a 56-test suite.
+        if (len(name) > 7) then
+            if (name(len(name) - 6:) == "_errors") then
+                safe = .false.
+                return
+            end if
+        end if
         safe = .not. (name == "writing" .or. name == "errors" .or. name == "metadata" .or. name == "maml" &
             .or. name == "filter_screen" .or. name == "sorting" .or. name == "sorting_cpp" &
             .or. name == "sort" .or. name == "settings" &

@@ -22,10 +22,16 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-RUN_TESTER="test/run_tester.f90"
+# Every runner, not just one. `test/run_tester.f90` is now group (b) alone -- the suites are
+# partitioned across five programs (see feature_tests.md section 6), so reading one by name would
+# silently report a fifth of the suite as the whole of it. Globbing keeps a sixth runner counted
+# with no edit here; `check_test_runner_partition` is what proves nothing is registered twice or
+# nowhere at all.
+RUN_TESTERS=()
+while IFS= read -r f; do RUN_TESTERS+=("$f"); done < <(ls test/run_tester*.f90 2>/dev/null | sort)
 
-if [ ! -f "$RUN_TESTER" ]; then
-    echo "error: $RUN_TESTER not found" >&2
+if [ ${#RUN_TESTERS[@]} -eq 0 ]; then
+    echo "error: no test/run_tester*.f90 found" >&2
     exit 1
 fi
 
@@ -44,26 +50,35 @@ count_suite_tests() {
     ' "$file"
 }
 
-printf '%-16s %8s   %s\n' "SUITE" "TESTS" "SOURCE"
-printf '%-16s %8s   %s\n' "--------------" "-----" "------"
-
 total=0
-while IFS= read -r pair; do
-    suite_name="$(sed -E 's/^new_testsuite\("([^"]+)",.*/\1/' <<< "$pair")"
-    fn="$(sed -E 's/^new_testsuite\("[^"]+",[[:space:]]*([A-Za-z0-9_]+).*/\1/' <<< "$pair")"
+nsuites=0
+for RUN_TESTER in "${RUN_TESTERS[@]}"; do
+    runner="$(basename "$RUN_TESTER" .f90)"
+    printf '\n=== %s\n' "$runner"
+    printf '%-18s %8s   %s\n' "SUITE" "TESTS" "SOURCE"
+    printf '%-18s %8s   %s\n' "----------------" "-----" "------"
+    subtotal=0
+    while IFS= read -r pair; do
+        suite_name="$(sed -E 's/^new_testsuite\("([^"]+)",.*/\1/' <<< "$pair")"
+        fn="$(sed -E 's/^new_testsuite\("[^"]+",[[:space:]]*([A-Za-z0-9_]+).*/\1/' <<< "$pair")"
 
-    file="$(grep -lE "^[[:space:]]*subroutine[[:space:]]+${fn}[[:space:]]*\(" test/test_*.f90 | head -1)"
-    if [ -z "$file" ]; then
-        echo "error: no 'subroutine ${fn}(...)' found under test/test_*.f90 (referenced by $RUN_TESTER" \
-            "for testsuite \"$suite_name\")" >&2
-        exit 1
-    fi
+        file="$(grep -lE "^[[:space:]]*subroutine[[:space:]]+${fn}[[:space:]]*\(" test/test_*.f90 | head -1)"
+        if [ -z "$file" ]; then
+            echo "error: no 'subroutine ${fn}(...)' found under test/test_*.f90 (referenced by" \
+                "$RUN_TESTER for testsuite \"$suite_name\")" >&2
+            exit 1
+        fi
 
-    count="$(count_suite_tests "$fn" "$file")"
-    total=$((total + count))
+        count="$(count_suite_tests "$fn" "$file")"
+        subtotal=$((subtotal + count))
+        nsuites=$((nsuites + 1))
 
-    printf '%-16s %8d   %s\n' "$suite_name" "$count" "$file"
-done < <(grep -oE 'new_testsuite\("[^"]+",[[:space:]]*[A-Za-z0-9_]+' "$RUN_TESTER")
+        printf '%-18s %8d   %s\n' "$suite_name" "$count" "$file"
+    done < <(grep -oE 'new_testsuite\("[^"]+",[[:space:]]*[A-Za-z0-9_]+' "$RUN_TESTER")
+    printf '%-18s %8s\n' "----------------" "-----"
+    printf '%-18s %8d\n' "subtotal" "$subtotal"
+    total=$((total + subtotal))
+done
 
-printf '%-16s %8s\n' "--------------" "-----"
-printf '%-16s %8d\n' "TOTAL" "$total"
+printf '\n%-18s %8s\n' "================" "====="
+printf '%-18s %8d   (%d suites across %d runners)\n' "TOTAL" "$total" "$nsuites" "${#RUN_TESTERS[@]}"

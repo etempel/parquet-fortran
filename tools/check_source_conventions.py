@@ -3983,6 +3983,164 @@ def check_view_call_sites_declare_target():
     return problems
 
 
+
+def _module_import_closure(seed_modules):
+    """Every src/ module reachable from `seed_modules`, submodules attached to their ancestor.
+
+    fpm never prunes a submodule separately from the module it belongs to (the rule
+    `tools/module_footprints.txt` documents), so a submodule's imports count as its ancestor's.
+    Without that attachment the walk misses exactly the imports that matter -- most of this
+    library's `use parquet_bindings` lines live in submodule files, not in module specs.
+    """
+    owner = {}          # program unit -> the top-level module it belongs to
+    imports = {}        # top-level module -> set of modules used, anywhere in its subtree
+    bodies = {}
+    for path in sorted(SRC.glob("*.f90")):
+        text = path.read_text(encoding="utf-8")
+        code = "\n".join(strip_comment(ln) for ln in text.splitlines())
+        m = re.search(r"^\s*submodule\s*\(\s*([a-z0-9_]+)", code, re.M | re.I)
+        if m:
+            root = m.group(1).lower()
+            unit = re.search(r"^\s*submodule\s*\([^)]*\)\s*([a-z0-9_]+)", code, re.M | re.I)
+        else:
+            m2 = re.search(r"^\s*module\s+([a-z0-9_]+)\s*$", code, re.M | re.I)
+            if not m2:
+                continue
+            root = m2.group(1).lower()
+            unit = m2
+        bodies[path.name] = code
+        owner[unit.group(1).lower() if unit else path.stem] = root
+        used = {u.lower() for u in re.findall(r"^\s*use\s+([a-z0-9_]+)", code, re.M | re.I)}
+        imports.setdefault(root, set()).update(used)
+    # a submodule names its ancestor via `submodule (root:parent)`; resolve roots transitively
+    changed = True
+    while changed:
+        changed = False
+        for root, used in list(imports.items()):
+            for u in list(used):
+                r = owner.get(u, u)
+                if r != u and r not in used:
+                    used.add(r)
+                    changed = True
+    seen, stack = set(), [m.lower() for m in seed_modules]
+    while stack:
+        n = stack.pop()
+        if n in seen:
+            continue
+        seen.add(n)
+        for u in imports.get(n, ()):
+            if u not in seen:
+                stack.append(u)
+    return seen
+
+
+def _runner_registrations():
+    """{runner stem: [(suite name, collector)]} read from every test/run_tester*.f90."""
+    out = {}
+    for path in sorted(TEST.glob("run_tester*.f90")):
+        code = "\n".join(strip_comment(ln) for ln in path.read_text(encoding="utf-8").splitlines())
+        out[path.stem] = re.findall(r'new_testsuite\(\s*"([a-z0-9_]+)"\s*,\s*([a-z0-9_]+)\s*\)', code)
+    return out
+
+
+def check_test_runner_partition():
+    """The five test runners partition the suites, and the undef-safe ones reach no C++.
+
+    **Nothing in CI can run the check this partition exists for.** The pipeline installs
+    `gfortran gcc g++` and no nagfor, so the `-C=undefined` build that gives the split its whole
+    purpose is a manual, machine-specific run. If membership were enforced only by that run, the
+    first `use parquet` added to `test_spatial.f90` would sit in the tree until someone next
+    happened to build with NAG -- and would then look like a NAG portability bug rather than a
+    partition violation, which is the most expensive way to find it. This check runs in the lint
+    stage, needs only python3, and fails at the moment the violation is introduced.
+
+    Five clauses, per `feature_tests.md` section 10:
+
+      1. every suite is registered in exactly one runner, and every `collect_tests_*` in `test/`
+         is registered somewhere -- the failure mode with no symptom, since a suite that stops
+         being registered simply stops running while every count still looks plausible;
+      2. no file feeding an undef-safe runner reaches `parquet_bindings`, transitively;
+      3. no such file declares a `bind(C)` interface of its own;
+      4. no file outside `run_tester_errors` drives an error scenario;
+      5. `run_tester_noundef` is held to 2 and 3 and NOTHING MORE -- its membership is decided by
+         a person after running the checked build (decision 8), and nothing in the source
+         distinguishes "Arrow-free and undef-safe" from "Arrow-free and not".
+
+    Clause 3 is easy to get wrong in the direction that makes the check useless: the Arrow-free
+    modules are full of doc-comments containing the phrase `bind(C)`, so a naive case-insensitive
+    grep reports every one of them and nothing else. Comments are stripped first.
+    """
+    UNDEF_SAFE = ("run_tester_pf", "run_tester", "run_tester_noundef")
+    regs = _runner_registrations()
+    problems = []
+    if not regs:
+        return ["test/run_tester*.f90: no runner found -- this check is blind"]
+    for want in UNDEF_SAFE + ("run_tester_errors", "run_tester_cpp"):
+        if want not in regs:
+            problems.append("test/%s.f90: expected runner is missing" % want)
+    if problems:
+        return problems
+
+    # ---- clause 1: exactly one runner per suite, and nothing unregistered -------------------
+    where = {}
+    for runner, pairs in regs.items():
+        for suite, coll in pairs:
+            where.setdefault(suite, []).append((runner, coll))
+    for suite, hits in sorted(where.items()):
+        if len(hits) > 1:
+            problems.append("suite '%s' is registered in %s -- it must appear in exactly one"
+                            % (suite, ", ".join(sorted(r for r, _ in hits))))
+    declared = {}
+    for path in sorted(TEST.glob("*.f90")):
+        code = "\n".join(strip_comment(ln) for ln in path.read_text(encoding="utf-8").splitlines())
+        for m in re.finditer(r"^\s*subroutine\s+(collect_tests_[a-z0-9_]+)\s*\(", code, re.M | re.I):
+            declared[m.group(1).lower()] = path
+    registered = {c.lower() for pairs in regs.values() for _, c in pairs}
+    for coll, path in sorted(declared.items()):
+        if coll not in registered:
+            problems.append("%s: %s is declared but registered in no runner -- its tests do not run"
+                            % (path.name, coll))
+
+    # ---- which test file defines each collector --------------------------------------------
+    file_of = {c: p for c, p in declared.items()}
+
+    # ---- clauses 2 and 3: undef-safe runners reach no C++ ----------------------------------
+    for runner in UNDEF_SAFE:
+        for suite, coll in regs[runner]:
+            path = file_of.get(coll.lower())
+            if path is None:
+                continue
+            code = "\n".join(strip_comment(ln) for ln in path.read_text(encoding="utf-8").splitlines())
+            seeds = {u.lower() for u in re.findall(r"^\s*use\s+([a-z0-9_]+)", code, re.M | re.I)}
+            closure = _module_import_closure(seeds)
+            if "parquet_bindings" in closure:
+                problems.append(
+                    "%s (suite '%s', %s): reaches parquet_bindings -- an undef-safe runner may "
+                    "not, because an executed bind(C) call is miscompiled under -C=undefined"
+                    % (path.name, suite, runner))
+            if re.search(r"bind\s*\(\s*c\s*,\s*name\s*=", code, re.I):
+                problems.append(
+                    "%s (suite '%s', %s): declares a bind(C) interface -- an undef-safe runner "
+                    "may not" % (path.name, suite, runner))
+
+    # ---- clause 4: only run_tester_errors drives scenarios ---------------------------------
+    for runner, pairs in regs.items():
+        if runner == "run_tester_errors":
+            continue
+        for suite, coll in pairs:
+            path = file_of.get(coll.lower())
+            if path is None:
+                continue
+            code = "\n".join(strip_comment(ln) for ln in path.read_text(encoding="utf-8").splitlines())
+            hit = re.search(r"\b(run_error_scenario|check_scenario_[a-z_]*|use\s+test_errors)\b", code)
+            if hit:
+                problems.append(
+                    "%s (suite '%s', %s): references %s -- only run_tester_errors may drive an "
+                    "error_scenarios subprocess, so that every other runner forks nothing"
+                    % (path.name, suite, runner, hit.group(1)))
+    return problems
+
+
 CHECKS = (
     ("threads= is forwarded to every callee that takes it", check_threads_are_forwarded),
     ("omp_* references are guarded by #ifdef _OPENMP", check_openmp_calls_are_guarded),
@@ -4033,6 +4191,7 @@ CHECKS = (
     ("no per-element helper takes a shared_ptr", check_no_per_element_shared_ptr),
     ("no per-element string allocation in a bulk loop", check_no_per_element_string_alloc),
     ("every error scenario is named in the shell runner", check_scenario_list_is_complete),
+    ("the test runners partition the suites", check_test_runner_partition),
     ("every intent(inout) temporal setter assigns all components", check_temporal_setters_assign_all),
     ("doc/pages index files agree with the page tree", check_doc_page_index_consistency),
     ("the landing page names every entry module", check_landing_page_names_every_entry_module),

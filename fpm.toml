@@ -124,10 +124,16 @@ nagfor.flags = "-f2018 -nan -colour -w=unused -Warn=unkind_real_literal -Warn=do
 #                    as long as this stands: per-file exclusion is impossible (the option is
 #                    stamped into every .mod; a mismatched `use` is a fatal error both ways), and
 #                    an augmented-ABI C shim was investigated and rejected -- see CLAUDE.md's NAG
-#                    section. The all-Fortran suites DO run under it, and pass:
-#                    fpm test run_tester --flag "-C=undefined" -- random    (likewise random_perm
-#                    and random_weighted). Standalone report, with the generated C
-#                    and the compiler matrix: feature_nag_bindc_undefined.md.
+#                    section. Since the option is per-BUILD, the only lever is which EXECUTABLE is
+#                    run, which is why test/run_tester*.f90 is five programs: run_tester_pf and
+#                    run_tester execute no bind(C) call at all and DO run under it.
+#                        tools/check_nag_undefined.sh
+#                    builds them with --profile nagundef, runs both in full, and re-tries the
+#                    curated run_tester_noundef list. It exports OMP_STACKSIZE, which is load-
+#                    bearing rather than a tuning knob -- an OpenMP worker's stack is that
+#                    variable, not the process limit, and the default is below the measured floor.
+#                    Standalone report, with the generated C and the compiler matrix:
+#                    feature_nag_bindc_undefined.md; the runner split: feature_tests.md.
 #                Note -C=all does NOT imply -C=undefined, so the nagdeb set below is unaffected.
 #
 # Both are written up in feature_nag_runtime_checks.md. Full suite under the set below:

@@ -163,16 +163,44 @@ build may gain nothing however carefully it is set up.
 
 ### Running a single test suite/test
 
+**The suites are split across five runner programs**, so the first thing to know is which one owns
+the suite you want. `tools/count_tests.sh` prints the whole map — every suite, its runner, its test
+count and the file it lives in — which is the authority; the table below is orientation only.
+
+| runner | what it holds | runs under `-C=undefined` | forks subprocesses |
+|---|---|---|---|
+| `run_tester_pf` | the `pf_`-prefixed utility tier: statistics, random/sampling, spatial, HEALPix, logging, path helpers | yes | no |
+| `run_tester` | the Arrow-free parquet-domain modules: string columns, the container types, temporal | yes | no |
+| `run_tester_noundef` | Arrow-free, but empirically not undef-safe — a curated list, see below | no | no |
+| `run_tester_cpp` | everything reaching the C++/Arrow layer | no | no |
+| `run_tester_errors` | everything driving an `error_scenarios` subprocess | no | **yes** |
+
 While iterating on one area, prefer scoping `fpm test` to just the relevant suite (or a single named
-test within it) over running the full suite every time — the full suite, including the OpenMP and
-error-scenario subprocess tests, takes much longer:
+test within it) over running the full suite every time:
 
 ```bash
-fpm test run_tester -- reading                       # one suite
-fpm test run_tester -- reading "test name"           # one test within a suite
+fpm test run_tester_cpp -- reading                   # one suite
+fpm test run_tester_cpp -- reading "test name"       # one test within a suite
+fpm test run_tester_errors -- reading_errors         # that suite's abort-path tests
 ```
 
-The suite names are the `new_testsuite(...)` array in `test/run_tester.f90`.
+A plain `fpm test` runs every runner, so the split changes nothing about the full run.
+
+**The abort-path tests no longer sit beside the tests they are about.** A test asserting that a bad
+write aborts is a test about writing, and it now lives in `writing_errors` rather than `writing`.
+That is deliberate: it is what makes every runner except `run_tester_errors` a program that forks
+nothing, which is what lets the two undef-safe runners exist at all.
+
+**`run_tester_noundef`'s membership is decided by a person, never by a tool.** It holds suites that
+reach no C++ and still cannot run under `-C=undefined` — today `columns` (it reads a null row's
+deliberately unspecified value bytes, which is `%init`'s documented contract) and `sorting` (a
+segfault inside NAG's own instrumentation; see the comment at its registration).
+`tools/check_nag_undefined.sh` re-tries them and *reports* any that now pass, but moving one out is
+an edit someone makes after looking at why the result changed.
+
+`tools/check_source_conventions.py`'s `check_test_runner_partition` enforces the split in CI: every
+suite in exactly one runner, no undef-safe runner reaching `parquet_bindings` or declaring its own
+`bind(C)`, and no runner but `run_tester_errors` driving a scenario.
 
 ### Running the error-path tests
 
@@ -314,6 +342,7 @@ Output is committed; re-run the generator and its `--check` after editing one.
 | `philox_reference.py` | An independent Philox model, for `check_philox_compliance.sh`. |
 | `count_lines.py` | Code/comment/blank line counts per source group. |
 | `count_tests.sh` | Unit tests per suite, read from source without building. |
+| `check_nag_undefined.sh` | Runs the undef-safe test runners under nagfor's `-C=undefined`. |
 | `doc_review_process.md` | The procedure for reviewing the `doc/pages/` user guide one page at a time: the passes, the report, and what a review may change. Prose, not a script. |
 
 #### `bench/` — benchmarks and probes

@@ -18,7 +18,6 @@ module test_reading
     use testdrive, only : new_unittest, unittest_type, error_type, check, test_failed
     use test_random_vectors, only : samp_label, n_samp, n_samp_frac, samp_seed, samp_row, &
         samp_u_bits, samp_frac_bits, samp_keep
-    use test_errors, only : check_scenario_exit_status
     !
     implicit none
     private
@@ -28,8 +27,9 @@ contains
     !
     subroutine collect_tests_parquet_reading(testsuite)
         type(unittest_type), allocatable, intent(out) :: testsuite(:)
-
-        testsuite = [ &
+        type(unittest_type), allocatable :: p1(:)
+        !
+        p1 = [ &
             new_unittest("read simple parquet file", test_read_simple_parquet_file), &
             new_unittest("read parquet file", test_read_parquet_file), &
             new_unittest("read column info", test_read_column_info), &
@@ -68,11 +68,6 @@ contains
                 "group was read", test_read_column_chunk_check_complete_pass), &
             new_unittest("chunked read: parquet_close_reader(check_complete=.true., check_hard=.false.) " // &
                 "warns instead of aborting on an incomplete read", test_read_column_chunk_check_complete_soft_warns), &
-            new_unittest("parquet_get_col_size/parquet_get_column_total_elements/parquet_read_array_row_mode/" // &
-                "parquet_read_array_element_mode avoid a whole-column read", &
-                test_col_size_and_row_mode_avoid_whole_column_read), &
-            new_unittest("parquet_get_col_size/parquet_get_column_total_elements avoid a whole-column " // &
-                "read on a plain LIST column", test_plain_list_size_queries_avoid_whole_column_read), &
             new_unittest("read extended source types (int8/16, uint8/16/32/64, half_float, decimal32/64/128/256)", &
                 test_read_extended_types), &
             new_unittest("read a real32 column as real64", test_read_float32_column_as_float64), &
@@ -96,8 +91,6 @@ contains
                 test_datetime_row_element_mode), &
             new_unittest("array element-mode read on a genuinely zero-row vector column does not crash", &
                 test_read_array_element_mode_zero_rows), &
-            new_unittest("date/time/timestamp: foreign INT96 and non-UTC-timezone fixtures round-trip", &
-                test_datetime_foreign_fixtures), &
             new_unittest("date/time/timestamp: row-mode and element-mode reads under an active row filter", &
                 test_datetime_array_filtered), &
             new_unittest("int32/boolean/string: row-mode and element-mode reads under an active row filter", &
@@ -118,8 +111,6 @@ contains
                 test_sample_seed_is_full_width), &
             new_unittest("the deferred draw (filter= follows) selects the same rows as the immediate one", &
                 test_sample_deferred_equals_immediate), &
-            new_unittest("plain LIST/LARGE_LIST columns from a foreign-written file (col_size, string length, print_stat)", &
-                test_list_type_foreign_fixture), &
             new_unittest("parquet_column_exists/parquet_get_column_type: all 9 canonical types, group aliases, " // &
                 "case-insensitivity, missing columns, struct-leaf paths, and a foreign-typed column", &
                 test_column_exists_and_get_column_type), &
@@ -133,6 +124,8 @@ contains
             new_unittest("parquet_release_column frees a column's buffers without changing any result", &
                 test_release_column) &
             ]
+        !
+        testsuite = p1
     end subroutine collect_tests_parquet_reading
 
     subroutine test_read_simple_parquet_file(error)
@@ -1931,46 +1924,7 @@ contains
             "aborted or disrupted the already-read row group")
     end subroutine test_read_column_chunk_check_complete_soft_warns
 
-    !> Regression coverage for the "List index overflow" crash parquet_get_col_size/
-    !> parquet_get_column_total_elements/parquet_read_array_row_mode/parquet_read_array_element_
-    !> mode used to hit once a vector column's total element count (nrows * col_size) exceeded
-    !> 2^31-1 -- all four used to read the *whole* column just to answer a size query, fetch one
-    !> row, or fetch one element position across all rows. Exercising this for real would need a
-    !> genuine multi-billion-element column, far too slow/large for this suite -- so the actual
-    !> proof runs out-of-process as
-    !> scenario_col_size_and_row_mode_avoid_whole_column_read in error_scenarios.f90 (same pattern
-    !> as test_list_element_count_auto_multi_row_group_roundtrip in test_writing.f90), against a
-    !> tiny fixture with a test-only hook that forces a whole-column read to abort; see that
-    !> scenario's own comment (and its negative control,
-    !> scenario_whole_column_read_forced_error_control) for why this proves the fix rather than
-    !> just "nothing happened to call the old path anyway". Note parquet_read_array_element_mode's
-    !> fix is streaming row group by row group, not skipping all but one -- it inherently needs
-    !> every row group's data (see stream_element_mode_row_groups's own comment in
-    !> parquet_wrapper.cpp), unlike parquet_read_array_row_mode which only ever needs one.
-    subroutine test_col_size_and_row_mode_avoid_whole_column_read(error)
-        type(error_type), allocatable, intent(out) :: error
 
-        call check_scenario_exit_status(error, "col_size_and_row_mode_avoid_whole_column_read", expect_abort=.false., &
-            failure_message="parquet_get_col_size/parquet_get_column_total_elements/" // &
-                "parquet_read_array_row_mode/parquet_read_array_element_mode did not all avoid a whole-column read")
-    end subroutine test_col_size_and_row_mode_avoid_whole_column_read
-    !
-    !> The same guarantee for a PLAIN LIST/LARGE_LIST column, which the scenario above cannot
-    !> reach: it writes its fixture with this library's own writer, so every column there is a
-    !> FIXED_SIZE_LIST whose width is a schema constant and no data is read at all. A plain
-    !> variable-length list is the only shape whose width lives in the data, so it is the only one
-    !> where these two queries can read anything -- and therefore the only one where reading too
-    !> much is possible. parquet_get_column_total_elements did exactly that until it was moved onto
-    !> list_width_verified, the screen-then-prove helper parquet_get_col_size already used;
-    !> reverting that change makes this test fail. Negative control:
-    !> scenario_whole_column_read_forced_error_control, which proves the forcing hook fires.
-    subroutine test_plain_list_size_queries_avoid_whole_column_read(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status(error, "plain_list_size_queries_avoid_whole_column_read", expect_abort=.false., &
-            failure_message="parquet_get_col_size/parquet_get_column_total_elements read a whole " // &
-                "plain LIST column instead of measuring it one row group at a time")
-    end subroutine test_plain_list_size_queries_avoid_whole_column_read
     !
     !> Read-time widening support for Arrow physical types this library's own
     !> writer never produces (see CONTRIBUTING.md's "Additional scalar types"
@@ -2709,22 +2663,7 @@ contains
         call check(error, size(v_elem) == 0 .and. size(ts_elem) == 0, &
             "zero-row element-mode read returned a non-empty array")
     end subroutine test_read_array_element_mode_zero_rows
-    !
-    !> The actual assertions run out-of-process (scenario_temporal_foreign_int96_roundtrip/
-    !> scenario_temporal_foreign_tz_roundtrip in error_scenarios.f90, each error-stopping on any
-    !> mismatch) since building the fixtures needs a test-only debug hook -- this just checks
-    !> both scenarios exit cleanly. See those scenarios' own comments for what each verifies:
-    !> a legacy INT96 timestamp column and a real non-UTC IANA timezone, neither ever produced
-    !> by this library's own writer.
-    subroutine test_datetime_foreign_fixtures(error)
-        type(error_type), allocatable, intent(out) :: error
 
-        call check_scenario_exit_status(error, "temporal_foreign_int96_roundtrip", expect_abort=.false., &
-            failure_message="a legacy INT96 timestamp fixture did not round-trip correctly")
-        if (allocated(error)) return
-        call check_scenario_exit_status(error, "temporal_foreign_tz_roundtrip", expect_abort=.false., &
-            failure_message="a non-UTC timezone fixture did not round-trip correctly")
-    end subroutine test_datetime_foreign_fixtures
     !
     !> Row-mode/element-mode reads of a temporal vector column under
     !> an active row filter -- read_temporal_row/read_temporal_element's own `filter_mask` branch
@@ -3220,20 +3159,7 @@ contains
         call check(error, nrows <= int(filter_only_nrows, int64), &
             "sample_fraction+filter combined must never keep more rows than the filter alone would")
     end subroutine test_sample_fraction_with_filter
-    !
-    !> get_col_size/flatten_for_stats/parquet_reader_get_string_length's
-    !> plain LIST/LARGE_LIST branches -- this library's own writer only ever emits FIXED_SIZE_LIST,
-    !> so these are only reachable through a foreign-written file, built by
-    !> parquet_debug_write_list_fixture (a test-only C++ hook, see its own comment). The actual
-    !> assertions run out-of-process (scenario_list_type_foreign_fixture in error_scenarios.f90,
-    !> error-stopping on any mismatch, same convention as test_datetime_foreign_fixtures above) --
-    !> this just checks the scenario exits cleanly.
-    subroutine test_list_type_foreign_fixture(error)
-        type(error_type), allocatable, intent(out) :: error
 
-        call check_scenario_exit_status(error, "list_type_foreign_fixture", expect_abort=.false., &
-            failure_message="LIST/LARGE_LIST foreign-fixture columns did not report the expected sizes/lengths")
-    end subroutine test_list_type_foreign_fixture
     !
     !> Builds a small schema with all 9 canonical types (int32/int64/float32/float64/boolean/
     !> string/date/time/timestamp), then exercises parquet_column_exists/parquet_get_column_type:

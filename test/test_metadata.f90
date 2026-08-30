@@ -12,7 +12,6 @@ module test_metadata
     use parquet_maml_base
     use iso_fortran_env, only : int32, int64, real32, real64
     use testdrive, only : new_unittest, unittest_type, error_type, check, test_failed
-    use test_errors, only : check_scenario_exit_status, run_error_scenario, scenario_capture_contains
     !
     implicit none
     private
@@ -22,8 +21,9 @@ contains
     !
     subroutine collect_tests_parquet_metadata(testsuite)
         type(unittest_type), allocatable, intent(out) :: testsuite(:)
-
-        testsuite = [ &
+        type(unittest_type), allocatable :: p1(:)
+        !
+        p1 = [ &
             new_unittest("round-trip scalar metadata of every type", test_scalar_round_trip), &
             new_unittest("round-trip array metadata of every type", test_array_round_trip), &
             new_unittest("string array with mixed element lengths round-trips exactly", &
@@ -44,40 +44,6 @@ contains
                 test_array_conversion_failure_default_all_types), &
             new_unittest("missing array key returns default (int64/float32/float64/logical/string)", &
                 test_array_missing_key_default_all_types), &
-            new_unittest("missing key with no default aborts", test_missing_key_no_default_aborts), &
-            new_unittest("unparsable value with no default aborts", test_conversion_failure_no_default_aborts), &
-            new_unittest("missing int64 key with no default aborts", test_missing_int64_no_default_aborts), &
-            new_unittest("missing float32 key with no default aborts", test_missing_float32_no_default_aborts), &
-            new_unittest("missing float64 key with no default aborts", test_missing_float64_no_default_aborts), &
-            new_unittest("missing logical key with no default aborts", test_missing_logical_no_default_aborts), &
-            new_unittest("missing string key with no default aborts", test_missing_string_no_default_aborts), &
-            new_unittest("unparsable int64 value with no default aborts", test_conversion_int64_no_default_aborts), &
-            new_unittest("unparsable float32 value with no default aborts", &
-                test_conversion_float32_no_default_aborts), &
-            new_unittest("unparsable float64 value with no default aborts", &
-                test_conversion_float64_no_default_aborts), &
-            new_unittest("unparsable logical value with no default aborts", &
-                test_conversion_logical_no_default_aborts), &
-            new_unittest("missing int32 array key with no default aborts", test_missing_int32_array_no_default_aborts), &
-            new_unittest("unparsable int32 array value with no default aborts", &
-                test_conversion_int32_array_no_default_aborts), &
-            new_unittest("missing int64 array key with no default aborts", test_missing_int64_array_no_default_aborts), &
-            new_unittest("unparsable int64 array value with no default aborts", &
-                test_conversion_int64_array_no_default_aborts), &
-            new_unittest("missing float32 array key with no default aborts", &
-                test_missing_float32_array_no_default_aborts), &
-            new_unittest("unparsable float32 array value with no default aborts", &
-                test_conversion_float32_array_no_default_aborts), &
-            new_unittest("missing float64 array key with no default aborts", &
-                test_missing_float64_array_no_default_aborts), &
-            new_unittest("unparsable float64 array value with no default aborts", &
-                test_conversion_float64_array_no_default_aborts), &
-            new_unittest("missing logical array key with no default aborts", &
-                test_missing_logical_array_no_default_aborts), &
-            new_unittest("unparsable logical array value with no default aborts", &
-                test_conversion_logical_array_no_default_aborts), &
-            new_unittest("missing string array key with no default aborts", &
-                test_missing_string_array_no_default_aborts), &
             new_unittest("add_metadata with an empty key is a silent no-op", test_add_metadata_empty_key_noop), &
             new_unittest("typed scalar metadata records a <KEY>.datatype companion; a string does not", &
                 test_scalar_metadata_datatype_companions), &
@@ -105,26 +71,10 @@ contains
                 test_print_schema_info_no_cols_no_header), &
             new_unittest("print_schema_info: table_name line, default position, prefix, and suppression", &
                 test_print_schema_info_table_name_line), &
-            new_unittest("print_schema_info: neither unit nor filename given aborts", &
-                test_print_schema_info_no_unit_no_filename_aborts), &
-            new_unittest("print_schema_info: unit not already open aborts", &
-                test_print_schema_info_unit_not_open_aborts), &
-            new_unittest("print_schema_info: unit open for reading only aborts", &
-                test_print_schema_info_unit_read_only_aborts), &
-            new_unittest("print_schema_info: unit/filename mismatch aborts", &
-                test_print_schema_info_unit_filename_mismatch_aborts), &
-            new_unittest("print_schema_info: uninitialized schema aborts by default", &
-                test_print_schema_info_uninitialized_schema_aborts), &
-            new_unittest("print_schema_info: filename that cannot be opened for writing aborts", &
-                test_print_schema_info_open_failure_aborts), &
             new_unittest("print_schema_info: allow_uninitialized=.true. is a complete no-op", &
                 test_print_schema_info_allow_uninitialized_is_noop), &
-            new_unittest("add_metadata before the schema has been initialized aborts", &
-                test_add_metadata_before_init_aborts), &
             new_unittest("add_metadata and add_field interleave in any order, with no parse", &
                 test_add_metadata_interleaved_with_add_field), &
-            new_unittest("add_field applies the per-field rules parquet_validate_maml would", &
-                test_add_field_validates_field_rules), &
             new_unittest("an integer field's qc bound may be written in exponent notation", &
                 test_qc_bound_exponent_notation), &
             new_unittest("clear_metadata keeps base (parsed) entries, discards user-added ones", &
@@ -144,6 +94,8 @@ contains
             new_unittest("add_metadata(warn=.false.) suppresses the warning but still appends the duplicate", &
                 test_add_metadata_warn_false_still_appends) &
             ]
+        !
+        testsuite = p1
     end subroutine collect_tests_parquet_metadata
 
     !> Builds a schema (schemas/maml_example.maml, "id0" only) carrying one
@@ -763,21 +715,6 @@ contains
         end if
     end subroutine test_array_missing_key_default_all_types
 
-    subroutine test_missing_key_no_default_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status(error, "get_metadata_missing_key_no_default", &
-            expect_abort=.true., &
-            failure_message="reading a missing metadata key with no default was expected to abort")
-    end subroutine test_missing_key_no_default_aborts
-
-    subroutine test_conversion_failure_no_default_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status(error, "get_metadata_conversion_failure_no_default", &
-            expect_abort=.true., &
-            failure_message="reading an unparsable metadata value with no default was expected to abort")
-    end subroutine test_conversion_failure_no_default_aborts
 
     ! The two int32 abort scenarios above cover the shared stop_missing/
     ! stop_conversion helpers; these per-type variants additionally exercise
@@ -786,77 +723,6 @@ contains
     ! given abort scenarios here -- matching the int32 array variant, which has
     ! only an in-process default-fallback test and no abort scenario.
 
-    subroutine test_missing_int64_no_default_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status(error, "get_metadata_missing_int64_no_default", &
-            expect_abort=.true., &
-            failure_message="reading a missing int64 metadata key with no default was expected to abort")
-    end subroutine test_missing_int64_no_default_aborts
-
-    subroutine test_missing_float32_no_default_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status(error, "get_metadata_missing_float32_no_default", &
-            expect_abort=.true., &
-            failure_message="reading a missing float32 metadata key with no default was expected to abort")
-    end subroutine test_missing_float32_no_default_aborts
-
-    subroutine test_missing_float64_no_default_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status(error, "get_metadata_missing_float64_no_default", &
-            expect_abort=.true., &
-            failure_message="reading a missing float64 metadata key with no default was expected to abort")
-    end subroutine test_missing_float64_no_default_aborts
-
-    subroutine test_missing_logical_no_default_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status(error, "get_metadata_missing_logical_no_default", &
-            expect_abort=.true., &
-            failure_message="reading a missing logical metadata key with no default was expected to abort")
-    end subroutine test_missing_logical_no_default_aborts
-
-    subroutine test_missing_string_no_default_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status(error, "get_metadata_missing_string_no_default", &
-            expect_abort=.true., &
-            failure_message="reading a missing string metadata key with no default was expected to abort")
-    end subroutine test_missing_string_no_default_aborts
-
-    subroutine test_conversion_int64_no_default_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status(error, "get_metadata_conversion_int64_no_default", &
-            expect_abort=.true., &
-            failure_message="reading an unparsable int64 metadata value with no default was expected to abort")
-    end subroutine test_conversion_int64_no_default_aborts
-
-    subroutine test_conversion_float32_no_default_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status(error, "get_metadata_conversion_float32_no_default", &
-            expect_abort=.true., &
-            failure_message="reading an unparsable float32 metadata value with no default was expected to abort")
-    end subroutine test_conversion_float32_no_default_aborts
-
-    subroutine test_conversion_float64_no_default_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status(error, "get_metadata_conversion_float64_no_default", &
-            expect_abort=.true., &
-            failure_message="reading an unparsable float64 metadata value with no default was expected to abort")
-    end subroutine test_conversion_float64_no_default_aborts
-
-    subroutine test_conversion_logical_no_default_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status(error, "get_metadata_conversion_logical_no_default", &
-            expect_abort=.true., &
-            failure_message="reading an unparsable logical metadata value with no default was expected to abort")
-    end subroutine test_conversion_logical_no_default_aborts
 
     !> Array-typed counterparts of the no-default abort tests above: every
     !> scalar getter's missing-key/conversion-failure abort was already
@@ -864,93 +730,6 @@ contains
     !> parquet_metadata_stop_missing/parquet_metadata_stop_conversion helpers)
     !> never were.
 
-    subroutine test_missing_int32_array_no_default_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status(error, "get_metadata_missing_int32_array_no_default", &
-            expect_abort=.true., &
-            failure_message="reading a missing int32 array metadata key with no default was expected to abort")
-    end subroutine test_missing_int32_array_no_default_aborts
-
-    subroutine test_conversion_int32_array_no_default_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status(error, "get_metadata_conversion_int32_array_no_default", &
-            expect_abort=.true., &
-            failure_message="reading an unparsable int32 array metadata value with no default was expected to abort")
-    end subroutine test_conversion_int32_array_no_default_aborts
-
-    subroutine test_missing_int64_array_no_default_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status(error, "get_metadata_missing_int64_array_no_default", &
-            expect_abort=.true., &
-            failure_message="reading a missing int64 array metadata key with no default was expected to abort")
-    end subroutine test_missing_int64_array_no_default_aborts
-
-    subroutine test_conversion_int64_array_no_default_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status(error, "get_metadata_conversion_int64_array_no_default", &
-            expect_abort=.true., &
-            failure_message="reading an unparsable int64 array metadata value with no default was expected to abort")
-    end subroutine test_conversion_int64_array_no_default_aborts
-
-    subroutine test_missing_float32_array_no_default_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status(error, "get_metadata_missing_float32_array_no_default", &
-            expect_abort=.true., &
-            failure_message="reading a missing float32 array metadata key with no default was expected to abort")
-    end subroutine test_missing_float32_array_no_default_aborts
-
-    subroutine test_conversion_float32_array_no_default_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status(error, "get_metadata_conversion_float32_array_no_default", &
-            expect_abort=.true., &
-            failure_message="reading an unparsable float32 array metadata value with no default was expected to abort")
-    end subroutine test_conversion_float32_array_no_default_aborts
-
-    subroutine test_missing_float64_array_no_default_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status(error, "get_metadata_missing_float64_array_no_default", &
-            expect_abort=.true., &
-            failure_message="reading a missing float64 array metadata key with no default was expected to abort")
-    end subroutine test_missing_float64_array_no_default_aborts
-
-    subroutine test_conversion_float64_array_no_default_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status(error, "get_metadata_conversion_float64_array_no_default", &
-            expect_abort=.true., &
-            failure_message="reading an unparsable float64 array metadata value with no default was expected to abort")
-    end subroutine test_conversion_float64_array_no_default_aborts
-
-    subroutine test_missing_logical_array_no_default_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status(error, "get_metadata_missing_logical_array_no_default", &
-            expect_abort=.true., &
-            failure_message="reading a missing logical array metadata key with no default was expected to abort")
-    end subroutine test_missing_logical_array_no_default_aborts
-
-    subroutine test_conversion_logical_array_no_default_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status(error, "get_metadata_conversion_logical_array_no_default", &
-            expect_abort=.true., &
-            failure_message="reading an unparsable logical array metadata value with no default was expected to abort")
-    end subroutine test_conversion_logical_array_no_default_aborts
-
-    subroutine test_missing_string_array_no_default_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status(error, "get_metadata_missing_string_array_no_default", &
-            expect_abort=.true., &
-            failure_message="reading a missing string array metadata key with no default was expected to abort")
-    end subroutine test_missing_string_array_no_default_aborts
 
     !> add_metadata("", ...) with an empty key must be a silent no-op (no
     !> metadata entry appended), not an error -- see
@@ -1234,47 +1013,6 @@ contains
             "schemas/maml_example.maml's table: input_table was not resolved correctly")
     end subroutine test_print_schema_info_table_name_line
 
-    subroutine test_print_schema_info_no_unit_no_filename_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status(error, "print_schema_info_no_unit_no_filename", expect_abort=.true., &
-            failure_message="print_schema_info with neither unit nor filename was expected to abort")
-    end subroutine test_print_schema_info_no_unit_no_filename_aborts
-
-    subroutine test_print_schema_info_unit_not_open_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status(error, "print_schema_info_unit_not_open", expect_abort=.true., &
-            failure_message="print_schema_info with an unopened unit was expected to abort")
-    end subroutine test_print_schema_info_unit_not_open_aborts
-
-    subroutine test_print_schema_info_unit_read_only_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status(error, "print_schema_info_unit_read_only", expect_abort=.true., &
-            failure_message="print_schema_info with a read-only unit was expected to abort")
-    end subroutine test_print_schema_info_unit_read_only_aborts
-
-    subroutine test_print_schema_info_unit_filename_mismatch_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status(error, "print_schema_info_unit_filename_mismatch", expect_abort=.true., &
-            failure_message="print_schema_info with a unit/filename mismatch was expected to abort")
-    end subroutine test_print_schema_info_unit_filename_mismatch_aborts
-
-    subroutine test_print_schema_info_uninitialized_schema_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status(error, "print_schema_info_uninitialized_schema", expect_abort=.true., &
-            failure_message="print_schema_info on a never-initialized schema was expected to abort by default")
-    end subroutine test_print_schema_info_uninitialized_schema_aborts
-
-    subroutine test_print_schema_info_open_failure_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status(error, "print_schema_info_open_failure", expect_abort=.true., &
-            failure_message="print_schema_info with a filename that cannot be opened was expected to abort")
-    end subroutine test_print_schema_info_open_failure_aborts
 
     !> allow_uninitialized=.true. must make print_schema_info on a never-initialized schema a
     !! complete no-op: no error, and -- critically -- no file touched at all (not even an empty
@@ -1309,28 +1047,6 @@ contains
             "allow_uninitialized=.true. on an uninitialized schema should not create/touch the filename= file")
     end subroutine test_print_schema_info_allow_uninitialized_is_noop
 
-    !> %add_metadata needs %init (or a parse) to have established the metadata table first.
-    !! The scenario runs the LEGAL "after %init, before any parse" call before the illegal one,
-    !! so a guard that fired unconditionally would fail this test rather than pass it.
-    subroutine test_add_metadata_before_init_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-        character(len=:), allocatable :: out_file, err_file
-        integer :: exitstat, cmdstat
-        logical :: found
-
-        call run_error_scenario("schema_add_metadata_before_init", exitstat, cmdstat, out_file, err_file)
-        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
-        if (allocated(error)) return
-        call check(error, exitstat /= 0, "add_metadata before schema%init was expected to abort")
-        if (allocated(error)) return
-        call scenario_capture_contains(out_file, err_file, "schema has no metadata table yet", found)
-        call check(error, found, "the abort should say the schema has no metadata table yet")
-        if (allocated(error)) return
-        call scenario_capture_contains(out_file, err_file, &
-            "metadata entries after add_metadata with no parse: 2", found)
-        call check(error, found, &
-            "the negative control (add_metadata after %init, before any parse) should have been accepted")
-    end subroutine test_add_metadata_before_init_aborts
 
     !> %add_field writes the schema's MAML text; %add_metadata writes its parsed metadata table.
     !! Those used to be two ends of one destructive rebuild, so they had a required order. They
@@ -1388,31 +1104,7 @@ contains
             "clear_metadata should discard exactly the three user-added entries")
     end subroutine test_add_metadata_interleaved_with_add_field
 
-    !> An in-code schema may now never be validated as a whole document, so %add_field runs the
-    !! per-field half of parquet_validate_maml itself -- literally the same procedure, so the two
-    !! routes cannot disagree about what a valid field is. The scenario's negative control is a
-    !! field that passes: it proves the WHOLE-document half stays skipped, since a one-field
-    !! sub-document carries no table: line and the full validator would reject every one.
-    subroutine test_add_field_validates_field_rules(error)
-        type(error_type), allocatable, intent(out) :: error
-        character(len=:), allocatable :: out_file, err_file
-        integer :: exitstat, cmdstat
-        logical :: found
 
-        call run_error_scenario("schema_add_field_validates_field_rules", exitstat, cmdstat, out_file, err_file)
-        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
-        if (allocated(error)) return
-        call check(error, exitstat /= 0, "a qc_min that is not integral for an int32 column should abort")
-        if (allocated(error)) return
-        call scenario_capture_contains(out_file, err_file, &
-            "parquet_schema%add_field: field 'x' has an invalid qc: min value '3.7'", found)
-        call check(error, found, "the abort should come from %add_field and name the offending bound")
-        if (allocated(error)) return
-        call scenario_capture_contains(out_file, err_file, &
-            "fields accepted with no whole-document validation: 1", found)
-        call check(error, found, &
-            "a valid field should still be accepted, with no whole-document validation applied to it")
-    end subroutine test_add_field_validates_field_rules
     !
     !> An `int32`/`int64` qc bound written in exponent notation must be accepted, and must mean the
     !! number it spells.

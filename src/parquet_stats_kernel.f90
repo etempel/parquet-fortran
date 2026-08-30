@@ -474,9 +474,16 @@ contains
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
         wide = real(values, real64)
-        call histogram_f64(wide, edges, counts, right=right, is_valid=is_valid, weights=weights, &
-            n_null=n_null, n_outside=n_outside, ok=ok)
+        call histogram_f64(wide, edges, counts, right=right, density=density, is_valid=is_valid, &
+            weights=weights, n_null=n_null, n_outside=n_outside, ok=ok)
     end procedure histogram_i32
+
+    module procedure bin_edges_i32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call bin_edges_f64(wide, nbins, edges, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok)
+    end procedure bin_edges_i32
 
     module procedure sum_i64
         real(real64), allocatable :: wide(:)
@@ -695,9 +702,16 @@ contains
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
         wide = real(values, real64)
-        call histogram_f64(wide, edges, counts, right=right, is_valid=is_valid, weights=weights, &
-            n_null=n_null, n_outside=n_outside, ok=ok)
+        call histogram_f64(wide, edges, counts, right=right, density=density, is_valid=is_valid, &
+            weights=weights, n_null=n_null, n_outside=n_outside, ok=ok)
     end procedure histogram_i64
+
+    module procedure bin_edges_i64
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call bin_edges_f64(wide, nbins, edges, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok)
+    end procedure bin_edges_i64
 
     module procedure sum_f32
         real(real64), allocatable :: wide(:)
@@ -925,9 +939,18 @@ contains
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
         wide = real(values, real64)
-        call histogram_f64(wide, edges, counts, right=right, is_valid=is_valid, weights=weights, &
-            skipnan=skipnan, n_null=n_null, n_nan=n_nan, n_outside=n_outside, ok=ok)
+        call histogram_f64(wide, edges, counts, right=right, density=density, is_valid=is_valid, &
+            weights=weights, skipnan=skipnan, n_null=n_null, n_nan=n_nan, n_outside=n_outside, &
+            ok=ok)
     end procedure histogram_f32
+
+    module procedure bin_edges_f32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call bin_edges_f64(wide, nbins, edges, is_valid=is_valid, weights=weights, skipnan=skipnan, &
+            n_null=n_null, n_nan=n_nan, ok=ok)
+    end procedure bin_edges_f32
 
     module procedure sum_bool
         real(real64), allocatable :: wide(:)
@@ -1146,9 +1169,16 @@ contains
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
         wide = merge(1.0_real64, 0.0_real64, values)
-        call histogram_f64(wide, edges, counts, right=right, is_valid=is_valid, weights=weights, &
-            n_null=n_null, n_outside=n_outside, ok=ok)
+        call histogram_f64(wide, edges, counts, right=right, density=density, is_valid=is_valid, &
+            weights=weights, n_null=n_null, n_outside=n_outside, ok=ok)
     end procedure histogram_bool
+
+    module procedure bin_edges_bool
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = merge(1.0_real64, 0.0_real64, values)
+        call bin_edges_f64(wide, nbins, edges, is_valid=is_valid, weights=weights, n_null=n_null, ok=ok)
+    end procedure bin_edges_bool
 
     module procedure sum_col
         real(real64), allocatable :: wide(:)
@@ -1377,9 +1407,18 @@ contains
         real(real64), allocatable :: wide(:)
         logical, allocatable :: mask(:)
         call col_to_real64(values, "pf_histogram", is_valid, wide, mask)
-        call histogram_f64(wide, edges, counts, right=right, is_valid=mask, weights=weights, &
-            skipnan=skipnan, n_null=n_null, n_nan=n_nan, n_outside=n_outside, ok=ok)
+        call histogram_f64(wide, edges, counts, right=right, density=density, is_valid=mask, &
+            weights=weights, skipnan=skipnan, n_null=n_null, n_nan=n_nan, n_outside=n_outside, &
+            ok=ok)
     end procedure histogram_col
+
+    module procedure bin_edges_col
+        real(real64), allocatable :: wide(:)
+        logical, allocatable :: mask(:)
+        call col_to_real64(values, "pf_bin_edges", is_valid, wide, mask)
+        call bin_edges_f64(wide, nbins, edges, is_valid=mask, weights=weights, skipnan=skipnan, &
+            n_null=n_null, n_nan=n_nan, ok=ok)
+    end procedure bin_edges_col
 
     module procedure obj_compute_i32
         real(real64), allocatable :: wide(:)

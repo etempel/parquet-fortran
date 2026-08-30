@@ -87,7 +87,7 @@ module parquet_stats
     public :: pf_mad, pf_mode, pf_describe
     public :: pf_cov, pf_corr, pf_zscore, pf_sigma_clipped_stats
     public :: pf_cumsum, pf_cumprod, pf_cummax, pf_cummin
-    public :: pf_bucketize, pf_histogram
+    public :: pf_bucketize, pf_histogram, pf_bin_edges
     public :: parquet_set_verbosity, parquet_get_verbosity
     public :: parquet_set_message_stream, parquet_get_message_stream
     public :: pf_stats
@@ -1032,6 +1032,12 @@ module parquet_stats
     !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
     !> `logical` array, or a scalar numeric `type(parquet_column)`; `out` is always
     !> `real(real64)`, so a running sum of 64-bit integers cannot silently wrap.
+    !>
+    !> **`out` must not be `values`.** There is no in-place form: passing one array to both
+    !> arguments associates it with an `intent(in)` and an `intent(out)` dummy at once, which
+    !> F2018 15.5.2.13 forbids and no compiler here diagnoses. The scan would in fact survive it,
+    !> since it reads element `i` before writing element `i` -- which is exactly what makes the
+    !> mistake worth naming rather than leaving to be discovered.
     interface pf_cumsum
         module procedure cumsum_f64
         module procedure cumsum_i32
@@ -1066,6 +1072,12 @@ module parquet_stats
     !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
     !> `logical` array, or a scalar numeric `type(parquet_column)`; `out` is always
     !> `real(real64)`, so a running sum of 64-bit integers cannot silently wrap.
+    !>
+    !> **`out` must not be `values`.** There is no in-place form: passing one array to both
+    !> arguments associates it with an `intent(in)` and an `intent(out)` dummy at once, which
+    !> F2018 15.5.2.13 forbids and no compiler here diagnoses. The scan would in fact survive it,
+    !> since it reads element `i` before writing element `i` -- which is exactly what makes the
+    !> mistake worth naming rather than leaving to be discovered.
     interface pf_cumprod
         module procedure cumprod_f64
         module procedure cumprod_i32
@@ -1099,6 +1111,12 @@ module parquet_stats
     !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
     !> `logical` array, or a scalar numeric `type(parquet_column)`; `out` is always
     !> `real(real64)`, so a running sum of 64-bit integers cannot silently wrap.
+    !>
+    !> **`out` must not be `values`.** There is no in-place form: passing one array to both
+    !> arguments associates it with an `intent(in)` and an `intent(out)` dummy at once, which
+    !> F2018 15.5.2.13 forbids and no compiler here diagnoses. The scan would in fact survive it,
+    !> since it reads element `i` before writing element `i` -- which is exactly what makes the
+    !> mistake worth naming rather than leaving to be discovered.
     interface pf_cummax
         module procedure cummax_f64
         module procedure cummax_i32
@@ -1132,6 +1150,12 @@ module parquet_stats
     !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
     !> `logical` array, or a scalar numeric `type(parquet_column)`; `out` is always
     !> `real(real64)`, so a running sum of 64-bit integers cannot silently wrap.
+    !>
+    !> **`out` must not be `values`.** There is no in-place form: passing one array to both
+    !> arguments associates it with an `intent(in)` and an `intent(out)` dummy at once, which
+    !> F2018 15.5.2.13 forbids and no compiler here diagnoses. The scan would in fact survive it,
+    !> since it reads element `i` before writing element `i` -- which is exactly what makes the
+    !> mistake worth naming rather than leaving to be discovered.
     interface pf_cummin
         module procedure cummin_f64
         module procedure cummin_i32
@@ -1205,6 +1229,52 @@ module parquet_stats
         module procedure histogram_bool
         module procedure histogram_col
     end interface pf_histogram
+    !
+    !> `nbins` equal-width bins spanning a population -- `np.histogram_bin_edges(bins=n)`.
+    !>
+    !> The half of `np.histogram(bins=10)` this library does not fold into `pf_histogram`: it finds
+    !> the range and lays `nbins + 1` boundaries across it, ready to hand straight to
+    !> `pf_histogram` or `pf_bucketize`. The population is the same one they would bin -- nulls,
+    !> NaNs and zero-weight elements leave it by the module's usual rules -- so a zero-weighted
+    !> extreme value does not stretch the range over data that will not be counted.
+    !>
+    !> **The edges are ALWAYS strictly increasing, which is a contract rather than an**
+    !> **observation**: they exist to be passed to `pf_histogram`, which aborts on a pair that is
+    !> not, so a degenerate population must not produce edges that abort one call later.
+    !> `ok = .false.` says the edges do not describe the data's own range, and there are three
+    !> ways to get it -- an EMPTY population, which falls back to `[0, 1]` as numpy does; a
+    !> CONSTANT one, which widens to `[x - 0.5, x + 0.5]`, also as numpy does; and an `nbins`
+    !> finer than double precision can resolve over the range, where the spacing would collapse
+    !> and neighbouring edges are nudged apart instead. In all three the edges are still usable.
+    !>
+    !> **There is no explicit range pair.** A caller who already knows the bounds can write the
+    !> `nbins + 1` values directly; what is worth a procedure is finding the range under this
+    !> module's exclusion rules, which is the part that is easy to get subtly wrong.
+    !>
+    !> `nbins` is a plain default-kind `integer` and has no int64 form. It is bounded by the size
+    !> of `edges`, so it can never legitimately exceed `huge(1_int32)`.
+    !>
+    !> `edges` must be **strictly increasing** and hold at least two entries, or the call aborts
+    !> naming the offending index -- an equal pair would describe a bin no value can reach, and a
+    !> descending one is always a mistake. An infinite outer edge is allowed and is the way to
+    !> ask for an open-ended first or last bin. A NaN edge aborts.
+    !>
+    !> Nothing here aborts on a data condition: a value outside the edges, a NaN, a null and an
+    !> entirely empty population are all ordinary and are reported through the counts. `ok` is
+    !> `.false.` when any element failed to reach a bin, for any of those reasons at once.
+    !>
+    !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
+    !> `logical` array, or a scalar numeric `type(parquet_column)`. `edges` is always
+    !> `real(real64)`: it states a rule rather than carrying data, and one type for it keeps the
+    !> generic resolving on `values` alone.
+    interface pf_bin_edges
+        module procedure bin_edges_f64
+        module procedure bin_edges_i32
+        module procedure bin_edges_i64
+        module procedure bin_edges_f32
+        module procedure bin_edges_bool
+        module procedure bin_edges_col
+    end interface pf_bin_edges
     !
     !> The most common value of a population -- pandas' `mode()`, scipy's `stats.mode`.
     !>
@@ -2469,11 +2539,12 @@ module parquet_stats
         !! present. The counts are `real(real64)` for that reason: a weighted histogram sums
         !! weights rather than counting elements. Unweighted they are whole numbers, exactly, up
         !! to 2**53 elements in one bin.
-        module subroutine histogram_f64(values, edges, counts, right, is_valid, weights, skipnan, &
-                n_null, n_nan, n_outside, ok)
+        module subroutine histogram_f64(values, edges, counts, right, density, is_valid, &
+                weights, skipnan, n_null, n_nan, n_outside, ok)
             real(real64), intent(in) :: values(:) !! the values to bin.
             real(real64), intent(in) :: edges(:) !! the bin boundaries, strictly increasing, at least two.
-            real(real64), intent(out) :: counts(:) !! one entry per bin, so `size(edges) - 1` of them.
+            real(real64), intent(out) :: counts(:)
+            !! one entry per bin, so `size(edges) - 1` of them. A density when `density` is set.
             logical, intent(in), optional :: right
             !! which side of a bin is closed. `.false.` by default, which is numpy's rule and the
             !! one `np.histogram`/`np.digitize` use: bin k is `[edges(k), edges(k+1))`, and the
@@ -2483,6 +2554,15 @@ module parquet_stats
             !! closed range `[edges(1), edges(nbins+1)]` is covered exactly once, so the two
             !! conventions differ only in which bin a value sitting exactly on an interior edge
             !! joins.
+            logical, intent(in), optional :: density
+            !! `.false.` by default. `.true.` divides each bin by its own WIDTH and by the total
+            !! that was binned, giving a probability density -- `np.histogram(density=True)`, so
+            !! `sum(counts * widths)` is 1 and an uneven edge spacing is accounted for. The
+            !! normalisation base is what actually landed in a bin: values outside the edges were
+            !! never counted, so they do not appear in it, which is numpy's rule too. When nothing
+            !! was binned the density is undefined and every entry is a **quiet NaN** with
+            !! `ok = .false.` -- note that an empty HISTOGRAM is perfectly well defined (all
+            !! zeros, `ok = .true.`) and an empty DENSITY is not.
             logical, intent(in), optional :: is_valid(:)
             !! per element: .false. marks a null. Absent means no element is null.
             real(real64), intent(in), optional :: weights(:)
@@ -2506,6 +2586,33 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
         end subroutine histogram_f64
+        !> `pf_bin_edges` over a 64-bit real array: `nbins` equal-width bins spanning the data.
+        !!
+        !! `np.histogram_bin_edges(values, bins=nbins)`, including its two degenerate answers: a
+        !! CONSTANT population widens to `[x - 0.5, x + 0.5]` and an EMPTY one falls back to
+        !! `[0, 1]`, both of which `ok = .false.` reports.
+        module subroutine bin_edges_f64(values, nbins, edges, is_valid, weights, skipnan, n_null, &
+                n_nan, ok)
+            real(real64), intent(in) :: values(:) !! the population the range is taken over.
+            integer, intent(in) :: nbins !! how many bins to describe; at least 1.
+            real(real64), intent(out) :: edges(:) !! the `nbins + 1` boundaries, strictly increasing.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine bin_edges_f64
     end interface
     !
     ! ---- pf_mode, one specific per kind (implemented in parquet_stats_order) ----
@@ -3439,7 +3546,8 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
         end subroutine bucketize_i32
         !> `pf_histogram` over a 32-bit integer array.
-        module subroutine histogram_i32(values, edges, counts, right, is_valid, weights, n_null, n_outside, ok)
+        module subroutine histogram_i32(values, edges, counts, right, density, is_valid, weights, n_null, n_outside, &
+                ok)
             integer(int32), intent(in) :: values(:) !! the population.
             real(real64), intent(in) :: edges(:) !! the bin boundaries, strictly increasing, at least two.
             real(real64), intent(out) :: counts(:)
@@ -3453,6 +3561,15 @@ module parquet_stats
             !! closed range `[edges(1), edges(nbins+1)]` is covered exactly once, so the two
             !! conventions differ only in which bin a value sitting exactly on an interior edge
             !! joins.
+            logical, intent(in), optional :: density
+            !! `.false.` by default. `.true.` divides each bin by its own WIDTH and by the total
+            !! that was binned, giving a probability density -- `np.histogram(density=True)`, so
+            !! `sum(counts * widths)` is 1 and an uneven edge spacing is accounted for. The
+            !! normalisation base is what actually landed in a bin: values outside the edges were
+            !! never counted, so they do not appear in it, which is numpy's rule too. When nothing
+            !! was binned the density is undefined and every entry is a **quiet NaN** with
+            !! `ok = .false.` -- note that an empty HISTOGRAM is perfectly well defined (all
+            !! zeros, `ok = .true.`) and an empty DENSITY is not.
             logical, intent(in), optional :: is_valid(:)
             !! per element: .false. marks a null. Absent means no element is null.
             real(real64), intent(in), optional :: weights(:)
@@ -3470,6 +3587,23 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
         end subroutine histogram_i32
+        !> `pf_bin_edges` over a 32-bit integer array.
+        module subroutine bin_edges_i32(values, nbins, edges, is_valid, weights, n_null, ok)
+            integer(int32), intent(in) :: values(:) !! the population.
+            integer, intent(in) :: nbins !! how many bins to describe; at least 1.
+            real(real64), intent(out) :: edges(:)
+            !! the `nbins + 1` boundaries, strictly increasing.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine bin_edges_i32
         !> `pf_sum` over a 64-bit integer array.
         !>
         !> **An `integer(int64)` above 2**53 loses exactness** on the way into the real64 buffer
@@ -4377,7 +4511,8 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
         end subroutine bucketize_i64
         !> `pf_histogram` over a 64-bit integer array.
-        module subroutine histogram_i64(values, edges, counts, right, is_valid, weights, n_null, n_outside, ok)
+        module subroutine histogram_i64(values, edges, counts, right, density, is_valid, weights, n_null, n_outside, &
+                ok)
             integer(int64), intent(in) :: values(:) !! the population.
             real(real64), intent(in) :: edges(:) !! the bin boundaries, strictly increasing, at least two.
             real(real64), intent(out) :: counts(:)
@@ -4391,6 +4526,15 @@ module parquet_stats
             !! closed range `[edges(1), edges(nbins+1)]` is covered exactly once, so the two
             !! conventions differ only in which bin a value sitting exactly on an interior edge
             !! joins.
+            logical, intent(in), optional :: density
+            !! `.false.` by default. `.true.` divides each bin by its own WIDTH and by the total
+            !! that was binned, giving a probability density -- `np.histogram(density=True)`, so
+            !! `sum(counts * widths)` is 1 and an uneven edge spacing is accounted for. The
+            !! normalisation base is what actually landed in a bin: values outside the edges were
+            !! never counted, so they do not appear in it, which is numpy's rule too. When nothing
+            !! was binned the density is undefined and every entry is a **quiet NaN** with
+            !! `ok = .false.` -- note that an empty HISTOGRAM is perfectly well defined (all
+            !! zeros, `ok = .true.`) and an empty DENSITY is not.
             logical, intent(in), optional :: is_valid(:)
             !! per element: .false. marks a null. Absent means no element is null.
             real(real64), intent(in), optional :: weights(:)
@@ -4408,6 +4552,23 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
         end subroutine histogram_i64
+        !> `pf_bin_edges` over a 64-bit integer array.
+        module subroutine bin_edges_i64(values, nbins, edges, is_valid, weights, n_null, ok)
+            integer(int64), intent(in) :: values(:) !! the population.
+            integer, intent(in) :: nbins !! how many bins to describe; at least 1.
+            real(real64), intent(out) :: edges(:)
+            !! the `nbins + 1` boundaries, strictly increasing.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine bin_edges_i64
         !> `pf_sum` over a 32-bit real array.
         module subroutine sum_f32(values, s, is_valid, weights, skipnan, n_null, n_nan, ok, threads)
             real(real32), intent(in) :: values(:) !! the population.
@@ -5375,8 +5536,8 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
         end subroutine bucketize_f32
         !> `pf_histogram` over a 32-bit real array.
-        module subroutine histogram_f32(values, edges, counts, right, is_valid, weights, skipnan, n_null, n_nan, &
-                n_outside, ok)
+        module subroutine histogram_f32(values, edges, counts, right, density, is_valid, weights, skipnan, n_null, &
+                n_nan, n_outside, ok)
             real(real32), intent(in) :: values(:) !! the population.
             real(real64), intent(in) :: edges(:) !! the bin boundaries, strictly increasing, at least two.
             real(real64), intent(out) :: counts(:)
@@ -5390,6 +5551,15 @@ module parquet_stats
             !! closed range `[edges(1), edges(nbins+1)]` is covered exactly once, so the two
             !! conventions differ only in which bin a value sitting exactly on an interior edge
             !! joins.
+            logical, intent(in), optional :: density
+            !! `.false.` by default. `.true.` divides each bin by its own WIDTH and by the total
+            !! that was binned, giving a probability density -- `np.histogram(density=True)`, so
+            !! `sum(counts * widths)` is 1 and an uneven edge spacing is accounted for. The
+            !! normalisation base is what actually landed in a bin: values outside the edges were
+            !! never counted, so they do not appear in it, which is numpy's rule too. When nothing
+            !! was binned the density is undefined and every entry is a **quiet NaN** with
+            !! `ok = .false.` -- note that an empty HISTOGRAM is perfectly well defined (all
+            !! zeros, `ok = .true.`) and an empty DENSITY is not.
             logical, intent(in), optional :: is_valid(:)
             !! per element: .false. marks a null. Absent means no element is null.
             real(real64), intent(in), optional :: weights(:)
@@ -5413,6 +5583,29 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
         end subroutine histogram_f32
+        !> `pf_bin_edges` over a 32-bit real array.
+        module subroutine bin_edges_f32(values, nbins, edges, is_valid, weights, skipnan, n_null, n_nan, ok)
+            real(real32), intent(in) :: values(:) !! the population.
+            integer, intent(in) :: nbins !! how many bins to describe; at least 1.
+            real(real64), intent(out) :: edges(:)
+            !! the `nbins + 1` boundaries, strictly increasing.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine bin_edges_f32
         !> `pf_sum` over a logical array.
         !>
         !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
@@ -6284,7 +6477,8 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
         end subroutine bucketize_bool
         !> `pf_histogram` over a logical array.
-        module subroutine histogram_bool(values, edges, counts, right, is_valid, weights, n_null, n_outside, ok)
+        module subroutine histogram_bool(values, edges, counts, right, density, is_valid, weights, n_null, n_outside, &
+                ok)
             logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
             real(real64), intent(in) :: edges(:) !! the bin boundaries, strictly increasing, at least two.
             real(real64), intent(out) :: counts(:)
@@ -6298,6 +6492,15 @@ module parquet_stats
             !! closed range `[edges(1), edges(nbins+1)]` is covered exactly once, so the two
             !! conventions differ only in which bin a value sitting exactly on an interior edge
             !! joins.
+            logical, intent(in), optional :: density
+            !! `.false.` by default. `.true.` divides each bin by its own WIDTH and by the total
+            !! that was binned, giving a probability density -- `np.histogram(density=True)`, so
+            !! `sum(counts * widths)` is 1 and an uneven edge spacing is accounted for. The
+            !! normalisation base is what actually landed in a bin: values outside the edges were
+            !! never counted, so they do not appear in it, which is numpy's rule too. When nothing
+            !! was binned the density is undefined and every entry is a **quiet NaN** with
+            !! `ok = .false.` -- note that an empty HISTOGRAM is perfectly well defined (all
+            !! zeros, `ok = .true.`) and an empty DENSITY is not.
             logical, intent(in), optional :: is_valid(:)
             !! per element: .false. marks a null. Absent means no element is null.
             real(real64), intent(in), optional :: weights(:)
@@ -6315,6 +6518,23 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
         end subroutine histogram_bool
+        !> `pf_bin_edges` over a logical array.
+        module subroutine bin_edges_bool(values, nbins, edges, is_valid, weights, n_null, ok)
+            logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
+            integer, intent(in) :: nbins !! how many bins to describe; at least 1.
+            real(real64), intent(out) :: edges(:)
+            !! the `nbins + 1` boundaries, strictly increasing.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine bin_edges_bool
         !> `pf_sum` over a scalar numeric `parquet_column`.
         !>
         !> Dispatched on the column's kind at run time, and **scalar numeric columns only**:
@@ -7408,8 +7628,8 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
         end subroutine bucketize_col
         !> `pf_histogram` over a scalar numeric `parquet_column`.
-        module subroutine histogram_col(values, edges, counts, right, is_valid, weights, skipnan, n_null, n_nan, &
-                n_outside, ok)
+        module subroutine histogram_col(values, edges, counts, right, density, is_valid, weights, skipnan, n_null, &
+                n_nan, n_outside, ok)
             type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
             real(real64), intent(in) :: edges(:) !! the bin boundaries, strictly increasing, at least two.
             real(real64), intent(out) :: counts(:)
@@ -7423,6 +7643,15 @@ module parquet_stats
             !! closed range `[edges(1), edges(nbins+1)]` is covered exactly once, so the two
             !! conventions differ only in which bin a value sitting exactly on an interior edge
             !! joins.
+            logical, intent(in), optional :: density
+            !! `.false.` by default. `.true.` divides each bin by its own WIDTH and by the total
+            !! that was binned, giving a probability density -- `np.histogram(density=True)`, so
+            !! `sum(counts * widths)` is 1 and an uneven edge spacing is accounted for. The
+            !! normalisation base is what actually landed in a bin: values outside the edges were
+            !! never counted, so they do not appear in it, which is numpy's rule too. When nothing
+            !! was binned the density is undefined and every entry is a **quiet NaN** with
+            !! `ok = .false.` -- note that an empty HISTOGRAM is perfectly well defined (all
+            !! zeros, `ok = .true.`) and an empty DENSITY is not.
             logical, intent(in), optional :: is_valid(:)
             !! per element: .false. marks a null. Absent means no element is null.
             real(real64), intent(in), optional :: weights(:)
@@ -7446,6 +7675,29 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
         end subroutine histogram_col
+        !> `pf_bin_edges` over a scalar numeric `parquet_column`.
+        module subroutine bin_edges_col(values, nbins, edges, is_valid, weights, skipnan, n_null, n_nan, ok)
+            type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
+            integer, intent(in) :: nbins !! how many bins to describe; at least 1.
+            real(real64), intent(out) :: edges(:)
+            !! the `nbins + 1` boundaries, strictly increasing.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine bin_edges_col
         !> `%compute` over a 32-bit integer array.
         module subroutine obj_compute_i32(self, values, retain, is_valid, weights, weight_type, threads)
             class(pf_stats), intent(inout) :: self

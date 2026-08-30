@@ -175,9 +175,9 @@ contains
     end procedure bucketize_f64
 
     module procedure histogram_f64
-        logical :: skip, use_right
+        logical :: skip, use_right, as_density
         integer(int64) :: n, nbins, nnull, nnan, nout, i, k
-        real(real64) :: w
+        real(real64) :: w, base
 
         n = size(values, kind=int64)
         call stats_check_sizes(n, "pf_histogram", is_valid, weights)
@@ -190,6 +190,8 @@ contains
         if (present(skipnan)) skip = skipnan
         use_right = .false.
         if (present(right)) use_right = right
+        as_density = .false.
+        if (present(density)) as_density = density
 
         counts = 0.0_real64
         nnull = 0_int64
@@ -231,6 +233,130 @@ contains
         ! removed from the POPULATION, exactly as it is everywhere else in this module, so it is
         ! not an element that failed to reach a bin. `pf_count_valid` is what reports it.
         if (present(ok)) ok = (nnull + nnan + nout == 0_int64)
+        if (.not. as_density) return
+
+        ! **The normalisation base is what was BINNED, not what was passed**, which is numpy's
+        ! rule: a value outside the edges was never counted, so it cannot appear in the total it
+        ! is not part of. Summed here rather than accumulated in the loop above so that the two
+        ! answers cannot drift -- the base is by construction the sum of the numbers being
+        ! divided, whatever the loop did.
+        base = sum(counts)
+        if (base > 0.0_real64) then
+            do k = 1_int64, nbins
+                ! Each bin by its OWN width, so an uneven edge spacing is accounted for and
+                ! `sum(counts * widths)` is 1. An infinite outer edge gives that bin a density of
+                ! exactly 0, which is the honest answer and comes free from the arithmetic.
+                counts(k) = counts(k) / ((edges(k + 1_int64) - edges(k)) * base)
+            end do
+        else
+            ! Nothing was binned, so there is no density -- the module's standing rule for an
+            ! undefined answer applies, and note it makes an empty DENSITY differ from an empty
+            ! HISTOGRAM, which is all zeros with `ok = .true.` and perfectly well defined.
+            counts = stats_nan()
+            if (present(ok)) ok = .false.
+        end if
     end procedure histogram_f64
+
+    !> `pf_bin_edges`: `nbins` equal-width boundaries spanning the population's own range.
+    !!
+    !! **The strict-increase guarantee is the whole design constraint.** These edges exist to be
+    !! handed to `pf_histogram`, which ABORTS on a pair that is not strictly increasing -- so a
+    !! degenerate population must not produce edges that abort one call later, and every branch
+    !! below ends in a usable array. `ok` reports that the edges do not describe the data's own
+    !! range; it never means "unusable".
+    module procedure bin_edges_f64
+        real(real64) :: lo, hi, span, e
+        integer(int64) :: n, i, k, kept
+        integer :: j
+        logical :: skip, fine
+
+        n = size(values, kind=int64)
+        if (nbins < 1) &
+            error stop "pf_bin_edges: nbins must be at least 1, but is " // &
+                trim(stats_i2s(int(nbins, int64)))
+        if (size(edges, kind=int64) /= int(nbins, int64) + 1_int64) &
+            error stop "pf_bin_edges: edges has " // trim(stats_i2s(size(edges, kind=int64))) // &
+                " elements but " // trim(stats_i2s(int(nbins, int64))) // &
+                " bins need one more boundary than that"
+        call stats_check_sizes(n, "pf_bin_edges", is_valid, weights)
+        skip = .true.
+        if (present(skipnan)) skip = skipnan
+
+        ! The range is taken over the population `pf_histogram` would BIN, exclusions and all --
+        ! otherwise a zero-weighted extreme would stretch the edges over data that never lands in
+        ! one. The same three exclusions in the same order as everywhere else in this module.
+        kept = 0_int64
+        lo = 0.0_real64
+        hi = 0.0_real64
+        if (present(n_null)) n_null = 0_int64
+        if (present(n_nan)) n_nan = 0_int64
+        do i = 1_int64, n
+            if (present(is_valid)) then
+                if (.not. is_valid(i)) then
+                    if (present(n_null)) n_null = n_null + 1_int64
+                    cycle
+                end if
+            end if
+            if (skip) then
+                if (values(i) /= values(i)) then
+                    if (present(n_nan)) n_nan = n_nan + 1_int64
+                    cycle
+                end if
+            end if
+            if (present(weights)) then
+                call stats_check_weight(weights(i), i, "pf_bin_edges")
+                if (weights(i) <= 0.0_real64) cycle
+            end if
+            kept = kept + 1_int64
+            if (kept == 1_int64) then
+                lo = values(i)
+                hi = values(i)
+            else
+                if (values(i) < lo) lo = values(i)
+                if (values(i) > hi) hi = values(i)
+            end if
+        end do
+
+        ! numpy's two degenerate answers, reproduced rather than invented: an EMPTY population
+        ! falls back to [0, 1] and a CONSTANT one widens to [x - 0.5, x + 0.5]. Both are arbitrary
+        ! -- there is no range to describe -- which is exactly what `ok = .false.` says.
+        fine = .true.
+        if (kept == 0_int64) then
+            lo = 0.0_real64
+            hi = 1.0_real64
+            fine = .false.
+        else if (.not. (hi > lo)) then
+            lo = lo - 0.5_real64
+            hi = hi + 0.5_real64
+            fine = .false.
+        end if
+
+        span = hi - lo
+        edges(1) = lo
+        do j = 2, nbins
+            edges(j) = lo + real(j - 1, real64) * span / real(nbins, real64)
+        end do
+        ! The top boundary is assigned rather than computed, so that the highest value in the
+        ! population is never left one ulp outside the last bin by a rounded multiplication.
+        edges(nbins + 1) = hi
+
+        ! **The repair, and why it cannot be skipped.** When `nbins` is finer than double
+        ! precision can resolve over the range -- reachable with a relative span of 1e-12 and ten
+        ! thousand bins, which is an ordinary thing to ask of nearly-constant data -- the spacing
+        ! underflows and neighbouring edges come out equal. Nudging each one past its predecessor
+        ! keeps the strict-increase contract at the smallest possible cost, and `ok = .false.`
+        ! says the result no longer spans exactly what was asked for. (Reaching `+Infinity` here
+        ! would need the data to sit within `nbins` ulps of `huge`; such an edge is still strictly
+        ! greater than its predecessor, so it satisfies the contract and merely leaves the top bin
+        ! unreachable.)
+        do k = 2_int64, int(nbins, int64) + 1_int64
+            if (.not. (edges(k) > edges(k - 1_int64))) then
+                e = nearest(edges(k - 1_int64), 1.0_real64)
+                edges(k) = e
+                fine = .false.
+            end if
+        end do
+        if (present(ok)) ok = fine
+    end procedure bin_edges_f64
 
 end submodule parquet_stats_bin ! GCOVR_EXCL_LINE

@@ -580,20 +580,28 @@ accumulated rounding, which on a large or badly scaled population is several ulp
 more. Compare them with a tolerance, and take the total itself from `pf_sum`, which is the more
 accurate of the two.
 
+**`out` must not be `values`.** There is no in-place form: passing one array to both arguments
+associates it with an `intent(in)` and an `intent(out)` dummy at once, which the standard forbids and
+no compiler here diagnoses. The scan would in fact survive it, reading element *i* before writing
+element *i* — which is exactly what makes the mistake worth naming rather than leaving to be
+discovered.
+
 There is no `weights` argument: a weighted running sum is `pf_cumsum(w*x)`, and the other three
 folds have no weighted reading worth choosing between. There is no `threads` argument either — a
 prefix scan is sequential by definition, so one could only ever be ignored.
 
-## `pf_bucketize` and `pf_histogram` — bins
+## `pf_bucketize`, `pf_histogram` and `pf_bin_edges` — bins
 
 ```fortran
 real(real64) :: edges(5) = [0.0_real64, 2.0_real64, 4.0_real64, 6.0_real64, 8.0_real64]
 integer(int32) :: codes(size(mag))
 real(real64) :: counts(size(edges) - 1)
 
+call pf_bin_edges(mag, 4, edges)                           ! np.histogram_bin_edges(bins=4)
 call pf_bucketize(mag, edges, codes)                       ! pd.cut
 call pf_histogram(mag, edges, counts)                      ! np.histogram(bins=edges)
 call pf_histogram(mag, edges, counts, weights=w, n_outside=nout)
+call pf_histogram(mag, edges, counts, density=.true.)      ! np.histogram(density=True)
 ```
 
 `pf_bucketize` answers, for each value, the **1-based number of the bin it falls in**, or **0** for
@@ -603,7 +611,16 @@ their weights** when `weights` is present, which is what `np.histogram(weights=)
 elements in one bin.
 
 The two are the same operation: `counts(k)` is the number of `codes` equal to `k` over the same
-arguments, and they share one edge search, so that identity cannot drift.
+arguments, and they share one edge search, so that identity cannot drift. (It holds with `density`
+absent, naturally — the whole point of `density` is to stop being a count.)
+
+**`density = .true.`** divides each bin by its own *width* and by the total that was binned, giving
+a probability density: `np.histogram(density=True)`, so `sum(counts * widths)` is 1 and an uneven
+edge spacing is accounted for. The normalisation base is **what actually landed in a bin** — values
+outside the edges were never counted, so they are not in it, which is numpy's rule too. When nothing
+was binned there is no density: every entry is a quiet NaN with `ok = .false.` Note that this is one
+place a density and a histogram genuinely differ — an empty *histogram* is all zeros with
+`ok = .true.` and perfectly well defined.
 
 **Two edge conventions, and they are mirror images.**
 
@@ -633,6 +650,37 @@ only decides whether the population was asked the question at all.
 
 A **zero-weight** element is in none of the three counts. It has left the population, exactly as it
 does everywhere else in this module, so it is not an element that failed to reach a bin.
+
+### `pf_bin_edges` — the edges themselves
+
+```fortran
+call pf_bin_edges(mag, 10, edges)                 ! 11 boundaries over mag's own range
+call pf_bin_edges(mag, 10, edges, is_valid=mask, ok=spanned)
+```
+
+The other half of `np.histogram(bins=10)`: it finds the range and lays `nbins + 1` boundaries across
+it, ready to hand straight to `pf_histogram` or `pf_bucketize`. The population is the same one they
+would bin — nulls, NaNs and zero-weight elements leave it by the usual rules — so a zero-weighted
+extreme value does not stretch the range over data that will not be counted.
+
+**The edges are always strictly increasing.** That is a contract, not an observation: they exist to
+be passed to `pf_histogram`, which *aborts* on a pair that is not, so a degenerate population must
+never produce edges that abort one call later. `ok = .false.` says the edges do not describe the
+data's own range, and there are three ways to get it:
+
+| population | edges | why |
+|---|---|---|
+| empty | `[0, 1]` split `nbins` ways | numpy's own fallback; there is no range to describe |
+| constant at `x` | `[x - 0.5, x + 0.5]` split `nbins` ways | also numpy's |
+| `nbins` finer than the range resolves | the boundaries nudged apart by one ulp each | the spacing underflowed |
+
+In all three the edges are still usable, which is what `ok` is *not* saying.
+
+There is deliberately no explicit range pair. A caller who already knows the bounds can write the
+`nbins + 1` values directly; what earns a procedure is finding the range under this module's
+exclusion rules, which is the part that is easy to get subtly wrong. `nbins` is a plain default-kind
+`integer` and has no `int64` form — it is bounded by the size of `edges`, so it can never
+legitimately exceed `huge(1_int32)`.
 
 ## `pf_stats` — summarise once, query as often as you like
 
@@ -778,7 +826,8 @@ What does abort is a call that cannot be honoured:
 - an `out`, `out_valid`, `codes` or `counts` array of the wrong size — note `counts` holds one
   entry per **bin**, so one fewer than the number of edges;
 - an `edges` array holding fewer than two entries, a NaN, or a pair that is not strictly
-  increasing. A value *outside* the edges is a data condition and is reported, not an abort.
+  increasing. A value *outside* the edges is a data condition and is reported, not an abort;
+- an `nbins` below 1, or an `edges` array that is not exactly `nbins + 1` long, on `pf_bin_edges`.
 
 ## Optional arguments are in one fixed order
 
@@ -793,7 +842,7 @@ method, kind, scale, center, out_valid, n_null, n_nan, n_outside, ok, threads
 Three short blocks sit either side of it and are part of the same sequence: an *output* prefix,
 which `pf_moments` and `pf_mode` declare before the inputs (`pf_mode`'s `count` is one of these);
 the rule block `sigma, sigma_lower, sigma_upper, maxiters, cenfunc, stdfunc, n_clipped, keep,
-converged, right`, whose entries say what the operation IS and are taken by
+converged, right, density`, whose entries say what the operation IS and are taken by
 `pf_sigma_clipped_stats` and the binning pair; and the `unit`/`name` pair, which only `%print`
 takes. A block used by one procedure is not a contradiction — every other procedure omits
 it, and omission is exactly what a subsequence permits.

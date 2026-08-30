@@ -1780,7 +1780,11 @@ contains
             new_unittest("a NaN bin edge aborts, naming the NaN rather than the ordering", &
                 test_stats_edges_nan_aborts), &
             new_unittest("one histogram count per EDGE rather than per bin aborts", &
-                test_stats_histogram_counts_size_aborts) &
+                test_stats_histogram_counts_size_aborts), &
+            new_unittest("asking pf_bin_edges for zero bins aborts", &
+                test_stats_bin_edges_nbins_aborts), &
+            new_unittest("one pf_bin_edges boundary per bin rather than one more aborts", &
+                test_stats_bin_edges_size_aborts) &
             ]
         testsuite = [p1, p2, p3, p4, p5, p6, p7, p8, p9]
     end subroutine collect_tests_parquet_errors
@@ -6342,6 +6346,26 @@ contains
             failure_message="one histogram count per edge was expected to abort", &
             required_stderr="edges describe")
     end subroutine test_stats_histogram_counts_size_aborts
+
+    !> parquet_stats abort path: see scenario_stats_bin_edges_nbins in test/error_scenarios.f90.
+    subroutine test_stats_bin_edges_nbins_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_bin_edges_nbins", &
+            expect_abort=.true., &
+            failure_message="pf_bin_edges with nbins=0 was expected to abort", &
+            required_stderr="nbins must be at least 1")
+    end subroutine test_stats_bin_edges_nbins_aborts
+
+    !> parquet_stats abort path: see scenario_stats_bin_edges_size in test/error_scenarios.f90.
+    subroutine test_stats_bin_edges_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_bin_edges_size", &
+            expect_abort=.true., &
+            failure_message="one pf_bin_edges boundary per bin was expected to abort", &
+            required_stderr="bins need one more boundary than that")
+    end subroutine test_stats_bin_edges_size_aborts
 
     !> pf_nth_quantile abort path: see scenario_sorting_quantile_out_of_range in
     !> test/error_scenarios.f90. The message names the scale, since 50 is exactly what a caller

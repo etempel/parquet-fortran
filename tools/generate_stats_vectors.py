@@ -496,6 +496,65 @@ def self_test():
         ok &= close(counts[k], int((cut.cat.codes == k).sum()),
                     "boundary histogram right bin %d" % (k + 1))
 
+    # ---- `density=` against numpy, including the degenerate answers ----
+    for label, kwargs, npkw in (("plain", {}, {}),
+                                ("weighted", {"weights": weights_mod5(32)},
+                                 {"weights": np.array([float(w) for w in weights_mod5(32)])})):
+        _, dens, _, _, _ = bin_model(xk, ed, density=True, **kwargs)
+        want, _ = np.histogram(arr, bins=npe, density=True, **npkw)
+        for k in range(len(dens)):
+            ok &= close(dens[k], want[k], "density %s bin %d" % (label, k + 1))
+    # `sum(density * width)` is 1 -- the property the normalisation exists for, and the one that
+    # a base taken over the wrong population (everything passed, rather than everything binned)
+    # would break while every individual bin still looked plausible.
+    _, dens, _, _, _ = bin_model(xk, ed, density=True)
+    total = sum((dens[j] * (ed[j + 1] - ed[j]) for j in range(len(dens))), mpf(0))
+    ok &= close(total, 1, "density integrates to 1")
+    # Uneven widths, where a formula that forgot the per-bin width still integrates to something
+    # and is wrong bin by bin.
+    uneven = [mpf(-400), mpf(-100), mpf(0), mpf(400)]
+    _, dens, _, _, _ = bin_model(xk, uneven, density=True)
+    want, _ = np.histogram(arr, bins=np.array([-400.0, -100.0, 0.0, 400.0]), density=True)
+    for k in range(len(dens)):
+        ok &= close(dens[k], want[k], "density uneven bin %d" % (k + 1))
+    # Nothing binned: numpy divides by zero and answers NaN, which is this module's own rule for
+    # an undefined result, so the two agree without a special case on either side.
+    _, dens, _, _, _ = bin_model([mpf(-5000), mpf(5000)], ed, density=True)
+    want, _ = np.histogram(np.array([-5000.0, 5000.0]), bins=npe, density=True)
+    for k in range(len(dens)):
+        checks += 1
+        if (dens[k] is not None) or (want[k] == want[k]):
+            print("--self-test: density all-outside bin %d: model %s, numpy %s"
+                  % (k + 1, dens[k], want[k]), file=sys.stderr)
+            ok = False
+
+    # ---- `pf_bin_edges` against `np.histogram_bin_edges`, degenerate answers included ----
+    valid_ext = [(i not in (1, 11)) for i in range(1, 33)]
+    for label, vals, kwargs, npvals in (
+            ("plain", xk, {}, arr),
+            ("nulled", xk, {"is_valid": valid_ext},
+             np.array([float(v) for i, v in enumerate(xk) if valid_ext[i]])),
+            ("constant", [mpf(7)] * 5, {}, np.full(5, 7.0)),
+            ("empty", [], {}, np.array([])),
+            ("single", [mpf(3)], {}, np.array([3.0]))):
+        be, fine = bin_edges_model(vals, NBE, **kwargs)
+        want = np.histogram_bin_edges(npvals, bins=NBE)
+        for k in range(NBE + 1):
+            ok &= close(be[k], want[k], "bin_edges %s edge %d" % (label, k))
+        checks += 1
+        if fine != (label in ("plain", "nulled")):
+            print("--self-test: bin_edges %s: ok flag is %s" % (label, fine), file=sys.stderr)
+            ok = False
+    # The edges have to be usable as edges, which is the contract the degenerate answers exist to
+    # keep: `pf_histogram` aborts on a pair that is not strictly increasing.
+    for label, vals in (("plain", xk), ("constant", [mpf(7)] * 5), ("empty", []),
+                        ("single", [mpf(3)])):
+        be, _ = bin_edges_model(vals, NBE)
+        checks += 1
+        if any(be[k] <= be[k - 1] for k in range(1, NBE + 1)):
+            print("--self-test: bin_edges %s is not strictly increasing" % label, file=sys.stderr)
+            ok = False
+
     # ---- the sigma clip against astropy, if it is installed ----
     #
     # Optional: this is a maintainer-only self-test and astropy is a heavy fourth dependency, so a
@@ -1066,7 +1125,8 @@ def bin_of(v, edges, right):
     return k
 
 
-def bin_model(values, edges, right=False, is_valid=None, weights=None, skipnan=True):
+def bin_model(values, edges, right=False, density=False, is_valid=None, weights=None,
+              skipnan=True):
     """`(codes, counts, n_null, n_nan, n_outside)` -- the whole binning contract in one place."""
     nb = len(edges) - 1
     codes, counts = [], [mpf(0)] * nb
@@ -1096,7 +1156,31 @@ def bin_model(values, edges, right=False, is_valid=None, weights=None, skipnan=T
             n_out += 1
             continue
         counts[k - 1] += w
+    if density:
+        # `np.histogram(density=True)`: each bin by its OWN width and by the total that was
+        # BINNED -- values outside the edges were never counted, so they are not in the base.
+        base = sum(counts, mpf(0))
+        if base > 0:
+            counts = [c / ((edges[j + 1] - edges[j]) * base) for j, c in enumerate(counts)]
+        else:
+            counts = [None] * nb
     return codes, counts, n_null, n_nan, n_out
+
+
+def bin_edges_model(values, nbins, is_valid=None, weights=None, skipnan=True):
+    """(edges, ok) -- np.histogram_bin_edges(bins=nbins), degenerate answers included."""
+    keep, _, _ = select(values, is_valid, weights, skipnan)
+    xs = [x for x, _ in keep]
+    fine = True
+    if not xs:
+        lo, hi, fine = mpf(0), mpf(1), False           # numpy's empty fallback
+    else:
+        lo, hi = min(xs), max(xs)
+        if not (hi > lo):
+            lo, hi, fine = lo - mpf("0.5"), hi + mpf("0.5"), False   # numpy's constant fallback
+    span = hi - lo
+    edges = [lo] + [lo + mpf(j) * span / mpf(nbins) for j in range(1, nbins)] + [hi]
+    return edges, fine
 
 
 #: The 1-based positions the K_* cumulative rows are read at. `1` pins the very first fold, `2`
@@ -1112,6 +1196,11 @@ HEDGES = [-400.0, -200.0, 0.0, 200.0, 400.0]
 #: the expected answer can also be read off by hand.
 HBX = [-1.0, 0.0, 2.0, 4.0, 8.0, 9.0]
 HBE = [0.0, 2.0, 4.0, 6.0, 8.0]
+
+#: How many bins the `pf_bin_edges` golden rows ask for. Five rather than a power of two so that
+#: the interior boundaries are not exactly representable, which is where a linspace written the
+#: obvious way drifts from one that pins its endpoints.
+NBE = 5
 
 
 def fortran_real(v):
@@ -1188,6 +1277,9 @@ module test_stats_golden
     !> How many values the exact-boundary binning case carries. Its edge array holds one fewer,
     !> which is what makes `NHBX - 2` the number of bins.
     integer, parameter :: NHBX = 6
+
+    !> How many bins the `B_*` edge rows describe.
+    integer, parameter :: NBE = 5
 '''
 
 
@@ -1319,6 +1411,39 @@ def emit():
         out += wrap_array("    real(real64), parameter :: H_%s(NHB) =" % tag,
                           [fortran_real(c) for c in counts])
         out.append("    integer, parameter :: H_%s_OUT = %d" % (tag, nout))
+    out.append("    !> The same bins as a DENSITY: each count by its own width and by the total")
+    out.append("    !> that was binned, so `sum(H_DENS * widths)` is 1.")
+    _, dens, _, _, _ = bin_model(xk, ed, density=True)
+    out += wrap_array("    real(real64), parameter :: H_DENS(NHB) =",
+                      [fortran_real(c) for c in dens])
+    _, densw, _, _, _ = bin_model(xk, ed, density=True, weights=wk)
+    out.append("    !> And weighted, where the base is the sum of the WEIGHTS that were binned.")
+    out += wrap_array("    real(real64), parameter :: H_DENS_WT(NHB) =",
+                      [fortran_real(c) for c in densw])
+    out.append("")
+    out.append("    !> `pf_bin_edges` over the n=32 recipe: NBE bins spanning its own range.")
+    be, _ = bin_edges_model(xk, NBE)
+    out += wrap_array("    real(real64), parameter :: B_EDGES(NBE + 1) =",
+                      [fortran_real(v) for v in be])
+    # **The mask has to remove the EXTREMES, and the obvious every-7th one does not.** The recipe
+    # takes its minimum at 1 and its maximum at 11, so nulling every 7th element leaves the range
+    # untouched and the row is byte-identical to the one above -- a golden row that asserts
+    # nothing. The range is the ONLY thing an exclusion can move here, so the mask has to aim at
+    # it directly.
+    valid_ext = [(i not in (1, 11)) for i in range(1, 33)]
+    out.append("    !> The same with the population's own minimum and maximum excluded, which is")
+    out.append("    !> the only kind of exclusion a RANGE can see.")
+    be, _ = bin_edges_model(xk, NBE, is_valid=valid_ext)
+    out += wrap_array("    real(real64), parameter :: B_EDGES_NULL(NBE + 1) =",
+                      [fortran_real(v) for v in be])
+    out.append("    !> numpy's two degenerate answers: a CONSTANT population widens by half a")
+    out.append("    !> unit either way, and an EMPTY one falls back to [0, 1].")
+    be, _ = bin_edges_model([mpf(7)] * 5, NBE)
+    out += wrap_array("    real(real64), parameter :: B_CONST(NBE + 1) =",
+                      [fortran_real(v) for v in be])
+    be, _ = bin_edges_model([], NBE)
+    out += wrap_array("    real(real64), parameter :: B_EMPTY(NBE + 1) =",
+                      [fortran_real(v) for v in be])
     out.append("")
     out.append("    !> The exact-boundary case: every interior edge lands ON one of these values,")
     out.append("    !> which is the only way the two conventions can be told apart at an edge.")

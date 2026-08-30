@@ -790,6 +790,8 @@ scenarios=(
     "stats_edges_not_increasing:1"
     "stats_edges_nan:1"
     "stats_histogram_counts_size:1"
+    "stats_bin_edges_nbins:1"
+    "stats_bin_edges_size:1"
     "sorting_column_vector:1"
     "sorting_search_unsorted:1"
     "sorting_search_target_too_long:1"

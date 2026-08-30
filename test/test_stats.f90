@@ -193,7 +193,13 @@ contains
             new_unittest("binning reports every element it could not place", &
                 test_binning_counts_and_weights), &
             new_unittest("every P9 procedure agrees across all six input kinds", &
-                test_p9_kinds_agree) &
+                test_p9_kinds_agree), &
+            new_unittest("density= reproduces np.histogram(density=True) and integrates to 1", &
+                test_histogram_density), &
+            new_unittest("pf_bin_edges reproduces np.histogram_bin_edges, degenerate cases too", &
+                test_bin_edges_matches_numpy), &
+            new_unittest("pf_bin_edges always emits edges pf_histogram will accept", &
+                test_bin_edges_are_always_usable) &
             ]
     end subroutine collect_tests_parquet_stats
 
@@ -3786,6 +3792,182 @@ contains
         call pf_histogram(col, edges, cx)
         call check(error, all(cx == cd), "pf_histogram over a parquet_column")
     end subroutine test_p9_kinds_agree
+
+    !> `density=` against `np.histogram(density=True)`, and against its defining property.
+    !!
+    !! The golden rows pin the values; the integral pins the thing they are FOR. A normalisation
+    !! taken over the wrong population -- everything passed, rather than everything binned -- makes
+    !! every bin individually plausible and only the integral wrong, which is why both halves are
+    !! here and why the fixture has values outside the edges for the base to get wrong.
+    subroutine test_histogram_density(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: x(:), w(:)
+        real(real64) :: counts(NHB), uneven(4), ucounts(3), integral
+        integer :: k
+        logical :: ok
+
+        call golden_fixture(32_int64, x)
+        call pf_histogram(x, G_HEDGES, counts, density=.true.)
+        call check(error, all_close(counts, H_DENS), "np.histogram(density=True)")
+        if (allocated(error)) return
+
+        integral = 0.0_real64
+        do k = 1, NHB
+            integral = integral + counts(k) * (G_HEDGES(k + 1) - G_HEDGES(k))
+        end do
+        call check(error, close_to(integral, 1.0_real64), &
+            "a density integrates to 1 over the bins, which is what it is for")
+        if (allocated(error)) return
+
+        call golden_weights_mod5(32_int64, w)
+        call pf_histogram(x, G_HEDGES, counts, density=.true., weights=w)
+        call check(error, all_close(counts, H_DENS_WT), &
+            "weighted, the base is the sum of the WEIGHTS that were binned")
+        if (allocated(error)) return
+
+        ! Uneven widths, where a formula that divided by one common width -- or by none -- still
+        ! integrates to something and is wrong bin by bin.
+        uneven = [-400.0_real64, -100.0_real64, 0.0_real64, 400.0_real64]
+        call pf_histogram(x, uneven, ucounts, density=.true.)
+        integral = 0.0_real64
+        do k = 1, 3
+            integral = integral + ucounts(k) * (uneven(k + 1) - uneven(k))
+        end do
+        call check(error, close_to(integral, 1.0_real64), &
+            "and still integrates to 1 when the bins are of different widths")
+        if (allocated(error)) return
+        call check(error, ucounts(1) /= ucounts(3), &
+            "an uneven spacing must give unequal densities for equal-ish counts")
+        if (allocated(error)) return
+
+        ! Nothing binned: numpy divides by zero and answers NaN, which is this module's own rule
+        ! for an undefined result. Note this is where a density DIFFERS from a histogram -- the
+        ! empty histogram just below is all zeros with ok=.true. and is perfectly well defined.
+        call pf_histogram([-5000.0_real64, 5000.0_real64], G_HEDGES, counts, density=.true., ok=ok)
+        call check(error, all(counts /= counts) .and. .not. ok, &
+            "nothing binned means no density: quiet NaNs with ok=.false.")
+        if (allocated(error)) return
+        call pf_histogram([-5000.0_real64, 5000.0_real64], G_HEDGES, counts)
+        call check(error, all(counts == 0.0_real64), &
+            "the control: the same call without density= is zeros, not NaNs")
+    end subroutine test_histogram_density
+
+    !> `pf_bin_edges` against `np.histogram_bin_edges`, including both degenerate answers.
+    subroutine test_bin_edges_matches_numpy(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: x(:)
+        real(real64) :: e(NBE + 1)
+        logical, allocatable :: v(:)
+        logical :: ok
+
+        call golden_fixture(32_int64, x)
+        call pf_bin_edges(x, NBE, e, ok=ok)
+        call check(error, all_close(e, B_EDGES), "np.histogram_bin_edges(values, bins=5)")
+        if (allocated(error)) return
+        call check(error, ok, "a population with a real range reports ok=.true.")
+        if (allocated(error)) return
+
+        ! The range is the ONLY thing an exclusion can move, so the mask has to remove the
+        ! population's own extremes -- at 1 and 11 for this recipe. A mask that misses them
+        ! produces a row identical to the one above and asserts nothing, which is how the
+        ! generator's first attempt at this fixture went.
+        allocate(v(32))
+        v = .true.
+        v(1) = .false.
+        v(11) = .false.
+        call pf_bin_edges(x, NBE, e, is_valid=v)
+        call check(error, all_close(e, B_EDGES_NULL), &
+            "excluding the minimum and maximum moves the range the edges span")
+        if (allocated(error)) return
+        call check(error, e(1) /= B_EDGES(1) .and. e(NBE + 1) /= B_EDGES(NBE + 1), &
+            "the control: the masked edges must actually differ from the unmasked ones")
+        if (allocated(error)) return
+
+        ! A zero weight removes an element from the population, so it must not stretch the range
+        ! over data that `pf_histogram(weights=)` will not count either.
+        call pf_bin_edges(x, NBE, e, weights=merge(0.0_real64, 1.0_real64, .not. v))
+        call check(error, all_close(e, B_EDGES_NULL), &
+            "and a zero WEIGHT removes it from the range for the same reason")
+        if (allocated(error)) return
+
+        call pf_bin_edges([7.0_real64, 7.0_real64, 7.0_real64, 7.0_real64, 7.0_real64], NBE, e, &
+            ok=ok)
+        call check(error, all_close(e, B_CONST) .and. .not. ok, &
+            "a constant population widens by half a unit either way, as numpy does")
+        if (allocated(error)) return
+        call pf_bin_edges(x(1:0), NBE, e, ok=ok)
+        call check(error, all_close(e, B_EMPTY) .and. .not. ok, &
+            "and an empty one falls back to [0, 1], also as numpy does")
+    end subroutine test_bin_edges_matches_numpy
+
+    !> The contract that makes `pf_bin_edges` safe to chain: its edges are always usable.
+    !!
+    !! `pf_histogram` **aborts** on a pair that is not strictly increasing, so a degenerate
+    !! population producing degenerate edges would turn a data condition into a crash one call
+    !! later. Every branch is exercised here by actually feeding the result on, which is the only
+    !! assertion that tests what the guarantee is for.
+    subroutine test_bin_edges_are_always_usable(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: e(NBE + 1), counts(NBE), tiny_pop(2)
+        real(real64) :: e7(8), counts7(7), edgy(2)
+        real(real64), allocatable :: x(:)
+        integer(int64) :: nout7
+        integer :: k
+        logical :: ok, rising
+
+        call golden_fixture(32_int64, x)
+        ! Four populations with no range to describe, plus the ordinary one as a control.
+        call pf_bin_edges(x, NBE, e)
+        call pf_histogram(x, e, counts)
+        call check(error, nint(sum(counts)) == 32, &
+            "every value lands in a bin when the edges span the population's own range")
+        if (allocated(error)) return
+
+        call pf_bin_edges([7.0_real64, 7.0_real64], NBE, e)
+        call pf_histogram([7.0_real64, 7.0_real64], e, counts)
+        call check(error, nint(sum(counts)) == 2, "a constant population still bins")
+        if (allocated(error)) return
+
+        call pf_bin_edges(x(1:0), NBE, e)
+        call pf_histogram(x(1:0), e, counts)
+        call check(error, nint(sum(counts)) == 0, "and an empty one still produces usable edges")
+        if (allocated(error)) return
+
+        ! **The case the repair exists for**, and it is not exotic: a relative span of 1e-16 with
+        ! five bins makes the spacing underflow, so the interior edges would all collapse onto the
+        ! first. Reachable with ordinary nearly-constant data and a few thousand bins.
+        tiny_pop = [1.0e300_real64, 1.0e300_real64 * (1.0_real64 + 1.0e-16_real64)]
+        call pf_bin_edges(tiny_pop, NBE, e, ok=ok)
+        rising = .true.
+        do k = 2, NBE + 1
+            if (.not. (e(k) > e(k - 1))) rising = .false.
+        end do
+        call check(error, rising, &
+            "an nbins finer than the range can resolve still gives strictly increasing edges")
+        if (allocated(error)) return
+        call check(error, .not. ok, "and says so through ok=.false. rather than silently")
+        if (allocated(error)) return
+        ! The proof that "usable" means what it says: this is the call that would abort.
+        call pf_histogram(tiny_pop, e, counts)
+        call check(error, nint(sum(counts)) == 2, &
+            "and pf_histogram accepts them, which is what the repair is for")
+        if (allocated(error)) return
+
+        ! **The top edge is ASSIGNED, not computed, and this fixture is why.** For these two
+        ! values at seven bins, `lo + nbins*(hi - lo)/nbins` rounds to 810.10242086441235 --
+        ! one ulp BELOW the maximum -- so a computed top edge would leave the population's own
+        ! largest value outside every bin, silently, with `n_outside` reporting 1. A mutation
+        ! replacing the assignment survives every other fixture here; it does not survive this
+        ! one.
+        edgy = [-906.83463876448741_real64, 810.10242086441258_real64]
+        call pf_bin_edges(edgy, 7, e7)
+        call check(error, e7(8) == edgy(2), &
+            "the top boundary must be the maximum EXACTLY, not a rounded multiple of the span")
+        if (allocated(error)) return
+        call pf_histogram(edgy, e7, counts7, n_outside=nout7)
+        call check(error, nint(sum(counts7)) == 2 .and. nout7 == 0_int64, &
+            "so the largest value lands in the last bin rather than outside every one")
+    end subroutine test_bin_edges_are_always_usable
 
     !> Whether two reals agree to the golden tolerance.
     logical function close_to(got, want)

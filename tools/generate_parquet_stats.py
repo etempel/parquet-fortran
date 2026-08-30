@@ -297,6 +297,15 @@ D["right"] = """            logical, intent(in), optional :: right
             !! closed range `[edges(1), edges(nbins+1)]` is covered exactly once, so the two
             !! conventions differ only in which bin a value sitting exactly on an interior edge
             !! joins."""
+D["density"] = """            logical, intent(in), optional :: density
+            !! `.false.` by default. `.true.` divides each bin by its own WIDTH and by the total
+            !! that was binned, giving a probability density -- `np.histogram(density=True)`, so
+            !! `sum(counts * widths)` is 1 and an uneven edge spacing is accounted for. The
+            !! normalisation base is what actually landed in a bin: values outside the edges were
+            !! never counted, so they do not appear in it, which is numpy's rule too. When nothing
+            !! was binned the density is undefined and every entry is a **quiet NaN** with
+            !! `ok = .false.` -- note that an empty HISTOGRAM is perfectly well defined (all
+            !! zeros, `ok = .true.`) and an empty DENSITY is not."""
 D["n_outside"] = """            integer(int64), intent(out), optional :: n_outside
             !! how many usable elements fell outside `[edges(1), edges(nbins+1)]` and so joined no
             !! bin. This is an ordinary data condition rather than an error -- `np.histogram`
@@ -1005,7 +1014,12 @@ BUCKETIZE_OPTS = ["right", "is_valid", "skipnan", "n_null", "n_nan", "n_outside"
 #: `pf_histogram` adds `weights`, which is why `counts` is a real array: `np.histogram(weights=)`
 #: sums the weights of the values in each bin rather than counting them, and an integer output
 #: could not hold that.
-HISTOGRAM_OPTS = ["right", "is_valid", "weights", "skipnan", "n_null", "n_nan", "n_outside", "ok"]
+HISTOGRAM_OPTS = ["right", "density", "is_valid", "weights", "skipnan", "n_null", "n_nan",
+                  "n_outside", "ok"]
+#: `pf_bin_edges` -- the population block and nothing else. No `right`: it produces edges rather
+#: than using them, so the convention is the CALLER's later choice and an argument here could only
+#: be ignored. No explicit range pair either -- see its doc-comment for why.
+BIN_EDGES_OPTS = ["is_valid", "weights", "skipnan", "n_null", "n_nan", "ok"]
 
 CORE_IFACES = [
     iface("sum_f64",
@@ -1592,13 +1606,26 @@ BIN_IFACES = """        !> `pf_bucketize` over a 64-bit real array: which bin ea
         !! present. The counts are `real(real64)` for that reason: a weighted histogram sums
         !! weights rather than counting elements. Unweighted they are whole numbers, exactly, up
         !! to 2**53 elements in one bin.
-        module subroutine histogram_f64(values, edges, counts, right, is_valid, weights, skipnan, &
-                n_null, n_nan, n_outside, ok)
+        module subroutine histogram_f64(values, edges, counts, right, density, is_valid, &
+                weights, skipnan, n_null, n_nan, n_outside, ok)
             real(real64), intent(in) :: values(:) !! the values to bin.
             real(real64), intent(in) :: edges(:) !! the bin boundaries, strictly increasing, at least two.
-            real(real64), intent(out) :: counts(:) !! one entry per bin, so `size(edges) - 1` of them.
+            real(real64), intent(out) :: counts(:)
+            !! one entry per bin, so `size(edges) - 1` of them. A density when `density` is set.
 @@histogram_opts@@
-        end subroutine histogram_f64"""
+        end subroutine histogram_f64
+        !> `pf_bin_edges` over a 64-bit real array: `nbins` equal-width bins spanning the data.
+        !!
+        !! `np.histogram_bin_edges(values, bins=nbins)`, including its two degenerate answers: a
+        !! CONSTANT population widens to `[x - 0.5, x + 0.5]` and an EMPTY one falls back to
+        !! `[0, 1]`, both of which `ok = .false.` reports.
+        module subroutine bin_edges_f64(values, nbins, edges, is_valid, weights, skipnan, n_null, &
+                n_nan, ok)
+            real(real64), intent(in) :: values(:) !! the population the range is taken over.
+            integer, intent(in) :: nbins !! how many bins to describe; at least 1.
+            real(real64), intent(out) :: edges(:) !! the `nbins + 1` boundaries, strictly increasing.
+@@bin_edges_opts@@
+        end subroutine bin_edges_f64"""
 
 #: What each P9 generic's own doc-comment says, on the generic's page.
 CUM_DOC = {
@@ -1649,7 +1676,13 @@ _CUM_COMMON = """    !>
     !>
     !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
     !> `logical` array, or a scalar numeric `type(parquet_column)`; `out` is always
-    !> `real(real64)`, so a running sum of 64-bit integers cannot silently wrap."""
+    !> `real(real64)`, so a running sum of 64-bit integers cannot silently wrap.
+    !>
+    !> **`out` must not be `values`.** There is no in-place form: passing one array to both
+    !> arguments associates it with an `intent(in)` and an `intent(out)` dummy at once, which
+    !> F2018 15.5.2.13 forbids and no compiler here diagnoses. The scan would in fact survive it,
+    !> since it reads element `i` before writing element `i` -- which is exactly what makes the
+    !> mistake worth naming rather than leaving to be discovered."""
 
 BIN_DOC = {
     "pf_bucketize": [
@@ -1674,6 +1707,31 @@ BIN_DOC = {
         "This is `pf_bucketize` followed by a tally, and the two agree by construction: the count",
         "in bin k is the number of `codes` equal to k over the same arguments."],
 }
+
+BIN_DOC["pf_bin_edges"] = [
+    "`nbins` equal-width bins spanning a population -- `np.histogram_bin_edges(bins=n)`.",
+    "",
+    "The half of `np.histogram(bins=10)` this library does not fold into `pf_histogram`: it finds",
+    "the range and lays `nbins + 1` boundaries across it, ready to hand straight to",
+    "`pf_histogram` or `pf_bucketize`. The population is the same one they would bin -- nulls,",
+    "NaNs and zero-weight elements leave it by the module's usual rules -- so a zero-weighted",
+    "extreme value does not stretch the range over data that will not be counted.",
+    "",
+    "**The edges are ALWAYS strictly increasing, which is a contract rather than an**",
+    "**observation**: they exist to be passed to `pf_histogram`, which aborts on a pair that is",
+    "not, so a degenerate population must not produce edges that abort one call later.",
+    "`ok = .false.` says the edges do not describe the data's own range, and there are three",
+    "ways to get it -- an EMPTY population, which falls back to `[0, 1]` as numpy does; a",
+    "CONSTANT one, which widens to `[x - 0.5, x + 0.5]`, also as numpy does; and an `nbins`",
+    "finer than double precision can resolve over the range, where the spacing would collapse",
+    "and neighbouring edges are nudged apart instead. In all three the edges are still usable.",
+    "",
+    "**There is no explicit range pair.** A caller who already knows the bounds can write the",
+    "`nbins + 1` values directly; what is worth a procedure is finding the range under this",
+    "module's exclusion rules, which is the part that is easy to get subtly wrong.",
+    "",
+    "`nbins` is a plain default-kind `integer` and has no int64 form. It is bounded by the size",
+    "of `edges`, so it can never legitimately exceed `huge(1_int32)`."]
 
 #: The tail the two binning generics share.
 _BIN_COMMON = """    !>
@@ -2123,6 +2181,40 @@ def bin_body(base, out_name, opts, tag, widen, has_nan):
     return "\n".join(lines)
 
 
+def edges_iface(tag, decl, has_nan, kindword):
+    """One interface body for `pf_bin_edges`' per-kind entry point."""
+    mine = kind_opts(BIN_EDGES_OPTS, has_nan)
+    args = wrap_args(["values", "nbins", "edges"] + mine)
+    lines = ["        !> `pf_bin_edges` over %s." % kindword]
+    lines.append("        module subroutine bin_edges_%s(%s)" % (tag, args))
+    lines.append("            " + decl.strip())
+    lines.append("            integer, intent(in) :: nbins !! how many bins to describe; at least 1.")
+    lines.append("            real(real64), intent(out) :: edges(:)")
+    lines.append("            !! the `nbins + 1` boundaries, strictly increasing.")
+    for key in mine:
+        lines.append(D[key])
+    lines.append("        end subroutine bin_edges_%s" % tag)
+    return "\n".join(lines)
+
+
+def edges_body(tag, widen, has_nan):
+    """One `module procedure` body for `pf_bin_edges`' per-kind entry point."""
+    mine = kind_opts(BIN_EDGES_OPTS, has_nan)
+    lines = ["    module procedure bin_edges_%s" % tag]
+    lines.append("        real(real64), allocatable :: wide(:)")
+    if tag == "col":
+        lines.append("        logical, allocatable :: mask(:)")
+        lines.append('        call col_to_real64(values, "pf_bin_edges", is_valid, wide, mask)')
+    else:
+        lines.append("        allocate(wide(size(values, kind=int64)))")
+        lines.append("        wide = %s" % widen)
+    call = ["wide", "nbins", "edges"] \
+        + ["%s=%s" % (o, "mask" if (o == "is_valid" and tag == "col") else o) for o in mine]
+    lines.append("        call " + wrap_call("bin_edges_f64", call))
+    lines.append("    end procedure bin_edges_%s" % tag)
+    return "\n".join(lines)
+
+
 def mode_iface(tag, decl, res_decl, res_doc, kindword):
     """One interface body for a `pf_mode` specific."""
     args = wrap_args(["values", "m"] + MODE_OPTS)
@@ -2562,7 +2654,7 @@ def gen_spec():
     out.append("    public :: pf_mad, pf_mode, pf_describe")
     out.append("    public :: pf_cov, pf_corr, pf_zscore, pf_sigma_clipped_stats")
     out.append("    public :: pf_cumsum, pf_cumprod, pf_cummax, pf_cummin")
-    out.append("    public :: pf_bucketize, pf_histogram")
+    out.append("    public :: pf_bucketize, pf_histogram, pf_bin_edges")
     # `%print` writes solicited output, so this module READS `verbosity` and `message_stream` --
     # and CLAUDE.md's standing rule is that a module re-exports, getter and setter both, every
     # knob its own code reads, so that a narrow `use parquet_stats` program can silence it
@@ -2656,7 +2748,7 @@ def gen_spec():
         for tag, _, _, _, _ in MOMENT_KINDS:
             out.append("        module procedure %s_%s" % (name[3:], tag))
         out.append("    end interface %s" % name)
-    for name in ("pf_bucketize", "pf_histogram"):
+    for name in ("pf_bucketize", "pf_histogram", "pf_bin_edges"):
         out.append("    !")
         for line in BIN_DOC[name]:
             out.append(("    !> " + line).rstrip())
@@ -2708,6 +2800,7 @@ def gen_spec():
     binning = BIN_IFACES
     binning = binning.replace("@@bucketize_opts@@", "\n".join(D[k] for k in BUCKETIZE_OPTS))
     binning = binning.replace("@@histogram_opts@@", "\n".join(D[k] for k in HISTOGRAM_OPTS))
+    binning = binning.replace("@@bin_edges_opts@@", "\n".join(D[k] for k in BIN_EDGES_OPTS))
     out.append(binning)
     out.append("    end interface")
     out.append("    !")
@@ -2739,6 +2832,7 @@ def gen_spec():
         for base, out_name, out_decl, out_doc, opts in BIN_FAMILY:
             out.append(bin_iface(base, out_name, out_decl, out_doc, opts,
                                  tag, decl, has_nan, kindword))
+        out.append(edges_iface(tag, decl, has_nan, kindword))
     out.append(obj_entry_ifaces())
     out.append("    end interface")
     out.append(object_ifaces())
@@ -2771,6 +2865,7 @@ def gen_kernel():
             bodies.append(cum_body(base, tag, widen, has_nan))
         for base, out_name, _, _, opts in BIN_FAMILY:
             bodies.append(bin_body(base, out_name, opts, tag, widen, has_nan))
+        bodies.append(edges_body(tag, widen, has_nan))
     out.append("\n\n".join(bodies))
     out.append("")
     out.append(obj_entry_bodies())

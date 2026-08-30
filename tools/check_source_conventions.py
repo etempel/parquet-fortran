@@ -1802,7 +1802,7 @@ def check_stats_optional_argument_order():
                  "vsum", "vmin", "vmax", "count",
                  "retain", "consume",
                  "sigma", "sigma_lower", "sigma_upper", "maxiters", "cenfunc", "stdfunc",
-                 "n_clipped", "keep", "converged", "right",
+                 "n_clipped", "keep", "converged", "right", "density",
                  "is_valid", "weights", "weight_type", "ddof", "bias", "excess", "skipnan",
                  "method", "kind", "scale", "center", "out_valid", "n_null", "n_nan",
                  "n_outside", "ok", "threads",

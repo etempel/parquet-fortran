@@ -49,7 +49,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pandas does. `pf_bucketize` says which bin of a sorted edge array each value falls in, and
   `pf_histogram` how many values — or how much weight — landed in each, under either numpy's or
   pandas' edge convention, reporting the values that reached no bin rather than dropping them
-  silently. See [Array statistics](doc/pages/utilities/statistics.md).
+  silently, and optionally as a `density=` normalised the way `np.histogram` normalises one.
+  `pf_bin_edges` supplies the edges themselves, spanning the population's own range.
+  See [Array statistics](doc/pages/utilities/statistics.md).
 - **`parquet_logging`: general-purpose logging for the calling program.** A `pf_logger` type and a
   matching set of `pf_log_*` procedures on a process-wide default logger: eight ascending severity
   levels using Python's numbers (`PF_LEVEL_DEBUG` = 10, and an arbitrary integer level is accepted

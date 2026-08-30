@@ -805,6 +805,10 @@ program error_scenarios
         call scenario_stats_edges_nan()
     case ("stats_histogram_counts_size")
         call scenario_stats_histogram_counts_size()
+    case ("stats_bin_edges_nbins")
+        call scenario_stats_bin_edges_nbins()
+    case ("stats_bin_edges_size")
+        call scenario_stats_bin_edges_size()
     case ("sorting_column_vector")
         call scenario_sorting_column_vector()
     case ("sorting_search_unsorted")
@@ -17058,6 +17062,29 @@ contains
         call pf_histogram(x, edges, four)    ! -> aborts (one entry per bin, not per edge)
         print '(a,es12.5)', "unexpectedly accepted one count per edge, counts(1)=", four(1)
     end subroutine scenario_stats_histogram_counts_size
+
+    !> Zero bins describe nothing, so there is no edge array `pf_bin_edges` could fill.
+    subroutine scenario_stats_bin_edges_nbins()
+        real(real64) :: x(4) = [1.0_real64, 2.0_real64, 3.0_real64, 5.0_real64]
+        real(real64) :: two(2), three(3)
+
+        call pf_bin_edges(x, 1, two)    ! one bin: accepted
+        if (two(2) <= two(1)) print '(a)', "one bin should still give increasing edges"
+        call pf_bin_edges(x, 0, three)  ! -> aborts (nbins must be at least 1)
+        print '(a,es12.5)', "unexpectedly accepted nbins=0, edges(1)=", three(1)
+    end subroutine scenario_stats_bin_edges_nbins
+
+    !> `edges` holds one boundary MORE than the bin count -- the off-by-one a caller sizing it
+    !! from `nbins` makes, and the mirror of `pf_histogram`'s `counts` check.
+    subroutine scenario_stats_bin_edges_size()
+        real(real64) :: x(4) = [1.0_real64, 2.0_real64, 3.0_real64, 5.0_real64]
+        real(real64) :: four(4), three(3)
+
+        call pf_bin_edges(x, 3, four)   ! three bins, four edges: accepted
+        if (four(4) /= 5.0_real64) print '(a)', "the top edge should be the population maximum"
+        call pf_bin_edges(x, 3, three)  ! -> aborts (three bins need four boundaries)
+        print '(a,es12.5)', "unexpectedly accepted one edge per bin, edges(1)=", three(1)
+    end subroutine scenario_stats_bin_edges_size
 
     !> A vector column has no defined order on a whole row, so it cannot be a sort key -- the
     !! same rule parquet_table%sort_by applies, enforced here for a bare parquet_column.

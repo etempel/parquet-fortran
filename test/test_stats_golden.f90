@@ -48,6 +48,9 @@ module test_stats_golden
     !> which is what makes `NHBX - 2` the number of bins.
     integer, parameter :: NHBX = 6
 
+    !> How many bins the `B_*` edge rows describe.
+    integer, parameter :: NBE = 5
+
     !> The first 8 values `golden_fixture` must produce. A recipe that has drifted from the
     !! generator's is reported here, as a fixture mismatch, rather than as an unexplained
     !! tolerance failure in every case at once.
@@ -337,6 +340,27 @@ module test_stats_golden
     !> the weighted counts, `w(i) = mod(i, 5)`, so every 5th element weighs nothing.
     real(real64), parameter :: H_WT(NHB) = [14.0_real64, 9.0_real64, 24.0_real64, 8.0_real64]
     integer, parameter :: H_WT_OUT = 5
+    !> The same bins as a DENSITY: each count by its own width and by the total
+    !> that was binned, so `sum(H_DENS * widths)` is 1.
+    real(real64), parameter :: H_DENS(NHB) = [0.0015384615384615385_real64, 0.00096153846153846159_real64,  &
+        0.0015384615384615385_real64, 0.00096153846153846159_real64]
+    !> And weighted, where the base is the sum of the WEIGHTS that were binned.
+    real(real64), parameter :: H_DENS_WT(NHB) = [0.0012727272727272728_real64, 0.00081818181818181816_real64,  &
+        0.0021818181818181819_real64, 0.00072727272727272723_real64]
+
+    !> `pf_bin_edges` over the n=32 recipe: NBE bins spanning its own range.
+    real(real64), parameter :: B_EDGES(NBE + 1) = [-468.4931640625_real64, -282.8916015625_real64, -97.2900390625_real64,  &
+        88.3115234375_real64, 273.9130859375_real64, 459.5146484375_real64]
+    !> The same with the population's own minimum and maximum excluded, which is
+    !> the only kind of exclusion a RANGE can see.
+    real(real64), parameter :: B_EDGES_NULL(NBE + 1) = [-449.607421875_real64, -269.5087890625_real64, -89.41015625_real64,  &
+        90.6884765625_real64, 270.787109375_real64, 450.8857421875_real64]
+    !> numpy's two degenerate answers: a CONSTANT population widens by half a
+    !> unit either way, and an EMPTY one falls back to [0, 1].
+    real(real64), parameter :: B_CONST(NBE + 1) = [6.5_real64, 6.7000000000000002_real64, 6.9000000000000004_real64,  &
+        7.0999999999999996_real64, 7.2999999999999998_real64, 7.5_real64]
+    real(real64), parameter :: B_EMPTY(NBE + 1) = [0.0_real64, 0.20000000000000001_real64, 0.40000000000000002_real64,  &
+        0.59999999999999998_real64, 0.80000000000000004_real64, 1.0_real64]
 
     !> The exact-boundary case: every interior edge lands ON one of these values,
     !> which is the only way the two conventions can be told apart at an edge.

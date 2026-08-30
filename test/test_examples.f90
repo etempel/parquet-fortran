@@ -330,6 +330,83 @@ contains
             if (allocated(error)) return
         end block
 
+        ! parquet_list / parquet_map / parquet_struct: the three container element domains. Each
+        ! type is declared in a block so a dropped re-export breaks the BUILD, which is the whole
+        ! mechanism of this test -- its only library import is a bare `use parquet`.
+        block
+            type(parquet_list_column) :: lc
+            type(parquet_map_column) :: mc
+            type(parquet_struct_column) :: stc
+            call lc%init(PK_INT32)
+            call lc%append_row([11_int32, 12_int32, 13_int32])
+            call check(error, lc%size() == 1_int64, &
+                "parquet_list_column must be reachable from use parquet alone and take a row")
+            if (allocated(error)) return
+            call mc%init(PK_INT32)
+            call check(error, mc%size() == 0_int64, &
+                "parquet_map_column must be reachable from use parquet alone")
+            if (allocated(error)) return
+            call stc%init(["id ", "nm "], [PK_INT32, PK_INT32])
+            call check(error, stc%field_count() == 2, &
+                "parquet_struct_column must be reachable from use parquet alone")
+            if (allocated(error)) return
+        end block
+
+        ! parquet_random and parquet_sampling: the counter-based generator and the population
+        ! draws. Both are pf_*-prefixed and neither has any other pin on its re-export -- the two
+        ! suites that used to import the facade for this reason were narrowed in the runner split,
+        ! so this is now the only thing that would fail if either `use` line left src/parquet.f90.
+        block
+            real(real64) :: u
+            integer(int64) :: perm_at
+            u = pf_random_at(12345_int64, 7_int64)
+            call check(error, u >= 0.0_real64 .and. u < 1.0_real64, &
+                "pf_random_at must be reachable from use parquet alone and land in [0,1)")
+            if (allocated(error)) return
+            perm_at = pf_random_perm_at(12345_int64, 10_int64, 3_int64)
+            call check(error, perm_at >= 1_int64 .and. perm_at <= 10_int64, &
+                "pf_random_perm_at must be reachable from use parquet alone and land in range")
+            if (allocated(error)) return
+        end block
+
+        ! parquet_spatial: the coordinate index over plain arrays.
+        block
+            type(pf_spatial_index) :: idx
+            real(real64) :: xs(3), ys(3), zs(3)
+            integer(int64) :: near(4), nnear
+            xs = [0.0_real64, 1.0_real64, 2.0_real64]
+            ys = [0.0_real64, 0.0_real64, 0.0_real64]
+            zs = [0.0_real64, 0.0_real64, 0.0_real64]
+            call idx%build(xs, ys, zs, radius=0.5_real64)
+            nnear = idx%within([0.1_real64, 0.0_real64, 0.0_real64], 0.5_real64, near)
+            call check(error, nnear == 1_int64, &
+                "pf_spatial_index must be reachable from use parquet alone and answer a query")
+            if (allocated(error)) return
+        end block
+
+        ! parquet_utils: the text and path helpers.
+        block
+            character(len=:), allocatable :: joined
+            call pf_join_path("data", "cat.parquet", joined)
+            call check(error, joined == "data/cat.parquet", &
+                "pf_join_path must be reachable from use parquet alone and join POSIX-style")
+            if (allocated(error)) return
+        end block
+
+        ! parquet_logging: the logger value type.
+        block
+            type(pf_logger) :: lg
+            call check(error, .not. lg%enabled(PF_LEVEL_CRITICAL), &
+                "pf_logger must be reachable from use parquet alone and report a fresh logger silent")
+            if (allocated(error)) return
+        end block
+
+        ! parquet_expkey: the facade re-exports exactly two names from this leaf, with an `only:`
+        ! list, so a rename on either side breaks here rather than at a call site nobody has.
+        call check(error, parquet_debug_exp_key(0.5_real64) /= 0.0_real64, &
+            "parquet_debug_exp_key must be reachable from use parquet alone")
+        if (allocated(error)) return
+
         ! parquet_temporal: one element type, carrying its own null state.
         call ts%parse("2026-08-03T12:00:00")
         call check(error, .not. ts%is_null(), &

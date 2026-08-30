@@ -26,7 +26,13 @@
 !> name -- but several drive the process-global debug hooks, which is why `run_tester.f90` excludes
 !> this suite from test-drive's per-test parallelism.
 module test_spatial
-    use parquet
+    ! NARROW import, not `use parquet`. The facade would compile just as well and would let a
+    ! future test in this file reach the C++ layer without anything saying so; naming the tier
+    ! makes that a build error instead. The facade's own re-export of this tier is pinned by
+    ! `test_facade_covers_every_layer` (test/test_examples.f90), which is where that claim lives.
+    use parquet_spatial
+    use parquet_random
+    use parquet_sorting
     use iso_fortran_env, only : int32, int64, real64
     use, intrinsic :: ieee_arithmetic, only : ieee_get_flag, ieee_set_flag, ieee_support_flag, ieee_invalid
     use testdrive, only : new_unittest, unittest_type, error_type, check, skip_test

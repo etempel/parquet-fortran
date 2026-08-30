@@ -31,8 +31,12 @@
 !> team of its own and so lives in `test_random_omp`, which is excluded from that parallelism.
 module test_random
 
-    use parquet                              ! deliberately the facade: a dropped re-export must
-                                             ! break the build rather than a later assertion
+    ! NARROW import, not `use parquet`. The facade would compile just as well and would let a
+    ! future test in this file reach the C++ layer without anything saying so; naming the tier
+    ! makes that a build error instead. The facade's own re-export of this tier is pinned by
+    ! `test_facade_covers_every_layer` (test/test_examples.f90), which is where that claim lives.
+    use parquet_random
+    use parquet_sampling
     use test_random_vectors
     use test_random_reference
     use iso_fortran_env, only: int32, int64, real32, real64

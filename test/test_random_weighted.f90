@@ -23,7 +23,12 @@
 !> would let the gate pass everything, which is the failure mode a gate cannot afford.
 module test_random_weighted
 
-    use parquet
+    ! NARROW import, not `use parquet`. The facade would compile just as well and would let a
+    ! future test in this file reach the C++ layer without anything saying so; naming the tier
+    ! makes that a build error instead. The facade's own re-export of this tier is pinned by
+    ! `test_facade_covers_every_layer` (test/test_examples.f90), which is where that claim lives.
+    use parquet_sampling
+    use parquet_random
     use iso_fortran_env, only: int32, int64, real64
     use testdrive, only: new_unittest, unittest_type, error_type, check
 

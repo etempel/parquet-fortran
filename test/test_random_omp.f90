@@ -19,7 +19,12 @@
 !> suites, which is exactly the hazard the exclusion list exists for.
 module test_random_omp
 
-    use parquet
+    ! NARROW import, not `use parquet`. The facade would compile just as well and would let a
+    ! future test in this file reach the C++ layer without anything saying so; naming the tier
+    ! makes that a build error instead. The facade's own re-export of this tier is pinned by
+    ! `test_facade_covers_every_layer` (test/test_examples.f90), which is where that claim lives.
+    use parquet_random
+    use parquet_sampling
     use iso_fortran_env, only: int32, int64, real64
     use testdrive, only: new_unittest, unittest_type, error_type, check
 #ifdef _OPENMP
@@ -361,6 +366,7 @@ contains
     !! the floor really does bite.
     subroutine test_perm_threads(error)
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer :: saved_floor !! the knob's value on entry, restored on every exit path.
         integer(int64), parameter :: SD = 555_int64
         integer(int64), parameter :: M = 5000_int64
         integer, parameter :: teams(*) = [1, 2, 3, 5, 8, 16, 64]
@@ -373,6 +379,7 @@ contains
         do k = 1_int64, M
             ref(k) = pf_random_perm_at(SD, M, k)
         end do
+        saved_floor = parquet_get_random_parallel_min_elements()
         call parquet_set_random_parallel_min_elements(0)
         do ti = 1, size(teams)
             got = -1_int64
@@ -381,7 +388,7 @@ contains
                 write (msg, '(a,i0,a)') "a bulk permutation at threads=", teams(ti), &
                     " differs from the scalar form"
                 call check(error, .false., trim(msg))
-                call parquet_reset_settings()
+                call parquet_set_random_parallel_min_elements(saved_floor)
                 return
             end if
             got32 = -1_int32
@@ -390,7 +397,7 @@ contains
                 write (msg, '(a,i0,a)') "the int32 bulk permutation at threads=", teams(ti), &
                     " differs from the scalar form"
                 call check(error, .false., trim(msg))
-                call parquet_reset_settings()
+                call parquet_set_random_parallel_min_elements(saved_floor)
                 return
             end if
             sub = -1_int64
@@ -399,11 +406,11 @@ contains
                 write (msg, '(a,i0,a)') "a bulk subset at threads=", teams(ti), &
                     " differs from the scalar form"
                 call check(error, .false., trim(msg))
-                call parquet_reset_settings()
+                call parquet_set_random_parallel_min_elements(saved_floor)
                 return
             end if
         end do
-        call parquet_reset_settings()
+        call parquet_set_random_parallel_min_elements(saved_floor)
         !
         ! The automatic form agrees too -- it is the one nobody passes an argument to.
         got = -1_int64
@@ -436,6 +443,7 @@ contains
     !!    one thread (Risk-104). And the values must still be right when called from in there.
     subroutine test_resample_threads(error)
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer :: saved_floor !! the knob's value on entry, restored on every exit path.
         integer(int64), parameter :: SD = 4242_int64
         integer(int64), parameter :: M = 900_int64
         integer(int64), parameter :: N = 5000_int64
@@ -450,6 +458,7 @@ contains
             ref(k) = pf_random_int_at(SD, ST, 1_int64, M, k)
         end do
 
+        saved_floor = parquet_get_random_parallel_min_elements()
         call parquet_set_random_parallel_min_elements(0)
         do ti = 1, size(teams)
             got = -1_int64
@@ -458,7 +467,7 @@ contains
                 write (msg, '(a,i0,a)') "a resample at threads=", teams(ti), &
                     " differs from the scalar integer draw"
                 call check(error, .false., trim(msg))
-                call parquet_reset_settings()
+                call parquet_set_random_parallel_min_elements(saved_floor)
                 return
             end if
             got32 = -1_int32
@@ -467,11 +476,11 @@ contains
                 write (msg, '(a,i0,a)') "the int32 resample at threads=", teams(ti), &
                     " differs from the scalar integer draw"
                 call check(error, .false., trim(msg))
-                call parquet_reset_settings()
+                call parquet_set_random_parallel_min_elements(saved_floor)
                 return
             end if
         end do
-        call parquet_reset_settings()
+        call parquet_set_random_parallel_min_elements(saved_floor)
 
         ! Negative control 1: with the floor back at its factory value, an explicit request above
         ! what the work can feed must be cut down. If this reported 64 the sweep above would have

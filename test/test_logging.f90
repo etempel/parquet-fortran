@@ -22,6 +22,9 @@ module test_logging
     private
 
     public :: collect_tests_logging
+    ! Shared with test_logging_env, which holds the one test that needs a bind(C) interface and so
+    ! had to move to its own file (see that file's header). Public only for that reason.
+    public :: truncate_file, read_back, has
 
 contains
 
@@ -898,45 +901,7 @@ contains
     ! exactly this reason.
     ! ==================================================================================
 
-    !> Sets an environment variable for the rest of this process, via POSIX `setenv`.
-    !!
-    !! Fortran cannot set one. Declared locally here rather than in `src/`, the same convention
-    !! `test/test_settings.f90` follows, so no library file gains a POSIX dependency.
-    subroutine set_env(name, value)
-        character(len=*), intent(in) :: name   !! Variable to set.
-        character(len=*), intent(in) :: value  !! Its new value.
-        interface
-            function c_setenv(nm, val, overwrite) bind(C, name="setenv") result(rc)
-                use iso_c_binding, only : c_char, c_int
-                character(kind=c_char), intent(in) :: nm(*)   !! NUL-terminated name.
-                character(kind=c_char), intent(in) :: val(*)  !! NUL-terminated value.
-                integer(c_int), value :: overwrite            !! Nonzero replaces an existing value.
-                integer(c_int) :: rc                          !! 0 on success.
-            end function c_setenv
-        end interface
-        integer :: rc
 
-        rc = int(c_setenv(name // c_null_char, value // c_null_char, 1_c_int))
-        ! Checked rather than discarded: a failed setenv leaves the old value in place, so every
-        ! assertion downstream would be made against an environment nobody set.
-        if (rc /= 0) error stop "set_env: setenv failed for '" // name // "'"
-    end subroutine set_env
-
-    !> Removes an environment variable.
-    subroutine unset_env(name)
-        character(len=*), intent(in) :: name  !! Variable to remove.
-        interface
-            function c_unsetenv(nm) bind(C, name="unsetenv") result(rc)
-                use iso_c_binding, only : c_char, c_int
-                character(kind=c_char), intent(in) :: nm(*)  !! NUL-terminated name.
-                integer(c_int) :: rc                         !! 0 on success.
-            end function c_unsetenv
-        end interface
-        integer :: rc
-
-        rc = int(c_unsetenv(name // c_null_char))
-        if (rc /= 0) error stop "unset_env: unsetenv failed for '" // name // "'"
-    end subroutine unset_env
 
     !> Every emission shim on the default logger reaches a sink, carries the right level tag, and
     !> obeys the logger-wide threshold -- with the two levels below that threshold as the negative
@@ -1045,43 +1010,6 @@ contains
             "the record below the raised threshold never reached the file")
     end subroutine test_default_logger_configuration
 
-    !> `pf_log_configure_from_env` applies each variable it recognises and leaves the logger
-    !> untouched for one that is unset -- the second half being the control, since a reader that
-    !> applied a default on an unset variable would pass every positive assertion.
-    subroutine test_configure_from_env(error)
-        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
-        character(len=*), parameter :: path = "test_run/log_env_file.txt"
-        character(len=512), allocatable :: lines(:)
-        integer :: n
-
-        call pf_log_reset_dedup()
-        call pf_log_init(console = .false.)
-        ! PFLOGTEST_FILE reaches pf_log_add_file with no append= argument, so it appends -- the
-        ! documented default. Start from an empty file or this asserts a count across every run.
-        call truncate_file(path)
-        call unset_env("PFLOGTEST_COLOR")            ! deliberately left unset: the control
-        call set_env("PFLOGTEST_LEVEL", "warning")
-        call set_env("PFLOGTEST_FORMAT", "env|{level}|{message}")
-        call set_env("PFLOGTEST_FILE", path)
-        call pf_log_configure_from_env("PFLOGTEST_")
-
-        call pf_log_info("env-below")     ! below WARNING: dropped
-        call pf_log_error("env-above")
-        call pf_log_flush()
-        call pf_log_close()
-        call unset_env("PFLOGTEST_LEVEL")
-        call unset_env("PFLOGTEST_FORMAT")
-        call unset_env("PFLOGTEST_FILE")
-        call read_back(path, lines, n)
-
-        call check(error, n == 1, "PFLOGTEST_FILE added a sink and PFLOGTEST_LEVEL filtered it")
-        if (allocated(error)) return
-        call check(error, has(lines(1), "env|") .and. has(lines(1), "ERROR"), &
-            "PFLOGTEST_FORMAT replaced the layout")
-        if (allocated(error)) return
-        call check(error, has(lines(1), "env-above") .and. .not. has(lines(1), "env-below"), &
-            "the record below the environment's threshold was dropped")
-    end subroutine test_configure_from_env
 
     !> A caller-owned unit is written to and NOT closed by `%close`, which is the whole difference
     !> between `add_unit` and `add_file`. Both the binding and the module-level shim are covered,
@@ -1980,7 +1908,6 @@ contains
             new_unittest("every default-logger emission shim reaches a sink", test_default_logger_emission), &
             new_unittest("every default-logger configuration shim takes effect", &
                 test_default_logger_configuration), &
-            new_unittest("pf_log_configure_from_env applies what is set", test_configure_from_env), &
             new_unittest("a caller-owned unit is written to and not closed", test_add_unit_sink), &
             new_unittest("date, time, stamp and elapsed render in shape", test_layout_clock_fields), &
             new_unittest("thread renders, and an unset rank collapses", test_layout_thread_and_rank), &

@@ -23,8 +23,12 @@
 !> safely under test-drive's per-test parallelism.
 module test_random_dist
 
-    use parquet                              ! deliberately the facade: a dropped re-export must
-                                             ! break the build rather than a later assertion
+    ! NARROW import, not `use parquet`. The facade would compile just as well and would let a
+    ! future test in this file reach the C++ layer without anything saying so; naming the tier
+    ! makes that a build error instead. The facade's own re-export of this tier is pinned by
+    ! `test_facade_covers_every_layer` (test/test_examples.f90), which is where that claim lives.
+    use parquet_random
+    use parquet_expkey, only: parquet_debug_exp_key
     use test_random_vectors
     use iso_fortran_env, only: int32, int64, real64
     use testdrive, only: new_unittest, unittest_type, error_type, check

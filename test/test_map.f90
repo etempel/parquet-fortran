@@ -18,7 +18,12 @@
 !!   neither, the call aborts (that half is an error scenario, since it ends the process).
 module test_map
     use testdrive, only : new_unittest, unittest_type, error_type, check
-    use parquet
+    ! NARROW import, not `use parquet`. The facade would compile just as well and would let a
+    ! future test in this file reach the C++ layer without anything saying so; naming the tier
+    ! makes that a build error instead. The facade's own re-export of this tier is pinned by
+    ! `test_facade_covers_every_layer` (test/test_examples.f90), which is where that claim lives.
+    use parquet_map
+    use parquet_columns
     use iso_fortran_env, only : int32, int64, real32, real64
     implicit none
     private

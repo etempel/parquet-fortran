@@ -49,7 +49,9 @@
 !! ```
 program benchmark_stats
 
-    use parquet, only : pf_sum, pf_mean, pf_variance, pf_moments, pf_count_valid
+    use parquet, only : pf_sum, pf_mean, pf_variance, pf_moments, pf_count_valid, &
+        pf_iqr, pf_median, pf_sigma_clipped_stats, parquet_debug_stats_sorts, &
+        parquet_debug_set_stats_quantile_sort_min
     use iso_fortran_env, only : int32, int64, real64, error_unit, output_unit
 #ifdef _OPENMP
     use omp_lib, only : omp_get_wtime, omp_get_max_threads, omp_get_num_procs, omp_set_num_threads
@@ -99,6 +101,8 @@ program benchmark_stats
     case ("shapes"); call mode_shapes(nrows, rounds, sink)
     case ("thread"); call mode_thread(nrows, rounds, nthreads, sink)
     case ("library"); call mode_library(nrows, rounds, sink)
+    case ("iqr");    call mode_iqr(nrows, rounds, sink)
+    case ("clip");   call mode_clip(nrows, rounds, sink)
     case default
         write (error_unit, "(a,a)") "benchmark_stats: unknown --mode=", trim(mode)
         write (error_unit, "(a)") "  known modes: floor, phases, shapes, thread, library"
@@ -654,6 +658,155 @@ contains
             stop 1
         end if
     end subroutine mode_library
+
+    !> P6-1: does `pf_iqr` do better by SELECTING its two order statistics or by SORTING once?
+    !!
+    !! It asks for two probabilities and `QUANTILE_SORT_MIN` is 4, so it currently selects -- four
+    !! `pf_nth_element` calls against one `pf_argsort`. That constant was placed to make its own
+    !! effect visible rather than measured, which is the open question this mode answers.
+    !!
+    !! The two arms are the SHIPPED procedure with the sort threshold pushed either side of 2, via
+    !! the debug override, so both are the real code path and neither is a replica. The answers are
+    !! compared bit for bit before any timing is reported: two routes to one quantile that disagree
+    !! would make the comparison meaningless whichever won.
+    subroutine mode_iqr(n, rounds, sink)
+        integer(int64), intent(in) :: n      !! population size.
+        integer, intent(in) :: rounds        !! rounds per arm.
+        real(real64), intent(inout) :: sink  !! keep-it-live accumulator.
+        real(real64), allocatable :: x(:)
+        real(real64) :: v_sel, v_sort, t_sel, t_sort, t0
+        integer(int64) :: sizes(4), m
+        integer :: r, k, np
+
+        sizes = [1000_int64, 100000_int64, 1000000_int64, n]
+        write (output_unit, "(a)") "  pf_iqr: SELECT (four pf_nth_element) against SORT (one pf_argsort)."
+        write (output_unit, "(a)") "  Both arms are the shipped procedure; only the sort threshold moves."
+        write (output_unit, "(a)") ""
+        write (output_unit, "(a)") "  ONE probe (pf_median) and TWO (pf_iqr): the constant has to serve both."
+        write (output_unit, "(a)") ""
+        write (output_unit, "(a)") "  probes          n      select ms      sort ms   sort/select   same answer"
+        write (output_unit, "(a)") "  --------------------------------------------------------------------------"
+        do np = 1, 2
+            do k = 1, 4
+                m = sizes(k)
+                if (m > n) cycle
+                call make_values(x, m)
+
+                ! `should_select` is `nprobs < floor_n`, so a floor above the probe count SELECTS
+                ! and a floor of 1 always SORTS. Both arms are the shipped procedure.
+                call parquet_debug_set_stats_quantile_sort_min(99999_int64)
+                call one_probe_or_two(x(1:m), np, v_sel)
+                t_sel = huge(0.0_real64)
+                do r = 1, rounds
+                    t0 = now()
+                    call one_probe_or_two(x(1:m), np, v_sel)
+                    t_sel = min(t_sel, now() - t0)
+                    sink = sink + v_sel
+                end do
+
+                call parquet_debug_set_stats_quantile_sort_min(1_int64)
+                call one_probe_or_two(x(1:m), np, v_sort)
+                t_sort = huge(0.0_real64)
+                do r = 1, rounds
+                    t0 = now()
+                    call one_probe_or_two(x(1:m), np, v_sort)
+                    t_sort = min(t_sort, now() - t0)
+                    sink = sink + v_sort
+                end do
+                call parquet_debug_set_stats_quantile_sort_min(-1_int64)
+
+                write (output_unit, "(2x,i6,2x,i9,2x,f11.4,2x,f11.4,2x,f12.2,3x,a)") np, m, &
+                    t_sel * 1000.0_real64, t_sort * 1000.0_real64, t_sort / t_sel, &
+                    trim(merge("yes", "NO ", v_sel == v_sort))
+                if (v_sel /= v_sort) then
+                    write (error_unit, "(a)") "benchmark_stats: the two routes disagree; the timings above are moot."
+                    stop 1
+                end if
+            end do
+        end do
+        write (output_unit, "(a)") ""
+        write (output_unit, "(a)") "  sort/select > 1 means selecting is the faster choice, i.e. the shipped default is right."
+    end subroutine mode_iqr
+
+    !> `pf_median` for one probe, `pf_iqr` for two -- the two probe counts the constant serves.
+    subroutine one_probe_or_two(x, nprobs, res)
+        real(real64), intent(in) :: x(:)      !! the population.
+        integer, intent(in) :: nprobs         !! 1 or 2.
+        real(real64), intent(out) :: res      !! the answer, kept so the call cannot be elided.
+        if (nprobs == 1) then
+            call pf_median(x, res)
+        else
+            call pf_iqr(x, res)
+        end if
+    end subroutine one_probe_or_two
+
+    !> P8-3: what does `stdfunc="mad_std"` cost, against the default `"std"`?
+    !!
+    !! The clip runs on ONE ordering of the values, whatever the round count -- but `"mad_std"`
+    !! orders the DEVIATIONS once per round as well, because those are a different population whose
+    !! order the values' order does not imply. That is honest and asserted, and it puts the
+    !! `mad_std` path back at O(k n log n), which is the shape the interval property was chosen to
+    !! avoid. This mode sizes it, so the decision to keep it or to look for a rank-selection form
+    !! rests on a number.
+    subroutine mode_clip(n, rounds, sink)
+        integer(int64), intent(in) :: n      !! population size.
+        integer, intent(in) :: rounds        !! rounds per arm.
+        real(real64), intent(inout) :: sink  !! keep-it-live accumulator.
+        real(real64), allocatable :: x(:)
+        real(real64) :: m1, md1, sd1, m2, md2, sd2, t_std, t_mad, t0, sg
+        integer(int64) :: sizes(4), m, s_std, s_mad, before
+        integer :: r, k, np
+
+        sizes = [1000_int64, 100000_int64, 1000000_int64, n]
+        write (output_unit, "(a)") '  pf_sigma_clipped_stats: stdfunc="std" against stdfunc="mad_std".'
+        write (output_unit, "(a)") "  `sorts` is parquet_debug_stats_sorts() over one call: the orderings each arm pays for."
+        write (output_unit, "(a)") ""
+        write (output_unit, "(a)") "  sigma=3 CONVERGES in one round on this population; sigma=0.5 keeps clipping, which"
+        write (output_unit, "(a)") "  is the only case the O(k n log n) question is about."
+        write (output_unit, "(a)") ""
+        write (output_unit, "(a)") "  sigma          n        std ms     mad_std ms       ratio   sorts std   sorts mad"
+        write (output_unit, "(a)") "  -------------------------------------------------------------------------------"
+        do np = 1, 2
+            sg = 3.0_real64
+            if (np == 2) sg = 0.5_real64
+            do k = 1, 4
+                m = sizes(k)
+                if (m > n) cycle
+                call make_values(x, m)
+
+                call pf_sigma_clipped_stats(x(1:m), m1, md1, sd1, sigma=sg)
+                t_std = huge(0.0_real64)
+                do r = 1, rounds
+                    t0 = now()
+                    call pf_sigma_clipped_stats(x(1:m), m1, md1, sd1, sigma=sg)
+                    t_std = min(t_std, now() - t0)
+                    sink = sink + m1
+                end do
+                before = parquet_debug_stats_sorts()
+                call pf_sigma_clipped_stats(x(1:m), m1, md1, sd1, sigma=sg)
+                s_std = parquet_debug_stats_sorts() - before
+
+                call pf_sigma_clipped_stats(x(1:m), m2, md2, sd2, sigma=sg, stdfunc="mad_std")
+                t_mad = huge(0.0_real64)
+                do r = 1, rounds
+                    t0 = now()
+                    call pf_sigma_clipped_stats(x(1:m), m2, md2, sd2, sigma=sg, stdfunc="mad_std")
+                    t_mad = min(t_mad, now() - t0)
+                    sink = sink + m2
+                end do
+                before = parquet_debug_stats_sorts()
+                call pf_sigma_clipped_stats(x(1:m), m2, md2, sd2, sigma=sg, stdfunc="mad_std")
+                s_mad = parquet_debug_stats_sorts() - before
+
+                write (output_unit, "(2x,f5.1,2x,i9,2x,f12.4,2x,f13.4,2x,f11.2,2x,i11,2x,i11)") &
+                    sg, m, t_std * 1000.0_real64, t_mad * 1000.0_real64, t_mad / t_std, &
+                    s_std, s_mad
+            end do
+        end do
+        write (output_unit, "(a)") ""
+        write (output_unit, "(a)") "  A `sorts mad` that grows with the round count is the O(k n log n) shape; one that stays at"
+        write (output_unit, "(a)") "  `sorts std` would mean the deviations are not being re-ordered and this question is closed."
+    end subroutine mode_clip
 
     ! ==========================================================================================
     ! Shared helpers

@@ -199,7 +199,9 @@ contains
             new_unittest("pf_bin_edges reproduces np.histogram_bin_edges, degenerate cases too", &
                 test_bin_edges_matches_numpy), &
             new_unittest("pf_bin_edges always emits edges pf_histogram will accept", &
-                test_bin_edges_are_always_usable) &
+                test_bin_edges_are_always_usable), &
+            new_unittest("every generated per-kind specific is reached at least once", &
+                test_every_kind_specific_is_reached) &
             ]
     end subroutine collect_tests_parquet_stats
 
@@ -3968,6 +3970,154 @@ contains
         call check(error, nint(sum(counts7)) == 2 .and. nout7 == 0_int64, &
             "so the largest value lands in the last bin rather than outside every one")
     end subroutine test_bin_edges_are_always_usable
+
+    !> Reaches the 24 generated per-kind specifics that P10's coverage run found never called.
+    !!
+    !! **Why this is worth a test of its own.** The per-kind layer is generated from one template,
+    !! so a mistake in the template is a mistake in all six specifics of a family and any one of
+    !! them catches it. What a template CANNOT make uniform is the part that varies by kind:
+    !! `kind_opts` drops `skipnan` and `n_nan` from a kind that cannot hold a NaN, so those
+    !! specifics have a different argument list and a different generated call. Those are exactly
+    !! the ones a sampled cross-kind test misses, and P10's coverage run found 24 of them shipping
+    !! as public API with no test ever having executed them -- a user calling `pf_hmean` on an
+    !! `integer(int64)` array would have been the first.
+    !!
+    !! The assertions are deliberately thin: each specific widens and forwards, so the only thing
+    !! that can go wrong is a mis-wired argument or a lost value, and comparing against the same
+    !! call over `real(real64)` catches both. Depth belongs in the family's own test.
+    subroutine test_every_kind_specific_is_reached(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: xd(4), got, want, od(4), ox(4), e3(3), ed(3)
+        real(real32) :: xs(4)
+        integer(int32) :: xi(4)
+        integer(int64) :: xl(4)
+        logical :: xb(4), allt(4)
+        type(pf_stats) :: acc
+        type(parquet_column) :: ca, cb
+        integer :: k
+
+        xd = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        xs = real(xd, real32)
+        xi = int(xd, int32)
+        xl = int(xd, int64)
+        xb = [.true., .true., .false., .true.]
+        ! All-true for the two power means: a logical array maps .false. to 0, and the geometric
+        ! mean of a population containing a zero is exactly 0 while the harmonic mean of one is
+        ! degenerate. Those are the documented answers and they are asserted in the power-mean
+        ! test; here the point is only that the specific is reached and forwards correctly.
+        allt = .true.
+
+        call pf_sum(xd, want)
+        call pf_sum(xi, got)
+        call check(error, got == want, "pf_sum over int32")
+        if (allocated(error)) return
+        call pf_sum(xl, got)
+        call check(error, got == want, "pf_sum over int64")
+        if (allocated(error)) return
+
+        call pf_mean(xd, want)
+        call pf_mean(xi, got)
+        call check(error, got == want, "pf_mean over int32")
+        if (allocated(error)) return
+        call pf_mean(xl, got)
+        call check(error, got == want, "pf_mean over int64")
+        if (allocated(error)) return
+
+        call pf_gmean(xd, want)
+        call pf_gmean(xl, got)
+        call check(error, close_to(got, want), "pf_gmean over int64")
+        if (allocated(error)) return
+        call pf_gmean(allt, got)
+        call check(error, got == 1.0_real64, "pf_gmean over a logical array")
+        if (allocated(error)) return
+
+        call pf_hmean(xd, want)
+        call pf_hmean(xi, got)
+        call check(error, close_to(got, want), "pf_hmean over int32")
+        if (allocated(error)) return
+        call pf_hmean(xl, got)
+        call check(error, close_to(got, want), "pf_hmean over int64")
+        if (allocated(error)) return
+        call pf_hmean(allt, got)
+        call check(error, got == 1.0_real64, "pf_hmean over a logical array")
+        if (allocated(error)) return
+
+        call pf_cummax(xd, od)
+        call pf_cummax(xi, ox)
+        call check(error, all(ox == od), "pf_cummax over int32")
+        if (allocated(error)) return
+        call pf_cummin(xi, ox)
+        call pf_cummin(xd, od)
+        call check(error, all(ox == od), "pf_cummin over int32")
+        if (allocated(error)) return
+        call pf_cummin(xl, ox)
+        call check(error, all(ox == od), "pf_cummin over int64")
+        if (allocated(error)) return
+        call pf_cumprod(xl, ox)
+        call pf_cumprod(xd, od)
+        call check(error, all(ox == od), "pf_cumprod over int64")
+        if (allocated(error)) return
+
+        ! The logical arms of the cumulative family, against the 1/0 mapping written out by hand.
+        call pf_cummax(xb, ox)
+        call check(error, all(ox == [1.0_real64, 1.0_real64, 1.0_real64, 1.0_real64]), &
+            "pf_cummax over a logical array")
+        if (allocated(error)) return
+        call pf_cummin(xb, ox)
+        call check(error, all(ox == [1.0_real64, 1.0_real64, 0.0_real64, 0.0_real64]), &
+            "pf_cummin over a logical array")
+        if (allocated(error)) return
+        call pf_cumprod(xb, ox)
+        call check(error, all(ox == [1.0_real64, 1.0_real64, 0.0_real64, 0.0_real64]), &
+            "pf_cumprod over a logical array")
+        if (allocated(error)) return
+
+        call pf_zscore(xd, od)
+        call pf_zscore(xl, ox)
+        call check(error, all(ox == od), "pf_zscore over int64")
+        if (allocated(error)) return
+        call pf_zscore(xb, ox)
+        call check(error, ox(1) == ox(2) .and. ox(3) < ox(1), &
+            "pf_zscore over a logical array standardises the 1/0 mapping")
+        if (allocated(error)) return
+
+        call pf_bin_edges(xd, 2, ed)
+        call pf_bin_edges(xi, 2, e3)
+        call check(error, all(e3 == ed), "pf_bin_edges over int32")
+        if (allocated(error)) return
+        call pf_bin_edges(xl, 2, e3)
+        call check(error, all(e3 == ed), "pf_bin_edges over int64")
+        if (allocated(error)) return
+        call pf_bin_edges(xb, 2, e3)
+        call check(error, e3(1) == 0.0_real64 .and. e3(3) == 1.0_real64, &
+            "pf_bin_edges over a logical array spans 0 to 1")
+        if (allocated(error)) return
+
+        ! `pf_cov` over two columns: the one two-sample specific no test had reached, and the one
+        ! whose entry point has to combine BOTH columns' own validity masks rather than one.
+        call ca%init(PK_FLOAT64, 4_int64)
+        call cb%init(PK_FLOAT64, 4_int64)
+        do k = 1, 4
+            call ca%set_at(int(k, int64), xd(k))
+            call cb%set_at(int(k, int64), xd(5 - k))
+        end do
+        call pf_cov(xd, xd(4:1:-1), want)
+        call pf_cov(ca, cb, got)
+        call check(error, close_to(got, want), "pf_cov over two parquet_columns")
+        if (allocated(error)) return
+
+        ! `%update`'s logical and real32 arms.
+        call acc%init()
+        call acc%update(xs)
+        call check(error, acc%n_valid() == 4_int64 .and. close_to(acc%mean(), 2.5_real64), &
+            "%update over a real32 array")
+        if (allocated(error)) return
+        call acc%clear()
+        call acc%init()
+        call acc%update(xb)
+        call check(error, acc%n_valid() == 4_int64 .and. close_to(acc%mean(), 0.75_real64), &
+            "%update over a logical array")
+    end subroutine test_every_kind_specific_is_reached
 
     !> Whether two reals agree to the golden tolerance.
     logical function close_to(got, want)

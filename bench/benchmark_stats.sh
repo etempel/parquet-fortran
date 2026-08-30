@@ -36,6 +36,15 @@
 #   thread  The `speedup` column, but ONLY after both bit-exactness gates report yes. The program
 #           exits nonzero if either fails, because a threaded arm that does not reproduce the serial
 #           answer makes every speedup beside it worthless.
+#   iqr     The `sort/select` column, which answers feature_pandas_S4.md's P6-1. Above 1 means
+#           selecting the two order statistics beats sorting once, i.e. the shipped default is
+#           right. Both arms are the shipped `pf_iqr` with the sort threshold moved either side of
+#           2 by the debug override, so neither is a replica, and the two answers are compared bit
+#           for bit before any timing is believed.
+#   clip    The `ratio` and `sorts mad` columns, which answer P8-3. `stdfunc="mad_std"` orders the
+#           DEVIATIONS once per clipping round on top of the single ordering of the values, so a
+#           `sorts mad` that grows with the round count is the O(k n log n) shape the interval
+#           property was chosen to avoid, and `ratio` is what it costs.
 #   library The same question asked of the SHIPPED procedure through its public `threads=`
 #           argument, so this is what a caller actually sees. It is well below --mode=thread's
 #           ceiling by construction: that one times pass two alone over an already-compacted
@@ -58,7 +67,7 @@ NROWS="${NROWS:-10000000}"
 ROUNDS="${ROUNDS:-5}"
 THREADS="${THREADS:-}"
 
-MODES=(floor phases shapes thread library)
+MODES=(floor phases shapes thread library iqr clip)
 for arg in "$@"; do
     case "$arg" in
         --mode=*) MODES=("${arg#--mode=}") ;;
@@ -134,6 +143,11 @@ fi
 
 fpm build --profile release >/dev/null
 
+# `${arr[@]+"${arr[@]}"}` and not a plain `"${arr[@]}"`: under `set -u`, bash 3.2 -- which is what
+# macOS ships and what `#!/usr/bin/env bash` finds there -- treats an EMPTY array's expansion as an
+# unbound variable and dies. `THREADS` is empty by default, so the plain form made this wrapper
+# unrunnable on two of this project's three machines for every mode at once, with an error naming
+# the array rather than the cause. See CLAUDE.md, "A tools/*.sh check must run under bash 3.2".
 THREAD_FLAG=()
 if [[ -n "$THREADS" ]]; then
     THREAD_FLAG=(--threads="$THREADS")
@@ -141,6 +155,6 @@ fi
 
 for m in "${MODES[@]}"; do
     fpm run benchmark_stats --profile release -- \
-        --mode="$m" --nrows="$NROWS" --rounds="$ROUNDS" "${THREAD_FLAG[@]}"
+        --mode="$m" --nrows="$NROWS" --rounds="$ROUNDS" ${THREAD_FLAG[@]+"${THREAD_FLAG[@]}"}
     echo
 done

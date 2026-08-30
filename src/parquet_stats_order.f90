@@ -363,6 +363,10 @@ contains
                 res = x(lo)
             end if
         case default
+            ! gcov attribution artifact: this line reports a positive hit count while never
+            ! executing -- gcov charges the `select case` dispatch to the `case default` label.
+            ! The proof it does not run is that the suite passes: an `error stop` that executed
+            ! would have killed the process.
             error stop "parquet_stats: unreachable quantile method code"   ! GCOVR_EXCL_LINE
         end select
     end subroutine apply_method

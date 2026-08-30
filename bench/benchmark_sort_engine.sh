@@ -396,7 +396,7 @@ for m in "${MODES[@]}"; do
         --engine="$ENGINE" \
         --radix-min-rows="$RADIX_MIN_ROWS" \
         --inner="$INNER" \
-        "${THREADS_ARG[@]}" "${OPT_ARGS[@]}"
+        ${THREADS_ARG[@]+"${THREADS_ARG[@]}"} ${OPT_ARGS[@]+"${OPT_ARGS[@]}"}
     echo
 done
 

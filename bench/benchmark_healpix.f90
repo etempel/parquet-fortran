@@ -40,7 +40,9 @@
 !! Driven by `bench/benchmark_healpix.sh`, which is where the environment (`--profile release`, and
 !! the assertion that it actually produced optimisation) is handled. Maintainer-only.
 program benchmark_healpix
+#ifdef _OPENMP
     use omp_lib, only: omp_get_wtime, omp_get_max_threads
+#endif
     use, intrinsic :: iso_fortran_env, only: real64, int32, int64, output_unit, error_unit
     use parquet_healpix
     implicit none
@@ -85,7 +87,7 @@ program benchmark_healpix
     write(output_unit, '(a,a)') '  mode          : ', mode
     write(output_unit, '(a,i0)') '  nside         : ', nside_b
     write(output_unit, '(a,i0)') '  rounds        : ', rounds
-    write(output_unit, '(a,i0)') '  omp_get_max_threads() : ', omp_get_max_threads()
+    write(output_unit, '(a,i0)') '  omp_get_max_threads() : ', omp_available()
     write(output_unit, '(a)') repeat('=', 96)
     write(output_unit, '(a)') ''
     flush(output_unit)
@@ -123,6 +125,33 @@ program benchmark_healpix
         'timed loop is dead code): ', chk, '  ', chkr
 
 contains
+
+    !> Wall-clock seconds. `omp_get_wtime` when there is OpenMP, `system_clock` otherwise.
+    !!
+    !! An UNGUARDED `use omp_lib` is a COMPILE failure rather than a graceful fallback to serial,
+    !! and MacPorts' flang ships no `omp_lib.mod` at all -- so without this pair the whole package
+    !! fails to build under flang, taking every other target with it. Copied from
+    !! `bench/benchmark_spatial.f90`, which had it already. See CLAUDE.md, "The three machines
+    !! available for testing".
+    real(real64) function wtime() result(t)
+        integer(int64) :: c, rate
+
+#ifdef _OPENMP
+        t = omp_get_wtime()
+#else
+        call system_clock(count=c, count_rate=rate)
+        t = real(c, kind=real64) / real(rate, kind=real64)
+#endif
+    end function wtime
+
+    !> How many threads OpenMP offers, or 1 without it.
+    integer function omp_available() result(n)
+
+        n = 1
+#ifdef _OPENMP
+        n = omp_get_max_threads()
+#endif
+    end function omp_available
 
     ! ============================================================================================
     ! Command line
@@ -425,18 +454,18 @@ contains
         sink = 0_int64
         best_f = huge(0.0_real64); best_b = huge(0.0_real64)
         do rep = 1, rounds
-            t0 = omp_get_wtime()
+            t0 = wtime()
             do k = 1_int64, nq
                 call pf_ang2pix_ring(nsg, th(k), ph(k), o64(k))
             end do
-            tf = omp_get_wtime() - t0
+            tf = wtime() - t0
             best_f = min(best_f, tf)
             sink = sink + o64(1)
-            t0 = omp_get_wtime()
+            t0 = wtime()
             do k = 1_int64, nq
                 call gring%ang2pix(th(k), ph(k), o64(k))
             end do
-            tb = omp_get_wtime() - t0
+            tb = wtime() - t0
             best_b = min(best_b, tb)
             sink = sink + o64(1)
         end do
@@ -444,33 +473,33 @@ contains
 
         best_f = huge(0.0_real64); best_b = huge(0.0_real64)
         do rep = 1, rounds
-            t0 = omp_get_wtime()
+            t0 = wtime()
             do k = 1_int64, nq
                 call pf_vec2pix_nest(nsg, vv(:, k), o64(k))
             end do
-            best_f = min(best_f, omp_get_wtime() - t0)
+            best_f = min(best_f, wtime() - t0)
             sink = sink + o64(1)
-            t0 = omp_get_wtime()
+            t0 = wtime()
             do k = 1_int64, nq
                 call gnest%vec2pix(vv(:, k), o64(k))
             end do
-            best_b = min(best_b, omp_get_wtime() - t0)
+            best_b = min(best_b, wtime() - t0)
             sink = sink + o64(1)
         end do
         call grid_row('vec2pix NEST', best_f, best_b, nq)
 
         best_f = huge(0.0_real64); best_b = huge(0.0_real64)
         do rep = 1, rounds
-            t0 = omp_get_wtime()
+            t0 = wtime()
             do k = 1_int64, nq
                 call pf_pix2ang_ring(nsg, pin64(k), oth(k), oph(k))
             end do
-            best_f = min(best_f, omp_get_wtime() - t0)
-            t0 = omp_get_wtime()
+            best_f = min(best_f, wtime() - t0)
+            t0 = wtime()
             do k = 1_int64, nq
                 call gring%pix2ang(pin64(k), oth(k), oph(k))
             end do
-            best_b = min(best_b, omp_get_wtime() - t0)
+            best_b = min(best_b, wtime() - t0)
         end do
         call grid_row('pix2ang RING', best_f, best_b, nq)
 
@@ -478,17 +507,17 @@ contains
         ! reduces to, so the ratio prices the degree scaling and the reflection, and nothing else.
         best_f = huge(0.0_real64); best_b = huge(0.0_real64)
         do rep = 1, rounds
-            t0 = omp_get_wtime()
+            t0 = wtime()
             do k = 1_int64, nq
                 call gring%ang2pix(th(k), ph(k), o64(k))
             end do
-            best_f = min(best_f, omp_get_wtime() - t0)
+            best_f = min(best_f, wtime() - t0)
             sink = sink + o64(1)
-            t0 = omp_get_wtime()
+            t0 = wtime()
             do k = 1_int64, nq
                 call gring%radec2pix(oph(k), oth(k), o64(k))
             end do
-            best_b = min(best_b, omp_get_wtime() - t0)
+            best_b = min(best_b, wtime() - t0)
             sink = sink + o64(1)
         end do
         call grid_row('radec2pix/ang', best_f, best_b, nq)
@@ -498,18 +527,18 @@ contains
         rad = 1.0_real64 * 3.141592653589793_real64 / 180.0_real64
         best_f = huge(0.0_real64); best_b = huge(0.0_real64)
         do rep = 1, rounds
-            t0 = omp_get_wtime()
+            t0 = wtime()
             do r = 1, 2000
                 call pf_query_disc(nsg, vv(:, r), rad, disc, nlist, scheme=PF_HP_RING)
                 sink = sink + nlist
             end do
-            best_f = min(best_f, omp_get_wtime() - t0)
-            t0 = omp_get_wtime()
+            best_f = min(best_f, wtime() - t0)
+            t0 = wtime()
             do r = 1, 2000
                 call gring%query_disc(vv(:, r), rad, disc, nlist)
                 sink = sink + nlist
             end do
-            best_b = min(best_b, omp_get_wtime() - t0)
+            best_b = min(best_b, wtime() - t0)
         end do
         write(output_unit, '(a16,3(f12.3))') 'query_disc (us)', &
             best_f * 1.0e6_real64 / 2000.0_real64, best_b * 1.0e6_real64 / 2000.0_real64, &
@@ -580,34 +609,34 @@ contains
 
         c_conv = huge(0.0_real64)
         do rep = 1, 5
-            t0 = omp_get_wtime()
+            t0 = wtime()
             do i = 1_int64, nq
                 call pf_ang2vec((90.0_real64 - dec(i)) * pi / 180.0_real64, &
                                 ra(i) * pi / 180.0_real64, v1(:, i))
             end do
-            c_conv = min(c_conv, omp_get_wtime() - t0)
+            c_conv = min(c_conv, wtime() - t0)
         end do
         c_conv = c_conv * 1.0e9_real64 / real(nq, real64)
 
         c_vec = huge(0.0_real64)
         do rep = 1, 5
             sink = 0.0_real64
-            t0 = omp_get_wtime()
+            t0 = wtime()
             do i = 1_int64, nq
                 call pf_angdist(v1(:, i), v2(:, i), d)
                 sink = sink + d
             end do
-            c_vec = min(c_vec, omp_get_wtime() - t0)
+            c_vec = min(c_vec, wtime() - t0)
         end do
         c_vec = c_vec * 1.0e9_real64 / real(nq, real64)
 
         c_deg = huge(0.0_real64)
         do rep = 1, 5
-            t0 = omp_get_wtime()
+            t0 = wtime()
             do i = 1_int64, nq
                 sink = sink + pf_angdist_deg(ra(i), dec(i), ra(i) + 0.4_real64, dec(i))
             end do
-            c_deg = min(c_deg, omp_get_wtime() - t0)
+            c_deg = min(c_deg, wtime() - t0)
         end do
         c_deg = c_deg * 1.0e9_real64 / real(nq, real64)
 
@@ -672,7 +701,7 @@ contains
 
         best = huge(0.0_real64)
         do rep = 1, rounds
-            t0 = omp_get_wtime()
+            t0 = wtime()
             select case (what)
             case ('ang2pix_r32')
                 do k = 1_int64, n
@@ -744,7 +773,7 @@ contains
                 write(error_unit, '(a)') "benchmark_healpix: conv_one has no case '" // what // "'"
                 error stop 1
             end select
-            t = omp_get_wtime() - t0
+            t = wtime() - t0
             best = min(best, t)
         end do
 
@@ -932,7 +961,7 @@ contains
         ns32 = int(nside_b, int32)
         t = huge(0.0_real64)
         do rep = 1, rounds
-            t0 = omp_get_wtime()
+            t0 = wtime()
             select case (id)
             case (1); call pf_ang2pix_ring_bulk(ns32, th(1:n), ph(1:n), o32(1:n), threads=threads)
             case (2); call pf_ang2pix_ring_bulk(ns64, th(1:n), ph(1:n), o64(1:n), threads=threads)
@@ -953,7 +982,7 @@ contains
             case (17); call pf_ang2vec_bulk(th(1:n), ph(1:n), ov(:, 1:n), threads=threads)
             case (18); call pf_vec2ang_bulk(vv(:, 1:n), oth(1:n), oph(1:n), threads=threads)
             end select
-            el = omp_get_wtime() - t0
+            el = wtime() - t0
             t = min(t, el)
         end do
         call absorb(n)
@@ -974,7 +1003,7 @@ contains
         ns32 = int(nside_b, int32)
         t = huge(0.0_real64)
         do rep = 1, rounds
-            t0 = omp_get_wtime()
+            t0 = wtime()
             select case (id)
             case (1); do k = 1_int64, n; call pf_ang2pix_ring(ns32, th(k), ph(k), o32(k)); end do
             case (2); do k = 1_int64, n; call pf_ang2pix_ring(ns64, th(k), ph(k), o64(k)); end do
@@ -995,7 +1024,7 @@ contains
             case (17); do k = 1_int64, n; call pf_ang2vec(th(k), ph(k), ov(:, k)); end do
             case (18); do k = 1_int64, n; call pf_vec2ang(vv(:, k), oth(k), oph(k)); end do
             end select
-            el = omp_get_wtime() - t0
+            el = wtime() - t0
             t = min(t, el)
         end do
         call absorb(n)
@@ -1055,10 +1084,10 @@ contains
             best = huge(0.0_real64)
             tsum = 0.0_real64
             do r = 1, reps
-                t0 = omp_get_wtime()
+                t0 = wtime()
                 call pf_ang2pix_ring_bulk(int(nside_b, int64), th(1:tiny), ph(1:tiny), &
                                           o64(1:tiny), threads=tlist(j))
-                el = omp_get_wtime() - t0
+                el = wtime() - t0
                 each(r) = el
                 best = min(best, el)
                 tsum = tsum + el
@@ -1165,40 +1194,40 @@ contains
         tall = huge(0.0_real64)
         t32 = huge(0.0_real64)
         do rep = 1, rounds
-            t0 = omp_get_wtime()
+            t0 = wtime()
             do k = 1_int64, nq
                 call pf_ang2vec(qt(k), qp(k), v)
                 call pf_query_disc(ns, v, r, buf, nl, scheme=scheme, inclusive=inclusive)
                 chk = ieor(ishftc(chk, 1), nl)
             end do
-            el = omp_get_wtime() - t0
+            el = wtime() - t0
             tbuf = min(tbuf, el)
 
-            t0 = omp_get_wtime()
+            t0 = wtime()
             do k = 1_int64, nq
                 call pf_ang2vec(qt(k), qp(k), v)
                 call pf_query_disc_count(ns, v, r, nl, scheme=scheme, inclusive=inclusive)
                 chk = ieor(ishftc(chk, 1), nl)
             end do
-            el = omp_get_wtime() - t0
+            el = wtime() - t0
             tcnt = min(tcnt, el)
 
-            t0 = omp_get_wtime()
+            t0 = wtime()
             do k = 1_int64, nq
                 call pf_ang2vec(qt(k), qp(k), v)
                 call pf_query_disc_alloc(ns, v, r, alloced, nl, scheme=scheme, inclusive=inclusive)
                 chk = ieor(ishftc(chk, 1), nl)
             end do
-            el = omp_get_wtime() - t0
+            el = wtime() - t0
             tall = min(tall, el)
 
-            t0 = omp_get_wtime()
+            t0 = wtime()
             do k = 1_int64, nq
                 call pf_ang2vec(qt(k), qp(k), v)
                 call pf_query_disc(int(ns, int32), v, r, buf32, nl32, scheme=scheme, inclusive=inclusive)
                 chk = ieor(ishftc(chk, 1), int(nl32, int64))
             end do
-            el = omp_get_wtime() - t0
+            el = wtime() - t0
             t32 = min(t32, el)
         end do
 

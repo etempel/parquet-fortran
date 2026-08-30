@@ -239,6 +239,7 @@ something a reader is expected to have.
 | [Risk-171](#risk-171--every-tier-of-parquet_stats-must-test-saw_nan-not-only-the-moments) | Every tier of `parquet_stats` must test `saw_nan`, not only the moments | 4 — covered |
 | [Risk-172](#risk-172--a-running-fold-built-on--or--silently-drops-a-nan-instead-of-propagating-it) | A running fold built on `<` or `>` silently DROPS a NaN instead of propagating it | 4 — covered |
 | [Risk-173](#risk-173--a-two-pass-size-then-fill-whose-sizing-pass-discards-work-writes-past-the-buffer-and-the-answer-is-still-right) | A two-pass size-then-fill whose sizing pass DISCARDS work writes past the buffer, and the answer is still right | 4 — covered |
+| [Risk-174](#risk-174--a-threaded-sort-that-never-decomposes-is-invisible-and-the-fortran-engine-has-its-own-floor) | A threaded sort that never decomposes is invisible, and the Fortran engine has its own floor | 4 — covered |
 
 ---
 
@@ -3096,12 +3097,19 @@ off by one; the values ignored in favour of an even split) survived the entire s
 noticed — the sweep was exercising the pairwise merge it had been written to replace. Zero
 invocations is a passing test, exactly as zero comparisons was for the partial sort (Risk-35).
 
-**Covered by** `the final merge round is really co-ranked` (`test/test_sorting.f90`), which asserts
+**Covered by** `the final merge round is really co-ranked` (`test/test_sorting_cpp.f90` — it drives
+the C++ engine, so it moved there with the runner split), which asserts
 `parquet_debug_get_sort_merge_threads_used() > 1` — the **final** round specifically, since a merge
 that co-ranked only its first round would report a healthy maximum while leaving the whole tail in
 place — plus two negative controls (below the minimum-work threshold, and `threads=1`, both of which
 must report 1). Every other merge test lowers the floor with
 `parquet_debug_set_sort_merge_min_segment` first.
+
+**The dense sweep that does that lowering is `co-ranking equals the serial permutation at every
+size`, and it had to be REBUILT once the Fortran engine started shipping** — the five sweeps that
+used to provide it now run the Fortran engine, which has no merge to co-rank, so for a while this
+entry's own coverage argument named tests that no longer exercised it. See **Risk-174**, which is
+the same shape in the other engine.
 
 **What this still forbids.**
 
@@ -6987,3 +6995,79 @@ builds catch it, both run by hand:
 
 So the test's only job is to make the input exist; the checked build is the assertion. Re-run one of
 the two after any change to either walk.
+
+
+### Risk-174 — A threaded sort that never decomposes is invisible, and the Fortran engine has its own floor
+
+The same shape as **Risk-49**, in the other engine, and it had to be found separately because the two
+engines share no vocabulary here. The C++ engine sorts chunks and co-ranks a parallel **merge**; the
+Fortran engine — the one that ships — count-prefix-scatters into disjoint **bucket** ranges and never
+merges at all (`grep -n "co-rank" src/*.f90` finds nothing). So `parquet_debug_set_sort_merge_min_segment`
+does not merely name a symbol a Fortran-engine test cannot reach: it names a phase that engine does not
+have, and a test calling it is inert rather than wrong.
+
+**The floor that matters here is a third one, and two of the three were being lowered.**
+`parquet_debug_set_sort_engine_min_rows` and `parquet_debug_set_sort_tail_min_rows` decide whether a
+thread *team opens*. `SORT_RADIX_MIN_ROWS = 128` decides whether the threaded radix *runs* — and the
+radix designs are the only threaded decomposition this engine has. Below it a sort opens a team and
+then runs a serial path inside it, so a "threaded equals serial" assertion compares a serial answer
+with itself and passes. Measured over the sweeps' own fixture with `parquet_debug_sort_design()`:
+`n = 2..127` reported **design 0** at every thread count from 2 to 8, and `n = 128..8192` reported
+design 2. That is 126 of the dense sweep's 399 sizes — **882 of its 2793 points asserting nothing.**
+
+**`parquet_debug_set_sort_task_floor` is NOT the analogue**, which was the standing guess and is
+worth recording so it is not guessed again: that one sizes Design B's *refinement* tasks once the
+decomposition is already running, so lowering it changes the schedule of a decomposition that has
+already been declined.
+
+**Covered by** `force_fortran_bucket_split`, `threaded_split_ran()` and `threaded_design_was()`
+(`test/test_sorting.f90`), used by the six `test_split_*` tests. The helper lowers all three floors together; the control
+asserts `parquet_debug_sort_design() /= 0`, which is 0 unless a threaded radix design ran — measured
+at `n = 4000`, a `real64` key reports design 2 at `threads = 2..8` and **0** at `threads = 1`, so it
+answers the question the oracle cannot. Both halves are mutation-proven: reverting the radix floor
+makes the sweep fail at `n = 2`.
+
+**What this still forbids.**
+
+- **Never assert a threaded sort only through its answer.** The permutation is bit-identical either
+  way — that identity is what makes threading safe — so the oracle cannot tell a decomposed sort from
+  a serial fallback. Pair it with `threaded_split_ran()`.
+- **Never lower only the team floors.** A team that opens and then sorts serially is the exact failure
+  this entry is about, and it looks like a healthy threaded test from every angle including
+  `parquet_debug_sort_threads_used`, which reports the team that was *opened*.
+- **Both radix designs count, and which one a fixture reaches is a property of its KEY FAMILY.**
+  Measured at `n = 4000`: `real64` reaches design 2 (the bucket split) while a `character` key and a
+  two-key set reach design 1 (the LSD chain). A control written as `design == 2` would therefore
+  refuse two of the three families outright — assert `/= 0`.
+- **A knob named for one engine's phase must not be assumed to have an analogue in the other.** The
+  useful move on finding one inert is to ask what phase the shipped engine actually has, not to look
+  for the nearest-named override.
+
+**Both designs need their own sweep, and design 1 had none.** The sweeps are `real64` and reach
+design 2; a `character` key reaches design 1, whose boundaries are computed by different code and
+which was covered at `n = 4000` alone. `the LSD chain splits identically at every size` is the
+matching dense sweep, and `threaded_design_was(1)` — asserting the design **by number** rather than
+`/= 0` — is what stops a future key-family change routing strings to design 2 and silently taking
+design 1's only threaded coverage with it.
+
+**What the small end does NOT add, and the structural reason — worth recording so nobody looks for
+this defect class again.** The obvious candidate for a small-n-only defect is *more threads than
+rows*: idle threads, empty chunks, a `sort_chunk_bounds` boundary with `base == 0`. **It cannot
+happen.** `resolve_thread_count` (`src/parquet_argsort_kernel.f90`) ends with
+`if (count > nrows) count = max(nrows, 1_int64)`, so the team is capped by the row count and
+`base >= 1` always; the refinement call sites are safe for a different reason, since a task is only
+refined when it exceeds `2048 * nt`. Confirmed empirically before it was traced: an `error stop`
+placed in the `base == 0` branch never fired across the whole `sorting` suite. So the small end of a
+sweep differs from the large end in bucket *population*, not in code path — it is cheap insurance,
+not a distinct capability. Consistent with that, a deliberate defect in the small-bucket shortcut
+(`m == 1` widened to `m <= 2`, `src/parquet_argsort_engine.f90`) was caught at `n = 25` by the fixed
+sweep **and also** by the pre-fix sweep from its large sizes, because two-row buckets arise at
+`n = 8192` too.
+
+**Two method notes from establishing that, both of which nearly inverted a verdict.** A
+*never-reached* probe is indistinguishable from a *stale build*, so it needs its own negative
+control — widening the same branch to `base >= 0` and confirming the abort DOES fire is what
+turned "the branch is unreachable" from a guess into a result. And `fpm` reported **"Project is up
+to date"** after `touch src/parquet_argsort_engine.f90`, so one mutation round ran against a binary
+that did not contain the mutation and reported it as survived; `fpm clean --skip` is the only
+reliable answer, per CLAUDE.md's stale-cache note.

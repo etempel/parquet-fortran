@@ -237,6 +237,7 @@ something a reader is expected to have.
 | [Risk-169](#risk-169--a-saturating-context-budget-must-drop-the-frames-text-and-never-its-depth) | A saturating context budget must drop the frame's TEXT and never its DEPTH | 4 — covered |
 | [Risk-170](#risk-170--a-write-to-a-log-sink-a-copy-has-closed-must-abort-not-go-nowhere) | A write to a log sink a copy has closed must ABORT, not go nowhere | 4 — covered |
 | [Risk-171](#risk-171--every-tier-of-parquet_stats-must-test-saw_nan-not-only-the-moments) | Every tier of `parquet_stats` must test `saw_nan`, not only the moments | 4 — covered |
+| [Risk-172](#risk-172--a-running-fold-built-on--or--silently-drops-a-nan-instead-of-propagating-it) | A running fold built on `<` or `>` silently DROPS a NaN instead of propagating it | 4 — covered |
 
 ---
 
@@ -6900,6 +6901,32 @@ it will pass every assertion anyone writes about its own arithmetic.
 and then asserts the **opposite** at the default `skipnan = .true.`, where every one of them must
 answer a number. Copy that shape rather than only the first half: without the second, a `pf_mad`
 that returned NaN unconditionally would pass.
+
+### Risk-172 — A running fold built on `<` or `>` silently DROPS a NaN instead of propagating it
+
+Under `skipnan = .false.` a NaN is an ordinary value, so `pf_cummax`/`pf_cummin` must poison every
+later element from the first NaN on — which is what `np.maximum.accumulate` and pandas'
+`cummax(skipna=False)` do. **The obvious implementation cannot: `if (v > acc) acc = v` is FALSE for
+a NaN `v`, so the NaN is read as "not larger" and discarded, and the running maximum sails on with a
+perfectly ordinary number.** Reaching for `max()` instead is the same trap by another route:
+`max(NaN, x)` is `x` on most implementations.
+
+This is not hypothetical. It shipped in P9's first draft, with a source comment asserting the
+opposite — that once `acc` holds a NaN it stays one, which is true and irrelevant, because the NaN
+never gets *into* `acc`. It was found by a hand-written probe before any test existed, not by
+review, and every answer it produced was in range and plausible.
+
+**What it forbids.** A running fold whose combination step is a comparison needs an explicit
+`if (v /= v)` arm ahead of that comparison. The two folds in `cum_scan`
+(`src/parquet_stats_relate.f90`) have one; a third — a running argmax, a running range, a windowed
+extremum — will need its own, and nothing will warn. Folds built on arithmetic (`+`, `*`) are
+exempt, because IEEE propagates a NaN through them for free, which is exactly why `pf_cumsum` and
+`pf_cumprod` never had the defect and why testing only those two would prove nothing.
+
+**Test.** `test_cumulative_null_rule` (`test/test_stats.f90`) asserts, on all FOUR folds, that every
+element from the NaN onward is a NaN under `skipnan = .false.` — and then the opposite at the
+default, where the same NaN is excluded and the running value carries past it. Both halves are
+needed: a fold that returned NaN unconditionally passes the first alone.
 
 ### Risk-170 — A write to a log sink a copy has closed must ABORT, not go nowhere
 

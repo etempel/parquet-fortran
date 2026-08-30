@@ -1768,7 +1768,19 @@ contains
             new_unittest("a negative sigma-clip width aborts", &
                 test_stats_clip_bad_sigma_aborts), &
             new_unittest("a short pf_zscore output array aborts", &
-                test_stats_zscore_size_mismatch_aborts) &
+                test_stats_zscore_size_mismatch_aborts), &
+            new_unittest("a short cumulative output array aborts", &
+                test_stats_cumsum_size_mismatch_aborts), &
+            new_unittest("a short cumulative out_valid mask aborts", &
+                test_stats_cum_out_valid_mismatch_aborts), &
+            new_unittest("fewer than two bin edges aborts", &
+                test_stats_edges_too_few_aborts), &
+            new_unittest("bin edges that are not strictly increasing abort", &
+                test_stats_edges_not_increasing_aborts), &
+            new_unittest("a NaN bin edge aborts, naming the NaN rather than the ordering", &
+                test_stats_edges_nan_aborts), &
+            new_unittest("one histogram count per EDGE rather than per bin aborts", &
+                test_stats_histogram_counts_size_aborts) &
             ]
         testsuite = [p1, p2, p3, p4, p5, p6, p7, p8, p9]
     end subroutine collect_tests_parquet_errors
@@ -6262,6 +6274,74 @@ contains
             failure_message="a short pf_zscore output array was expected to abort", &
             required_stderr="elements but values has")
     end subroutine test_stats_zscore_size_mismatch_aborts
+
+    !> parquet_stats abort path: see scenario_stats_cumsum_size_mismatch in
+    !> test/error_scenarios.f90.
+    subroutine test_stats_cumsum_size_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_cumsum_size_mismatch", &
+            expect_abort=.true., &
+            failure_message="a short pf_cumsum output array was expected to abort", &
+            required_stderr="pf_cumsum: out has")
+    end subroutine test_stats_cumsum_size_mismatch_aborts
+
+    !> parquet_stats abort path: see scenario_stats_cum_out_valid_mismatch in
+    !> test/error_scenarios.f90.
+    subroutine test_stats_cum_out_valid_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_cum_out_valid_mismatch", &
+            expect_abort=.true., &
+            failure_message="a short cumulative out_valid mask was expected to abort", &
+            required_stderr="pf_cummax: out_valid has")
+    end subroutine test_stats_cum_out_valid_mismatch_aborts
+
+    !> parquet_stats abort path: see scenario_stats_edges_too_few in test/error_scenarios.f90.
+    subroutine test_stats_edges_too_few_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_edges_too_few", &
+            expect_abort=.true., &
+            failure_message="a single bin edge was expected to abort", &
+            required_stderr="at least two entries to describe one bin")
+    end subroutine test_stats_edges_too_few_aborts
+
+    !> parquet_stats abort path: see scenario_stats_edges_not_increasing in
+    !> test/error_scenarios.f90.
+    subroutine test_stats_edges_not_increasing_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_edges_not_increasing", &
+            expect_abort=.true., &
+            failure_message="a repeated bin edge was expected to abort", &
+            required_stderr="edges must be strictly increasing")
+    end subroutine test_stats_edges_not_increasing_aborts
+
+    !> parquet_stats abort path: see scenario_stats_edges_nan in test/error_scenarios.f90.
+    !>
+    !> The required text is what makes this test worth having separately from the ordering one:
+    !> a NaN edge fails the ordering test too, so a check that dropped the NaN test would still
+    !> abort -- with a message pointing at the wrong half of the caller's edge array.
+    subroutine test_stats_edges_nan_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_edges_nan", &
+            expect_abort=.true., &
+            failure_message="a NaN bin edge was expected to abort", &
+            required_stderr="edges(2) is a NaN")
+    end subroutine test_stats_edges_nan_aborts
+
+    !> parquet_stats abort path: see scenario_stats_histogram_counts_size in
+    !> test/error_scenarios.f90.
+    subroutine test_stats_histogram_counts_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_histogram_counts_size", &
+            expect_abort=.true., &
+            failure_message="one histogram count per edge was expected to abort", &
+            required_stderr="edges describe")
+    end subroutine test_stats_histogram_counts_size_aborts
 
     !> pf_nth_quantile abort path: see scenario_sorting_quantile_out_of_range in
     !> test/error_scenarios.f90. The message names the scale, since 50 is exactly what a caller

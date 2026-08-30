@@ -38,6 +38,16 @@ module test_stats_golden
     !> How many elements each `Z_*` row probes.
     integer, parameter :: NZP = 4
 
+    !> How many positions each `K_*` cumulative row is read at.
+    integer, parameter :: NKP = 5
+
+    !> How many bins the `H_*` histogram rows carry.
+    integer, parameter :: NHB = 4
+
+    !> How many values the exact-boundary binning case carries. Its edge array holds one fewer,
+    !> which is what makes `NHBX - 2` the number of bins.
+    integer, parameter :: NHBX = 6
+
     !> The first 8 values `golden_fixture` must produce. A recipe that has drifted from the
     !! generator's is reported here, as a fixture mismatch, rather than as an unexplained
     !! tolerance failure in every case at once.
@@ -296,5 +306,49 @@ module test_stats_golden
 
     !> an asymmetric clip, where a sigma_lower/sigma_upper mix-up would show
     real(real64), parameter :: C_ASYM(3) = [170.44556281024367_real64, 171.0068359375_real64, 195.424608843367_real64]
+
+    !> The 1-based positions the K_* cumulative rows are read at.
+    integer, parameter :: G_KPROBES(NKP) = [1, 2, 8, 17, 32]
+    !> The running sum of the n=32 recipe, at G_KPROBES.
+    real(real64), parameter :: K_SUM(NKP) = [-468.4931640625_real64, -913.7861328125_real64, -2232.19921875_real64,  &
+        -2104.2587890625_real64, -1964.7099609375_real64]
+    !> The running prod of the n=32 recipe, at G_KPROBES.
+    real(real64), parameter :: K_PROD(NKP) = [-468.4931640625_real64, 208616.71186447144_real64,  &
+        -3.0461911403972076e+18_real64, -4.8831968086477219e+39_real64, -1.5821021222274711e+73_real64]
+    !> The running max of the n=32 recipe, at G_KPROBES.
+    real(real64), parameter :: K_MAX(NKP) = [-468.4931640625_real64, -445.29296875_real64, 18.7109375_real64,  &
+        459.5146484375_real64, 459.5146484375_real64]
+    !> The running min of the n=32 recipe, at G_KPROBES.
+    real(real64), parameter :: K_MIN(NKP) = [-468.4931640625_real64, -468.4931640625_real64, -468.4931640625_real64,  &
+        -468.4931640625_real64, -468.4931640625_real64]
+    !> The same running sum with every 7th element null: the running value must
+    !> carry PAST a null unchanged rather than restart or be poisoned by it.
+    real(real64), parameter :: K_SUM_NULL(NKP) = [-468.4931640625_real64, -913.7861328125_real64, -2134.9091796875_real64,  &
+        -2069.9228515625_real64, -1662.2451171875_real64]
+
+    !> The bin edges the H_* rows are taken against.
+    real(real64), parameter :: G_HEDGES(NHB + 1) = [-400.0_real64, -200.0_real64, 0.0_real64, 200.0_real64, 400.0_real64]
+    !> numpy's convention: bin k is [edges(k), edges(k+1)), last closed at the top.
+    real(real64), parameter :: H_LEFT(NHB) = [8.0_real64, 5.0_real64, 8.0_real64, 5.0_real64]
+    integer, parameter :: H_LEFT_OUT = 6
+    !> pandas' convention: bin k is (edges(k), edges(k+1)], first closed at the bottom.
+    real(real64), parameter :: H_RIGHT(NHB) = [8.0_real64, 5.0_real64, 8.0_real64, 5.0_real64]
+    integer, parameter :: H_RIGHT_OUT = 6
+    !> the weighted counts, `w(i) = mod(i, 5)`, so every 5th element weighs nothing.
+    real(real64), parameter :: H_WT(NHB) = [14.0_real64, 9.0_real64, 24.0_real64, 8.0_real64]
+    integer, parameter :: H_WT_OUT = 5
+
+    !> The exact-boundary case: every interior edge lands ON one of these values,
+    !> which is the only way the two conventions can be told apart at an edge.
+    real(real64), parameter :: G_HBX(NHBX) = [-1.0_real64, 0.0_real64, 2.0_real64, 4.0_real64, 8.0_real64, 9.0_real64]
+    real(real64), parameter :: G_HBE(NHBX - 1) = [0.0_real64, 2.0_real64, 4.0_real64, 6.0_real64, 8.0_real64]
+    !> Its codes and bin counts under the lower-closed convention.
+    integer, parameter :: HB_LEFT(NHBX) = [0, 1, 2, 3, 4, 0]
+    integer, parameter :: HB_LEFT_N(NHBX - 2) = [1, 1, 1, 1]
+    integer, parameter :: HB_LEFT_OUT = 2
+    !> Its codes and bin counts under the upper-closed convention.
+    integer, parameter :: HB_RIGHT(NHBX) = [0, 1, 1, 2, 4, 0]
+    integer, parameter :: HB_RIGHT_N(NHBX - 2) = [2, 1, 0, 1]
+    integer, parameter :: HB_RIGHT_OUT = 2
 
 end module test_stats_golden ! GCOVR_EXCL_LINE

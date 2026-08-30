@@ -4,8 +4,13 @@
 ! Copyright (c) Elmo Tempel
 ! Licensed under the MIT License - see LICENSE
 !===========================================
-!> The relational tier of `parquet_stats`: statistics of TWO samples, and of one sample
-!! transformed element by element.
+!> The relational tier of `parquet_stats`: statistics of TWO samples, of one sample transformed
+!! element by element, and the four running folds.
+!!
+!! **Everything here is VECTOR-shaped in at least one direction**, which is what groups an
+!! otherwise odd set: `pf_cov`/`pf_corr` take two arrays in, `pf_zscore` and the cumulative family
+!! give one array out. Nothing here reduces a population to a single number without also needing
+!! a second sequence to do it with.
 !!
 !! **Pairwise-complete is the rule, and it is not a preference.** A pair enters a two-sample
 !! population only when both of its elements are usable; handling nullness independently per array
@@ -17,8 +22,22 @@
 !! That is what makes `pf_cov(x, x)` exactly `pf_variance(x)`: both reach the same block tree, the
 !! same `pair_reduce` and the same re-centring correction. A local accumulation loop would agree
 !! to fifteen digits and differ in the sixteenth, and the identity is the more valuable of the two.
+!!
+!! **The cumulative family's null rule is NOT the reduction family's, and `cum_scan` is where it
+!! lives.** An excluded element yields an excluded OUTPUT element and the running value carries
+!! past it unchanged -- pandas' rule -- so "the output element is undefined" and "the rest of the
+!! output is undefined" are one careless line apart and only the first is meant. One loop serves
+!! all four folds for exactly that reason: four copies of that rule would be four chances to get
+!! the second sentence instead of the first.
 submodule (parquet_stats) parquet_stats_relate
     implicit none
+
+    !> Which fold `cum_scan` applies. Private to this submodule: they name a branch, not a rule a
+    !! caller chooses between, so every public entry point picks one for itself.
+    integer, parameter :: CUM_SUM = 1   !! the running sum.
+    integer, parameter :: CUM_PROD = 2  !! the running product.
+    integer, parameter :: CUM_MAX = 3   !! the running maximum.
+    integer, parameter :: CUM_MIN = 4   !! the running minimum.
 
 contains
 
@@ -294,5 +313,139 @@ contains
         ! information.
         if (present(ok)) ok = .not. any_excluded
     end procedure zscore_f64
+
+    ! ==================================================================================
+    ! The cumulative family
+    ! ==================================================================================
+
+    !> The one prefix scan behind `pf_cumsum`, `pf_cumprod`, `pf_cummax` and `pf_cummin`.
+    !!
+    !! **Four generics, one null rule, one loop.** The rule -- an excluded element yields an
+    !! excluded output element and the running value continues past it unchanged -- is the whole
+    !! substance of this family, and four copies of it would be four chances to diverge on a case
+    !! nothing tests. Only `fold` differs between them.
+    !!
+    !! `started` rather than a sentinel initial value: the identity for a sum is 0 and for a
+    !! product 1, but for a running maximum it would have to be `-huge`, which is a real number a
+    !! caller can legitimately hold. A flag costs one branch and cannot be confused with data.
+    subroutine cum_scan(values, out, op, what, is_valid, skipnan, out_valid, n_null, n_nan, ok)
+        real(real64), intent(in) :: values(:)               !! the population, in scan order.
+        real(real64), intent(out) :: out(:)                 !! the running value, same size.
+        integer, intent(in) :: op                           !! CUM_SUM, CUM_PROD, CUM_MAX or CUM_MIN.
+        character(len=*), intent(in) :: what                !! the public procedure's name.
+        logical, intent(in), optional :: is_valid(:)        !! per element: .false. marks a null.
+        logical, intent(in), optional :: skipnan            !! .true. excludes a NaN from the scan.
+        logical, intent(out), optional :: out_valid(:)      !! per output element: .false. if undefined.
+        integer(int64), intent(out), optional :: n_null     !! how many elements were null.
+        integer(int64), intent(out), optional :: n_nan      !! how many were excluded as NaN.
+        logical, intent(out), optional :: ok                !! .false. when any element was excluded.
+        integer(int64) :: n, i, nnull, nnan
+        real(real64) :: acc, v
+        logical :: skip, started, excluded
+
+        n = size(values, kind=int64)
+        if (size(out, kind=int64) /= n) &
+            error stop what // ": out has " // trim(stats_i2s(size(out, kind=int64))) // &
+                " elements but values has " // trim(stats_i2s(n))
+        if (present(out_valid)) then
+            if (size(out_valid, kind=int64) /= n) &
+                error stop what // ": out_valid has " // &
+                    trim(stats_i2s(size(out_valid, kind=int64))) // &
+                    " elements but values has " // trim(stats_i2s(n))
+        end if
+        call stats_check_sizes(n, what, is_valid)
+        skip = .true.
+        if (present(skipnan)) skip = skipnan
+
+        nnull = 0_int64
+        nnan = 0_int64
+        started = .false.
+        acc = 0.0_real64
+        do i = 1_int64, n
+            excluded = .false.
+            if (present(is_valid)) then
+                if (.not. is_valid(i)) then
+                    nnull = nnull + 1_int64
+                    excluded = .true.
+                end if
+            end if
+            if (.not. excluded .and. skip) then
+                ! `x /= x` rather than `ieee_is_nan`: per-element test, and `ieee_is_nan` is a
+                ! runtime call on half the compiler fleet.
+                if (values(i) /= values(i)) then
+                    nnan = nnan + 1_int64
+                    excluded = .true.
+                end if
+            end if
+            if (excluded) then
+                ! A quiet NaN whether or not `out_valid` was asked for. Writing it anyway means an
+                ! output element is never undefined memory -- a class nagfor's `-nan` build
+                ! reports and the standard leaves non-conforming to read -- and it costs one store
+                ! on a path that has already left the population. **`acc` is deliberately not
+                ! touched**: this is the line that decides the family's null rule.
+                out(i) = stats_nan()
+                if (present(out_valid)) out_valid(i) = .false.
+                cycle
+            end if
+            v = values(i)
+            if (.not. started) then
+                acc = v
+                started = .true.
+            else
+                select case (op)
+                case (CUM_SUM)
+                    acc = acc + v
+                case (CUM_PROD)
+                    acc = acc * v
+                case (CUM_MAX)
+                    ! **The NaN test is not redundant and a probe found that the hard way.** Under
+                    ! `skipnan = .false.` a NaN is a value and must poison every later element, as
+                    ! `np.maximum.accumulate` and pandas' `cummax(skipna=False)` both do -- but
+                    ! `v > acc` is FALSE for a NaN `v`, so without this the NaN is silently
+                    ! discarded and the running maximum sails on. Once `acc` is a NaN it stays
+                    ! one, because `v > acc` is false in that direction too.
+                    if (v /= v) then
+                        acc = v
+                    else if (v > acc) then
+                        acc = v
+                    end if
+                case (CUM_MIN)
+                    if (v /= v) then
+                        acc = v
+                    else if (v < acc) then
+                        acc = v
+                    end if
+                end select
+            end if
+            out(i) = acc
+            if (present(out_valid)) out_valid(i) = .true.
+        end do
+        if (present(n_null)) n_null = nnull
+        if (present(n_nan)) n_nan = nnan
+        ! ONE flag with two causes, and `n_null`/`n_nan` separate them at no cost -- the shape
+        ! `pf_zscore` uses. Note what it does NOT report: a NaN kept under `skipnan = .false.`
+        ! leaves `ok` .true., because nothing was excluded. The output says so itself.
+        if (present(ok)) ok = (nnull + nnan == 0_int64)
+    end subroutine cum_scan
+
+    module procedure cumsum_f64
+        call cum_scan(values, out, CUM_SUM, "pf_cumsum", is_valid, skipnan, out_valid, n_null, &
+            n_nan, ok)
+    end procedure cumsum_f64
+
+    module procedure cumprod_f64
+        call cum_scan(values, out, CUM_PROD, "pf_cumprod", is_valid, skipnan, out_valid, n_null, &
+            n_nan, ok)
+    end procedure cumprod_f64
+
+    module procedure cummax_f64
+        call cum_scan(values, out, CUM_MAX, "pf_cummax", is_valid, skipnan, out_valid, n_null, &
+            n_nan, ok)
+    end procedure cummax_f64
+
+    module procedure cummin_f64
+        call cum_scan(values, out, CUM_MIN, "pf_cummin", is_valid, skipnan, out_valid, n_null, &
+            n_nan, ok)
+    end procedure cummin_f64
 
 end submodule parquet_stats_relate ! GCOVR_EXCL_LINE

@@ -190,6 +190,7 @@ parquet_sorting_search.f90
 parquet_sorting_select.f90
 parquet_sorting_unique.f90
 parquet_stats.f90
+parquet_stats_bin.f90
 parquet_stats_core.f90
 parquet_stats_kernel.f90
 parquet_stats_order.f90
@@ -397,6 +398,7 @@ parquet_spatial_bulk.f90
 parquet_spatial_query.f90
 parquet_spatial_tune.f90
 parquet_stats.f90
+parquet_stats_bin.f90
 parquet_stats_core.f90
 parquet_stats_kernel.f90
 parquet_stats_order.f90

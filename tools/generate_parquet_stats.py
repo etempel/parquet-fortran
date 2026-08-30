@@ -288,6 +288,21 @@ D["converged"] = """            logical, intent(out), optional :: converged
             !! removed, rather than because a round removed nothing. The answer is still usable
             !! -- it is the last completed round's -- so `ok` stays .true. and this is the only
             !! way to tell the two endings apart."""
+D["right"] = """            logical, intent(in), optional :: right
+            !! which side of a bin is closed. `.false.` by default, which is numpy's rule and the
+            !! one `np.histogram`/`np.digitize` use: bin k is `[edges(k), edges(k+1))`, and the
+            !! LAST bin closes at the top so that `edges(nbins+1)` itself lands in it. `.true.`
+            !! mirrors it, which is `pd.cut(right=True, include_lowest=True)`: bin k is
+            !! `(edges(k), edges(k+1)]`, and the FIRST bin closes at the bottom. Either way the
+            !! closed range `[edges(1), edges(nbins+1)]` is covered exactly once, so the two
+            !! conventions differ only in which bin a value sitting exactly on an interior edge
+            !! joins."""
+D["n_outside"] = """            integer(int64), intent(out), optional :: n_outside
+            !! how many usable elements fell outside `[edges(1), edges(nbins+1)]` and so joined no
+            !! bin. This is an ordinary data condition rather than an error -- `np.histogram`
+            !! drops such values silently -- but it is the one thing a caller cannot recover from
+            !! the output, so it is reported. A NaN under `skipnan = .false.` is counted here: it
+            !! is then a value, and it matches no bin."""
 D["count"] = """            integer(int64), intent(out), optional :: count
             !! how many elements hold the modal value. `0` when the population is empty. Counts
             !! ELEMENTS even when weights decided which value won, so a weighted mode reports the
@@ -978,6 +993,20 @@ SIGCLIP_OPTS = ["sigma", "sigma_lower", "sigma_upper", "maxiters", "cenfunc", "s
                 "n_clipped", "keep", "converged", "is_valid", "skipnan", "n_null", "n_nan", "ok",
                 "threads"]
 
+#: The cumulative family -- `pf_cumsum`, `pf_cumprod`, `pf_cummax`, `pf_cummin`. VECTOR-valued,
+#: so `out_valid` again, and no `weights`: a weighted running sum is `pf_cumsum(w*x)` and the
+#: other three have no weighted meaning worth choosing between. No `threads` either -- a prefix
+#: scan is sequential by definition, so an argument here could only ever be ignored.
+CUM_OPTS = ["is_valid", "skipnan", "out_valid", "n_null", "n_nan", "ok"]
+#: The binning family. The bin rule comes first, before the population block, exactly as
+#: `pf_sigma_clipped_stats`' clipping rule does -- `right` says what the bins ARE, so it belongs
+#: with `edges` rather than among the exclusions.
+BUCKETIZE_OPTS = ["right", "is_valid", "skipnan", "n_null", "n_nan", "n_outside", "ok"]
+#: `pf_histogram` adds `weights`, which is why `counts` is a real array: `np.histogram(weights=)`
+#: sums the weights of the values in each bin rather than counting them, and an integer output
+#: could not hold that.
+HISTOGRAM_OPTS = ["right", "is_valid", "weights", "skipnan", "n_null", "n_nan", "n_outside", "ok"]
+
 CORE_IFACES = [
     iface("sum_f64",
           ["`pf_sum` over a 64-bit real array: the PAIRWISE sum of the population.",
@@ -1519,6 +1548,149 @@ RELATE_IFACES = """        !> `pf_cov` over two 64-bit real arrays: the PAIRWISE
 @@sigclip_opts@@
         end subroutine sigma_clipped_stats_f64"""
 
+CUM_IFACES = """        !> `pf_cumsum` over a 64-bit real array: the running sum, element by element.
+        module subroutine cumsum_f64(values, out, is_valid, skipnan, out_valid, n_null, n_nan, ok)
+            real(real64), intent(in) :: values(:) !! the population, in the order it is to be scanned.
+            real(real64), intent(out) :: out(:) !! the running value, same size as `values`.
+@@cum_opts@@
+        end subroutine cumsum_f64
+        !> `pf_cumprod` over a 64-bit real array: the running product.
+        module subroutine cumprod_f64(values, out, is_valid, skipnan, out_valid, n_null, n_nan, ok)
+            real(real64), intent(in) :: values(:) !! the population, in the order it is to be scanned.
+            real(real64), intent(out) :: out(:) !! the running value, same size as `values`.
+@@cum_opts@@
+        end subroutine cumprod_f64
+        !> `pf_cummax` over a 64-bit real array: the running maximum.
+        module subroutine cummax_f64(values, out, is_valid, skipnan, out_valid, n_null, n_nan, ok)
+            real(real64), intent(in) :: values(:) !! the population, in the order it is to be scanned.
+            real(real64), intent(out) :: out(:) !! the running value, same size as `values`.
+@@cum_opts@@
+        end subroutine cummax_f64
+        !> `pf_cummin` over a 64-bit real array: the running minimum.
+        module subroutine cummin_f64(values, out, is_valid, skipnan, out_valid, n_null, n_nan, ok)
+            real(real64), intent(in) :: values(:) !! the population, in the order it is to be scanned.
+            real(real64), intent(out) :: out(:) !! the running value, same size as `values`.
+@@cum_opts@@
+        end subroutine cummin_f64"""
+
+BIN_IFACES = """        !> `pf_bucketize` over a 64-bit real array: which bin each value falls in.
+        !!
+        !! The bins are the intervals between consecutive `edges`, and the answer is a 1-based bin
+        !! number or **0** for a value that joined none -- excluded, or outside the edge range.
+        !! `pd.cut` spells that last case -1 over 0-based codes; 0 is the 1-based spelling of the
+        !! same idea, and it is the value a Fortran caller can test without knowing the bin count.
+        module subroutine bucketize_f64(values, edges, codes, right, is_valid, skipnan, n_null, &
+                n_nan, n_outside, ok)
+            real(real64), intent(in) :: values(:) !! the values to classify.
+            real(real64), intent(in) :: edges(:) !! the bin boundaries, strictly increasing, at least two.
+            integer(int32), intent(out) :: codes(:) !! the 1-based bin of each value, or 0. Same size as `values`.
+@@bucketize_opts@@
+        end subroutine bucketize_f64
+        !> `pf_histogram` over a 64-bit real array: how much weight lands in each bin.
+        !!
+        !! `np.histogram(values, bins=edges)`, and `np.histogram(..., weights=)` when `weights` is
+        !! present. The counts are `real(real64)` for that reason: a weighted histogram sums
+        !! weights rather than counting elements. Unweighted they are whole numbers, exactly, up
+        !! to 2**53 elements in one bin.
+        module subroutine histogram_f64(values, edges, counts, right, is_valid, weights, skipnan, &
+                n_null, n_nan, n_outside, ok)
+            real(real64), intent(in) :: values(:) !! the values to bin.
+            real(real64), intent(in) :: edges(:) !! the bin boundaries, strictly increasing, at least two.
+            real(real64), intent(out) :: counts(:) !! one entry per bin, so `size(edges) - 1` of them.
+@@histogram_opts@@
+        end subroutine histogram_f64"""
+
+#: What each P9 generic's own doc-comment says, on the generic's page.
+CUM_DOC = {
+    "pf_cumsum": [
+        "The running sum of a population -- pandas' `Series.cumsum()`.",
+        "",
+        "**The last element is NOT `pf_sum(values)`, and that is arithmetic rather than a bug.**",
+        "A running sum is sequential by definition, so it accumulates left to right; `pf_sum` is",
+        "PAIRWISE over a fixed block tree. The two agree to within the accumulated rounding of a",
+        "naive sum, which on a large or badly scaled population is several ulps and occasionally",
+        "more. Compare them with a tolerance, or take the total from `pf_sum`."],
+    "pf_cumprod": [
+        "The running product of a population -- pandas' `Series.cumprod()`.",
+        "",
+        "Formed as a product and not in log space, deliberately: unlike `pf_gmean` this has to",
+        "reproduce every intermediate value, including the sign, so a magnitude that overflows to",
+        "infinity is the honest answer rather than something to be routed around."],
+    "pf_cummax": [
+        "The running maximum of a population -- pandas' `Series.cummax()`.",
+        "",
+        "The comparison is IEEE `>`, so a negative zero and a positive zero compare equal and the",
+        "first of them is kept -- which is what numpy and pandas do."],
+    "pf_cummin": [
+        "The running minimum of a population -- pandas' `Series.cummin()`.",
+        "",
+        "The comparison is IEEE `<`, so a negative zero and a positive zero compare equal and the",
+        "first of them is kept -- which is what numpy and pandas do."],
+}
+
+#: The tail the four cumulative generics share. Their null rule is NOT the reduction family's and
+#: has to be stated rather than inherited, which is why this text exists separately.
+_CUM_COMMON = """    !>
+    !> **An excluded element yields an excluded OUTPUT element, and the running value continues
+    !> past it unchanged** -- which is what pandas does, and the whole reason this family needs a
+    !> paragraph of its own. `pf_cumsum([1, null, 3])` is `[1, undefined, 4]`: the null contributes
+    !> nothing and is not carried forward. "The output element is undefined" and "the rest of the
+    !> output is undefined" are one careless line apart, and only the first is meant.
+    !>
+    !> An undefined output element is `.false.` in `out_valid` when that mask is present, and a
+    !> **quiet NaN** when it is not -- there being no other way to say "no value" in a
+    !> `real(real64)` array. `ok` comes back `.false.` when any element was excluded; `n_null` and
+    !> `n_nan` say why. This module aborts on misuse (`out` the wrong size) and never on a data
+    !> condition.
+    !>
+    !> `skipnan = .false.` is the one case where a NaN DOES poison what follows: it is then an
+    !> ordinary value, the running sum of a NaN is a NaN, and every later element is one too.
+    !> That is numpy's `np.cumsum` and pandas' `skipna=False`.
+    !>
+    !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
+    !> `logical` array, or a scalar numeric `type(parquet_column)`; `out` is always
+    !> `real(real64)`, so a running sum of 64-bit integers cannot silently wrap."""
+
+BIN_DOC = {
+    "pf_bucketize": [
+        "Which bin of a sorted edge array each value falls in -- pandas' `pd.cut`.",
+        "",
+        "The primitive behind a histogram, a grouped aggregation over ranges, and every",
+        "hand-written `if (x < a) then ... else if (x < b)` ladder. `codes(i)` is the 1-based",
+        "number of the bin holding `values(i)`, or **0** when it joined none: excluded by",
+        "`is_valid`, a NaN, or outside `[edges(1), edges(nbins+1)]`. `n_null`, `n_nan` and",
+        "`n_outside` separate those three causes exactly.",
+        "",
+        "The search is binary, so the cost is `O(n log nbins)` and an edge array with thousands",
+        "of bins is as cheap as one with four."],
+    "pf_histogram": [
+        "How much of a population falls in each bin -- `np.histogram` with explicit `bins=`.",
+        "",
+        "`counts(k)` is the number of values in bin k, or the SUM OF THEIR WEIGHTS when `weights`",
+        "is present, which is what `np.histogram(weights=)` returns and why the output is real",
+        "rather than integer. Values outside the edge range join no bin and are reported through",
+        "`n_outside`; numpy drops them silently, so this is strictly more information.",
+        "",
+        "This is `pf_bucketize` followed by a tally, and the two agree by construction: the count",
+        "in bin k is the number of `codes` equal to k over the same arguments."],
+}
+
+#: The tail the two binning generics share.
+_BIN_COMMON = """    !>
+    !> `edges` must be **strictly increasing** and hold at least two entries, or the call aborts
+    !> naming the offending index -- an equal pair would describe a bin no value can reach, and a
+    !> descending one is always a mistake. An infinite outer edge is allowed and is the way to
+    !> ask for an open-ended first or last bin. A NaN edge aborts.
+    !>
+    !> Nothing here aborts on a data condition: a value outside the edges, a NaN, a null and an
+    !> entirely empty population are all ordinary and are reported through the counts. `ok` is
+    !> `.false.` when any element failed to reach a bin, for any of those reasons at once.
+    !>
+    !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
+    !> `logical` array, or a scalar numeric `type(parquet_column)`. `edges` is always
+    !> `real(real64)`: it states a rule rather than carrying data, and one type for it keeps the
+    !> generic resolving on `values` alone."""
+
 #: What each P8 generic's own doc-comment says, on the generic's page.
 RELATE_DOC = {
     "pf_cov": [
@@ -1863,6 +2035,91 @@ def sigclip_body(tag, widen, has_nan):
         + ["%s=%s" % (o, "mask" if (o == "is_valid" and tag == "col") else o) for o in mine]
     lines.append("        call " + wrap_call("sigma_clipped_stats_f64", call))
     lines.append("    end procedure sigma_clipped_stats_%s" % tag)
+    return "\n".join(lines)
+
+
+def cum_iface(base, kindword_doc, tag, decl, has_nan, kindword):
+    """One interface body for a cumulative procedure's per-kind entry point."""
+    mine = kind_opts(CUM_OPTS, has_nan)
+    args = wrap_args(["values", "out"] + mine)
+    lines = ["        !> `pf_%s` over %s." % (base, kindword)]
+    lines.append("        module subroutine %s_%s(%s)" % (base, tag, args))
+    lines.append("            " + decl.strip())
+    lines.append("            real(real64), intent(out) :: out(:)")
+    for line in _wrap_doc(kindword_doc):
+        lines.append("            !! " + line)
+    for key in mine:
+        lines.append(D[key])
+    lines.append("        end subroutine %s_%s" % (base, tag))
+    return "\n".join(lines)
+
+
+def cum_body(base, tag, widen, has_nan):
+    """One `module procedure` body for a cumulative procedure's per-kind entry point."""
+    mine = kind_opts(CUM_OPTS, has_nan)
+    lines = ["    module procedure %s_%s" % (base, tag)]
+    lines.append("        real(real64), allocatable :: wide(:)")
+    if tag == "col":
+        lines.append("        logical, allocatable :: mask(:)")
+        lines.append('        call col_to_real64(values, "pf_%s", is_valid, wide, mask)' % base)
+    else:
+        lines.append("        allocate(wide(size(values, kind=int64)))")
+        lines.append("        wide = %s" % widen)
+    call = ["wide", "out"] + ["%s=%s" % (o, "mask" if (o == "is_valid" and tag == "col") else o)
+                              for o in mine]
+    lines.append("        call " + wrap_call("%s_f64" % base, call))
+    lines.append("    end procedure %s_%s" % (base, tag))
+    return "\n".join(lines)
+
+
+#: The four cumulative procedures and the noun each one's `out` argument is described with.
+CUM_WORDS = [("cumsum", "sum"), ("cumprod", "product"),
+             ("cummax", "maximum"), ("cummin", "minimum")]
+
+
+#: The binning family's two shapes: (base, result argument, its declaration, its doc, options).
+BIN_FAMILY = [
+    ("bucketize", "codes", "integer(int32), intent(out) :: codes(:)",
+     "the 1-based bin of each value, or 0 for one that joined none. Same size as `values`.",
+     BUCKETIZE_OPTS),
+    ("histogram", "counts", "real(real64), intent(out) :: counts(:)",
+     "one entry per bin, so `size(edges) - 1` of them.", HISTOGRAM_OPTS),
+]
+
+
+def bin_iface(base, out_name, out_decl, out_doc, opts, tag, decl, has_nan, kindword):
+    """One interface body for a binning procedure's per-kind entry point."""
+    mine = kind_opts(opts, has_nan)
+    args = wrap_args(["values", "edges", out_name] + mine)
+    lines = ["        !> `pf_%s` over %s." % (base, kindword)]
+    lines.append("        module subroutine %s_%s(%s)" % (base, tag, args))
+    lines.append("            " + decl.strip())
+    lines.append("            real(real64), intent(in) :: edges(:) "
+                 "!! the bin boundaries, strictly increasing, at least two.")
+    lines.append("            " + out_decl)
+    for line in _wrap_doc(out_doc):
+        lines.append("            !! " + line)
+    for key in mine:
+        lines.append(D[key])
+    lines.append("        end subroutine %s_%s" % (base, tag))
+    return "\n".join(lines)
+
+
+def bin_body(base, out_name, opts, tag, widen, has_nan):
+    """One `module procedure` body for a binning procedure's per-kind entry point."""
+    mine = kind_opts(opts, has_nan)
+    lines = ["    module procedure %s_%s" % (base, tag)]
+    lines.append("        real(real64), allocatable :: wide(:)")
+    if tag == "col":
+        lines.append("        logical, allocatable :: mask(:)")
+        lines.append('        call col_to_real64(values, "pf_%s", is_valid, wide, mask)' % base)
+    else:
+        lines.append("        allocate(wide(size(values, kind=int64)))")
+        lines.append("        wide = %s" % widen)
+    call = ["wide", "edges", out_name] \
+        + ["%s=%s" % (o, "mask" if (o == "is_valid" and tag == "col") else o) for o in mine]
+    lines.append("        call " + wrap_call("%s_f64" % base, call))
+    lines.append("    end procedure %s_%s" % (base, tag))
     return "\n".join(lines)
 
 
@@ -2304,6 +2561,8 @@ def gen_spec():
     out.append("    public :: pf_iqr, pf_trim_mean, pf_percentile_of_score")
     out.append("    public :: pf_mad, pf_mode, pf_describe")
     out.append("    public :: pf_cov, pf_corr, pf_zscore, pf_sigma_clipped_stats")
+    out.append("    public :: pf_cumsum, pf_cumprod, pf_cummax, pf_cummin")
+    out.append("    public :: pf_bucketize, pf_histogram")
     # `%print` writes solicited output, so this module READS `verbosity` and `message_stream` --
     # and CLAUDE.md's standing rule is that a module re-exports, getter and setter both, every
     # knob its own code reads, so that a narrow `use parquet_stats` program can silence it
@@ -2386,6 +2645,28 @@ def gen_spec():
         for tag, _, _, _, _ in MOMENT_KINDS:
             out.append("        module procedure %s_%s" % (base, tag))
         out.append("    end interface %s" % name)
+    for name in ("pf_cumsum", "pf_cumprod", "pf_cummax", "pf_cummin"):
+        out.append("    !")
+        for line in CUM_DOC[name]:
+            out.append(("    !> " + line).rstrip())
+        for line in _CUM_COMMON.split("\n"):
+            out.append(line.rstrip())
+        out.append("    interface %s" % name)
+        out.append("        module procedure %s_f64" % name[3:])
+        for tag, _, _, _, _ in MOMENT_KINDS:
+            out.append("        module procedure %s_%s" % (name[3:], tag))
+        out.append("    end interface %s" % name)
+    for name in ("pf_bucketize", "pf_histogram"):
+        out.append("    !")
+        for line in BIN_DOC[name]:
+            out.append(("    !> " + line).rstrip())
+        for line in _BIN_COMMON.split("\n"):
+            out.append(line.rstrip())
+        out.append("    interface %s" % name)
+        out.append("        module procedure %s_f64" % name[3:])
+        for tag, _, _, _, _ in MOMENT_KINDS:
+            out.append("        module procedure %s_%s" % (name[3:], tag))
+        out.append("    end interface %s" % name)
     out.append("    !")
     for line in MODE_DOC:
         out.append(("    !> " + line).rstrip())
@@ -2418,6 +2699,16 @@ def gen_spec():
     relate = relate.replace("@@zscore_opts@@", "\n".join(D[k] for k in ZSCORE_OPTS))
     relate = relate.replace("@@sigclip_opts@@", "\n".join(D[k] for k in SIGCLIP_OPTS))
     out.append(relate)
+    cum = CUM_IFACES.replace("@@cum_opts@@", "\n".join(D[k] for k in CUM_OPTS))
+    out.append(cum)
+    out.append("    end interface")
+    out.append("    !")
+    out.append("    ! ---- The real64 binning core (implemented in parquet_stats_bin) ----")
+    out.append("    interface")
+    binning = BIN_IFACES
+    binning = binning.replace("@@bucketize_opts@@", "\n".join(D[k] for k in BUCKETIZE_OPTS))
+    binning = binning.replace("@@histogram_opts@@", "\n".join(D[k] for k in HISTOGRAM_OPTS))
+    out.append(binning)
     out.append("    end interface")
     out.append("    !")
     out.append("    ! ---- pf_mode, one specific per kind (implemented in parquet_stats_order) ----")
@@ -2441,6 +2732,13 @@ def gen_spec():
                               CORR_OPTS, tag, decl, kindword, []))
         out.append(zscore_iface(tag, decl, has_nan, kindword))
         out.append(sigclip_iface(tag, decl, has_nan, kindword))
+        for base, word in CUM_WORDS:
+            out.append(cum_iface(base, "the running %s, same size as `values`. An excluded "
+                                 "element is a quiet NaN unless `out_valid` is present." % word,
+                                 tag, decl, has_nan, kindword))
+        for base, out_name, out_decl, out_doc, opts in BIN_FAMILY:
+            out.append(bin_iface(base, out_name, out_decl, out_doc, opts,
+                                 tag, decl, has_nan, kindword))
     out.append(obj_entry_ifaces())
     out.append("    end interface")
     out.append(object_ifaces())
@@ -2469,6 +2767,10 @@ def gen_kernel():
         bodies.append(pair_body("corr", "r", CORR_OPTS, tag, widen))
         bodies.append(zscore_body(tag, widen, has_nan))
         bodies.append(sigclip_body(tag, widen, has_nan))
+        for base, _ in CUM_WORDS:
+            bodies.append(cum_body(base, tag, widen, has_nan))
+        for base, out_name, _, _, opts in BIN_FAMILY:
+            bodies.append(bin_body(base, out_name, opts, tag, widen, has_nan))
     out.append("\n\n".join(bodies))
     out.append("")
     out.append(obj_entry_bodies())

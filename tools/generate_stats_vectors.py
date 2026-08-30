@@ -392,6 +392,110 @@ def self_test():
                 sps.hmean(np.array([v for v, _ in live]),
                           weights=np.array([w for _, w in live])), "hmean weighted")
 
+    # ---- the cumulative family against pandas, both `skipna` settings ----
+    #
+    # pandas is the reference the design names, and it is the ONE place the family's null rule can
+    # be checked against something other than this file: "the running value carries past a null"
+    # is a sentence, and `Series.cumsum()` is that sentence executed.
+    xk = fixture(32)
+    valid7 = [(i % 7) != 0 for i in range(1, 33)]
+    ser = pd.Series([float(v) for v in xk])
+    holed = pd.Series([float(v) if valid7[i] else np.nan for i, v in enumerate(xk)])
+    for op, meth in (("sum", "cumsum"), ("prod", "cumprod"), ("max", "cummax"), ("min", "cummin")):
+        want = getattr(ser, meth)().to_numpy()
+        got = cum_model(xk, op)
+        for k in KPROBES:
+            ok &= close(got[k - 1], want[k - 1], "cum%s at %d" % (op, k))
+        # The nulled arm: pandas' default `skipna=True` IS this family's rule, so a disagreement
+        # here would mean the running value restarts or is poisoned rather than carrying past.
+        want = getattr(holed, meth)().to_numpy()
+        got = cum_model(xk, op, is_valid=valid7)
+        for k in KPROBES:
+            if got[k - 1] is None:
+                checks += 1
+                if want[k - 1] == want[k - 1]:
+                    print("--self-test: cum%s at %d: model excluded, pandas kept %.17g"
+                          % (op, k, want[k - 1]), file=sys.stderr)
+                    ok = False
+            else:
+                ok &= close(got[k - 1], want[k - 1], "cum%s nulled at %d" % (op, k))
+        # `skipna=False`: a NaN is a value, enters the fold and poisons every later element. The
+        # assertion is that EVERY position from the first NaN on is a NaN, which is the property
+        # a `max()`-based running maximum silently fails -- and did, before a probe caught it.
+        raw = [float(v) if valid7[i] else float("nan") for i, v in enumerate(xk)]
+        want = getattr(pd.Series(raw), meth)(skipna=False).to_numpy()
+        got = cum_model(raw, op, skipnan=False)
+        for k in range(1, 33):
+            checks += 1
+            if (want[k - 1] != want[k - 1]) != (got[k - 1] != got[k - 1]):
+                print("--self-test: cum%s skipna=False at %d: model %s, pandas %s"
+                      % (op, k, got[k - 1], want[k - 1]), file=sys.stderr)
+                ok = False
+
+    # ---- the binning family against numpy and pandas ----
+    ed = [mpf(repr(e)) for e in HEDGES]
+    arr = np.array([float(v) for v in xk])
+    npe = np.array(HEDGES)
+    for label, kwargs, npkw in (("plain", {}, {}),
+                                ("weighted", {"weights": weights_mod5(32)},
+                                 {"weights": np.array([float(w) for w in weights_mod5(32)])})):
+        _, counts, _, _, nout = bin_model(xk, ed, **kwargs)
+        want, _ = np.histogram(arr, bins=npe, **npkw)
+        for k in range(len(counts)):
+            ok &= close(counts[k], want[k], "histogram %s bin %d" % (label, k + 1))
+        # numpy drops out-of-range values silently, so `n_outside` has no direct counterpart --
+        # it is checked against a restatement of the definition in numpy's own array algebra:
+        # a USABLE element (non-zero weight) that is not inside the closed edge range. The weight
+        # has to appear here for the same reason it appears in the model: a zero-weight element
+        # has left the population and cannot be one that failed to reach a bin.
+        usable = np.ones(len(xk), dtype=bool)
+        if npkw:
+            usable = npkw["weights"] > 0
+        want_out = int((usable & ~((arr >= HEDGES[0]) & (arr <= HEDGES[-1]))).sum())
+        ok &= close(nout, want_out, "histogram %s n_outside" % label)
+
+    # `np.digitize(x, bins) - 1` is `pf_bucketize`'s left-closed code, except at the very top
+    # edge, where digitize answers `nbins + 1` and this family folds that value into the last
+    # bin. That difference IS `np.histogram`'s last-bin rule, so the two numpy functions
+    # disagree with each other and the histogram is the one being matched.
+    hbx = [mpf(repr(v)) for v in HBX]
+    hbe = [mpf(repr(e)) for e in HBE]
+    codes, counts, _, _, nout = bin_model(hbx, hbe, right=False)
+    dig = np.digitize(np.array(HBX), np.array(HBE), right=False)
+    for i, v in enumerate(HBX):
+        checks += 1
+        # `digitize` answers `nbins + 1` for BOTH the top edge and anything above it, so the
+        # two have to be told apart by value rather than by its code -- which is exactly the
+        # last-bin rule `np.histogram` applies and `np.digitize` does not.
+        if v < HBE[0] or v > HBE[-1]:
+            want = 0
+        elif v == HBE[-1]:
+            want = len(HBE) - 1
+        else:
+            want = int(dig[i])
+        if codes[i] != want:
+            print("--self-test: bucketize left at %g: model %d, digitize %d"
+                  % (v, codes[i], want), file=sys.stderr)
+            ok = False
+    want, _ = np.histogram(np.array(HBX), bins=np.array(HBE))
+    for k in range(len(counts)):
+        ok &= close(counts[k], want[k], "boundary histogram left bin %d" % (k + 1))
+
+    # The right-closed convention is `pd.cut(right=True, include_lowest=True)`, whose 0-based
+    # codes are ours minus one and whose -1 is our 0.
+    codes, counts, _, _, _ = bin_model(hbx, hbe, right=True)
+    cut = pd.cut(pd.Series(HBX), bins=HBE, right=True, include_lowest=True)
+    for i, v in enumerate(HBX):
+        checks += 1
+        want = int(cut.cat.codes.iloc[i]) + 1      # -1 -> 0, 0 -> 1, ...
+        if codes[i] != want:
+            print("--self-test: bucketize right at %g: model %d, pd.cut %d"
+                  % (v, codes[i], want), file=sys.stderr)
+            ok = False
+    for k in range(len(counts)):
+        ok &= close(counts[k], int((cut.cat.codes == k).sum()),
+                    "boundary histogram right bin %d" % (k + 1))
+
     # ---- the sigma clip against astropy, if it is installed ----
     #
     # Optional: this is a maintainer-only self-test and astropy is a heavy fourth dependency, so a
@@ -907,6 +1011,109 @@ def quantile_at(xs, ws, p, method, weighted):
     raise SystemExit("generate_stats_vectors.py: unknown method %r" % method)
 
 
+# ======================================================================================
+# P9: the cumulative family and the binning family
+# ======================================================================================
+
+def cum_model(values, op, is_valid=None, skipnan=True):
+    """The running value at every position, with `None` where the element is excluded.
+
+    The family's rule, written out once: an excluded element contributes NOTHING and the running
+    value carries past it unchanged. `skipnan=False` makes a NaN an ordinary value instead, so it
+    enters the fold and poisons everything after it.
+    """
+    out, acc, started = [], None, False
+    for i, raw in enumerate(values):
+        v = raw
+        if is_valid is not None and not is_valid[i]:
+            out.append(None)
+            continue
+        if skipnan and v != v:
+            out.append(None)
+            continue
+        v = mpf(v) if v == v else v
+        if not started:
+            acc, started = v, True
+        elif acc != acc or v != v:
+            acc = NAN                      # a NaN kept as a value poisons every later element
+        elif op == "sum":
+            acc = acc + v
+        elif op == "prod":
+            acc = acc * v
+        elif op == "max":
+            acc = v if v > acc else acc
+        else:
+            acc = v if v < acc else acc
+        out.append(acc)
+    return out
+
+
+def bin_of(v, edges, right):
+    """The 1-based bin `v` joins, or 0. The convention, transcribed from the doc-comment."""
+    nb = len(edges) - 1
+    if not (v >= edges[0]) or not (v <= edges[nb]):
+        return 0
+    if right:
+        # bin k is (edges(k), edges(k+1)], and the FIRST bin closes at the bottom.
+        k = 1
+        while k < nb and not (v <= edges[k]):
+            k += 1
+        return k
+    # bin k is [edges(k), edges(k+1)), and the LAST bin closes at the top.
+    k = nb
+    while k > 1 and not (v >= edges[k - 1]):
+        k -= 1
+    return k
+
+
+def bin_model(values, edges, right=False, is_valid=None, weights=None, skipnan=True):
+    """`(codes, counts, n_null, n_nan, n_outside)` -- the whole binning contract in one place."""
+    nb = len(edges) - 1
+    codes, counts = [], [mpf(0)] * nb
+    n_null = n_nan = n_out = 0
+    for i, v in enumerate(values):
+        if is_valid is not None and not is_valid[i]:
+            codes.append(0)
+            n_null += 1
+            continue
+        if skipnan and v != v:
+            codes.append(0)
+            n_nan += 1
+            continue
+        w = mpf(1)
+        if weights is not None:
+            # The weight is examined BEFORE the bin search, which is the module's own exclusion
+            # order -- null, then NaN, then weight -- and it has an observable consequence: a
+            # zero-weight element has left the POPULATION, so it is not an element that failed to
+            # reach a bin and is counted in neither `n_outside` nor any bin.
+            if weights[i] <= 0:
+                codes.append(0)
+                continue
+            w = mpf(weights[i])
+        k = bin_of(v, edges, right)
+        codes.append(k)
+        if k == 0:
+            n_out += 1
+            continue
+        counts[k - 1] += w
+    return codes, counts, n_null, n_nan, n_out
+
+
+#: The 1-based positions the K_* cumulative rows are read at. `1` pins the very first fold, `2`
+#: the first combination, and `32` the total -- which is where a wrong fold shows up largest.
+KPROBES = [1, 2, 8, 17, 32]
+
+#: The edges the H_* histogram rows use: round numbers well inside the fixture's own range, so
+#: values fall outside at both ends and `n_outside` is exercised rather than merely reported.
+HEDGES = [-400.0, -200.0, 0.0, 200.0, 400.0]
+
+#: The exact-boundary case, where every interior edge lands ON a value. This is the ONLY fixture
+#: that can tell the two conventions apart at an edge, and its values are small integers so that
+#: the expected answer can also be read off by hand.
+HBX = [-1.0, 0.0, 2.0, 4.0, 8.0, 9.0]
+HBE = [0.0, 2.0, 4.0, 6.0, 8.0]
+
+
 def fortran_real(v):
     """`v` as a round-trip-exact Fortran real64 literal."""
     if v is None or v != v:
@@ -971,6 +1178,16 @@ module test_stats_golden
 
     !> How many elements each `Z_*` row probes.
     integer, parameter :: NZP = 4
+
+    !> How many positions each `K_*` cumulative row is read at.
+    integer, parameter :: NKP = 5
+
+    !> How many bins the `H_*` histogram rows carry.
+    integer, parameter :: NHB = 4
+
+    !> How many values the exact-boundary binning case carries. Its edge array holds one fewer,
+    !> which is what makes `NHBX - 2` the number of bins.
+    integer, parameter :: NHBX = 6
 '''
 
 
@@ -1067,6 +1284,60 @@ def emit():
         out += wrap_array("    real(real64), parameter :: C_%s(3) =" % name,
                           [fortran_real(v) for v in vals])
         out.append("")
+
+    out.append("    !> The 1-based positions the K_* cumulative rows are read at.")
+    out.append("    integer, parameter :: G_KPROBES(NKP) = [%s]"
+               % ", ".join(str(k) for k in KPROBES))
+    xk = fixture(32)
+    valid7 = [(i % 7) != 0 for i in range(1, 33)]
+    for op, tag in (("sum", "SUM"), ("prod", "PROD"), ("max", "MAX"), ("min", "MIN")):
+        full = cum_model(xk, op)
+        out.append("    !> The running %s of the n=32 recipe, at G_KPROBES." % op)
+        out += wrap_array("    real(real64), parameter :: K_%s(NKP) =" % tag,
+                          [fortran_real(full[k - 1]) for k in KPROBES])
+    out.append("    !> The same running sum with every 7th element null: the running value must")
+    out.append("    !> carry PAST a null unchanged rather than restart or be poisoned by it.")
+    nulled = cum_model(xk, "sum", is_valid=valid7)
+    out += wrap_array("    real(real64), parameter :: K_SUM_NULL(NKP) =",
+                      [fortran_real(nulled[k - 1]) for k in KPROBES])
+    out.append("")
+
+    out.append("    !> The bin edges the H_* rows are taken against.")
+    out += wrap_array("    real(real64), parameter :: G_HEDGES(NHB + 1) =",
+                      [fortran_real(mpf(repr(e))) for e in HEDGES])
+    ed = [mpf(repr(e)) for e in HEDGES]
+    wk = weights_mod5(32)
+    for tag, doc, kwargs in (
+            ("LEFT", "numpy's convention: bin k is [edges(k), edges(k+1)), last closed at the top.",
+             {}),
+            ("RIGHT", "pandas' convention: bin k is (edges(k), edges(k+1)], first closed at the "
+             "bottom.", {"right": True}),
+            ("WT", "the weighted counts, `w(i) = mod(i, 5)`, so every 5th element weighs nothing.",
+             {"weights": wk})):
+        _, counts, _, _, nout = bin_model(xk, ed, **kwargs)
+        out.append("    !> %s" % doc)
+        out += wrap_array("    real(real64), parameter :: H_%s(NHB) =" % tag,
+                          [fortran_real(c) for c in counts])
+        out.append("    integer, parameter :: H_%s_OUT = %d" % (tag, nout))
+    out.append("")
+    out.append("    !> The exact-boundary case: every interior edge lands ON one of these values,")
+    out.append("    !> which is the only way the two conventions can be told apart at an edge.")
+    out += wrap_array("    real(real64), parameter :: G_HBX(NHBX) =",
+                      [fortran_real(mpf(repr(v))) for v in HBX])
+    out += wrap_array("    real(real64), parameter :: G_HBE(NHBX - 1) =",
+                      [fortran_real(mpf(repr(e))) for e in HBE])
+    hbe = [mpf(repr(e)) for e in HBE]
+    hbx = [mpf(repr(v)) for v in HBX]
+    for tag, right in (("LEFT", False), ("RIGHT", True)):
+        codes, counts, _, _, nout = bin_model(hbx, hbe, right=right)
+        out.append("    !> Its codes and bin counts under the %s-closed convention."
+                   % ("upper" if right else "lower"))
+        out.append("    integer, parameter :: HB_%s(NHBX) = [%s]"
+                   % (tag, ", ".join(str(c) for c in codes)))
+        out.append("    integer, parameter :: HB_%s_N(NHBX - 2) = [%s]"
+                   % (tag, ", ".join(str(int(c)) for c in counts)))
+        out.append("    integer, parameter :: HB_%s_OUT = %d" % (tag, nout))
+    out.append("")
 
     out.append("end module test_stats_golden ! GCOVR_EXCL_LINE")
     text = "\n".join(out) + "\n"

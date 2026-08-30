@@ -7,10 +7,9 @@ Arrow underneath it: a program that already has an array in hand can `use parque
 it, without compiling the C++ wrapper's dependencies into its build. `use parquet` brings it in too,
 so nothing here needs a second import.
 
-**This page describes what is implemented today, which is the module's foundation rather than its
-whole surface.** The reduction family it is being built for arrives in stages: the moment family is
-here, the order statistics — quantiles, the median absolute deviation, the robust estimators — are
-not yet.
+The family is broad: counts and moments, order statistics and quantiles, the median absolute
+deviation and the mode, two-sample covariance and correlation, the sigma clip, the running folds,
+and bins. `pf_stats` is the object that answers many of them off one pass and one ordering.
 
 Every procedure here accepts the same six inputs — see
 [What `values` may be](#what-values-may-be) — so the kind of array you happen to have is not a
@@ -542,6 +541,99 @@ Five rules worth knowing:
 An empty population gives three NaNs with `ok = .false.` and `n_clipped = 0`; a constant one is
 reported unchanged, converged, with nothing clipped.
 
+## `pf_cumsum`, `pf_cumprod`, `pf_cummax`, `pf_cummin` — the running folds
+
+```fortran
+call pf_cumsum(flux, total)                    ! total(i) = sum of flux(1:i)
+call pf_cummax(flux, peak, is_valid=mask, out_valid=ok_out, n_null=nn)
+```
+
+pandas' `Series.cumsum()`, `cumprod()`, `cummax()` and `cummin()`. `out` is the same size as
+`values` and is always `real(real64)`, so a running sum of 64-bit integers cannot silently wrap.
+
+**Their null rule is not the reduction family's, and it is the whole point of the family.** An
+excluded element yields an excluded *output* element, and the running value **continues past it
+unchanged**:
+
+```
+values   1    null   3    4
+cumsum   1    ---    4    8
+```
+
+The null contributes nothing and is not carried forward — `4` is `1 + 3`, and the scan does not
+restart. "The output element is undefined" and "the rest of the output is undefined" are one
+careless line apart, and only the first is meant.
+
+An undefined output element is `.false.` in `out_valid(:)` when that mask is present and a quiet
+NaN when it is not, exactly as for `pf_zscore`. `ok = .false.` when any element was excluded, and
+`n_null`/`n_nan` say why.
+
+**`skipnan = .false.` is the one case where a NaN does poison what follows.** It is then an ordinary
+value, so the running sum of a NaN is a NaN and every later element is one too — numpy's `np.cumsum`
+and pandas' `skipna=False`. This holds for the running maximum and minimum as well, which is worth
+saying because it is not what `max()` would do: comparing a NaN against anything is false, so a
+maximum built on comparison alone would silently discard it.
+
+**The last element of a `pf_cumsum` is not `pf_sum(values)`.** A running sum is sequential by
+definition; `pf_sum` is pairwise over a fixed block tree. The two agree to within a naive sum's
+accumulated rounding, which on a large or badly scaled population is several ulps and occasionally
+more. Compare them with a tolerance, and take the total itself from `pf_sum`, which is the more
+accurate of the two.
+
+There is no `weights` argument: a weighted running sum is `pf_cumsum(w*x)`, and the other three
+folds have no weighted reading worth choosing between. There is no `threads` argument either — a
+prefix scan is sequential by definition, so one could only ever be ignored.
+
+## `pf_bucketize` and `pf_histogram` — bins
+
+```fortran
+real(real64) :: edges(5) = [0.0_real64, 2.0_real64, 4.0_real64, 6.0_real64, 8.0_real64]
+integer(int32) :: codes(size(mag))
+real(real64) :: counts(size(edges) - 1)
+
+call pf_bucketize(mag, edges, codes)                       ! pd.cut
+call pf_histogram(mag, edges, counts)                      ! np.histogram(bins=edges)
+call pf_histogram(mag, edges, counts, weights=w, n_outside=nout)
+```
+
+`pf_bucketize` answers, for each value, the **1-based number of the bin it falls in**, or **0** for
+one that joined none. `pf_histogram` answers how many values landed in each bin — or the **sum of
+their weights** when `weights` is present, which is what `np.histogram(weights=)` returns and why
+`counts` is real rather than integer. Unweighted the counts are whole numbers exactly, up to 2⁵³
+elements in one bin.
+
+The two are the same operation: `counts(k)` is the number of `codes` equal to `k` over the same
+arguments, and they share one edge search, so that identity cannot drift.
+
+**Two edge conventions, and they are mirror images.**
+
+| `right=` | bin k covers | which end closes | equivalent |
+|---|---|---|---|
+| `.false.` (default) | `[edges(k), edges(k+1))` | the **last** bin closes at the top | `np.histogram`, `np.digitize` |
+| `.true.` | `(edges(k), edges(k+1)]` | the **first** bin closes at the bottom | `pd.cut(right=True, include_lowest=True)` |
+
+Either way the closed range `[edges(1), edges(nbins+1)]` is covered **exactly once**, so nothing is
+lost and nothing is double-counted. The two differ only in which bin a value sitting exactly on an
+interior edge joins.
+
+`edges` is always `real(real64)`, whatever kind `values` is: it states a rule rather than carrying
+data, and one type for it keeps the generic resolving on `values` alone. It must be **strictly
+increasing** with at least two entries, or the call aborts naming the offending index. An **infinite
+outer edge is allowed** and is how an open-ended first or last bin is asked for.
+
+Nothing here aborts on a data condition. A value outside the edges joins no bin, is reported through
+`n_outside`, and makes `ok = .false.` — numpy drops such values silently, so this is strictly more
+information. `n_null`, `n_nan` and `n_outside` separate the three reasons an element reached no bin,
+and `codes(i) == 0` says it per element; that is the 1-based spelling of `pd.cut`'s `-1`.
+
+A **NaN reaches no bin under either `skipnan`, and only the accounting differs**: skipped, it is an
+exclusion and lands in `n_nan`; kept, it is a value that matches no bin and lands in `n_outside`.
+Every comparison against a NaN is false, so "which bin does it join" has one answer, and the argument
+only decides whether the population was asked the question at all.
+
+A **zero-weight** element is in none of the three counts. It has left the population, exactly as it
+does everywhere else in this module, so it is not an element that failed to reach a bin.
+
 ## `pf_stats` — summarise once, query as often as you like
 
 The one-shot procedures above each traverse the population. When a group needs more than one or two
@@ -602,7 +694,7 @@ declared inside the region is miscompiled by at least one supported compiler.
 | `%update` | appends; one traversal, recomputation deferred | one traversal, O(1) memory |
 | `%merge` | concatenates; recomputation deferred | combines in O(1) |
 | accuracy after `%update`/`%merge` | **exactly** `%compute` over the concatenation | the combination formulas' own |
-| order statistics (a later release) | available | never |
+| order statistics | available | never |
 
 The exactness is worth being concrete about: a retained `%update` loop and a retained `%merge` both
 recompute the moments by the same two-pass algorithm over the concatenated survivors, so the result
@@ -682,7 +774,11 @@ What does abort is a call that cannot be honoured:
 - a NaN or infinite `score` or `center` — the two arguments a caller computes rather than measures;
 - an order statistic asked of a `retain = .false.` accumulator, which kept no values to order;
 - `is_valid=` passed beside a `parquet_column` or a `parquet_string_column`, both of which carry
-  their own validity: two sources of truth that can disagree is not something to resolve silently.
+  their own validity: two sources of truth that can disagree is not something to resolve silently;
+- an `out`, `out_valid`, `codes` or `counts` array of the wrong size — note `counts` holds one
+  entry per **bin**, so one fewer than the number of edges;
+- an `edges` array holding fewer than two entries, a NaN, or a pair that is not strictly
+  increasing. A value *outside* the edges is a data condition and is reported, not an abort.
 
 ## Optional arguments are in one fixed order
 
@@ -691,14 +787,15 @@ sequence, so a signature you have seen once you have seen everywhere:
 
 ```
 is_valid, weights, weight_type, ddof, bias, excess, skipnan,
-method, kind, scale, center, out_valid, n_null, n_nan, ok, threads
+method, kind, scale, center, out_valid, n_null, n_nan, n_outside, ok, threads
 ```
 
 Three short blocks sit either side of it and are part of the same sequence: an *output* prefix,
 which `pf_moments` and `pf_mode` declare before the inputs (`pf_mode`'s `count` is one of these);
-the sigma-clip block `sigma, sigma_lower, sigma_upper, maxiters, cenfunc, stdfunc, n_clipped, keep,
-converged`, which only `pf_sigma_clipped_stats` takes; and the `unit`/`name` pair, which only
-`%print` takes. A block used by one procedure is not a contradiction — every other procedure omits
+the rule block `sigma, sigma_lower, sigma_upper, maxiters, cenfunc, stdfunc, n_clipped, keep,
+converged, right`, whose entries say what the operation IS and are taken by
+`pf_sigma_clipped_stats` and the binning pair; and the `unit`/`name` pair, which only `%print`
+takes. A block used by one procedure is not a contradiction — every other procedure omits
 it, and omission is exactly what a subsequence permits.
 
 A procedure omits the ones it has no use for and never reorders the rest. In Fortran the order of

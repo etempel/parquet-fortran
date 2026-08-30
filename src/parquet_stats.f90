@@ -86,6 +86,8 @@ module parquet_stats
     public :: pf_iqr, pf_trim_mean, pf_percentile_of_score
     public :: pf_mad, pf_mode, pf_describe
     public :: pf_cov, pf_corr, pf_zscore, pf_sigma_clipped_stats
+    public :: pf_cumsum, pf_cumprod, pf_cummax, pf_cummin
+    public :: pf_bucketize, pf_histogram
     public :: parquet_set_verbosity, parquet_get_verbosity
     public :: parquet_set_message_stream, parquet_get_message_stream
     public :: pf_stats
@@ -1002,6 +1004,207 @@ module parquet_stats
         module procedure sigma_clipped_stats_bool
         module procedure sigma_clipped_stats_col
     end interface pf_sigma_clipped_stats
+    !
+    !> The running sum of a population -- pandas' `Series.cumsum()`.
+    !>
+    !> **The last element is NOT `pf_sum(values)`, and that is arithmetic rather than a bug.**
+    !> A running sum is sequential by definition, so it accumulates left to right; `pf_sum` is
+    !> PAIRWISE over a fixed block tree. The two agree to within the accumulated rounding of a
+    !> naive sum, which on a large or badly scaled population is several ulps and occasionally
+    !> more. Compare them with a tolerance, or take the total from `pf_sum`.
+    !>
+    !> **An excluded element yields an excluded OUTPUT element, and the running value continues
+    !> past it unchanged** -- which is what pandas does, and the whole reason this family needs a
+    !> paragraph of its own. `pf_cumsum([1, null, 3])` is `[1, undefined, 4]`: the null contributes
+    !> nothing and is not carried forward. "The output element is undefined" and "the rest of the
+    !> output is undefined" are one careless line apart, and only the first is meant.
+    !>
+    !> An undefined output element is `.false.` in `out_valid` when that mask is present, and a
+    !> **quiet NaN** when it is not -- there being no other way to say "no value" in a
+    !> `real(real64)` array. `ok` comes back `.false.` when any element was excluded; `n_null` and
+    !> `n_nan` say why. This module aborts on misuse (`out` the wrong size) and never on a data
+    !> condition.
+    !>
+    !> `skipnan = .false.` is the one case where a NaN DOES poison what follows: it is then an
+    !> ordinary value, the running sum of a NaN is a NaN, and every later element is one too.
+    !> That is numpy's `np.cumsum` and pandas' `skipna=False`.
+    !>
+    !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
+    !> `logical` array, or a scalar numeric `type(parquet_column)`; `out` is always
+    !> `real(real64)`, so a running sum of 64-bit integers cannot silently wrap.
+    interface pf_cumsum
+        module procedure cumsum_f64
+        module procedure cumsum_i32
+        module procedure cumsum_i64
+        module procedure cumsum_f32
+        module procedure cumsum_bool
+        module procedure cumsum_col
+    end interface pf_cumsum
+    !
+    !> The running product of a population -- pandas' `Series.cumprod()`.
+    !>
+    !> Formed as a product and not in log space, deliberately: unlike `pf_gmean` this has to
+    !> reproduce every intermediate value, including the sign, so a magnitude that overflows to
+    !> infinity is the honest answer rather than something to be routed around.
+    !>
+    !> **An excluded element yields an excluded OUTPUT element, and the running value continues
+    !> past it unchanged** -- which is what pandas does, and the whole reason this family needs a
+    !> paragraph of its own. `pf_cumsum([1, null, 3])` is `[1, undefined, 4]`: the null contributes
+    !> nothing and is not carried forward. "The output element is undefined" and "the rest of the
+    !> output is undefined" are one careless line apart, and only the first is meant.
+    !>
+    !> An undefined output element is `.false.` in `out_valid` when that mask is present, and a
+    !> **quiet NaN** when it is not -- there being no other way to say "no value" in a
+    !> `real(real64)` array. `ok` comes back `.false.` when any element was excluded; `n_null` and
+    !> `n_nan` say why. This module aborts on misuse (`out` the wrong size) and never on a data
+    !> condition.
+    !>
+    !> `skipnan = .false.` is the one case where a NaN DOES poison what follows: it is then an
+    !> ordinary value, the running sum of a NaN is a NaN, and every later element is one too.
+    !> That is numpy's `np.cumsum` and pandas' `skipna=False`.
+    !>
+    !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
+    !> `logical` array, or a scalar numeric `type(parquet_column)`; `out` is always
+    !> `real(real64)`, so a running sum of 64-bit integers cannot silently wrap.
+    interface pf_cumprod
+        module procedure cumprod_f64
+        module procedure cumprod_i32
+        module procedure cumprod_i64
+        module procedure cumprod_f32
+        module procedure cumprod_bool
+        module procedure cumprod_col
+    end interface pf_cumprod
+    !
+    !> The running maximum of a population -- pandas' `Series.cummax()`.
+    !>
+    !> The comparison is IEEE `>`, so a negative zero and a positive zero compare equal and the
+    !> first of them is kept -- which is what numpy and pandas do.
+    !>
+    !> **An excluded element yields an excluded OUTPUT element, and the running value continues
+    !> past it unchanged** -- which is what pandas does, and the whole reason this family needs a
+    !> paragraph of its own. `pf_cumsum([1, null, 3])` is `[1, undefined, 4]`: the null contributes
+    !> nothing and is not carried forward. "The output element is undefined" and "the rest of the
+    !> output is undefined" are one careless line apart, and only the first is meant.
+    !>
+    !> An undefined output element is `.false.` in `out_valid` when that mask is present, and a
+    !> **quiet NaN** when it is not -- there being no other way to say "no value" in a
+    !> `real(real64)` array. `ok` comes back `.false.` when any element was excluded; `n_null` and
+    !> `n_nan` say why. This module aborts on misuse (`out` the wrong size) and never on a data
+    !> condition.
+    !>
+    !> `skipnan = .false.` is the one case where a NaN DOES poison what follows: it is then an
+    !> ordinary value, the running sum of a NaN is a NaN, and every later element is one too.
+    !> That is numpy's `np.cumsum` and pandas' `skipna=False`.
+    !>
+    !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
+    !> `logical` array, or a scalar numeric `type(parquet_column)`; `out` is always
+    !> `real(real64)`, so a running sum of 64-bit integers cannot silently wrap.
+    interface pf_cummax
+        module procedure cummax_f64
+        module procedure cummax_i32
+        module procedure cummax_i64
+        module procedure cummax_f32
+        module procedure cummax_bool
+        module procedure cummax_col
+    end interface pf_cummax
+    !
+    !> The running minimum of a population -- pandas' `Series.cummin()`.
+    !>
+    !> The comparison is IEEE `<`, so a negative zero and a positive zero compare equal and the
+    !> first of them is kept -- which is what numpy and pandas do.
+    !>
+    !> **An excluded element yields an excluded OUTPUT element, and the running value continues
+    !> past it unchanged** -- which is what pandas does, and the whole reason this family needs a
+    !> paragraph of its own. `pf_cumsum([1, null, 3])` is `[1, undefined, 4]`: the null contributes
+    !> nothing and is not carried forward. "The output element is undefined" and "the rest of the
+    !> output is undefined" are one careless line apart, and only the first is meant.
+    !>
+    !> An undefined output element is `.false.` in `out_valid` when that mask is present, and a
+    !> **quiet NaN** when it is not -- there being no other way to say "no value" in a
+    !> `real(real64)` array. `ok` comes back `.false.` when any element was excluded; `n_null` and
+    !> `n_nan` say why. This module aborts on misuse (`out` the wrong size) and never on a data
+    !> condition.
+    !>
+    !> `skipnan = .false.` is the one case where a NaN DOES poison what follows: it is then an
+    !> ordinary value, the running sum of a NaN is a NaN, and every later element is one too.
+    !> That is numpy's `np.cumsum` and pandas' `skipna=False`.
+    !>
+    !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
+    !> `logical` array, or a scalar numeric `type(parquet_column)`; `out` is always
+    !> `real(real64)`, so a running sum of 64-bit integers cannot silently wrap.
+    interface pf_cummin
+        module procedure cummin_f64
+        module procedure cummin_i32
+        module procedure cummin_i64
+        module procedure cummin_f32
+        module procedure cummin_bool
+        module procedure cummin_col
+    end interface pf_cummin
+    !
+    !> Which bin of a sorted edge array each value falls in -- pandas' `pd.cut`.
+    !>
+    !> The primitive behind a histogram, a grouped aggregation over ranges, and every
+    !> hand-written `if (x < a) then ... else if (x < b)` ladder. `codes(i)` is the 1-based
+    !> number of the bin holding `values(i)`, or **0** when it joined none: excluded by
+    !> `is_valid`, a NaN, or outside `[edges(1), edges(nbins+1)]`. `n_null`, `n_nan` and
+    !> `n_outside` separate those three causes exactly.
+    !>
+    !> The search is binary, so the cost is `O(n log nbins)` and an edge array with thousands
+    !> of bins is as cheap as one with four.
+    !>
+    !> `edges` must be **strictly increasing** and hold at least two entries, or the call aborts
+    !> naming the offending index -- an equal pair would describe a bin no value can reach, and a
+    !> descending one is always a mistake. An infinite outer edge is allowed and is the way to
+    !> ask for an open-ended first or last bin. A NaN edge aborts.
+    !>
+    !> Nothing here aborts on a data condition: a value outside the edges, a NaN, a null and an
+    !> entirely empty population are all ordinary and are reported through the counts. `ok` is
+    !> `.false.` when any element failed to reach a bin, for any of those reasons at once.
+    !>
+    !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
+    !> `logical` array, or a scalar numeric `type(parquet_column)`. `edges` is always
+    !> `real(real64)`: it states a rule rather than carrying data, and one type for it keeps the
+    !> generic resolving on `values` alone.
+    interface pf_bucketize
+        module procedure bucketize_f64
+        module procedure bucketize_i32
+        module procedure bucketize_i64
+        module procedure bucketize_f32
+        module procedure bucketize_bool
+        module procedure bucketize_col
+    end interface pf_bucketize
+    !
+    !> How much of a population falls in each bin -- `np.histogram` with explicit `bins=`.
+    !>
+    !> `counts(k)` is the number of values in bin k, or the SUM OF THEIR WEIGHTS when `weights`
+    !> is present, which is what `np.histogram(weights=)` returns and why the output is real
+    !> rather than integer. Values outside the edge range join no bin and are reported through
+    !> `n_outside`; numpy drops them silently, so this is strictly more information.
+    !>
+    !> This is `pf_bucketize` followed by a tally, and the two agree by construction: the count
+    !> in bin k is the number of `codes` equal to k over the same arguments.
+    !>
+    !> `edges` must be **strictly increasing** and hold at least two entries, or the call aborts
+    !> naming the offending index -- an equal pair would describe a bin no value can reach, and a
+    !> descending one is always a mistake. An infinite outer edge is allowed and is the way to
+    !> ask for an open-ended first or last bin. A NaN edge aborts.
+    !>
+    !> Nothing here aborts on a data condition: a value outside the edges, a NaN, a null and an
+    !> entirely empty population are all ordinary and are reported through the counts. `ok` is
+    !> `.false.` when any element failed to reach a bin, for any of those reasons at once.
+    !>
+    !> `values` may be a `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` or
+    !> `logical` array, or a scalar numeric `type(parquet_column)`. `edges` is always
+    !> `real(real64)`: it states a rule rather than carrying data, and one type for it keeps the
+    !> generic resolving on `values` alone.
+    interface pf_histogram
+        module procedure histogram_f64
+        module procedure histogram_i32
+        module procedure histogram_i64
+        module procedure histogram_f32
+        module procedure histogram_bool
+        module procedure histogram_col
+    end interface pf_histogram
     !
     !> The most common value of a population -- pandas' `mode()`, scipy's `stats.mode`.
     !>
@@ -2124,6 +2327,185 @@ module parquet_stats
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
             !! bits. It is a speed control and never an accuracy one.
         end subroutine sigma_clipped_stats_f64
+        !> `pf_cumsum` over a 64-bit real array: the running sum, element by element.
+        module subroutine cumsum_f64(values, out, is_valid, skipnan, out_valid, n_null, n_nan, ok)
+            real(real64), intent(in) :: values(:) !! the population, in the order it is to be scanned.
+            real(real64), intent(out) :: out(:) !! the running value, same size as `values`.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the result is
+            !! therefore undefined. Same size as `values`. **Absent, such an element is written as
+            !! a quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine cumsum_f64
+        !> `pf_cumprod` over a 64-bit real array: the running product.
+        module subroutine cumprod_f64(values, out, is_valid, skipnan, out_valid, n_null, n_nan, ok)
+            real(real64), intent(in) :: values(:) !! the population, in the order it is to be scanned.
+            real(real64), intent(out) :: out(:) !! the running value, same size as `values`.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the result is
+            !! therefore undefined. Same size as `values`. **Absent, such an element is written as
+            !! a quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine cumprod_f64
+        !> `pf_cummax` over a 64-bit real array: the running maximum.
+        module subroutine cummax_f64(values, out, is_valid, skipnan, out_valid, n_null, n_nan, ok)
+            real(real64), intent(in) :: values(:) !! the population, in the order it is to be scanned.
+            real(real64), intent(out) :: out(:) !! the running value, same size as `values`.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the result is
+            !! therefore undefined. Same size as `values`. **Absent, such an element is written as
+            !! a quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine cummax_f64
+        !> `pf_cummin` over a 64-bit real array: the running minimum.
+        module subroutine cummin_f64(values, out, is_valid, skipnan, out_valid, n_null, n_nan, ok)
+            real(real64), intent(in) :: values(:) !! the population, in the order it is to be scanned.
+            real(real64), intent(out) :: out(:) !! the running value, same size as `values`.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the result is
+            !! therefore undefined. Same size as `values`. **Absent, such an element is written as
+            !! a quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine cummin_f64
+    end interface
+    !
+    ! ---- The real64 binning core (implemented in parquet_stats_bin) ----
+    interface
+        !> `pf_bucketize` over a 64-bit real array: which bin each value falls in.
+        !!
+        !! The bins are the intervals between consecutive `edges`, and the answer is a 1-based bin
+        !! number or **0** for a value that joined none -- excluded, or outside the edge range.
+        !! `pd.cut` spells that last case -1 over 0-based codes; 0 is the 1-based spelling of the
+        !! same idea, and it is the value a Fortran caller can test without knowing the bin count.
+        module subroutine bucketize_f64(values, edges, codes, right, is_valid, skipnan, n_null, &
+                n_nan, n_outside, ok)
+            real(real64), intent(in) :: values(:) !! the values to classify.
+            real(real64), intent(in) :: edges(:) !! the bin boundaries, strictly increasing, at least two.
+            integer(int32), intent(out) :: codes(:) !! the 1-based bin of each value, or 0. Same size as `values`.
+            logical, intent(in), optional :: right
+            !! which side of a bin is closed. `.false.` by default, which is numpy's rule and the
+            !! one `np.histogram`/`np.digitize` use: bin k is `[edges(k), edges(k+1))`, and the
+            !! LAST bin closes at the top so that `edges(nbins+1)` itself lands in it. `.true.`
+            !! mirrors it, which is `pd.cut(right=True, include_lowest=True)`: bin k is
+            !! `(edges(k), edges(k+1)]`, and the FIRST bin closes at the bottom. Either way the
+            !! closed range `[edges(1), edges(nbins+1)]` is covered exactly once, so the two
+            !! conventions differ only in which bin a value sitting exactly on an interior edge
+            !! joins.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            integer(int64), intent(out), optional :: n_outside
+            !! how many usable elements fell outside `[edges(1), edges(nbins+1)]` and so joined no
+            !! bin. This is an ordinary data condition rather than an error -- `np.histogram`
+            !! drops such values silently -- but it is the one thing a caller cannot recover from
+            !! the output, so it is reported. A NaN under `skipnan = .false.` is counted here: it
+            !! is then a value, and it matches no bin.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine bucketize_f64
+        !> `pf_histogram` over a 64-bit real array: how much weight lands in each bin.
+        !!
+        !! `np.histogram(values, bins=edges)`, and `np.histogram(..., weights=)` when `weights` is
+        !! present. The counts are `real(real64)` for that reason: a weighted histogram sums
+        !! weights rather than counting elements. Unweighted they are whole numbers, exactly, up
+        !! to 2**53 elements in one bin.
+        module subroutine histogram_f64(values, edges, counts, right, is_valid, weights, skipnan, &
+                n_null, n_nan, n_outside, ok)
+            real(real64), intent(in) :: values(:) !! the values to bin.
+            real(real64), intent(in) :: edges(:) !! the bin boundaries, strictly increasing, at least two.
+            real(real64), intent(out) :: counts(:) !! one entry per bin, so `size(edges) - 1` of them.
+            logical, intent(in), optional :: right
+            !! which side of a bin is closed. `.false.` by default, which is numpy's rule and the
+            !! one `np.histogram`/`np.digitize` use: bin k is `[edges(k), edges(k+1))`, and the
+            !! LAST bin closes at the top so that `edges(nbins+1)` itself lands in it. `.true.`
+            !! mirrors it, which is `pd.cut(right=True, include_lowest=True)`: bin k is
+            !! `(edges(k), edges(k+1)]`, and the FIRST bin closes at the bottom. Either way the
+            !! closed range `[edges(1), edges(nbins+1)]` is covered exactly once, so the two
+            !! conventions differ only in which bin a value sitting exactly on an interior edge
+            !! joins.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            integer(int64), intent(out), optional :: n_outside
+            !! how many usable elements fell outside `[edges(1), edges(nbins+1)]` and so joined no
+            !! bin. This is an ordinary data condition rather than an error -- `np.histogram`
+            !! drops such values silently -- but it is the one thing a caller cannot recover from
+            !! the output, so it is reported. A NaN under `skipnan = .false.` is counted here: it
+            !! is then a value, and it matches no bin.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine histogram_f64
     end interface
     !
     ! ---- pf_mode, one specific per kind (implemented in parquet_stats_order) ----
@@ -2951,6 +3333,143 @@ module parquet_stats
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
             !! bits. It is a speed control and never an accuracy one.
         end subroutine sigma_clipped_stats_i32
+        !> `pf_cumsum` over a 32-bit integer array.
+        module subroutine cumsum_i32(values, out, is_valid, out_valid, n_null, ok)
+            integer(int32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: out(:)
+            !! the running sum, same size as `values`. An excluded element is a quiet NaN unless
+            !! `out_valid` is present.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the result is
+            !! therefore undefined. Same size as `values`. **Absent, such an element is written as
+            !! a quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine cumsum_i32
+        !> `pf_cumprod` over a 32-bit integer array.
+        module subroutine cumprod_i32(values, out, is_valid, out_valid, n_null, ok)
+            integer(int32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: out(:)
+            !! the running product, same size as `values`. An excluded element is a quiet NaN unless
+            !! `out_valid` is present.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the result is
+            !! therefore undefined. Same size as `values`. **Absent, such an element is written as
+            !! a quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine cumprod_i32
+        !> `pf_cummax` over a 32-bit integer array.
+        module subroutine cummax_i32(values, out, is_valid, out_valid, n_null, ok)
+            integer(int32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: out(:)
+            !! the running maximum, same size as `values`. An excluded element is a quiet NaN unless
+            !! `out_valid` is present.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the result is
+            !! therefore undefined. Same size as `values`. **Absent, such an element is written as
+            !! a quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine cummax_i32
+        !> `pf_cummin` over a 32-bit integer array.
+        module subroutine cummin_i32(values, out, is_valid, out_valid, n_null, ok)
+            integer(int32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: out(:)
+            !! the running minimum, same size as `values`. An excluded element is a quiet NaN unless
+            !! `out_valid` is present.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the result is
+            !! therefore undefined. Same size as `values`. **Absent, such an element is written as
+            !! a quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine cummin_i32
+        !> `pf_bucketize` over a 32-bit integer array.
+        module subroutine bucketize_i32(values, edges, codes, right, is_valid, n_null, n_outside, ok)
+            integer(int32), intent(in) :: values(:) !! the population.
+            real(real64), intent(in) :: edges(:) !! the bin boundaries, strictly increasing, at least two.
+            integer(int32), intent(out) :: codes(:)
+            !! the 1-based bin of each value, or 0 for one that joined none. Same size as `values`.
+            logical, intent(in), optional :: right
+            !! which side of a bin is closed. `.false.` by default, which is numpy's rule and the
+            !! one `np.histogram`/`np.digitize` use: bin k is `[edges(k), edges(k+1))`, and the
+            !! LAST bin closes at the top so that `edges(nbins+1)` itself lands in it. `.true.`
+            !! mirrors it, which is `pd.cut(right=True, include_lowest=True)`: bin k is
+            !! `(edges(k), edges(k+1)]`, and the FIRST bin closes at the bottom. Either way the
+            !! closed range `[edges(1), edges(nbins+1)]` is covered exactly once, so the two
+            !! conventions differ only in which bin a value sitting exactly on an interior edge
+            !! joins.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_outside
+            !! how many usable elements fell outside `[edges(1), edges(nbins+1)]` and so joined no
+            !! bin. This is an ordinary data condition rather than an error -- `np.histogram`
+            !! drops such values silently -- but it is the one thing a caller cannot recover from
+            !! the output, so it is reported. A NaN under `skipnan = .false.` is counted here: it
+            !! is then a value, and it matches no bin.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine bucketize_i32
+        !> `pf_histogram` over a 32-bit integer array.
+        module subroutine histogram_i32(values, edges, counts, right, is_valid, weights, n_null, n_outside, ok)
+            integer(int32), intent(in) :: values(:) !! the population.
+            real(real64), intent(in) :: edges(:) !! the bin boundaries, strictly increasing, at least two.
+            real(real64), intent(out) :: counts(:)
+            !! one entry per bin, so `size(edges) - 1` of them.
+            logical, intent(in), optional :: right
+            !! which side of a bin is closed. `.false.` by default, which is numpy's rule and the
+            !! one `np.histogram`/`np.digitize` use: bin k is `[edges(k), edges(k+1))`, and the
+            !! LAST bin closes at the top so that `edges(nbins+1)` itself lands in it. `.true.`
+            !! mirrors it, which is `pd.cut(right=True, include_lowest=True)`: bin k is
+            !! `(edges(k), edges(k+1)]`, and the FIRST bin closes at the bottom. Either way the
+            !! closed range `[edges(1), edges(nbins+1)]` is covered exactly once, so the two
+            !! conventions differ only in which bin a value sitting exactly on an interior edge
+            !! joins.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_outside
+            !! how many usable elements fell outside `[edges(1), edges(nbins+1)]` and so joined no
+            !! bin. This is an ordinary data condition rather than an error -- `np.histogram`
+            !! drops such values silently -- but it is the one thing a caller cannot recover from
+            !! the output, so it is reported. A NaN under `skipnan = .false.` is counted here: it
+            !! is then a value, and it matches no bin.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine histogram_i32
         !> `pf_sum` over a 64-bit integer array.
         !>
         !> **An `integer(int64)` above 2**53 loses exactness** on the way into the real64 buffer
@@ -3752,6 +4271,143 @@ module parquet_stats
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
             !! bits. It is a speed control and never an accuracy one.
         end subroutine sigma_clipped_stats_i64
+        !> `pf_cumsum` over a 64-bit integer array.
+        module subroutine cumsum_i64(values, out, is_valid, out_valid, n_null, ok)
+            integer(int64), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: out(:)
+            !! the running sum, same size as `values`. An excluded element is a quiet NaN unless
+            !! `out_valid` is present.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the result is
+            !! therefore undefined. Same size as `values`. **Absent, such an element is written as
+            !! a quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine cumsum_i64
+        !> `pf_cumprod` over a 64-bit integer array.
+        module subroutine cumprod_i64(values, out, is_valid, out_valid, n_null, ok)
+            integer(int64), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: out(:)
+            !! the running product, same size as `values`. An excluded element is a quiet NaN unless
+            !! `out_valid` is present.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the result is
+            !! therefore undefined. Same size as `values`. **Absent, such an element is written as
+            !! a quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine cumprod_i64
+        !> `pf_cummax` over a 64-bit integer array.
+        module subroutine cummax_i64(values, out, is_valid, out_valid, n_null, ok)
+            integer(int64), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: out(:)
+            !! the running maximum, same size as `values`. An excluded element is a quiet NaN unless
+            !! `out_valid` is present.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the result is
+            !! therefore undefined. Same size as `values`. **Absent, such an element is written as
+            !! a quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine cummax_i64
+        !> `pf_cummin` over a 64-bit integer array.
+        module subroutine cummin_i64(values, out, is_valid, out_valid, n_null, ok)
+            integer(int64), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: out(:)
+            !! the running minimum, same size as `values`. An excluded element is a quiet NaN unless
+            !! `out_valid` is present.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the result is
+            !! therefore undefined. Same size as `values`. **Absent, such an element is written as
+            !! a quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine cummin_i64
+        !> `pf_bucketize` over a 64-bit integer array.
+        module subroutine bucketize_i64(values, edges, codes, right, is_valid, n_null, n_outside, ok)
+            integer(int64), intent(in) :: values(:) !! the population.
+            real(real64), intent(in) :: edges(:) !! the bin boundaries, strictly increasing, at least two.
+            integer(int32), intent(out) :: codes(:)
+            !! the 1-based bin of each value, or 0 for one that joined none. Same size as `values`.
+            logical, intent(in), optional :: right
+            !! which side of a bin is closed. `.false.` by default, which is numpy's rule and the
+            !! one `np.histogram`/`np.digitize` use: bin k is `[edges(k), edges(k+1))`, and the
+            !! LAST bin closes at the top so that `edges(nbins+1)` itself lands in it. `.true.`
+            !! mirrors it, which is `pd.cut(right=True, include_lowest=True)`: bin k is
+            !! `(edges(k), edges(k+1)]`, and the FIRST bin closes at the bottom. Either way the
+            !! closed range `[edges(1), edges(nbins+1)]` is covered exactly once, so the two
+            !! conventions differ only in which bin a value sitting exactly on an interior edge
+            !! joins.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_outside
+            !! how many usable elements fell outside `[edges(1), edges(nbins+1)]` and so joined no
+            !! bin. This is an ordinary data condition rather than an error -- `np.histogram`
+            !! drops such values silently -- but it is the one thing a caller cannot recover from
+            !! the output, so it is reported. A NaN under `skipnan = .false.` is counted here: it
+            !! is then a value, and it matches no bin.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine bucketize_i64
+        !> `pf_histogram` over a 64-bit integer array.
+        module subroutine histogram_i64(values, edges, counts, right, is_valid, weights, n_null, n_outside, ok)
+            integer(int64), intent(in) :: values(:) !! the population.
+            real(real64), intent(in) :: edges(:) !! the bin boundaries, strictly increasing, at least two.
+            real(real64), intent(out) :: counts(:)
+            !! one entry per bin, so `size(edges) - 1` of them.
+            logical, intent(in), optional :: right
+            !! which side of a bin is closed. `.false.` by default, which is numpy's rule and the
+            !! one `np.histogram`/`np.digitize` use: bin k is `[edges(k), edges(k+1))`, and the
+            !! LAST bin closes at the top so that `edges(nbins+1)` itself lands in it. `.true.`
+            !! mirrors it, which is `pd.cut(right=True, include_lowest=True)`: bin k is
+            !! `(edges(k), edges(k+1)]`, and the FIRST bin closes at the bottom. Either way the
+            !! closed range `[edges(1), edges(nbins+1)]` is covered exactly once, so the two
+            !! conventions differ only in which bin a value sitting exactly on an interior edge
+            !! joins.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_outside
+            !! how many usable elements fell outside `[edges(1), edges(nbins+1)]` and so joined no
+            !! bin. This is an ordinary data condition rather than an error -- `np.histogram`
+            !! drops such values silently -- but it is the one thing a caller cannot recover from
+            !! the output, so it is reported. A NaN under `skipnan = .false.` is counted here: it
+            !! is then a value, and it matches no bin.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine histogram_i64
         !> `pf_sum` over a 32-bit real array.
         module subroutine sum_f32(values, s, is_valid, weights, skipnan, n_null, n_nan, ok, threads)
             real(real32), intent(in) :: values(:) !! the population.
@@ -4583,6 +5239,180 @@ module parquet_stats
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
             !! bits. It is a speed control and never an accuracy one.
         end subroutine sigma_clipped_stats_f32
+        !> `pf_cumsum` over a 32-bit real array.
+        module subroutine cumsum_f32(values, out, is_valid, skipnan, out_valid, n_null, n_nan, ok)
+            real(real32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: out(:)
+            !! the running sum, same size as `values`. An excluded element is a quiet NaN unless
+            !! `out_valid` is present.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the result is
+            !! therefore undefined. Same size as `values`. **Absent, such an element is written as
+            !! a quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine cumsum_f32
+        !> `pf_cumprod` over a 32-bit real array.
+        module subroutine cumprod_f32(values, out, is_valid, skipnan, out_valid, n_null, n_nan, ok)
+            real(real32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: out(:)
+            !! the running product, same size as `values`. An excluded element is a quiet NaN unless
+            !! `out_valid` is present.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the result is
+            !! therefore undefined. Same size as `values`. **Absent, such an element is written as
+            !! a quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine cumprod_f32
+        !> `pf_cummax` over a 32-bit real array.
+        module subroutine cummax_f32(values, out, is_valid, skipnan, out_valid, n_null, n_nan, ok)
+            real(real32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: out(:)
+            !! the running maximum, same size as `values`. An excluded element is a quiet NaN unless
+            !! `out_valid` is present.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the result is
+            !! therefore undefined. Same size as `values`. **Absent, such an element is written as
+            !! a quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine cummax_f32
+        !> `pf_cummin` over a 32-bit real array.
+        module subroutine cummin_f32(values, out, is_valid, skipnan, out_valid, n_null, n_nan, ok)
+            real(real32), intent(in) :: values(:) !! the population.
+            real(real64), intent(out) :: out(:)
+            !! the running minimum, same size as `values`. An excluded element is a quiet NaN unless
+            !! `out_valid` is present.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the result is
+            !! therefore undefined. Same size as `values`. **Absent, such an element is written as
+            !! a quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine cummin_f32
+        !> `pf_bucketize` over a 32-bit real array.
+        module subroutine bucketize_f32(values, edges, codes, right, is_valid, skipnan, n_null, n_nan, n_outside, ok)
+            real(real32), intent(in) :: values(:) !! the population.
+            real(real64), intent(in) :: edges(:) !! the bin boundaries, strictly increasing, at least two.
+            integer(int32), intent(out) :: codes(:)
+            !! the 1-based bin of each value, or 0 for one that joined none. Same size as `values`.
+            logical, intent(in), optional :: right
+            !! which side of a bin is closed. `.false.` by default, which is numpy's rule and the
+            !! one `np.histogram`/`np.digitize` use: bin k is `[edges(k), edges(k+1))`, and the
+            !! LAST bin closes at the top so that `edges(nbins+1)` itself lands in it. `.true.`
+            !! mirrors it, which is `pd.cut(right=True, include_lowest=True)`: bin k is
+            !! `(edges(k), edges(k+1)]`, and the FIRST bin closes at the bottom. Either way the
+            !! closed range `[edges(1), edges(nbins+1)]` is covered exactly once, so the two
+            !! conventions differ only in which bin a value sitting exactly on an interior edge
+            !! joins.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            integer(int64), intent(out), optional :: n_outside
+            !! how many usable elements fell outside `[edges(1), edges(nbins+1)]` and so joined no
+            !! bin. This is an ordinary data condition rather than an error -- `np.histogram`
+            !! drops such values silently -- but it is the one thing a caller cannot recover from
+            !! the output, so it is reported. A NaN under `skipnan = .false.` is counted here: it
+            !! is then a value, and it matches no bin.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine bucketize_f32
+        !> `pf_histogram` over a 32-bit real array.
+        module subroutine histogram_f32(values, edges, counts, right, is_valid, weights, skipnan, n_null, n_nan, &
+                n_outside, ok)
+            real(real32), intent(in) :: values(:) !! the population.
+            real(real64), intent(in) :: edges(:) !! the bin boundaries, strictly increasing, at least two.
+            real(real64), intent(out) :: counts(:)
+            !! one entry per bin, so `size(edges) - 1` of them.
+            logical, intent(in), optional :: right
+            !! which side of a bin is closed. `.false.` by default, which is numpy's rule and the
+            !! one `np.histogram`/`np.digitize` use: bin k is `[edges(k), edges(k+1))`, and the
+            !! LAST bin closes at the top so that `edges(nbins+1)` itself lands in it. `.true.`
+            !! mirrors it, which is `pd.cut(right=True, include_lowest=True)`: bin k is
+            !! `(edges(k), edges(k+1)]`, and the FIRST bin closes at the bottom. Either way the
+            !! closed range `[edges(1), edges(nbins+1)]` is covered exactly once, so the two
+            !! conventions differ only in which bin a value sitting exactly on an interior edge
+            !! joins.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            integer(int64), intent(out), optional :: n_outside
+            !! how many usable elements fell outside `[edges(1), edges(nbins+1)]` and so joined no
+            !! bin. This is an ordinary data condition rather than an error -- `np.histogram`
+            !! drops such values silently -- but it is the one thing a caller cannot recover from
+            !! the output, so it is reported. A NaN under `skipnan = .false.` is counted here: it
+            !! is then a value, and it matches no bin.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine histogram_f32
         !> `pf_sum` over a logical array.
         !>
         !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
@@ -5348,6 +6178,143 @@ module parquet_stats
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
             !! bits. It is a speed control and never an accuracy one.
         end subroutine sigma_clipped_stats_bool
+        !> `pf_cumsum` over a logical array.
+        module subroutine cumsum_bool(values, out, is_valid, out_valid, n_null, ok)
+            logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
+            real(real64), intent(out) :: out(:)
+            !! the running sum, same size as `values`. An excluded element is a quiet NaN unless
+            !! `out_valid` is present.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the result is
+            !! therefore undefined. Same size as `values`. **Absent, such an element is written as
+            !! a quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine cumsum_bool
+        !> `pf_cumprod` over a logical array.
+        module subroutine cumprod_bool(values, out, is_valid, out_valid, n_null, ok)
+            logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
+            real(real64), intent(out) :: out(:)
+            !! the running product, same size as `values`. An excluded element is a quiet NaN unless
+            !! `out_valid` is present.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the result is
+            !! therefore undefined. Same size as `values`. **Absent, such an element is written as
+            !! a quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine cumprod_bool
+        !> `pf_cummax` over a logical array.
+        module subroutine cummax_bool(values, out, is_valid, out_valid, n_null, ok)
+            logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
+            real(real64), intent(out) :: out(:)
+            !! the running maximum, same size as `values`. An excluded element is a quiet NaN unless
+            !! `out_valid` is present.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the result is
+            !! therefore undefined. Same size as `values`. **Absent, such an element is written as
+            !! a quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine cummax_bool
+        !> `pf_cummin` over a logical array.
+        module subroutine cummin_bool(values, out, is_valid, out_valid, n_null, ok)
+            logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
+            real(real64), intent(out) :: out(:)
+            !! the running minimum, same size as `values`. An excluded element is a quiet NaN unless
+            !! `out_valid` is present.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the result is
+            !! therefore undefined. Same size as `values`. **Absent, such an element is written as
+            !! a quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine cummin_bool
+        !> `pf_bucketize` over a logical array.
+        module subroutine bucketize_bool(values, edges, codes, right, is_valid, n_null, n_outside, ok)
+            logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
+            real(real64), intent(in) :: edges(:) !! the bin boundaries, strictly increasing, at least two.
+            integer(int32), intent(out) :: codes(:)
+            !! the 1-based bin of each value, or 0 for one that joined none. Same size as `values`.
+            logical, intent(in), optional :: right
+            !! which side of a bin is closed. `.false.` by default, which is numpy's rule and the
+            !! one `np.histogram`/`np.digitize` use: bin k is `[edges(k), edges(k+1))`, and the
+            !! LAST bin closes at the top so that `edges(nbins+1)` itself lands in it. `.true.`
+            !! mirrors it, which is `pd.cut(right=True, include_lowest=True)`: bin k is
+            !! `(edges(k), edges(k+1)]`, and the FIRST bin closes at the bottom. Either way the
+            !! closed range `[edges(1), edges(nbins+1)]` is covered exactly once, so the two
+            !! conventions differ only in which bin a value sitting exactly on an interior edge
+            !! joins.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_outside
+            !! how many usable elements fell outside `[edges(1), edges(nbins+1)]` and so joined no
+            !! bin. This is an ordinary data condition rather than an error -- `np.histogram`
+            !! drops such values silently -- but it is the one thing a caller cannot recover from
+            !! the output, so it is reported. A NaN under `skipnan = .false.` is counted here: it
+            !! is then a value, and it matches no bin.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine bucketize_bool
+        !> `pf_histogram` over a logical array.
+        module subroutine histogram_bool(values, edges, counts, right, is_valid, weights, n_null, n_outside, ok)
+            logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
+            real(real64), intent(in) :: edges(:) !! the bin boundaries, strictly increasing, at least two.
+            real(real64), intent(out) :: counts(:)
+            !! one entry per bin, so `size(edges) - 1` of them.
+            logical, intent(in), optional :: right
+            !! which side of a bin is closed. `.false.` by default, which is numpy's rule and the
+            !! one `np.histogram`/`np.digitize` use: bin k is `[edges(k), edges(k+1))`, and the
+            !! LAST bin closes at the top so that `edges(nbins+1)` itself lands in it. `.true.`
+            !! mirrors it, which is `pd.cut(right=True, include_lowest=True)`: bin k is
+            !! `(edges(k), edges(k+1)]`, and the FIRST bin closes at the bottom. Either way the
+            !! closed range `[edges(1), edges(nbins+1)]` is covered exactly once, so the two
+            !! conventions differ only in which bin a value sitting exactly on an interior edge
+            !! joins.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_outside
+            !! how many usable elements fell outside `[edges(1), edges(nbins+1)]` and so joined no
+            !! bin. This is an ordinary data condition rather than an error -- `np.histogram`
+            !! drops such values silently -- but it is the one thing a caller cannot recover from
+            !! the output, so it is reported. A NaN under `skipnan = .false.` is counted here: it
+            !! is then a value, and it matches no bin.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine histogram_bool
         !> `pf_sum` over a scalar numeric `parquet_column`.
         !>
         !> Dispatched on the column's kind at run time, and **scalar numeric columns only**:
@@ -6305,6 +7272,180 @@ module parquet_stats
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
             !! bits. It is a speed control and never an accuracy one.
         end subroutine sigma_clipped_stats_col
+        !> `pf_cumsum` over a scalar numeric `parquet_column`.
+        module subroutine cumsum_col(values, out, is_valid, skipnan, out_valid, n_null, n_nan, ok)
+            type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
+            real(real64), intent(out) :: out(:)
+            !! the running sum, same size as `values`. An excluded element is a quiet NaN unless
+            !! `out_valid` is present.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the result is
+            !! therefore undefined. Same size as `values`. **Absent, such an element is written as
+            !! a quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine cumsum_col
+        !> `pf_cumprod` over a scalar numeric `parquet_column`.
+        module subroutine cumprod_col(values, out, is_valid, skipnan, out_valid, n_null, n_nan, ok)
+            type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
+            real(real64), intent(out) :: out(:)
+            !! the running product, same size as `values`. An excluded element is a quiet NaN unless
+            !! `out_valid` is present.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the result is
+            !! therefore undefined. Same size as `values`. **Absent, such an element is written as
+            !! a quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine cumprod_col
+        !> `pf_cummax` over a scalar numeric `parquet_column`.
+        module subroutine cummax_col(values, out, is_valid, skipnan, out_valid, n_null, n_nan, ok)
+            type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
+            real(real64), intent(out) :: out(:)
+            !! the running maximum, same size as `values`. An excluded element is a quiet NaN unless
+            !! `out_valid` is present.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the result is
+            !! therefore undefined. Same size as `values`. **Absent, such an element is written as
+            !! a quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine cummax_col
+        !> `pf_cummin` over a scalar numeric `parquet_column`.
+        module subroutine cummin_col(values, out, is_valid, skipnan, out_valid, n_null, n_nan, ok)
+            type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
+            real(real64), intent(out) :: out(:)
+            !! the running minimum, same size as `values`. An excluded element is a quiet NaN unless
+            !! `out_valid` is present.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            logical, intent(out), optional :: out_valid(:)
+            !! per output element: .false. where the input was excluded and the result is
+            !! therefore undefined. Same size as `values`. **Absent, such an element is written as
+            !! a quiet NaN instead** -- which is loud in practice, since it propagates through
+            !! whatever the caller does next.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine cummin_col
+        !> `pf_bucketize` over a scalar numeric `parquet_column`.
+        module subroutine bucketize_col(values, edges, codes, right, is_valid, skipnan, n_null, n_nan, n_outside, ok)
+            type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
+            real(real64), intent(in) :: edges(:) !! the bin boundaries, strictly increasing, at least two.
+            integer(int32), intent(out) :: codes(:)
+            !! the 1-based bin of each value, or 0 for one that joined none. Same size as `values`.
+            logical, intent(in), optional :: right
+            !! which side of a bin is closed. `.false.` by default, which is numpy's rule and the
+            !! one `np.histogram`/`np.digitize` use: bin k is `[edges(k), edges(k+1))`, and the
+            !! LAST bin closes at the top so that `edges(nbins+1)` itself lands in it. `.true.`
+            !! mirrors it, which is `pd.cut(right=True, include_lowest=True)`: bin k is
+            !! `(edges(k), edges(k+1)]`, and the FIRST bin closes at the bottom. Either way the
+            !! closed range `[edges(1), edges(nbins+1)]` is covered exactly once, so the two
+            !! conventions differ only in which bin a value sitting exactly on an interior edge
+            !! joins.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            integer(int64), intent(out), optional :: n_outside
+            !! how many usable elements fell outside `[edges(1), edges(nbins+1)]` and so joined no
+            !! bin. This is an ordinary data condition rather than an error -- `np.histogram`
+            !! drops such values silently -- but it is the one thing a caller cannot recover from
+            !! the output, so it is reported. A NaN under `skipnan = .false.` is counted here: it
+            !! is then a value, and it matches no bin.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine bucketize_col
+        !> `pf_histogram` over a scalar numeric `parquet_column`.
+        module subroutine histogram_col(values, edges, counts, right, is_valid, weights, skipnan, n_null, n_nan, &
+                n_outside, ok)
+            type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
+            real(real64), intent(in) :: edges(:) !! the bin boundaries, strictly increasing, at least two.
+            real(real64), intent(out) :: counts(:)
+            !! one entry per bin, so `size(edges) - 1` of them.
+            logical, intent(in), optional :: right
+            !! which side of a bin is closed. `.false.` by default, which is numpy's rule and the
+            !! one `np.histogram`/`np.digitize` use: bin k is `[edges(k), edges(k+1))`, and the
+            !! LAST bin closes at the top so that `edges(nbins+1)` itself lands in it. `.true.`
+            !! mirrors it, which is `pd.cut(right=True, include_lowest=True)`: bin k is
+            !! `(edges(k), edges(k+1)]`, and the FIRST bin closes at the bottom. Either way the
+            !! closed range `[edges(1), edges(nbins+1)]` is covered exactly once, so the two
+            !! conventions differ only in which bin a value sitting exactly on an interior edge
+            !! joins.
+            logical, intent(in), optional :: is_valid(:)
+            !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
+            !! which one NaN makes every answer NaN.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
+            integer(int64), intent(out), optional :: n_outside
+            !! how many usable elements fell outside `[edges(1), edges(nbins+1)]` and so joined no
+            !! bin. This is an ordinary data condition rather than an error -- `np.histogram`
+            !! drops such values silently -- but it is the one thing a caller cannot recover from
+            !! the output, so it is reported. A NaN under `skipnan = .false.` is counted here: it
+            !! is then a value, and it matches no bin.
+            logical, intent(out), optional :: ok
+            !! .false. when the statistic is undefined for this population -- the result is then a
+            !! quiet NaN and must not be relied on. Partial nullness is not a failure.
+        end subroutine histogram_col
         !> `%compute` over a 32-bit integer array.
         module subroutine obj_compute_i32(self, values, retain, is_valid, weights, weight_type, threads)
             class(pf_stats), intent(inout) :: self

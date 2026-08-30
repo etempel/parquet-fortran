@@ -793,6 +793,18 @@ program error_scenarios
         call scenario_stats_clip_bad_sigma()
     case ("stats_zscore_size_mismatch")
         call scenario_stats_zscore_size_mismatch()
+    case ("stats_cumsum_size_mismatch")
+        call scenario_stats_cumsum_size_mismatch()
+    case ("stats_cum_out_valid_mismatch")
+        call scenario_stats_cum_out_valid_mismatch()
+    case ("stats_edges_too_few")
+        call scenario_stats_edges_too_few()
+    case ("stats_edges_not_increasing")
+        call scenario_stats_edges_not_increasing()
+    case ("stats_edges_nan")
+        call scenario_stats_edges_nan()
+    case ("stats_histogram_counts_size")
+        call scenario_stats_histogram_counts_size()
     case ("sorting_column_vector")
         call scenario_sorting_column_vector()
     case ("sorting_search_unsorted")
@@ -16965,6 +16977,87 @@ contains
         call pf_zscore(x, three)    ! -> aborts (size mismatch)
         print '(a,es12.5)', "unexpectedly accepted a short output array, z=", three(1)
     end subroutine scenario_stats_zscore_size_mismatch
+
+    !> A cumulative procedure writes one output per input, so a short `out` is a caller error.
+    subroutine scenario_stats_cumsum_size_mismatch()
+        real(real64) :: x(4) = [1.0_real64, 2.0_real64, 3.0_real64, 5.0_real64]
+        real(real64) :: four(4), three(3)
+
+        call pf_cumsum(x, four)     ! matched: accepted
+        if (four(4) /= 11.0_real64) print '(a)', "the running sum came back wrong"
+        call pf_cumsum(x, three)    ! -> aborts (size mismatch)
+        print '(a,es12.5)', "unexpectedly accepted a short output array, out=", three(1)
+    end subroutine scenario_stats_cumsum_size_mismatch
+
+    !> `out_valid` is checked separately from `out`: getting one right does not excuse the other,
+    !! and a short mask would be written past its end rather than merely reported incompletely.
+    subroutine scenario_stats_cum_out_valid_mismatch()
+        real(real64) :: x(4) = [1.0_real64, 2.0_real64, 3.0_real64, 5.0_real64]
+        real(real64) :: four(4)
+        logical :: mask4(4), mask2(2)
+
+        call pf_cummax(x, four, out_valid=mask4)   ! matched: accepted
+        if (.not. all(mask4)) print '(a)', "every element was usable and should be marked valid"
+        call pf_cummax(x, four, out_valid=mask2)   ! -> aborts (out_valid size mismatch)
+        print '(a,l1)', "unexpectedly accepted a short mask, first=", mask2(1)
+    end subroutine scenario_stats_cum_out_valid_mismatch
+
+    !> One edge describes no bin at all, so there is nothing the call could answer.
+    subroutine scenario_stats_edges_too_few()
+        real(real64) :: x(3) = [1.0_real64, 2.0_real64, 3.0_real64]
+        real(real64) :: two(2) = [0.0_real64, 4.0_real64]
+        real(real64) :: one(1) = [0.0_real64]
+        integer(int32) :: codes(3)
+
+        call pf_bucketize(x, two, codes)   ! two edges: one bin, accepted
+        if (any(codes /= 1_int32)) print '(a)', "all three values should have landed in bin 1"
+        call pf_bucketize(x, one, codes)   ! -> aborts (fewer than two edges)
+        print '(a,i0)', "unexpectedly accepted a single edge, codes(1)=", codes(1)
+    end subroutine scenario_stats_edges_too_few
+
+    !> An equal adjacent pair describes a bin no value can reach, which has no useful reading.
+    subroutine scenario_stats_edges_not_increasing()
+        real(real64) :: x(3) = [1.0_real64, 2.0_real64, 3.0_real64]
+        real(real64) :: good(4) = [0.0_real64, 1.5_real64, 2.5_real64, 4.0_real64]
+        real(real64) :: flat(4) = [0.0_real64, 1.5_real64, 1.5_real64, 4.0_real64]
+        real(real64) :: counts(3)
+
+        call pf_histogram(x, good, counts)   ! strictly increasing: accepted
+        if (sum(counts) /= 3.0_real64) print '(a)', "all three values should have been counted"
+        call pf_histogram(x, flat, counts)   ! -> aborts (not strictly increasing)
+        print '(a,es12.5)', "unexpectedly accepted a repeated edge, counts(1)=", counts(1)
+    end subroutine scenario_stats_edges_not_increasing
+
+    !> A NaN edge is reported as a NaN and not as "not increasing" -- it fails the ordering test
+    !! too, since every comparison against it is false, but that message sends the reader to the
+    !! wrong half of their edge array.
+    subroutine scenario_stats_edges_nan()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        real(real64) :: x(3) = [1.0_real64, 2.0_real64, 3.0_real64]
+        real(real64) :: good(3) = [0.0_real64, 2.0_real64, 4.0_real64]
+        real(real64) :: bad(3)
+        integer(int32) :: codes(3)
+
+        call pf_bucketize(x, good, codes)   ! finite edges: accepted
+        if (codes(3) /= 2_int32) print '(a)', "3.0 should have landed in the upper bin"
+        bad = good
+        bad(2) = ieee_value(0.0_real64, ieee_quiet_nan)
+        call pf_bucketize(x, bad, codes)    ! -> aborts (NaN edge)
+        print '(a,i0)', "unexpectedly accepted a NaN edge, codes(1)=", codes(1)
+    end subroutine scenario_stats_edges_nan
+
+    !> `counts` holds one entry per BIN, which is one fewer than the number of edges -- the
+    !! off-by-one a caller sizing it from `size(edges)` makes, and worth its own message.
+    subroutine scenario_stats_histogram_counts_size()
+        real(real64) :: x(3) = [1.0_real64, 2.0_real64, 3.0_real64]
+        real(real64) :: edges(4) = [0.0_real64, 1.5_real64, 2.5_real64, 4.0_real64]
+        real(real64) :: three(3), four(4)
+
+        call pf_histogram(x, edges, three)   ! four edges, three bins: accepted
+        if (sum(three) /= 3.0_real64) print '(a)', "all three values should have been counted"
+        call pf_histogram(x, edges, four)    ! -> aborts (one entry per bin, not per edge)
+        print '(a,es12.5)', "unexpectedly accepted one count per edge, counts(1)=", four(1)
+    end subroutine scenario_stats_histogram_counts_size
 
     !> A vector column has no defined order on a whole row, so it cannot be a sort key -- the
     !! same rule parquet_table%sort_by applies, enforced here for a bare parquet_column.

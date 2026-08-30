@@ -1802,10 +1802,10 @@ def check_stats_optional_argument_order():
                  "vsum", "vmin", "vmax", "count",
                  "retain", "consume",
                  "sigma", "sigma_lower", "sigma_upper", "maxiters", "cenfunc", "stdfunc",
-                 "n_clipped", "keep", "converged",
+                 "n_clipped", "keep", "converged", "right",
                  "is_valid", "weights", "weight_type", "ddof", "bias", "excess", "skipnan",
                  "method", "kind", "scale", "center", "out_valid", "n_null", "n_nan",
-                 "ok", "threads",
+                 "n_outside", "ok", "threads",
                  "unit", "name"]
     rank = {name: i for i, name in enumerate(canonical)}
     path = SRC / "parquet_stats.f90"

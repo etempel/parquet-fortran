@@ -177,7 +177,23 @@ contains
             new_unittest("every P8 procedure agrees across all six input kinds", &
                 test_p8_kinds_agree), &
             new_unittest("the four properties P8's first mutation round found unasserted", &
-                test_p8_mutation_gaps) &
+                test_p8_mutation_gaps), &
+            new_unittest("the cumulative family matches the 50-digit oracle EXACTLY", &
+                test_cumulative_matches_the_oracle), &
+            new_unittest("a null leaves the running value alone; a kept NaN poisons it", &
+                test_cumulative_null_rule), &
+            new_unittest("the last cumsum is not pf_sum, and the gap is the documented one", &
+                test_cumsum_is_not_pf_sum), &
+            new_unittest("pf_histogram matches np.histogram on the golden fixture", &
+                test_histogram_matches_numpy), &
+            new_unittest("the two edge conventions differ only ON an edge, and cover it once", &
+                test_binning_conventions), &
+            new_unittest("pf_histogram IS pf_bucketize tallied, on both conventions", &
+                test_histogram_is_bucketize_tallied), &
+            new_unittest("binning reports every element it could not place", &
+                test_binning_counts_and_weights), &
+            new_unittest("every P9 procedure agrees across all six input kinds", &
+                test_p9_kinds_agree) &
             ]
     end subroutine collect_tests_parquet_stats
 
@@ -3350,6 +3366,426 @@ contains
         call check(error, .not. flag, &
             "pf_gmean must not reach log(0); under nagfor's default traps that ends the process")
     end subroutine test_p8_mutation_gaps
+
+    ! ==================================================================================
+    ! P9 -- the cumulative family and the binning family
+    ! ==================================================================================
+
+    !> The four cumulative procedures against the 50-digit oracle, at five positions each.
+    !!
+    !! **Three of the four are asserted with `==` rather than a tolerance, and that is a property
+    !! of the fixture worth knowing before it is weakened.** Every recipe value is an integer over
+    !! 1024 with |x| < 512, so every partial SUM is an integer over 1024 below 2**24 -- exactly
+    !! representable, so a correct running sum reproduces the oracle bit for bit, and so does a
+    !! running maximum or minimum, which only ever selects. Only `pf_cumprod` accumulates rounding,
+    !! and only it gets `close_to`.
+    subroutine test_cumulative_matches_the_oracle(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: x(:), out(:)
+        integer :: k
+        logical :: ok, same
+
+        call golden_fixture(32_int64, x)
+        allocate(out(32))
+
+        call pf_cumsum(x, out, ok=ok)
+        same = .true.
+        do k = 1, NKP
+            if (out(G_KPROBES(k)) /= K_SUM(k)) same = .false.
+        end do
+        call check(error, same, "the running sum must reproduce the oracle EXACTLY on this fixture")
+        if (allocated(error)) return
+        call check(error, ok, "nothing was excluded, so ok must be .true.")
+        if (allocated(error)) return
+
+        call pf_cummax(x, out)
+        same = .true.
+        do k = 1, NKP
+            if (out(G_KPROBES(k)) /= K_MAX(k)) same = .false.
+        end do
+        call check(error, same, "the running maximum only ever selects, so it too is exact")
+        if (allocated(error)) return
+
+        call pf_cummin(x, out)
+        same = .true.
+        do k = 1, NKP
+            if (out(G_KPROBES(k)) /= K_MIN(k)) same = .false.
+        end do
+        call check(error, same, "and so is the running minimum")
+        if (allocated(error)) return
+
+        call pf_cumprod(x, out)
+        same = .true.
+        do k = 1, NKP
+            if (.not. close_to(out(G_KPROBES(k)), K_PROD(k))) same = .false.
+        end do
+        call check(error, same, &
+            "the running product accumulates rounding, so it is the one checked to a tolerance")
+    end subroutine test_cumulative_matches_the_oracle
+
+    !> The family's null rule, in both directions, and the one case where a NaN DOES poison.
+    !!
+    !! Two statements that are one careless line apart: "the output element is undefined" and "the
+    !! rest of the output is undefined". Only the first is meant, and the oracle's `K_SUM_NULL`
+    !! row -- the running sum with every 7th element null -- is what separates them: a running
+    !! value that restarted, or that carried the NaN forward, disagrees with it at every probe
+    !! after the first null.
+    subroutine test_cumulative_null_rule(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: x(:), out(:)
+        logical, allocatable :: v(:), ov(:)
+        real(real64) :: nan, small(5), sout(5)
+        integer(int64) :: i, nnull, nnan
+        integer :: k
+        logical :: ok, same
+
+        nan = ieee_value(0.0_real64, ieee_quiet_nan)
+        call golden_fixture(32_int64, x)
+        allocate(out(32), v(32), ov(32))
+        do i = 1_int64, 32_int64
+            v(i) = mod(i, 7_int64) /= 0_int64
+        end do
+
+        call pf_cumsum(x, out, is_valid=v, out_valid=ov, n_null=nnull, ok=ok)
+        same = .true.
+        do k = 1, NKP
+            if (out(G_KPROBES(k)) /= K_SUM_NULL(k)) same = .false.
+        end do
+        call check(error, same, "the running sum must carry PAST a null, unchanged and unrestarted")
+        if (allocated(error)) return
+        call check(error, nnull == 4_int64 .and. .not. ok, &
+            "four nulls at 7, 14, 21 and 28, and ok=.false. because elements were excluded")
+        if (allocated(error)) return
+        call check(error, .not. ov(7) .and. .not. ov(14) .and. ov(8) .and. ov(1), &
+            "out_valid must mark exactly the excluded positions")
+        if (allocated(error)) return
+
+        ! With `out_valid` absent the same element is a quiet NaN, which is the only way a
+        ! `real(real64)` array can say "no value" -- and it is loud, since it propagates.
+        call pf_cumsum(x, out, is_valid=v)
+        call check(error, out(7) /= out(7) .and. out(8) == K_SUM_NULL(3) * 0.0_real64 + out(8), &
+            "an excluded element is a quiet NaN when no mask was asked for")
+        if (allocated(error)) return
+        call check(error, out(8) == K_SUM_NULL(3), "and the element after it is unaffected")
+        if (allocated(error)) return
+
+        ! `skipnan = .false.` is the ONE case where a NaN poisons what follows: it is then an
+        ! ordinary value, and this is `np.cumsum`/`skipna=False`. Checked on all four folds,
+        ! because `cummax`/`cummin` reach it by a different branch -- `v > acc` is false for a
+        ! NaN `v`, so without an explicit test the NaN is silently discarded. A probe found
+        ! exactly that before this test existed.
+        small = [1.0_real64, nan, 3.0_real64, 4.0_real64, 5.0_real64]
+        call pf_cumsum(small, sout, skipnan=.false., n_nan=nnan, ok=ok)
+        call check(error, sout(1) == 1.0_real64 .and. all(sout(2:) /= sout(2:)), &
+            "a kept NaN poisons every later running SUM")
+        if (allocated(error)) return
+        call check(error, nnan == 0_int64 .and. ok, &
+            "and nothing was EXCLUDED, so n_nan is 0 and ok stays .true.")
+        if (allocated(error)) return
+        call pf_cumprod(small, sout, skipnan=.false.)
+        call check(error, all(sout(2:) /= sout(2:)), "a kept NaN poisons the running PRODUCT")
+        if (allocated(error)) return
+        call pf_cummax(small, sout, skipnan=.false.)
+        call check(error, all(sout(2:) /= sout(2:)), "a kept NaN poisons the running MAXIMUM")
+        if (allocated(error)) return
+        call pf_cummin(small, sout, skipnan=.false.)
+        call check(error, all(sout(2:) /= sout(2:)), "a kept NaN poisons the running MINIMUM")
+        if (allocated(error)) return
+
+        ! Skipped, the same NaN leaves the running value exactly where it was.
+        call pf_cumsum(small, sout, n_nan=nnan, ok=ok)
+        call check(error, sout(3) == 4.0_real64 .and. sout(5) == 13.0_real64, &
+            "a skipped NaN contributes nothing and the sum carries past it")
+        if (allocated(error)) return
+        call check(error, nnan == 1_int64 .and. .not. ok, &
+            "and it IS an exclusion, so n_nan is 1 and ok is .false.")
+        if (allocated(error)) return
+
+        ! A leading exclusion leaves nothing to carry: the fold starts at the first element that
+        ! survives, rather than at an identity that a caller could hold as data.
+        call pf_cummax([nan, 2.0_real64, 1.0_real64], sout(1:3))
+        call check(error, sout(1) /= sout(1) .and. sout(2) == 2.0_real64 .and. &
+            sout(3) == 2.0_real64, "a leading exclusion does not seed the fold with an identity")
+    end subroutine test_cumulative_null_rule
+
+    !> The documented divergence: the last cumulative sum is NOT `pf_sum`.
+    !!
+    !! A running sum is sequential by definition and `pf_sum` is pairwise, so the two agree only
+    !! to within a naive sum's accumulated rounding. The doc-comment says so, and a user who does
+    !! not read it will compare them; this test pins the claim in both directions -- they are
+    !! close, and on a fixture built to make cancellation bite they need not be equal.
+    subroutine test_cumsum_is_not_pf_sum(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: x(:), out(:)
+        real(real64) :: total
+        integer(int64) :: i, n
+
+        n = 4096_int64
+        allocate(x(n), out(n))
+        ! A large value first, then many small ones: the classic shape where a left-to-right sum
+        ! loses the tail and a pairwise one does not.
+        x(1) = 1.0e16_real64
+        do i = 2_int64, n
+            x(i) = 1.0_real64
+        end do
+        call pf_cumsum(x, out)
+        call pf_sum(x, total)
+        call check(error, close_to(out(n), total), &
+            "the two must still agree to the golden tolerance -- this is rounding, not a defect")
+        if (allocated(error)) return
+        ! Not asserted as an inequality: whether they differ is a property of the compiler's
+        ! rounding, and a test that REQUIRED a difference would be asserting a defect. What is
+        ! asserted is that the pairwise total is the better of the two, which is the reason the
+        ! doc-comment tells a caller to take the total from `pf_sum`.
+        call check(error, abs(total - (1.0e16_real64 + real(n - 1_int64, real64))) <= &
+            abs(out(n) - (1.0e16_real64 + real(n - 1_int64, real64))), &
+            "pf_sum must be at least as close to the true total as the running sum is")
+    end subroutine test_cumsum_is_not_pf_sum
+
+    !> `pf_histogram` against `np.histogram` on the golden fixture -- P9's acceptance gate.
+    subroutine test_histogram_matches_numpy(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: x(:), w(:)
+        real(real64) :: counts(NHB)
+        integer(int64) :: nout
+        logical :: ok
+
+        call golden_fixture(32_int64, x)
+        call pf_histogram(x, G_HEDGES, counts, n_outside=nout, ok=ok)
+        call check(error, all(counts == H_LEFT), "np.histogram's counts, exactly")
+        if (allocated(error)) return
+        call check(error, nout == H_LEFT_OUT, "and the values it silently dropped")
+        if (allocated(error)) return
+        call check(error, .not. ok, "ok is .false. because some values reached no bin")
+        if (allocated(error)) return
+
+        call pf_histogram(x, G_HEDGES, counts, right=.true., n_outside=nout)
+        call check(error, all(counts == H_RIGHT) .and. nout == H_RIGHT_OUT, &
+            "and pd.cut's convention over the same fixture")
+        if (allocated(error)) return
+
+        call golden_weights_mod5(32_int64, w)
+        call pf_histogram(x, G_HEDGES, counts, weights=w, n_outside=nout)
+        call check(error, all(counts == H_WT), &
+            "np.histogram(weights=) SUMS the weights rather than counting elements")
+        if (allocated(error)) return
+        call check(error, nout == H_WT_OUT, &
+            "a zero weight leaves the population, so it is not an element that missed a bin")
+    end subroutine test_histogram_matches_numpy
+
+    !> The two conventions are mirror images: they differ only ON an edge, and cover it once.
+    !!
+    !! The golden fixture cannot show this -- no recipe value lands on a round edge, which is why
+    !! `H_LEFT` and `H_RIGHT` are equal -- so the exact-boundary case exists for it. Every
+    !! interior edge there IS a value, so a mixed-up convention moves a code and is caught.
+    subroutine test_binning_conventions(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        integer(int32) :: codes(NHBX)
+        real(real64) :: counts(NHBX - 2)
+        integer(int64) :: nout
+        integer :: k
+        logical :: ok, covered
+
+        call pf_bucketize(G_HBX, G_HBE, codes, n_outside=nout, ok=ok)
+        call check(error, all(int(codes, kind=kind(HB_LEFT)) == HB_LEFT), &
+            "the lower-closed codes: a value ON an interior edge joins the bin ABOVE it")
+        if (allocated(error)) return
+        call check(error, nout == HB_LEFT_OUT .and. .not. ok, "with two values outside the range")
+        if (allocated(error)) return
+
+        call pf_bucketize(G_HBX, G_HBE, codes, right=.true., n_outside=nout)
+        call check(error, all(int(codes, kind=kind(HB_RIGHT)) == HB_RIGHT), &
+            "the upper-closed codes: the same value joins the bin BELOW it")
+        if (allocated(error)) return
+        call check(error, nout == HB_RIGHT_OUT, "and the same two values are outside either way")
+        if (allocated(error)) return
+
+        ! The whole-family invariant, and the cheapest one available: under BOTH conventions the
+        ! closed range [edges(1), edges(nbins+1)] is covered exactly once, so nothing is lost and
+        ! nothing is double-counted. A convention that left a gap, or that closed both ends of an
+        ! interior bin, fails here rather than only on a golden row.
+        covered = .true.
+        do k = 1, 2
+            call pf_histogram(G_HBX, G_HBE, counts, right=(k == 2), n_outside=nout)
+            if (nint(sum(counts)) + int(nout) /= NHBX) covered = .false.
+        end do
+        call check(error, covered, &
+            "every value is either in exactly one bin or outside, under both conventions")
+        if (allocated(error)) return
+        call pf_histogram(G_HBX, G_HBE, counts)
+        call check(error, all(nint(counts) == HB_LEFT_N), "the lower-closed bin counts")
+        if (allocated(error)) return
+        call pf_histogram(G_HBX, G_HBE, counts, right=.true.)
+        call check(error, all(nint(counts) == HB_RIGHT_N), &
+            "the upper-closed counts, which move a value between bins 1 and 2")
+    end subroutine test_binning_conventions
+
+    !> `pf_histogram` IS `pf_bucketize` followed by a tally, and the identity is asserted.
+    !!
+    !! Both reach the same `bin_of`, so this holds by construction -- which is exactly why it is
+    !! worth a test: a second, separately written edge search inside the histogram would agree on
+    !! every ordinary value and diverge on an edge, which no golden row over a round-edged fixture
+    !! could see.
+    subroutine test_histogram_is_bucketize_tallied(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: x(:)
+        real(real64) :: counts(NHB), tally(NHB), btally(NHBX - 2)
+        integer(int32), allocatable :: codes(:)
+        integer(int32) :: bcodes(NHBX)
+        integer(int64) :: nout_h, nout_b
+        integer :: k, arm
+        logical :: agree
+
+        call golden_fixture(32_int64, x)
+        allocate(codes(32))
+        agree = .true.
+        do arm = 1, 2
+            call pf_bucketize(x, G_HEDGES, codes, right=(arm == 2), n_outside=nout_b)
+            call pf_histogram(x, G_HEDGES, counts, right=(arm == 2), n_outside=nout_h)
+            do k = 1, NHB
+                tally(k) = real(count(codes == int(k, int32)), real64)
+            end do
+            if (.not. all(tally == counts)) agree = .false.
+            if (nout_b /= nout_h) agree = .false.
+        end do
+        call check(error, agree, &
+            "the count in bin k must equal the number of codes equal to k, on both conventions")
+        if (allocated(error)) return
+
+        ! **The fixture above cannot see the failure this test exists for.** No recipe value lands
+        ! on a round edge, and a second, separately written edge search would agree everywhere
+        ! except ON one -- so the identity has to be re-asserted over the boundary case, where
+        ! every interior edge IS a value.
+        agree = .true.
+        do arm = 1, 2
+            call pf_bucketize(G_HBX, G_HBE, bcodes, right=(arm == 2), n_outside=nout_b)
+            call pf_histogram(G_HBX, G_HBE, btally, right=(arm == 2), n_outside=nout_h)
+            do k = 1, NHBX - 2
+                if (real(count(bcodes == int(k, int32)), real64) /= btally(k)) agree = .false.
+            end do
+            if (nout_b /= nout_h) agree = .false.
+        end do
+        call check(error, agree, &
+            "and it must still hold where every interior edge lands exactly on a value")
+    end subroutine test_histogram_is_bucketize_tallied
+
+    !> Every element the binning family could not place is reported, and the causes are separated.
+    subroutine test_binning_counts_and_weights(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: x(7), edges(3), counts(2), nan
+        integer(int32) :: codes(7)
+        logical :: v(7), ok
+        integer(int64) :: nnull, nnan, nout
+
+        nan = ieee_value(0.0_real64, ieee_quiet_nan)
+        edges = [0.0_real64, 10.0_real64, 20.0_real64]
+        x = [1.0_real64, nan, 5.0_real64, -3.0_real64, 15.0_real64, 99.0_real64, 12.0_real64]
+        v = .true.
+        v(3) = .false.
+
+        call pf_bucketize(x, edges, codes, is_valid=v, n_null=nnull, n_nan=nnan, n_outside=nout, &
+            ok=ok)
+        call check(error, nnull == 1_int64 .and. nnan == 1_int64 .and. nout == 2_int64, &
+            "one null, one NaN and two out of range, each counted under its own cause")
+        if (allocated(error)) return
+        call check(error, codes(2) == 0_int32 .and. codes(3) == 0_int32 .and. &
+            codes(4) == 0_int32 .and. codes(6) == 0_int32, &
+            "and every one of them answers 0 -- the 1-based spelling of pd.cut's -1")
+        if (allocated(error)) return
+        call check(error, .not. ok, "ok is .false. when anything failed to reach a bin")
+        if (allocated(error)) return
+        call check(error, codes(1) == 1_int32 .and. codes(5) == 2_int32 .and. codes(7) == 2_int32, &
+            "while the three that did reach one are placed correctly")
+        if (allocated(error)) return
+
+        ! `skipnan = .false.` makes the NaN a VALUE, so it is no longer excluded -- but it still
+        ! reaches no bin, because every comparison against it is false. Only the ACCOUNTING moves,
+        ! which is the honest answer and is what the doc-comment states.
+        call pf_bucketize(x, edges, codes, is_valid=v, skipnan=.false., n_nan=nnan, n_outside=nout)
+        call check(error, nnan == 0_int64 .and. nout == 3_int64 .and. codes(2) == 0_int32, &
+            "a kept NaN moves from n_nan to n_outside and still joins no bin")
+        if (allocated(error)) return
+
+        ! An entirely empty population is an ordinary data condition, not an error.
+        call pf_histogram(x(1:0), edges, counts, n_outside=nout, ok=ok)
+        call check(error, all(counts == 0.0_real64) .and. nout == 0_int64 .and. ok, &
+            "an empty population gives zero counts, nothing outside, and ok=.true.")
+    end subroutine test_binning_counts_and_weights
+
+    !> Every P9 procedure answers the same over all six input kinds.
+    !!
+    !! The per-kind layer is generated, so a mistake here would be identical in all six specifics
+    !! of one family rather than in one of them -- which is precisely what a cross-kind comparison
+    !! cannot see. What it CAN see is a widening that lost a value or an argument wired to the
+    !! wrong dummy, and both have happened in this module before.
+    subroutine test_p9_kinds_agree(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: xd(6), od(6), edges(4), cd(3), cx(3)
+        real(real32) :: xs(6)
+        integer(int32) :: xi(6), codes_d(6), codes_x(6)
+        integer(int64) :: xl(6)
+        logical :: xb(6)
+        type(parquet_column) :: col
+        real(real64) :: ox(6)
+        integer :: k
+
+        xd = [1.0_real64, 4.0_real64, 2.0_real64, 8.0_real64, 3.0_real64, 5.0_real64]
+        xs = real(xd, real32)
+        xi = int(xd, int32)
+        xl = int(xd, int64)
+        xb = xd > 3.0_real64
+        edges = [0.0_real64, 3.0_real64, 6.0_real64, 9.0_real64]
+        call col%init(PK_FLOAT64, 6_int64)
+        do k = 1, 6
+            call col%set_at(int(k, int64), xd(k))
+        end do
+
+        call pf_cumsum(xd, od)
+        call pf_cumsum(xs, ox)
+        call check(error, all(ox == od), "pf_cumsum over real32")
+        if (allocated(error)) return
+        call pf_cumsum(xi, ox)
+        call check(error, all(ox == od), "pf_cumsum over int32")
+        if (allocated(error)) return
+        call pf_cumsum(xl, ox)
+        call check(error, all(ox == od), "pf_cumsum over int64")
+        if (allocated(error)) return
+        call pf_cumsum(col, ox)
+        call check(error, all(ox == od), "pf_cumsum over a parquet_column")
+        if (allocated(error)) return
+        ! The logical kind is 1 for .true. and 0 for .false., so its running sum is a count.
+        call pf_cumsum(xb, ox)
+        call check(error, ox(6) == real(count(xb), real64), "pf_cumsum over a logical array")
+        if (allocated(error)) return
+
+        call pf_cumprod(xi, ox)
+        call check(error, ox(6) == 960.0_real64, "pf_cumprod over int32")
+        if (allocated(error)) return
+        call pf_cummax(xl, ox)
+        call check(error, ox(6) == 8.0_real64, "pf_cummax over int64")
+        if (allocated(error)) return
+        call pf_cummin(xs, ox)
+        call check(error, ox(6) == 1.0_real64, "pf_cummin over real32")
+        if (allocated(error)) return
+
+        call pf_bucketize(xd, edges, codes_d)
+        call pf_bucketize(xi, edges, codes_x)
+        call check(error, all(codes_x == codes_d), "pf_bucketize over int32")
+        if (allocated(error)) return
+        call pf_bucketize(col, edges, codes_x)
+        call check(error, all(codes_x == codes_d), "pf_bucketize over a parquet_column")
+        if (allocated(error)) return
+
+        call pf_histogram(xd, edges, cd)
+        call pf_histogram(xs, edges, cx)
+        call check(error, all(cx == cd), "pf_histogram over real32")
+        if (allocated(error)) return
+        call pf_histogram(xl, edges, cx)
+        call check(error, all(cx == cd), "pf_histogram over int64")
+        if (allocated(error)) return
+        call pf_histogram(col, edges, cx)
+        call check(error, all(cx == cd), "pf_histogram over a parquet_column")
+    end subroutine test_p9_kinds_agree
 
     !> Whether two reals agree to the golden tolerance.
     logical function close_to(got, want)

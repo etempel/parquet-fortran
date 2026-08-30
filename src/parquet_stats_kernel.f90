@@ -434,6 +434,50 @@ contains
             n_null=n_null, ok=ok, threads=threads)
     end procedure sigma_clipped_stats_i32
 
+    module procedure cumsum_i32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call cumsum_f64(wide, out, is_valid=is_valid, out_valid=out_valid, n_null=n_null, ok=ok)
+    end procedure cumsum_i32
+
+    module procedure cumprod_i32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call cumprod_f64(wide, out, is_valid=is_valid, out_valid=out_valid, n_null=n_null, ok=ok)
+    end procedure cumprod_i32
+
+    module procedure cummax_i32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call cummax_f64(wide, out, is_valid=is_valid, out_valid=out_valid, n_null=n_null, ok=ok)
+    end procedure cummax_i32
+
+    module procedure cummin_i32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call cummin_f64(wide, out, is_valid=is_valid, out_valid=out_valid, n_null=n_null, ok=ok)
+    end procedure cummin_i32
+
+    module procedure bucketize_i32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call bucketize_f64(wide, edges, codes, right=right, is_valid=is_valid, n_null=n_null, &
+            n_outside=n_outside, ok=ok)
+    end procedure bucketize_i32
+
+    module procedure histogram_i32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call histogram_f64(wide, edges, counts, right=right, is_valid=is_valid, weights=weights, &
+            n_null=n_null, n_outside=n_outside, ok=ok)
+    end procedure histogram_i32
+
     module procedure sum_i64
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
@@ -610,6 +654,50 @@ contains
             n_clipped=n_clipped, keep=keep, converged=converged, is_valid=is_valid, &
             n_null=n_null, ok=ok, threads=threads)
     end procedure sigma_clipped_stats_i64
+
+    module procedure cumsum_i64
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call cumsum_f64(wide, out, is_valid=is_valid, out_valid=out_valid, n_null=n_null, ok=ok)
+    end procedure cumsum_i64
+
+    module procedure cumprod_i64
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call cumprod_f64(wide, out, is_valid=is_valid, out_valid=out_valid, n_null=n_null, ok=ok)
+    end procedure cumprod_i64
+
+    module procedure cummax_i64
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call cummax_f64(wide, out, is_valid=is_valid, out_valid=out_valid, n_null=n_null, ok=ok)
+    end procedure cummax_i64
+
+    module procedure cummin_i64
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call cummin_f64(wide, out, is_valid=is_valid, out_valid=out_valid, n_null=n_null, ok=ok)
+    end procedure cummin_i64
+
+    module procedure bucketize_i64
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call bucketize_f64(wide, edges, codes, right=right, is_valid=is_valid, n_null=n_null, &
+            n_outside=n_outside, ok=ok)
+    end procedure bucketize_i64
+
+    module procedure histogram_i64
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call histogram_f64(wide, edges, counts, right=right, is_valid=is_valid, weights=weights, &
+            n_null=n_null, n_outside=n_outside, ok=ok)
+    end procedure histogram_i64
 
     module procedure sum_f32
         real(real64), allocatable :: wide(:)
@@ -793,6 +881,54 @@ contains
             skipnan=skipnan, n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
     end procedure sigma_clipped_stats_f32
 
+    module procedure cumsum_f32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call cumsum_f64(wide, out, is_valid=is_valid, skipnan=skipnan, out_valid=out_valid, n_null=n_null, &
+            n_nan=n_nan, ok=ok)
+    end procedure cumsum_f32
+
+    module procedure cumprod_f32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call cumprod_f64(wide, out, is_valid=is_valid, skipnan=skipnan, out_valid=out_valid, n_null=n_null, &
+            n_nan=n_nan, ok=ok)
+    end procedure cumprod_f32
+
+    module procedure cummax_f32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call cummax_f64(wide, out, is_valid=is_valid, skipnan=skipnan, out_valid=out_valid, n_null=n_null, &
+            n_nan=n_nan, ok=ok)
+    end procedure cummax_f32
+
+    module procedure cummin_f32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call cummin_f64(wide, out, is_valid=is_valid, skipnan=skipnan, out_valid=out_valid, n_null=n_null, &
+            n_nan=n_nan, ok=ok)
+    end procedure cummin_f32
+
+    module procedure bucketize_f32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call bucketize_f64(wide, edges, codes, right=right, is_valid=is_valid, skipnan=skipnan, &
+            n_null=n_null, n_nan=n_nan, n_outside=n_outside, ok=ok)
+    end procedure bucketize_f32
+
+    module procedure histogram_f32
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = real(values, real64)
+        call histogram_f64(wide, edges, counts, right=right, is_valid=is_valid, weights=weights, &
+            skipnan=skipnan, n_null=n_null, n_nan=n_nan, n_outside=n_outside, ok=ok)
+    end procedure histogram_f32
+
     module procedure sum_bool
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
@@ -969,6 +1105,50 @@ contains
             n_clipped=n_clipped, keep=keep, converged=converged, is_valid=is_valid, &
             n_null=n_null, ok=ok, threads=threads)
     end procedure sigma_clipped_stats_bool
+
+    module procedure cumsum_bool
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = merge(1.0_real64, 0.0_real64, values)
+        call cumsum_f64(wide, out, is_valid=is_valid, out_valid=out_valid, n_null=n_null, ok=ok)
+    end procedure cumsum_bool
+
+    module procedure cumprod_bool
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = merge(1.0_real64, 0.0_real64, values)
+        call cumprod_f64(wide, out, is_valid=is_valid, out_valid=out_valid, n_null=n_null, ok=ok)
+    end procedure cumprod_bool
+
+    module procedure cummax_bool
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = merge(1.0_real64, 0.0_real64, values)
+        call cummax_f64(wide, out, is_valid=is_valid, out_valid=out_valid, n_null=n_null, ok=ok)
+    end procedure cummax_bool
+
+    module procedure cummin_bool
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = merge(1.0_real64, 0.0_real64, values)
+        call cummin_f64(wide, out, is_valid=is_valid, out_valid=out_valid, n_null=n_null, ok=ok)
+    end procedure cummin_bool
+
+    module procedure bucketize_bool
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = merge(1.0_real64, 0.0_real64, values)
+        call bucketize_f64(wide, edges, codes, right=right, is_valid=is_valid, n_null=n_null, &
+            n_outside=n_outside, ok=ok)
+    end procedure bucketize_bool
+
+    module procedure histogram_bool
+        real(real64), allocatable :: wide(:)
+        allocate(wide(size(values, kind=int64)))
+        wide = merge(1.0_real64, 0.0_real64, values)
+        call histogram_f64(wide, edges, counts, right=right, is_valid=is_valid, weights=weights, &
+            n_null=n_null, n_outside=n_outside, ok=ok)
+    end procedure histogram_bool
 
     module procedure sum_col
         real(real64), allocatable :: wide(:)
@@ -1152,6 +1332,54 @@ contains
             n_clipped=n_clipped, keep=keep, converged=converged, is_valid=mask, &
             skipnan=skipnan, n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
     end procedure sigma_clipped_stats_col
+
+    module procedure cumsum_col
+        real(real64), allocatable :: wide(:)
+        logical, allocatable :: mask(:)
+        call col_to_real64(values, "pf_cumsum", is_valid, wide, mask)
+        call cumsum_f64(wide, out, is_valid=mask, skipnan=skipnan, out_valid=out_valid, n_null=n_null, &
+            n_nan=n_nan, ok=ok)
+    end procedure cumsum_col
+
+    module procedure cumprod_col
+        real(real64), allocatable :: wide(:)
+        logical, allocatable :: mask(:)
+        call col_to_real64(values, "pf_cumprod", is_valid, wide, mask)
+        call cumprod_f64(wide, out, is_valid=mask, skipnan=skipnan, out_valid=out_valid, n_null=n_null, &
+            n_nan=n_nan, ok=ok)
+    end procedure cumprod_col
+
+    module procedure cummax_col
+        real(real64), allocatable :: wide(:)
+        logical, allocatable :: mask(:)
+        call col_to_real64(values, "pf_cummax", is_valid, wide, mask)
+        call cummax_f64(wide, out, is_valid=mask, skipnan=skipnan, out_valid=out_valid, n_null=n_null, &
+            n_nan=n_nan, ok=ok)
+    end procedure cummax_col
+
+    module procedure cummin_col
+        real(real64), allocatable :: wide(:)
+        logical, allocatable :: mask(:)
+        call col_to_real64(values, "pf_cummin", is_valid, wide, mask)
+        call cummin_f64(wide, out, is_valid=mask, skipnan=skipnan, out_valid=out_valid, n_null=n_null, &
+            n_nan=n_nan, ok=ok)
+    end procedure cummin_col
+
+    module procedure bucketize_col
+        real(real64), allocatable :: wide(:)
+        logical, allocatable :: mask(:)
+        call col_to_real64(values, "pf_bucketize", is_valid, wide, mask)
+        call bucketize_f64(wide, edges, codes, right=right, is_valid=mask, skipnan=skipnan, n_null=n_null, &
+            n_nan=n_nan, n_outside=n_outside, ok=ok)
+    end procedure bucketize_col
+
+    module procedure histogram_col
+        real(real64), allocatable :: wide(:)
+        logical, allocatable :: mask(:)
+        call col_to_real64(values, "pf_histogram", is_valid, wide, mask)
+        call histogram_f64(wide, edges, counts, right=right, is_valid=mask, weights=weights, &
+            skipnan=skipnan, n_null=n_null, n_nan=n_nan, n_outside=n_outside, ok=ok)
+    end procedure histogram_col
 
     module procedure obj_compute_i32
         real(real64), allocatable :: wide(:)

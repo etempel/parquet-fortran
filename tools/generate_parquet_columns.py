@@ -98,6 +98,18 @@ KINDS = [
 # they delegate to parquet_string_column rather than owning a Fortran array (DD1).
 ARRAY_KINDS = [k for k in KINDS if k[5] != "str"]
 
+
+#: What an UNDEFINED_CHECK build writes into a row's value bytes that nothing has written yet.
+#: POISON rather than zero -- see the emitted comment in ensure_capacity. `undef_nan32`/
+#: `undef_nan64` are declared inside that procedure, under the same guard.
+UNDEF_FILL = {
+    "integer(int32)": "huge(0_int32)",
+    "integer(int64)": "huge(0_int64)",
+    "real(real32)": "undef_nan32",
+    "real(real64)": "undef_nan64",
+    "logical": ".true.",
+}
+
 # The vector kinds -- the only ones with more than one value per row, and so the only ones for
 # which "one element of one row" is a different operation from "row i". `get_elem`/`set_elem`
 # exist for these and nothing else.
@@ -2117,16 +2129,43 @@ contains""")
     end procedure gather_storage
     !
     module procedure ensure_capacity
+#ifdef UNDEFINED_CHECK
+        use ieee_arithmetic, only : ieee_value, ieee_quiet_nan
+#endif
         integer(int64) :: old, newcap""")
     for k in ARRAY_KINDS:
         tag, pk, decl, comp, rank, cat = k
         dims = "(:)" if rank == 1 else "(:,:)"
         w(f"        {decl}, allocatable :: tmp_{comp}{dims}")
-    w("""        if (need_rows <= self%cap) return
+    w("""#ifdef UNDEFINED_CHECK
+        ! Quiet NaNs, and `ieee_value` rather than a TRANSFER of a bit pattern: nagfor
+        ! CONSTANT-FOLDS a transfer and then refuses the result outright (`Error: Result of
+        ! TRANSFER is Not a Number`) -- as a parameter AND as a runtime local. Creating a NaN
+        ! raises no flag; arithmetic and ordered comparison on it do, which is the signal.
+        real(real32) :: undef_nan32
+        real(real64) :: undef_nan64
+#endif
+        if (need_rows <= self%cap) return
         old = self%nrows
         ! Geometric, not exact-fit: see the interface's own doc-comment for why, and why the
         ! `cap + cap/2` form is the one to keep.
         newcap = max(need_rows, self%cap + self%cap/2_int64)
+#ifdef UNDEFINED_CHECK
+        undef_nan32 = ieee_value(0.0_real32, ieee_quiet_nan)
+        undef_nan64 = ieee_value(0.0_real64, ieee_quiet_nan)
+#endif
+        ! The `#ifdef UNDEFINED_CHECK` fills below exist for ONE build: nagfor's `-C=undefined`
+        ! (fpm.toml's `nagundef` profile). `%init`'s contract leaves a null row's value bytes
+        ! unspecified, so the copy in each arm reads bytes nothing ever wrote -- which that
+        ! checker reports, correctly, and which used to abort the whole `columns` suite at test
+        ! 28 of 74. This is the only place storage grows, so one fill site covers every kind.
+        !
+        ! POISON, not zero, and the difference is the whole point: defining these bytes makes
+        ! the one instrument that could see an unsound read of them blind to it. A NaN or
+        ! `huge` keeps such a read visible as a WRONG ANSWER rather than a plausible zero, so
+        ! the class changes instrument instead of disappearing. Do not tidy these to 0/.false.
+        ! The temporal kinds need no fill at all -- their types carry default component
+        ! initializers, so allocation defines them.
         select case (self%kind)""")
     for k in ARRAY_KINDS:
         tag, pk, decl, comp, rank, cat = k
@@ -2140,6 +2179,11 @@ contains""")
             allocate(tmp_{comp}(self%width, newcap))
             if (old > 0_int64) tmp_{comp}(:, 1:old) = self%{comp}(:, 1:old)
             call move_alloc(tmp_{comp}, self%{comp})""")
+        if cat == "num":
+            sect = f"(old + 1_int64:)" if rank == 1 else f"(:, old + 1_int64:)"
+            w("#ifdef UNDEFINED_CHECK")
+            w(f"            self%{comp}{sect} = {UNDEF_FILL[decl]}")
+            w("#endif")
     w("""        case (PK_STRING, PK_STRING_VEC)
             ! the string store carries its own capacity (parquet_strings' ensure_*_cap), so `cap`
             ! is meaningless here and %capacity/%reserve/%shrink_to_fit forward to it instead

@@ -148,7 +148,7 @@ nagfor.flags = "-f2018 -nan -colour -w=unused -Warn=unkind_real_literal -Warn=do
 #nagdeb.flags = "-C=all -g -gline -mtrace"
 nagdeb.flags = "-C=all -g"
 
-nagundefined.flags = "-C=undefined"
+nagundefined.flags = "-C=undefined -DUNDEFINED_CHECK"
 
 [profiles]
 nag = ["nagfor"]

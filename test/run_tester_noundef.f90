@@ -23,7 +23,6 @@
 program run_tester_noundef
     use testdrive, only : new_testsuite, testsuite_type
     use test_runner_support, only : run_tester_args, run_tester_main
-    use test_columns, only : collect_tests_parquet_columns
     use test_sorting, only : collect_tests_parquet_sorting
     implicit none
     type(testsuite_type), allocatable :: testsuites(:)
@@ -32,12 +31,8 @@ program run_tester_noundef
     call run_tester_args(suite_name, test_name)
     !
     testsuites = [ &
-        ! BLOCKER B, not a C++ dependency: `grow_storage` reads a null row's value bytes, which
-        ! `%init`'s documented contract leaves unspecified on purpose. `-C=undefined` reports
-        ! that as an undefined-variable read, and decision 4 settled that the contract stays.
-        new_testsuite("columns", collect_tests_parquet_columns), &
-        ! NOT a C++ dependency either -- `test_sorting.f90` is Arrow-free and the partition
-        ! check proves it. It is here because `-C=undefined` SEGFAULTS inside its own
+        ! NOT a C++ dependency -- `test_sorting.f90` is Arrow-free and the partition check
+        ! proves it. It is here because `-C=undefined` SEGFAULTS inside its own
         ! instrumentation, at `parquet_argsort_kernel.f90:303` (`extract_chr`, writing
         ! `buf(1)%data(pos + j)`), reached from `pf_sort` on a `character` array. The line is
         ! correct -- `buf(1)%data` is allocated five lines above -- and the suite passes under

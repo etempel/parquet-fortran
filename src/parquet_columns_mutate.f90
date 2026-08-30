@@ -318,6 +318,9 @@ contains
     end procedure gather_storage
     !
     module procedure ensure_capacity
+#ifdef UNDEFINED_CHECK
+        use ieee_arithmetic, only : ieee_value, ieee_quiet_nan
+#endif
         integer(int64) :: old, newcap
         integer(int32), allocatable :: tmp_i32(:)
         integer(int64), allocatable :: tmp_i64(:)
@@ -335,32 +338,71 @@ contains
         type(parquet_date), allocatable :: tmp_dtv(:,:)
         type(parquet_time), allocatable :: tmp_tmv(:,:)
         type(parquet_timestamp), allocatable :: tmp_tsv(:,:)
+#ifdef UNDEFINED_CHECK
+        ! Quiet NaNs, and `ieee_value` rather than a TRANSFER of a bit pattern: nagfor
+        ! CONSTANT-FOLDS a transfer and then refuses the result outright (`Error: Result of
+        ! TRANSFER is Not a Number`) -- as a parameter AND as a runtime local. Creating a NaN
+        ! raises no flag; arithmetic and ordered comparison on it do, which is the signal.
+        real(real32) :: undef_nan32
+        real(real64) :: undef_nan64
+#endif
         if (need_rows <= self%cap) return
         old = self%nrows
         ! Geometric, not exact-fit: see the interface's own doc-comment for why, and why the
         ! `cap + cap/2` form is the one to keep.
         newcap = max(need_rows, self%cap + self%cap/2_int64)
+#ifdef UNDEFINED_CHECK
+        undef_nan32 = ieee_value(0.0_real32, ieee_quiet_nan)
+        undef_nan64 = ieee_value(0.0_real64, ieee_quiet_nan)
+#endif
+        ! The `#ifdef UNDEFINED_CHECK` fills below exist for ONE build: nagfor's `-C=undefined`
+        ! (fpm.toml's `nagundef` profile). `%init`'s contract leaves a null row's value bytes
+        ! unspecified, so the copy in each arm reads bytes nothing ever wrote -- which that
+        ! checker reports, correctly, and which used to abort the whole `columns` suite at test
+        ! 28 of 74. This is the only place storage grows, so one fill site covers every kind.
+        !
+        ! POISON, not zero, and the difference is the whole point: defining these bytes makes
+        ! the one instrument that could see an unsound read of them blind to it. A NaN or
+        ! `huge` keeps such a read visible as a WRONG ANSWER rather than a plausible zero, so
+        ! the class changes instrument instead of disappearing. Do not tidy these to 0/.false.
+        ! The temporal kinds need no fill at all -- their types carry default component
+        ! initializers, so allocation defines them.
         select case (self%kind)
         case (PK_INT32)
             allocate(tmp_i32(newcap))
             if (old > 0_int64) tmp_i32(1:old) = self%i32(1:old)
             call move_alloc(tmp_i32, self%i32)
+#ifdef UNDEFINED_CHECK
+            self%i32(old + 1_int64:) = huge(0_int32)
+#endif
         case (PK_INT64)
             allocate(tmp_i64(newcap))
             if (old > 0_int64) tmp_i64(1:old) = self%i64(1:old)
             call move_alloc(tmp_i64, self%i64)
+#ifdef UNDEFINED_CHECK
+            self%i64(old + 1_int64:) = huge(0_int64)
+#endif
         case (PK_FLOAT32)
             allocate(tmp_f32(newcap))
             if (old > 0_int64) tmp_f32(1:old) = self%f32(1:old)
             call move_alloc(tmp_f32, self%f32)
+#ifdef UNDEFINED_CHECK
+            self%f32(old + 1_int64:) = undef_nan32
+#endif
         case (PK_FLOAT64)
             allocate(tmp_f64(newcap))
             if (old > 0_int64) tmp_f64(1:old) = self%f64(1:old)
             call move_alloc(tmp_f64, self%f64)
+#ifdef UNDEFINED_CHECK
+            self%f64(old + 1_int64:) = undef_nan64
+#endif
         case (PK_LOGICAL)
             allocate(tmp_bool(newcap))
             if (old > 0_int64) tmp_bool(1:old) = self%bool(1:old)
             call move_alloc(tmp_bool, self%bool)
+#ifdef UNDEFINED_CHECK
+            self%bool(old + 1_int64:) = .true.
+#endif
         case (PK_DATE)
             allocate(tmp_dt(newcap))
             if (old > 0_int64) tmp_dt(1:old) = self%dt(1:old)
@@ -377,22 +419,37 @@ contains
             allocate(tmp_i32v(self%width, newcap))
             if (old > 0_int64) tmp_i32v(:, 1:old) = self%i32v(:, 1:old)
             call move_alloc(tmp_i32v, self%i32v)
+#ifdef UNDEFINED_CHECK
+            self%i32v(:, old + 1_int64:) = huge(0_int32)
+#endif
         case (PK_INT64_VEC)
             allocate(tmp_i64v(self%width, newcap))
             if (old > 0_int64) tmp_i64v(:, 1:old) = self%i64v(:, 1:old)
             call move_alloc(tmp_i64v, self%i64v)
+#ifdef UNDEFINED_CHECK
+            self%i64v(:, old + 1_int64:) = huge(0_int64)
+#endif
         case (PK_FLOAT32_VEC)
             allocate(tmp_f32v(self%width, newcap))
             if (old > 0_int64) tmp_f32v(:, 1:old) = self%f32v(:, 1:old)
             call move_alloc(tmp_f32v, self%f32v)
+#ifdef UNDEFINED_CHECK
+            self%f32v(:, old + 1_int64:) = undef_nan32
+#endif
         case (PK_FLOAT64_VEC)
             allocate(tmp_f64v(self%width, newcap))
             if (old > 0_int64) tmp_f64v(:, 1:old) = self%f64v(:, 1:old)
             call move_alloc(tmp_f64v, self%f64v)
+#ifdef UNDEFINED_CHECK
+            self%f64v(:, old + 1_int64:) = undef_nan64
+#endif
         case (PK_LOGICAL_VEC)
             allocate(tmp_boolv(self%width, newcap))
             if (old > 0_int64) tmp_boolv(:, 1:old) = self%boolv(:, 1:old)
             call move_alloc(tmp_boolv, self%boolv)
+#ifdef UNDEFINED_CHECK
+            self%boolv(:, old + 1_int64:) = .true.
+#endif
         case (PK_DATE_VEC)
             allocate(tmp_dtv(self%width, newcap))
             if (old > 0_int64) tmp_dtv(:, 1:old) = self%dtv(:, 1:old)

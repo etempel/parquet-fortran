@@ -33,6 +33,12 @@
 !>                          logging for the calling program. Nothing in this
 !>                          library uses it; the library's own messages go
 !>                          through `parquet_settings`' verbosity and stream.
+!>   * `parquet_utils`   -- `pf_to_lower`/`pf_to_upper`, `pf_to_str` and the
+!>                          POSIX path helpers (`pf_join_path`, `pf_dirname`,
+!>                          `pf_basename`, `pf_path_ext`, `pf_path_stem`,
+!>                          `pf_split_path`, `pf_path_add_suffix`). A leaf
+!>                          below everything: nothing in it validates, aborts
+!>                          or prints, and it imports only iso_fortran_env.
 !>   * `parquet_settings`-- process-global settings: thread caps, writer
 !>                          defaults, terminal verbosity and message stream,
 !>                          plus the read-only `parquet_max_*` limits.
@@ -69,6 +75,7 @@ module parquet
     use parquet_spatial
     use parquet_healpix
     use parquet_logging
+    use parquet_utils
     ! Only the test hook: the transform itself and its contract check are internal.
     use parquet_expkey, only: parquet_debug_exp_key, parquet_debug_set_exp_key_contract
     use parquet_settings

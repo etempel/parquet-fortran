@@ -6,6 +6,7 @@ ordered_subpage: random.md
 ordered_subpage: spatial.md
 ordered_subpage: healpix.md
 ordered_subpage: logging.md
+ordered_subpage: utils.md
 ordered_subpage: generated-tables.md
 ordered_subpage: embedding-maml-schemas.md
 ---
@@ -13,7 +14,8 @@ ordered_subpage: embedding-maml-schemas.md
 Things beyond the file being read or written: a general-purpose sorting API over plain Fortran
 arrays and this library's own column types, counter-based random numbers that survive a parallel
 loop — with the distributions and sampling built on them — spatial neighbour search over
-coordinate arrays, the HEALPix sphere pixelisation, and the two generators meant to be copied into your own project.
+coordinate arrays, the HEALPix sphere pixelisation, small text and path helpers, and the two
+generators meant to be copied into your own project.
 
 - [Sorting arrays and columns](sorting.html) — `pf_sort` and `pf_argsort` over eleven element
   types, from plain arrays to a `parquet_column`, with multi-key sorts and group boundaries; then
@@ -46,6 +48,10 @@ coordinate arrays, the HEALPix sphere pixelisation, and the two generators meant
   a cheap `%enabled` check before an expensive message, per-thread context tags and a buffered
   mode that keeps one thread's narrative together inside an OpenMP region. Not this library's
   own messaging, which the settings page covers.
+- [Text and path helpers with parquet_utils](utils.html) — ASCII case folding, turning a value
+  into text with a minimum width or a format of your choosing, and joining and taking apart POSIX
+  paths by CPython's `posixpath` rules. A leaf module that cannot fail: nothing in it validates,
+  aborts or prints, and every result comes back allocated.
 - [Generated table types](generated-tables.html) — `tools/generate_user_table_code.py`: named,
   typed accessors on your own `parquet_table` extension, generated from a MAML schema. Opening one
   from a file, from a slice, or from nothing at all (`%init`, `%init_slice`, `%init_empty`);

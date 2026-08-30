@@ -881,10 +881,16 @@ def generate(healpy_version=None, numpy_version=None, hp_cxx_version=None):
 
     a("!> Reference vectors for `parquet_healpix`, generated from an independent model.")
     a("!!")
-    a("!! **GENERATED FILE -- DO NOT EDIT BY HAND.** Emitted by `tools/generate_healpix_reference.py`;")
-    a("!! `tools/generate_healpix_reference.py --check` fails if this file has drifted from what the")
-    a("!! generator produces, and CI runs it. **Never hand-edit a value here**: these vectors are what")
-    a("!! pin the pixelisation's contract, so an edited one is a lie that nothing else would catch.")
+    a("!! **GENERATED FILE -- DO NOT EDIT BY HAND.** Emitted by `tools/generate_healpix_reference.py`.")
+    a("!! **Never hand-edit a value here**: these vectors are what pin the pixelisation's contract, so")
+    a("!! an edited one is a lie that nothing else would catch.")
+    a("!!")
+    a("!! **`--check` is HOST-DEPENDENT and is deliberately NOT run by CI.** The directions below come")
+    a("!! from `math.acos`/`cos`/`atan2`, so their last digit follows the platform's libm and a fresh")
+    a("!! run on a different machine legitimately disagrees with this file in the 17th significant")
+    a("!! figure. Use it to see what a regeneration WOULD change, never as a pass/fail gate. What CI")
+    a("!! runs instead is `--self-test`, which reproduces the anchors without touching this file, plus")
+    a("!! the generated-file banner check in `tools/check_source_conventions.py`.")
     a("!!")
     a("!! Every value is derived by the generator's own pure-Python model of the published HEALPix")
     a("!! algorithm (Gorski et al. 2005, ApJ 622, 759) and cross-checked against `healpy`. The oracle")
@@ -1126,7 +1132,8 @@ def generate(healpy_version=None, numpy_version=None, hp_cxx_version=None):
     lines.extend(emit_int_array("hv_ud_result", [ud_pix_nest(*c) for c in uds]))
     a("")
 
-    a("end module test_healpix_vectors")
+    a("    ! gcov attribution artifact: an `end module` line is not a statement and reports 0 hits.")
+    a("end module test_healpix_vectors ! GCOVR_EXCL_LINE")
     return "\n".join(lines) + "\n"
 
 

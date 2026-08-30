@@ -145,6 +145,16 @@ lint:
     - python3 tools/generate_random_golden_vectors.py --check
     - python3 tools/generate_random_perm_vectors.py --self-test
     - python3 tools/generate_random_perm_vectors.py --check
+    - python3 tools/generate_path_reference.py --self-test
+    - python3 tools/generate_path_reference.py --check
+    # generate_healpix_reference.py gets its --self-test only, deliberately. Its --check is
+    # HOST-DEPENDENT and cannot gate a pipeline: the emitted directions come from math.acos/
+    # cos/atan2, so the last digit follows the platform's libm, and the committed file already
+    # differs from a fresh macOS run in the 17th significant figure. Wiring --check here would
+    # fail whenever the image's libm differs from whoever last regenerated. The banner in
+    # test/test_healpix_vectors.f90 says so; its drift protection is the GENERATED_FILES
+    # banner check in tools/check_source_conventions.py, which is host-independent.
+    - python3 tools/generate_healpix_reference.py --self-test
 
 test:
   # Selects the Docker-executor runner; the image: above overrides its default

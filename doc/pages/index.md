@@ -16,11 +16,12 @@ type/function/subroutine under `use parquet`), see the [modules](../lists/module
 **One `use parquet` brings in the whole library** — readers and writers, schemas and MAML, the
 `parquet_table` container, the `parquet_column` foundation and its `PK_*` kind constants, compact
 string columns, the date/time/timestamp types, sorting, random numbers and sampling, spatial
-neighbour search, sphere pixelisation, logging for your own program, and the process-global settings. Every page below assumes that single import. The
+neighbour search, sphere pixelisation, logging for your own program, text and path helpers, and the process-global settings. Every page below assumes that single import. The
 individual modules (`parquet_io`, `parquet_tables`, `parquet_columns`, `parquet_list`,
 `parquet_struct`, `parquet_map`, `parquet_strings`, `parquet_temporal`, `parquet_sorting`, `parquet_argsort`,
 `parquet_stats`,
 `parquet_sampling`, `parquet_spatial`, `parquet_healpix`, `parquet_random`, `parquet_logging`,
+`parquet_utils`,
 `parquet_settings`, `parquet_version`,
 `parquet_maml_base`)
 are still there and
@@ -51,8 +52,8 @@ point in the library.
   file as one object, columns by name as ordinary arrays or zero-copy pointers, read only when
   touched — or built in memory and written out.
 - [Utilities and code generation](utilities/index.html) — sorting for arrays and columns,
-  reproducible random numbers and the sampling built on them, generated table types, and embedding
-  your own MAML schemas.
+  reproducible random numbers and the sampling built on them, text and path helpers, generated
+  table types, and embedding your own MAML schemas.
 - [Operating the library](operating/index.html) — the cross-cutting concerns you reach for when
   something is wrong or has to be tuned: which module to import, what an abort means, why a build
   or read fails, what may run concurrently, what memory and speed to expect, and the process-global
@@ -60,7 +61,7 @@ point in the library.
 
 ### Every page at a glance
 
-All 31 pages, in reading order. (This list, each group's own page list and the
+All 32 pages, in reading order. (This list, each group's own page list and the
 `ordered_subpage:` frontmatter are kept consistent by
 `tools/check_source_conventions.py`, which fails the CI lint stage when they drift.)
 
@@ -101,6 +102,7 @@ All 31 pages, in reading order. (This list, each group's own page list and the
 - [Spatial neighbour search with `pf_spatial_index`](utilities/spatial.html)
 - [Sphere pixelisation with `parquet_healpix`](utilities/healpix.html)
 - [Logging with parquet_logging](utilities/logging.html)
+- [Text and path helpers with parquet_utils](utilities/utils.html)
 - [Generated table types: named accessors from a MAML schema](utilities/generated-tables.html)
 - [Embedding your own MAML schemas in your own project](utilities/embedding-maml-schemas.html)
 

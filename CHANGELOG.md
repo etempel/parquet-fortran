@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`parquet_utils`: text and path helpers.** A new Arrow-free leaf entry module, one Fortran
+  file, importing nothing but `iso_fortran_env`. `pf_to_lower`/`pf_to_upper` fold ASCII case, as a
+  copy or in place, leaving every other byte — including multi-byte UTF-8 — untouched. `pf_to_str`
+  renders an `integer(int32)`, `integer(int64)`, `real(real32)`, `real(real64)` or `logical` as
+  text, with an optional minimum field width, padding character and format; a `logical` renders as
+  `true`/`false`. `pf_join_path` joins two to five components, or an array of them, by CPython's
+  `posixpath.join` rules, and `pf_dirname`, `pf_basename`, `pf_path_ext`, `pf_path_stem`,
+  `pf_split_path` and `pf_path_add_suffix` take a path apart and rebuild it with a suffix inserted
+  before the extension. Nothing in the module validates, aborts or prints, and every result comes
+  back allocated. See [Text and path helpers](doc/pages/utilities/utils.md).
+
 - **`parquet_stats`: array statistics over plain Fortran arrays.** A new Arrow-free entry module
   under `pf_*` names, for reducing arrays a program already has rather than anything about a
   parquet file. It opens with `pf_count_valid`, which answers how many elements are in the

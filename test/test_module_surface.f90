@@ -913,6 +913,51 @@ contains
 
 end module test_module_surface_tables
 
+!> `parquet_utils` alone: the text and path helpers, with no other library import.
+!!
+!! **One library import, and it must stay that way.** `parquet_utils` reads no setting at all, so
+!! unlike its neighbours here there is no knob to round-trip -- what this asserts instead is that
+!! all four families are reachable and usable through the single `use`, which is the half that
+!! breaks at BUILD time when a re-export is dropped.
+module test_module_surface_utils
+    use parquet_utils                  ! THE ONLY library import.
+    use iso_fortran_env, only : int32
+    implicit none
+    private
+    public :: check_utils_surface
+
+contains
+
+    !> Exercises one entry point from each family through `use parquet_utils` alone.
+    subroutine check_utils_surface(what)
+        character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
+        character(len=:), allocatable :: got, dir, stem, ext
+
+        what = ""
+        call pf_to_lower("AbC", got)
+        if (got /= "abc") what = "pf_to_lower"
+        call pf_to_upper("AbC", got)
+        if (what == "" .and. got /= "ABC") what = "pf_to_upper"
+        call pf_to_str(7_int32, got, min_width=3)
+        if (what == "" .and. got /= "007") what = "pf_to_str"
+        call pf_join_path("a", "b", got)
+        if (what == "" .and. got /= "a/b") what = "pf_join_path"
+        call pf_split_path("/d/f.txt", dir, stem, ext)
+        if (what == "" .and. dir//"|"//stem//"|"//ext /= "/d|f|.txt") what = "pf_split_path"
+        call pf_path_add_suffix("/d/f.txt", "_s", got)
+        if (what == "" .and. got /= "/d/f_s.txt") what = "pf_path_add_suffix"
+        call pf_dirname("/d/f.txt", got)
+        if (what == "" .and. got /= "/d") what = "pf_dirname"
+        call pf_basename("/d/f.txt", got)
+        if (what == "" .and. got /= "f.txt") what = "pf_basename"
+        call pf_path_ext("/d/f.txt", got)
+        if (what == "" .and. got /= ".txt") what = "pf_path_ext"
+        call pf_path_stem("/d/f.txt", got)
+        if (what == "" .and. got /= "f") what = "pf_path_stem"
+    end subroutine check_utils_surface
+
+end module test_module_surface_utils
+
 module test_module_surface
     use test_module_surface_io, only : check_io_surface
     use test_module_surface_argsort, only : check_argsort_surface
@@ -921,6 +966,7 @@ module test_module_surface
     use test_module_surface_strings, only : check_strings_surface
     use test_module_surface_sampling, only : check_sampling_surface
     use test_module_surface_version, only : check_version_surface
+    use test_module_surface_utils, only : check_utils_surface
     use test_module_surface_spatial, only : check_spatial_surface
     use test_module_surface_healpix, only : check_healpix_surface
     use test_module_surface_columns, only : check_columns_surface
@@ -1032,6 +1078,8 @@ contains
                 test_spatial_surface), &
             new_unittest("parquet_healpix alone pixelises the sphere and exposes the output pair", &
                          test_healpix_surface), &
+            new_unittest("parquet_utils alone folds text and takes a path apart", &
+                         test_utils_surface), &
             new_unittest("parquet_version alone reports the library version", &
                 test_version_surface), &
             new_unittest("parquet_io alone reaches every layer of the read/write API", &
@@ -1122,6 +1170,15 @@ contains
         call check(error, what == "", &
             "the pixelisation was not usable through `use parquet_healpix` alone: " // what)
     end subroutine test_healpix_surface
+
+    !> The test-drive wrapper over check_utils_surface.
+    subroutine test_utils_surface(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: what
+
+        call check_utils_surface(what)
+        call check(error, what == "", "the helpers were not usable through `use parquet_utils` alone: " // what)
+    end subroutine test_utils_surface
 
     !> The test-drive wrapper over check_version_surface.
     subroutine test_version_surface(error)

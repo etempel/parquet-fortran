@@ -29,6 +29,10 @@ parquet_settings_base.f90
 parquet_version.f90
 parquet_wrapper.cpp
 
+[parquet_utils]
+parquet_utils.f90
+parquet_wrapper.cpp
+
 [parquet_temporal]
 parquet_temporal.f90
 parquet_wrapper.cpp
@@ -426,6 +430,7 @@ parquet_tables_slice.f90
 parquet_tables_sort.f90
 parquet_tables_write.f90
 parquet_temporal.f90
+parquet_utils.f90
 parquet_version.f90
 parquet_wrapper.cpp
 parquet_write.f90
@@ -436,3 +441,4 @@ parquet_write_string.f90
 parquet_write_struct.f90
 parquet_write_temporal.f90
 parquet_ziggurat.f90
+

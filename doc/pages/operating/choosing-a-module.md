@@ -3,7 +3,7 @@ title: Choosing a module: what each entry module costs to import
 ---
 
 `use parquet` brings the whole library into scope and is the right answer for most programs. It is
-also the largest: a project that imports it compiles **94** of this library's Fortran files.
+also the largest: a project that imports it compiles **95** of this library's Fortran files.
 
 Every layer underneath is importable on its own, and several of them cost a great deal less. This
 page says what each entry module gives you, what it costs, and — the part that is easy to get wrong
@@ -53,12 +53,13 @@ in every one of them.
 | `parquet_struct` | 11 | no | `parquet_struct_column` / `parquet_struct_row`: one value per declared field per row |
 | `parquet_map` | 11 | no | `parquet_map_column` / `parquet_map_row`: string-keyed `key -> value` entries per row |
 | `parquet_logging` | 1 | no | `pf_logger` and the `pf_log_*` procedures: leveled logging to several destinations at once, with a layout you choose and correct behaviour inside an OpenMP parallel region |
+| `parquet_utils` | 1 | no | `pf_to_lower`, `pf_to_str`, `pf_join_path` and the path splitters: ASCII case folding, value-to-text, and POSIX path handling |
 | `parquet_sorting` | 21 | no | the whole sorting API, every element type, including `pf_sort_keys` |
 | `parquet_stats` | 27 | no | the `pf_*` array-statistics family: reductions over plain Fortran arrays |
 | `parquet_settings` | 3 | **yes** | the process-global knobs, and `parquet_get_arrow_version` |
 | `parquet_io` | 53 | **yes** | reading and writing Parquet files, and nothing else |
 | `parquet_tables` | 72 | **yes** | the `parquet_table` container |
-| `parquet` | 94 | **yes** | everything above, through one `use` |
+| `parquet` | 95 | **yes** | everything above, through one `use` |
 
 Four rows deserve a note.
 
@@ -122,6 +123,7 @@ anything else.
 |---|---|
 | `parquet_version` | `verbosity` and `message_stream` — it can print, see below |
 | `parquet_temporal` | none — it reads none |
+| `parquet_utils` | none — it reads none, and must not: it sits below `parquet_settings_base` |
 | `parquet_random` | none — it reads none; the thread rule lives in `parquet_sampling` |
 | `parquet_columns` | none — it reads none |
 | `parquet_list` | none — it reads none |

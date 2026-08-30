@@ -250,6 +250,18 @@ GENERATED_FILES = [
     SRC / "parquet_tables_addcol.f90",
     SRC / "parquet_tables_materialize.f90",
     SRC / "parquet_maml_base.f90",
+    # Generated TEST vectors. Not source, but the banner matters more here than anywhere: a
+    # reference table that has quietly stopped being generated is a table nothing checks, and
+    # an edited value in one is a lie the implementation is then written to match.
+    TEST / "test_path_vectors.f90",
+    # test/test_healpix_vectors.f90 BELONGS here and is deliberately not listed yet. Adding it
+    # fails immediately on a real gap -- its `end module` line carries no `! GCOVR_EXCL_LINE`,
+    # which is fixed in tools/generate_healpix_reference.py but only reaches the file when
+    # someone regenerates. That regeneration is a maintainer action rather than a routine one:
+    # the emitted directions come from math.acos/cos/atan2, so a fresh run on a different libm
+    # legitimately rewrites 46 lines in their last digits, and the values want
+    # `--verify-oracle` against healpy afterwards. Add this line in the same change as that
+    # regeneration.
 ]
 
 #: Marker every generated file carries, checked so that a file dropping out of generation (or being
@@ -1737,6 +1749,24 @@ def check_parquet_logging_stays_arrow_free():
     return _check_stays_arrow_free(
         "parquet_logging",
         "A logging module must not require the Arrow stack to print a line.")
+
+
+def check_parquet_utils_stays_arrow_free():
+    """`use parquet_utils` must not reach parquet_bindings.
+
+    Stricter than a tier rule: this module imports `iso_fortran_env` and NOTHING else, not even
+    `parquet_settings_base`, and that is load-bearing rather than tidy. `parquet_settings_base`
+    used to carry a private ASCII fold with a doc-comment explaining that it could not call
+    `parquet_core`'s copy without creating a circular dependency; a module strictly below
+    everything is what removes that cycle. The obvious import to add here is `parquet_settings`,
+    for a verbosity knob -- which is the exact edge that would put the cycle back AND drag in the
+    C++ boundary. It needs none: nothing in this module prints, validates or aborts.
+
+    One check per tier rather than one for the group, per the established pattern.
+    """
+    return _check_stays_arrow_free(
+        "parquet_utils",
+        "Joining two path components must not require the Arrow stack.")
 
 
 def check_parquet_stats_stays_arrow_free():

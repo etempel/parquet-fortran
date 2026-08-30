@@ -48,6 +48,7 @@ program tester
     use test_module_surface, only : collect_tests_module_surface
     use test_diagnostics, only : collect_tests_diagnostics
     use test_logging, only : collect_tests_logging
+    use test_utils, only : collect_tests_utils
     use test_random, only : collect_tests_parquet_random, collect_tests_parquet_random_perm
     use test_random_omp, only : collect_tests_parquet_random_omp
     use test_healpix, only : collect_tests_parquet_healpix
@@ -124,6 +125,7 @@ program tester
         new_testsuite("module_surface", collect_tests_module_surface), &
         new_testsuite("diagnostics", collect_tests_diagnostics), &
         new_testsuite("logging", collect_tests_logging), &
+        new_testsuite("utils", collect_tests_utils), &
         new_testsuite("random", collect_tests_parquet_random), &
         new_testsuite("random_perm", collect_tests_parquet_random_perm), &
         new_testsuite("random_omp", collect_tests_parquet_random_omp), &

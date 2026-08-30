@@ -283,6 +283,7 @@ Output is committed; re-run the generator and its `--check` after editing one.
 | `generate_user_table_code.py` | A Role-A MAML into a named `parquet_table` extension type. **Consumer-facing.** |
 | `generate_random_golden_vectors.py` | The golden vectors freezing `parquet_random`'s bit contract. |
 | `generate_healpix_reference.py` | The reference vectors pinning `parquet_healpix` against an independent model. |
+| `generate_path_reference.py` | The CPython `posixpath` values pinning `parquet_utils`' path procedures. |
 | `check_healpix_fptrap.sh` | Runs `parquet_healpix` in a build where an FP exception is fatal. |
 | `generate_random_perm_vectors.py` | The same for the permutation contract. |
 | `generate_stats_vectors.py` | `parquet_stats`' golden expectations, from a 50-digit `mpmath` oracle. |

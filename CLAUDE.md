@@ -3914,13 +3914,39 @@ the only profile that checks anything at runtime.
   an undocumented, version-specific internal ABI whose every mistake is exactly the silent
   corruption the option exists to catch.
 
-  **What DOES run under it: the all-Fortran suites.** A suite whose runtime paths never execute a
-  `bind(C)` call runs genuinely — `fpm test run_tester --flag "-C=undefined" -- random` passes, as
-  do `random_perm` and `random_weighted`, giving a real undefined-variable check over the
-  random/sampling/expkey family. Do not expect to widen it: `columns` aborts on the value bytes of
-  null rows, which are unspecified **by design** (`%init`'s documented contract — the checker and
-  the design disagree, and per "Coverage tooling never drives design" the design wins), and
-  `sorting` hides a file round-trip.
+  **What DOES run under it: the two undef-safe runners.** A suite whose runtime paths never execute
+  a `bind(C)` call runs genuinely, which is why `test/run_tester*.f90` is five programs rather than
+  one — see `feature_tests.md`. **`tools/check_nag_undefined.sh` is the entry point**: it builds
+  `run_tester_pf` and `run_tester` under `--profile nagundef`, runs both in full, asserts the suite
+  count it actually covered, and re-tries the `run_tester_noundef` list without moving anything.
+  Read the coverage from that script's output rather than from here — a figure written down here
+  went stale within a week. One suite at a time is `fpm test run_tester_pf --profile nagundef --
+  random`.
+
+  **Widening it is a SOURCE question, and one blocker has already been removed.** `columns` used to
+  abort because `ensure_capacity`'s own copy reads a null row's value bytes, which `%init`'s
+  contract leaves unspecified **by design**. That contract still stands — what changed is that
+  `ensure_capacity` now DEFINES those bytes under `#ifdef UNDEFINED_CHECK`, a macro `fpm.toml`'s
+  `nagundefined` feature passes and nothing else does, so the shipped path is textually unchanged
+  (check it the cheap way: preprocess with and without the macro and diff). Two rules travel with
+  the technique. The fill is **poison** — `huge()`, a quiet NaN, `.true.` — and never zero, because
+  defining these bytes blinds the one instrument that could see an unsound read of them, while
+  poison keeps such a read visible as a wrong answer. And the NaN comes from `ieee_value`, never a
+  `transfer` of a bit pattern: nagfor constant-folds a transfer and then refuses the result
+  outright (`Error: Result of TRANSFER is Not a Number`), as a `parameter` and as a runtime local
+  alike.
+
+  **`sorting` is the one suite still parked, and it is NOT a file round-trip** — an earlier version
+  of this note said so; `test_sorting.f90` is Arrow-free and `check_test_runner_partition` proves
+  it. It SEGFAULTS inside nagfor's own instrumentation, in `extract_chr`
+  (`src/parquet_argsort_kernel.f90`), reached from `pf_sort` on a `character` array: the faulting
+  instruction reads a definedness-map byte from a NULL base, so the map for the `values` dummy's
+  contents was never passed. `-C=all` is not involved. **No source change dodges it** — a
+  whole-element copy faults exactly as the per-character one does, so every read of `values` faults
+  — and a guarded rewrite would be the wrong trade regardless: the `columns` fill only DEFINES
+  memory the standard leaves undefined, whereas a rewrite here would replace an algorithm to work
+  around a compiler bug, leaving the checked build checking a different program. It does not reduce
+  to a synthetic (three tried, all clean), so a NAG report needs it bisected out of the real tree.
 
   **Three compile-time nagfor defects were found and fixed while getting the build clean under it,
   and two of the fixes are rules that must not be reverted.** (a) An ICE (`Panic: Cannot find scope

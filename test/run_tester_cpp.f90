@@ -40,7 +40,6 @@ program run_tester_cpp
     use test_settings, only : collect_tests_parquet_settings
     use test_sort, only : collect_tests_sort
     use test_sorting_cpp, only : collect_tests_sorting_cpp
-    use test_struct, only : collect_tests_parquet_struct
     use test_struct_read, only : collect_tests_parquet_struct_read
     use test_struct_write, only : collect_tests_parquet_struct_write
     use test_table, only : collect_tests_parquet_table
@@ -73,7 +72,6 @@ program run_tester_cpp
         new_testsuite("temporal_cpp", collect_tests_parquet_temporal_cpp), &
         new_testsuite("list_read", collect_tests_parquet_list_read), &
         new_testsuite("list_write", collect_tests_parquet_list_write), &
-        new_testsuite("struct", collect_tests_parquet_struct), &
         new_testsuite("struct_read", collect_tests_parquet_struct_read), &
         new_testsuite("struct_write", collect_tests_parquet_struct_write), &
         new_testsuite("map_read", collect_tests_parquet_map_read), &

@@ -24,6 +24,7 @@ program run_tester
     use test_columns, only : collect_tests_parquet_columns
     use test_list, only : collect_tests_parquet_list
     use test_map, only : collect_tests_parquet_map
+    use test_struct, only : collect_tests_parquet_struct
     use test_parquet_string, only : collect_tests_parquet_string
     use test_string_parallel, only : collect_tests_string_parallel
     use test_temporal, only : collect_tests_parquet_temporal
@@ -42,6 +43,7 @@ program run_tester
         new_testsuite("parquet_string", collect_tests_parquet_string), &
         new_testsuite("list", collect_tests_parquet_list), &
         new_testsuite("map", collect_tests_parquet_map), &
+        new_testsuite("struct", collect_tests_parquet_struct), &
         new_testsuite("temporal", collect_tests_parquet_temporal), &
         new_testsuite("string_parallel", collect_tests_string_parallel) &
         ]

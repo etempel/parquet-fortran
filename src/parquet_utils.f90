@@ -541,8 +541,8 @@ contains
     pure subroutine pf_join_path_many(parts, path)
         character(len=*), intent(in) :: parts(:) !! the components, in order; each is trailing-trimmed.
         character(len=:), allocatable, intent(out) :: path !! the joined path; always allocated, zero-length for a zero-size array.
-        integer :: k, n, ln, total, pos
-        logical :: is_empty, ends_sep, absolute
+        integer :: k, n, ln, total, pos, first
+        logical :: is_empty, ends_sep
 
         n = size(parts)
         if (n == 0) then
@@ -550,19 +550,32 @@ contains
             return
         end if
 
+        ! An absolute component discards every component before it (posixpath.join's first rule),
+        ! so both walks start at the LAST absolute one instead of resetting when they reach it.
+        ! Pass 1 could reset in place; pass 2 could not. The buffer is sized for what SURVIVES, so
+        ! writing a prefix that is about to be discarded stores past the end of it -- and the
+        ! answer still comes out right, because those bytes are then overwritten. Only a
+        ! bounds-checking build reports it (--profile debug and --profile nagdeb both do; a plain
+        ! `fpm test`, and CI, do not). Starting at `first` removes the reset from both loops, which
+        ! is why neither has an "absolute" case at all. See feature_risks.md Risk-173.
+        first = 1
+        do k = n, 1, -1
+            ln = len_trim(parts(k))
+            if (ln > 0) then
+                if (parts(k) (1:1) == PATH_SEP) then
+                    first = k
+                    exit
+                end if
+            end if
+        end do
+
         ! Pass 1 -- the final length, by walking the fold without building anything.
         total = 0
         is_empty = .true.
         ends_sep = .false.
-        do k = 1, n
+        do k = first, n
             ln = len_trim(parts(k))
-            absolute = .false.
-            if (ln > 0) absolute = (parts(k) (1:1) == PATH_SEP)
-            if (absolute) then
-                total = ln
-                is_empty = .false.
-                ends_sep = (parts(k) (ln:ln) == PATH_SEP)
-            else if (is_empty .or. ends_sep) then
+            if (is_empty .or. ends_sep) then
                 total = total + ln
                 if (ln > 0) then
                     is_empty = .false.
@@ -580,21 +593,14 @@ contains
 
         allocate (character(len=total) :: path)
 
-        ! Pass 2 -- the identical walk, writing. An absolute component restarts at position 1,
-        ! overwriting whatever was written before it, exactly as pass 1 reset `total`.
+        ! Pass 2 -- the identical walk, writing. `pos` therefore tracks `total` exactly, and the
+        ! final `pos` equals `total` on every input.
         pos = 0
         is_empty = .true.
         ends_sep = .false.
-        do k = 1, n
+        do k = first, n
             ln = len_trim(parts(k))
-            absolute = .false.
-            if (ln > 0) absolute = (parts(k) (1:1) == PATH_SEP)
-            if (absolute) then
-                path(1:ln) = parts(k) (1:ln)
-                pos = ln
-                is_empty = .false.
-                ends_sep = (parts(k) (ln:ln) == PATH_SEP)
-            else if (is_empty .or. ends_sep) then
+            if (is_empty .or. ends_sep) then
                 if (ln > 0) then
                     path(pos + 1:pos + ln) = parts(k) (1:ln)
                     pos = pos + ln

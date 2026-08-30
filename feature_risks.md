@@ -238,6 +238,7 @@ something a reader is expected to have.
 | [Risk-170](#risk-170--a-write-to-a-log-sink-a-copy-has-closed-must-abort-not-go-nowhere) | A write to a log sink a copy has closed must ABORT, not go nowhere | 4 — covered |
 | [Risk-171](#risk-171--every-tier-of-parquet_stats-must-test-saw_nan-not-only-the-moments) | Every tier of `parquet_stats` must test `saw_nan`, not only the moments | 4 — covered |
 | [Risk-172](#risk-172--a-running-fold-built-on--or--silently-drops-a-nan-instead-of-propagating-it) | A running fold built on `<` or `>` silently DROPS a NaN instead of propagating it | 4 — covered |
+| [Risk-173](#risk-173--a-two-pass-size-then-fill-whose-sizing-pass-discards-work-writes-past-the-buffer-and-the-answer-is-still-right) | A two-pass size-then-fill whose sizing pass DISCARDS work writes past the buffer, and the answer is still right | 4 — covered |
 
 ---
 
@@ -6948,3 +6949,41 @@ standard output must not kill the program.
 through the copy while the unit is open, closes the original, and writes again — asserting the
 abort names the file. `logging_control` is the negative control for it and for every other
 `parquet_logging` refusal.
+
+### Risk-173 — A two-pass size-then-fill whose sizing pass DISCARDS work writes past the buffer, and the answer is still right
+
+`pf_join_path_many` (`src/parquet_utils.f90`) sizes the joined path in one walk and fills it in a
+second. `posixpath.join`'s first rule is that an **absolute** component discards every component
+before it, so the sizing walk reset `total` when it reached one — and the filling walk could not
+follow, because by then it had already written the discarded prefix into a buffer sized only for
+what survives. `pf_join_path(["x", "y", "z", "w", "/v"], p)` allocated **2** bytes and stored up to
+position **7**.
+
+**Nothing observable went wrong**, which is the whole reason this is here. The five stray bytes
+were immediately overwritten by the absolute component, so the result was `"/v"` — exactly what
+CPython gives — and the case was already in the generated vectors (`pv_join_*` case 30), already
+asserted, and already passing. The only evidence is a heap store five bytes past a two-byte
+allocation, corrupting whatever the allocator had put there.
+
+**What this entry forbids, and it is not about paths: in a size-then-fill pair, pass 1 may subtract
+and pass 2 may not.** Pass 1 works in a scalar it can reset freely; pass 2 works in a buffer whose
+length is pass 1's *final* value, so **any intermediate state larger than that final value is out of
+bounds**. Whenever a sizing walk has a branch that shrinks or resets its accumulator, the filling
+walk cannot simply mirror it — it has to be restructured so it never reaches that state. Here that
+means locating the last absolute component first and starting **both** walks there, which deletes
+the reset from each and makes the two loops identical again; `pos` then tracks `total` exactly.
+
+**Test.** `test_join_many_degenerate` (`test/test_utils.f90`) carries a deliberate long-prefix case
+(`"wwwwwwww", "xxxxxxxx", "yyyyyyyy", "/z"`) beside vector case 30. **Neither fails in a build
+without bounds checking**, and that is the part to carry forward: a plain `fpm test` passes against
+the defect, and so does CI's own `FPM_FFLAGS="--coverage" fpm test`, which names no `--profile` and
+therefore compiles no `-fcheck` (see CLAUDE.md's four-way `FPM_FFLAGS`/`--profile` table). Two
+builds catch it, both run by hand:
+
+- `fpm test run_tester --profile debug -- utils` (gfortran) —
+  *Substring out of bounds: upper bound (3) of 'path' exceeds string length (2)*
+- `fpm test run_tester --profile nagdeb -- utils` (nagfor) —
+  *Out of range: substring ending position 3 is greater than length 2*
+
+So the test's only job is to make the input exist; the checked build is the assertion. Re-run one of
+the two after any change to either walk.

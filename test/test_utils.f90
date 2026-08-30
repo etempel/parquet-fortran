@@ -458,6 +458,9 @@ contains
     !! The n-element fixture puts its **shortest element first** deliberately, per this project's
     !! "sized from the first element" rule: a fixture whose first element happens to be the longest
     !! passes even when that bug is present.
+    !!
+    !! The last fixture is the mirror image: a long prefix followed by an **absolute** component
+    !! that discards it, so the allocated result is shorter than what the fill walks past.
     subroutine test_join_many_degenerate(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
         character(len=:), allocatable :: got
@@ -477,6 +480,20 @@ contains
         several = [character(len=8) :: "a", "bb", "ccc", "dddd"]
         call pf_join_path(several, got)
         call check(error, got == "a/bb/ccc/dddd", "an n-element array whose FIRST element is shortest must join in full")
+        if (allocated(error)) return
+
+        ! An absolute component discards every component before it, so the result here is far
+        ! SHORTER than the text preceding it. The array form sizes in one pass and fills in a
+        ! second, and the fill must not write the discarded prefix: it once did, five bytes past a
+        ! two-byte buffer, while still returning the right answer because those bytes were then
+        ! overwritten. Only a bounds-checking build turns that into a failure
+        ! (fpm test run_tester --profile nagdeb -- utils), so this case exists for that build to
+        ! run. The long components are what make the overrun large enough to be worth catching.
+        several = [character(len=8) :: "wwwwwwww", "xxxxxxxx", "yyyyyyyy", "/z"]
+        call pf_join_path(several, got)
+        call check(error, got == "/z", "an absolute component must discard every component before it")
+        if (allocated(error)) return
+        call check(error, len(got) == 2, "the result must be sized for what SURVIVES the absolute component")
     end subroutine test_join_many_degenerate
 
     ! ================================================================================

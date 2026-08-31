@@ -68,7 +68,7 @@ offsets array, whatever its rows look like.
 
 ## The payload kind is fixed at `%init`
 
-`%init(payload_kind [, nrows] [, unit])` requires the payload kind and it cannot change afterwards.
+`%init(payload_kind, [nrows], [unit])` requires the payload kind and it cannot change afterwards.
 Appending values of any other type aborts, naming both kinds.
 
 ```fortran
@@ -153,8 +153,12 @@ character(len=:), allocatable :: sv(:)
 call row%get(sv)
 ```
 
+`%row_index()` gives the row the handle refers to, which is what a loop over handles reports when
+something goes wrong with one of them.
+
 `%is_valid()` reports whether the handle refers to a live row; a default-constructed handle
-answers `.false.` and every other accessor on it aborts rather than returning a plausible answer.
+answers `.false.` and every other accessor on it — `%row_index()` included — aborts rather than
+returning a plausible answer.
 
 ## Growing, copying and reordering
 
@@ -180,6 +184,23 @@ answers `.false.` and every other accessor on it aborts rather than returning a 
 - **`%summary(out)`** composes a one-line description such as `list<int32>: 4 rows, 6 elements,
   1 null`, and `%kind_text(out)` gives just `list<int32>`. Both write into a string rather than
   printing, so the caller decides where it goes.
+
+## Querying a column without reading a row
+
+Four queries answer about the column as a whole, without touching a row or allocating anything:
+
+- **`%size()`** — the number of rows, as used in the first example above.
+- **`%null_count()`** — how many of them are **null rows**. Element nulls are not counted here;
+  they live in the payload column and belong to the rows that hold them.
+- **`%total_elements()`** — the payload's element count, which is the last offset. A null row
+  contributes whatever its offsets still describe, so this counts storage rather than reachable
+  values until the next `%gather_rows` rebuild compacts it.
+- **`%capacity()`** — how many rows the offsets array can hold before it grows again, which is the
+  third member of the `%reserve`/`%shrink_to_fit` trio and the way to see what those two did.
+
+**`%clear()`** is the matching mutation: it empties the column, drops the payload and the offsets,
+and returns it to the uninitialized state, so the payload kind must be given again with `%init`.
+Every outstanding row handle is invalidated by it.
 
 ## Putting a list column into a `parquet_column`
 
@@ -352,8 +373,9 @@ The element type is **required** — a bare `list` is rejected — and it must m
 payload kind **exactly**: there is no widening between list element kinds the way there is between
 scalar numeric kinds, so a `PK_INT32` column cannot be written into a `list[int64]` declaration.
 
-`col_size:` does not apply and is rejected: a list row's length comes from the data. `qc: min:`/
-`max:` is rejected too, on the same terms as for a `date`/`time`/`timestamp` column; `qc: miss:`
+`col_size:` does not apply: a list row's length comes from the data, so `col_size: auto` and any
+value above 1 are rejected. `qc: min:`/`max:` is rejected too, on the same terms as for a
+`date`/`time`/`timestamp` column; `qc: miss:`
 does apply, and counts **null rows**. `extra: protected_cols:` applies and means the column holds
 no Null at *either* level — neither a null row nor a null element — which is also what makes a
 streamed list column's fields non-nullable.
@@ -380,7 +402,7 @@ A table column can be a `parquet_list_column`. See
 declines, and how row-structural mutations carry it along.
 
 Open the file with `list_columns="container"` to have every variable-length `LIST` column
-classified as one, from the schema alone -- see
+classified as one, from the schema alone — see
 [Opening a table](../tables/table-open.html).
 
 ## Nested containers
@@ -428,9 +450,13 @@ type is (parquet_struct_column)
 end select
 ```
 
-`inner` comes back null, and `lo > hi`, when the payload is not a container or the row is null or
-empty — so a caller that has not checked `%element_kind()` gets an empty loop rather than a wrong
-answer. The pointer is borrowed and is invalidated by anything that rebuilds the payload.
+**`lo > hi` is the check to write**, and it covers all three cases that yield nothing: the payload
+is not a container, the row is null, or the row is present but empty. A caller that has not checked
+`%element_kind()` therefore gets an empty loop rather than a wrong answer. `inner` is null only in
+the first of those — a null or empty row of a genuinely nested column still hands back the payload
+container, with an empty range — so do not test `associated(inner)` to detect a null row.
+`%is_null()` answers that. The pointer is borrowed and is invalidated by anything that rebuilds the
+payload.
 
 `%kind_text()` reports the whole nested spelling (`list<struct<x:int32,y:string>>`), and it is the
 only query that recurses: `%kindof()` stays `PK_LIST` at every depth.

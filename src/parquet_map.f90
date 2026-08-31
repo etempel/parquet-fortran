@@ -1204,9 +1204,15 @@ contains
     end function pmr_is_valid
     !
     !> The 1-based row this handle refers to.
-    pure function pmr_row_index(self) result(i)
+    !!
+    !! Guarded like every other accessor on this handle, and deliberately NOT `pure`: a pure
+    !! procedure may not `error stop`, so a pure form could only answer 0 for a dead handle --
+    !! exactly the plausible-looking wrong answer `check_handle` exists to prevent. Matches
+    !! `parquet_struct_row%row_index`, which has always been guarded.
+    function pmr_row_index(self) result(i)
         class(parquet_map_row), intent(in) :: self !! the handle.
-        integer(int64) :: i                        !! the row index, 0 for an unassociated handle.
+        integer(int64) :: i                        !! the row index.
+        call check_handle(self, "row_index")
         i = self%idx
     end function pmr_row_index
     !

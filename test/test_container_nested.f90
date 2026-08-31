@@ -49,6 +49,7 @@ contains
         type(unittest_type), allocatable, intent(out) :: testsuite(:) !! the collected tests.
         testsuite = [ &
             new_unittest("a list may adopt a struct payload", test_list_of_struct_build), &
+            new_unittest("nested on a null, empty and non-container row", test_nested_empty_cases), &
             new_unittest("a list may adopt a list payload", test_list_of_list_build), &
             new_unittest("a map may adopt a struct value", test_map_of_struct_build), &
             new_unittest("a struct may adopt a list field", test_struct_of_list_build), &
@@ -117,6 +118,68 @@ contains
             call r%get_field("id", value)
         end select
     end subroutine element_id
+
+    !> What `%nested` reports for the three rows that yield nothing, and how they differ.
+    !!
+    !! `lo > hi` is the check a caller writes: it holds for a NULL row, for a present but EMPTY
+    !! row, and for a payload that is not a container at all. `inner` does NOT distinguish them --
+    !! it is null only in the last case, and a null or empty row of a genuinely nested column still
+    !! hands back the payload container. Testing `associated(inner)` to detect a null row is
+    !! therefore wrong, which is what this test pins; `%is_null` is the query that answers it.
+    !!
+    !! The populated row is the negative control: without it every assertion below would pass just
+    !! as happily against a `%nested` that always reported an empty range.
+    subroutine test_nested_empty_cases(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_struct_column) :: sc
+        type(parquet_list_column), target :: lc, plain
+        type(parquet_column) :: pay
+        class(parquet_container_column), pointer :: inner
+        type(parquet_list_row) :: h
+        integer(int64), allocatable :: offs(:)
+        integer(int64) :: lo, hi
+
+        call make_struct(4, sc)
+        call wrap(sc, pay)
+        offs = [0_int64, 2_int64, 2_int64, 4_int64]
+        call lc%adopt_rows(offs, pay)
+        call lc%set_null(3_int64)                     ! row 3 was populated; row 2 is empty
+
+        ! The negative control: a populated row reports a real range and a real payload.
+        h = lc%view(1_int64)
+        call h%nested(inner, lo, hi)
+        call check(error, lo <= hi, "a populated row reports a non-empty range")
+        if (allocated(error)) return
+        call check(error, associated(inner), "a populated row hands back the payload container")
+        if (allocated(error)) return
+
+        ! A present but EMPTY row: empty range, payload still there.
+        h = lc%view(2_int64)
+        call h%nested(inner, lo, hi)
+        call check(error, lo > hi, "an empty row reports an empty range")
+        if (allocated(error)) return
+        call check(error, associated(inner), "an empty row still hands back the payload container")
+        if (allocated(error)) return
+
+        ! A NULL row: empty range, payload still there -- associated(inner) is NOT a null test.
+        h = lc%view(3_int64)
+        call h%nested(inner, lo, hi)
+        call check(error, lo > hi, "a null row reports an empty range")
+        if (allocated(error)) return
+        call check(error, associated(inner), "a null row still hands back the payload container")
+        if (allocated(error)) return
+        call check(error, lc%is_null(3_int64), "is_null is what distinguishes the null row")
+        if (allocated(error)) return
+
+        ! A NON-container payload: the one case where inner really is null.
+        call plain%init(PK_INT32)
+        call plain%append_row([1_int32, 2_int32])
+        h = plain%view(1_int64)
+        call h%nested(inner, lo, hi)
+        call check(error, lo > hi, "a non-container payload reports an empty range")
+        if (allocated(error)) return
+        call check(error, .not. associated(inner), "a non-container payload is the only null inner")
+    end subroutine test_nested_empty_cases
 
     !> `list<struct<id:int32>>`: rows of 2, 0 and 2 elements over a 4-row struct payload.
     subroutine test_list_of_struct_build(error)

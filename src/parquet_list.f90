@@ -1118,10 +1118,16 @@ contains
         res = (self%idx >= 1_int64 .and. self%idx <= self%col%nrows_)
     end function plv_is_valid
     !
-    !> The 1-based row index this handle refers to (0 for an unassigned handle).
-    pure function plv_row_index(self) result(i)
+    !> The 1-based row index this handle refers to.
+    !!
+    !! Guarded like every other accessor on this handle, and deliberately NOT `pure`: a pure
+    !! procedure may not `error stop`, so a pure form could only answer 0 for a dead handle --
+    !! exactly the plausible-looking wrong answer `check_handle` exists to prevent. Matches
+    !! `parquet_struct_row%row_index`, which has always been guarded.
+    function plv_row_index(self) result(i)
         class(parquet_list_row), intent(in) :: self !! the handle.
         integer(int64) :: i                     !! the row index.
+        call check_handle(self, "row_index")
         i = self%idx
     end function plv_row_index
     !

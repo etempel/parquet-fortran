@@ -1613,6 +1613,12 @@ contains
             new_unittest("writing a NON-nested list still works", test_write_nested_list_control), &
             new_unittest("writing a struct with a container field names the field", &
                 test_write_nested_struct_field_aborts), &
+            new_unittest("a qc rule on a descent path is refused", test_qc_descent_path_aborts), &
+            new_unittest("a qc rule on an ordinary leaf still works", test_qc_descent_path_control), &
+            new_unittest("the bare list token is rejected", test_maml_list_bare_token_aborts), &
+            new_unittest("row_index on an unassigned list handle aborts", test_list_row_index_unassigned), &
+            new_unittest("row_index on an unassigned map handle aborts", test_map_row_index_unassigned), &
+            new_unittest("row_index on a live handle still answers", test_list_row_index_live), &
             new_unittest("a filter on a descent path is refused", test_filter_descent_path_aborts), &
             new_unittest("a filter on an ordinary leaf still works", test_filter_descent_path_control), &
             new_unittest("a sort key on a descent path is refused", test_sort_key_descent_path_aborts), &
@@ -2052,6 +2058,46 @@ contains
     !> evaluated against a container's flattened child -- one answer per ELEMENT, silently
     !> misaligned with every other column. That is a wrong answer, not an error, which is why the
     !> refusal is asserted rather than assumed.
+    subroutine test_qc_descent_path_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "qc_descent_path", expect_abort=.true., &
+            failure_message="a qc: rule naming a descent path was expected to abort", &
+            required_stderr="is not a qc target")
+    end subroutine test_qc_descent_path_aborts
+
+    subroutine test_qc_descent_path_control(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status(error, "qc_descent_path_control", expect_abort=.false., &
+            failure_message="a qc: rule on an ordinary dotted struct leaf was expected to work")
+    end subroutine test_qc_descent_path_control
+
+    subroutine test_maml_list_bare_token_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "maml_list_bare_token", expect_abort=.true., &
+            failure_message="a bare list data_type was expected to be rejected", &
+            required_stderr="has invalid data_type 'list'")
+    end subroutine test_maml_list_bare_token_aborts
+
+    subroutine test_list_row_index_unassigned(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_row_index_unassigned", expect_abort=.true., &
+            failure_message="row_index on an unassigned list handle was expected to abort", &
+            required_stderr="row_index: this row handle is not associated with a column")
+    end subroutine test_list_row_index_unassigned
+
+    subroutine test_map_row_index_unassigned(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_row_index_unassigned", expect_abort=.true., &
+            failure_message="row_index on an unassigned map handle was expected to abort", &
+            required_stderr="row_index: this row handle is not associated with a column")
+    end subroutine test_map_row_index_unassigned
+
+    subroutine test_list_row_index_live(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status(error, "list_row_index_live", expect_abort=.false., &
+            failure_message="row_index on a live handle was expected to answer")
+    end subroutine test_list_row_index_live
+
     subroutine test_filter_descent_path_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "filter_descent_path", expect_abort=.true., &

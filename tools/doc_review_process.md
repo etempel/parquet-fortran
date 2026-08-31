@@ -189,9 +189,17 @@ this:
 
 **What is missing, and what is stale.**
 
-- Every public procedure and type in the page's subject area should be reachable from *somewhere* in
-  the guide. List anything with no narrative coverage at all; it need not be on this page — say where
-  it belongs.
+- **The test is what a working program needs, not what is public.** Being callable does not earn a
+  binding a place on a page: introspection accessors, capacity and storage queries, and bindings that
+  exist to satisfy an abstract interface are public because Fortran has no finer visibility, not
+  because a reader has to know about them. Ask instead whether a program someone actually writes
+  would reach for it — to build the thing, to query it, to hand it on, or to avoid a trap. If yes it
+  belongs somewhere in the guide; if no, its `!>` doc-comment and the generated reference are its
+  documentation and that is enough. **List what you excluded and why**, in one line, so the decision
+  is visible and the next reviewer does not re-find the same names and propose them again.
+- Every public procedure and type that passes that test should be reachable from *somewhere* in the
+  guide. List anything with no narrative coverage at all; it need not be on this page — say where it
+  belongs.
 - Anything the page documents that no longer exists, or has been superseded: remove or rewrite.
 - **Anything the code enforces that a reader would only discover by hitting it** — a guard, a "cannot
   be called twice", a detach, an invalidated pointer, a required call order — belongs on the page

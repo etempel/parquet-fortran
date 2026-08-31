@@ -692,13 +692,17 @@ contains
     end subroutine test_handle_survives_append
 
     !> A default-constructed handle reports itself invalid rather than answering plausibly.
+    !!
+    !! `%is_valid` is the ONLY accessor that answers on a dead handle; every other one aborts, which
+    !! is why this test cannot assert anything more here. `%row_index` used to be the exception --
+    !! it was `pure`, so it could not `error stop` and returned 0 -- and the abort it now raises is
+    !! covered out of process by the `list_row_index_unassigned` scenario, with
+    !! `list_row_index_live` as its negative control.
     subroutine test_unassigned_handle(error)
         type(error_type), allocatable, intent(out) :: error !! set on failure.
         type(parquet_list_row) :: row
 
         call check(error, .not. row%is_valid(), "an unassigned handle is not valid")
-        if (allocated(error)) return
-        call check(error, row%row_index() == 0_int64, "an unassigned handle names no row")
     end subroutine test_unassigned_handle
 
     !> `%kind_text` and `%summary` describe the column in the spelling a schema uses.

@@ -158,6 +158,23 @@ row the permutation does not name.
 outstanding handle's index stays correct. The nulled row reports `%size() == 0` and finds no key
 from that moment on; its former entries are dropped by the next `%gather_rows`.
 
+## Querying a column without reading a row
+
+Four queries answer about the column as a whole, without touching a row or allocating anything:
+
+- **`%size()`** — the number of rows.
+- **`%total_entries()`** — the total number of `key -> value` entries across every row, which is
+  what the [entry-count ceiling](#the-entry-count-ceiling) below is measured against.
+- **`%null_count()`** — how many rows are **null maps** — absent rather than empty. A present but
+  empty row is not counted here, and neither is a present entry whose value is null; see
+  [Null rows, empty rows and null values](#null-rows-empty-rows-and-null-values).
+- **`%capacity()`** — how many rows the column can hold before it grows again, which is the third
+  member of the `%reserve`/`%shrink_to_fit` trio and the way to see what those two did.
+
+**`%clear()`** is the matching mutation: it empties the column and returns it to the uninitialized
+state, so the value kind must be given again with `%init`. Every outstanding row handle is
+invalidated by it.
+
 ## Putting a map column into a `parquet_column`
 
 `parquet_column%adopt_container` takes ownership of a map column, so one can travel anywhere a

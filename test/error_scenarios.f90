@@ -153,6 +153,18 @@ program error_scenarios
         call scenario_write_nested_list_control()
     case ("write_nested_struct_field")
         call scenario_write_nested_struct_field()
+    case ("qc_descent_path")
+        call scenario_qc_descent_path()
+    case ("qc_descent_path_control")
+        call scenario_qc_descent_path_control()
+    case ("maml_list_bare_token")
+        call scenario_maml_list_bare_token()
+    case ("list_row_index_unassigned")
+        call scenario_list_row_index_unassigned()
+    case ("map_row_index_unassigned")
+        call scenario_map_row_index_unassigned()
+    case ("list_row_index_live")
+        call scenario_list_row_index_live()
     case ("filter_descent_path")
         call scenario_filter_descent_path()
     case ("filter_descent_path_control")
@@ -18606,6 +18618,89 @@ contains
 
     !> A `parquet_filter` rule naming a DESCENT path. `qc:` and `parquet_filter` are scalar-leaf-only
     !> permanently, so the grammar Phase 7 added must not leak into either.
+    !> A qc: rule naming a DESCENT path. Refused by `parquet_reader_set_qc`
+    !> (src/parquet_wrapper.cpp), the third of three identical `path_has_descent` guards -- the
+    !> other two sit on the filter and sort-key paths and each already had a scenario.
+    !>
+    !! A descent path has one entry per ELEMENT while qc is evaluated per ROW, so an accepted rule
+    !! would check a different population than the caller asked about. It is a hard error rather
+    !! than a skip, because an ignored qc rule is a check the caller believes is running.
+    !!
+    !! The path must EXIST in the file for the guard to be reached at all: `parquet_reader_set_qc`
+    !! skips a qc-maml entry naming an absent column before it tests for descent.
+    subroutine scenario_qc_descent_path()
+        type(parquet_reader) :: reader
+
+        call write_text_file("test_run/qc_descent.maml", [character(len=48) :: &
+            "fields:", "- name: list_of_struct[].x", "  qc:", "    min: '>= 0'"])
+
+        call parquet_open_reader(reader, "test/fixtures/map_list_types.parquet", &
+            schema=parquet_load_qc_maml_file("test_run/qc_descent.maml"))
+        print '(a)', "unexpectedly opened a reader with a qc: rule on a descent path"
+    end subroutine scenario_qc_descent_path
+
+    !> The NEGATIVE CONTROL for `qc_descent_path`: the same qc: rule on an ORDINARY scalar leaf of
+    !> the same file is accepted, so the refusal above is about the descent path and not about the
+    !> fixture, the qc-maml or the bound.
+    subroutine scenario_qc_descent_path_control()
+        type(parquet_reader) :: reader
+
+        call write_text_file("test_run/qc_descent_ctl.maml", [character(len=48) :: &
+            "fields:", "- name: struct_of_struct.inner.a", "  qc:", "    min: '>= 0'"])
+
+        call parquet_open_reader(reader, "test/fixtures/map_list_types.parquet", &
+            schema=parquet_load_qc_maml_file("test_run/qc_descent_ctl.maml"))
+        call parquet_close_reader(reader)
+    end subroutine scenario_qc_descent_path_control
+
+    !> The bare `list` token, the twin of `maml_map_bare_token`.
+    !>
+    !! `parse_container_token` treats "list" and "map" identically, so the map scenario covers the
+    !! shared path today -- but the bare `struct` token is already a special case inside that same
+    !! function, so a future special case for `list` would otherwise go unnoticed.
+    subroutine scenario_maml_list_bare_token()
+        type(parquet_schema) :: schema
+        call schema%init(table="list_bare")
+        call schema%add_field("v", "list")
+        call parquet_parse_maml(schema)
+    end subroutine scenario_maml_list_bare_token
+
+    !> `%row_index` on a default-constructed `parquet_list_row`.
+    !>
+    !! It was `pure` and therefore could not `error stop`, so it answered 0 -- a plausible-looking
+    !! wrong answer, and the one accessor on the handle that did not guard. It is now impure and
+    !! guarded, matching `parquet_struct_row%row_index`.
+    subroutine scenario_list_row_index_unassigned()
+        type(parquet_list_row) :: row
+        integer(int64) :: i
+        i = row%row_index()
+        print '(a,i0)', "unexpectedly read a row index from an unassigned list handle: ", i
+    end subroutine scenario_list_row_index_unassigned
+
+    !> The map twin of `list_row_index_unassigned`; `pmr_row_index` carried the same defect.
+    subroutine scenario_map_row_index_unassigned()
+        type(parquet_map_row) :: row
+        integer(int64) :: i
+        i = row%row_index()
+        print '(a,i0)', "unexpectedly read a row index from an unassigned map handle: ", i
+    end subroutine scenario_map_row_index_unassigned
+
+    !> The NEGATIVE CONTROL for both: `%row_index` on a LIVE handle still answers, so the guard
+    !> fires on a dead handle rather than unconditionally.
+    subroutine scenario_list_row_index_live()
+        type(parquet_list_column), target :: lc
+        type(parquet_list_row) :: row
+
+        call lc%init(PK_INT32)
+        call lc%append_row([1_int32, 2_int32])
+        call lc%append_row([3_int32])
+        row = lc%view(2_int64)
+        if (row%row_index() /= 2_int64) then
+            print '(a)', "a live handle reported the wrong row index"
+            error stop 1
+        end if
+    end subroutine scenario_list_row_index_live
+
     subroutine scenario_filter_descent_path()
         type(parquet_reader) :: reader
         type(parquet_filter) :: flt

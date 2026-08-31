@@ -569,7 +569,9 @@ Working rules:
   `tools/check_source_conventions.py`; a fourth of this shape should get the same treatment rather
   than a careful review.
 - **Optional arguments are shown in square brackets** when a signature is written out in prose or
-  in a table — `call t%get_file_metadata(key, value, [found])`, `%ncols([resident_only])`. This
+  in a table — `call t%get_file_metadata(key, value, [found])`, `%ncols([resident_only])`. **The
+  comma goes OUTSIDE the bracket** — `%f(a, [b])`, never `%f(a [, b])` — so the brackets enclose the
+  argument and nothing else; both spellings were in the guide until this was settled. This
   applies to *descriptions* of a call, never to a runnable code example inside a ```fortran fence,
   where brackets would not compile. Adopted after the fact rather than in one sweep: apply it to
   any signature you write or edit, and retrofit a whole page the next time that page is touched

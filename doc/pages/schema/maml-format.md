@@ -121,8 +121,9 @@ Notes on the `fields:` entries:
   kinds (`int32`, `int64`, `float32`, `float64`, `boolean`, `string`, `date`, `time[unit]`,
   `timestamp[unit,utc]`) and is **required**: a bare `list` is rejected, because a declared column
   that is never written has to be written with zero rows at close and that cannot invent an element
-  type. `col_size:` does not apply to such a column and is rejected — a list row's length comes from
-  the data — and neither does `array_size:`, which is not consulted for a `list[string]`.
+  type. `col_size:` does not apply to such a column — `auto` and any value above 1 are rejected,
+  since a list row's length comes from the data — and neither does `array_size:`, which is not
+  consulted for a `list[string]`.
   > That makes the naming trap below four-way rather than two-way: `col_size` is how many elements
   > a **vector** row holds, `array_size` is how many characters a **string** value holds, and
   > neither a **list** column nor a **struct** column has either — a list's rows are not all the

@@ -187,6 +187,22 @@ null. A caller comparing an in-memory column against a read-back one must expect
 - `%adopt_fields(names, fields, [row_valid])` builds a whole column from field columns you already
   have, moving them in. The row count and every field's kind come from what you hand over.
 
+## Querying a column without reading a row
+
+Four queries answer about the column as a whole, without touching a row or allocating anything:
+
+- **`%size()`** — the number of rows.
+- **`%field_count()`** — how many fields each row holds, fixed by `%init`.
+- **`%null_count()`** — how many rows are **null structs** — absent instances. A present row whose
+  fields are all null is not counted here; see
+  [Row nullness and field nullness](#row-nullness-and-field-nullness-are-different-things).
+- **`%capacity()`** — how many rows the column can hold before it grows again, which is the third
+  member of the `%reserve`/`%shrink_to_fit` trio and the way to see what those two did.
+
+**`%clear()`** is the matching mutation: it empties the column and returns it to the uninitialized
+state, so the field set must be declared again with `%init`. Every outstanding row handle is
+invalidated by it.
+
 ## Putting a struct column into a `parquet_column`
 
 ```fortran

@@ -94,6 +94,14 @@ do p = 1, row%size()
 end do
 ```
 
+A handle also answers about itself and about its row without a lookup: `%row_index()` gives the
+row it refers to, which is what a loop over handles reports when something goes wrong with one of
+them; `%is_null()` and `%is_empty()` are the handle forms of the column queries above; and
+`%element_kind()` gives the column's value kind, which is what code dispatching over the nine kinds
+needs before it can pick a `%get`. `%is_valid()` reports whether the handle still refers to a live
+row — a default-constructed handle answers `.false.`, and every other accessor on it,
+`%row_index()` included, aborts rather than returning a plausible answer.
+
 **Within-row positions and counts are a plain `integer`.** Arrow addresses a map's entries with an
 int32 offsets buffer, so no row can hold more entries than an int32 can index — see
 [The entry-count ceiling](#the-entry-count-ceiling) below. Row *indices* are `integer(int64)` and
@@ -105,10 +113,24 @@ A map column has exactly **two** null levels, and the pair that gets conflated i
 
 - **A null ROW** — this map is absent. `%is_null(i)` is `.true.`.
 - **A null VALUE** — the map is present, an entry exists, and its value is missing. `%get`'s
-  `is_valid` argument reports it.
+  `is_valid` argument reports it, and `%append_row`'s own optional `is_valid` argument — one
+  logical per entry — is what creates it. Such an entry still counts toward `%size()` and is still
+  found by `%contains_key`: it is a present entry whose value is absent, not a missing entry.
 
 **A null row and a present-but-EMPTY row both report `%size() == 0`, and only `%is_null` separates
 them.** `%append_null_row()` makes the first; `%append_empty_row()` makes the second.
+
+**`%is_empty(i)` does not separate them either, despite its name.** It answers "this row holds no
+entries", which is `.true.` for a null row as well as for a present empty one — it is exactly
+`%length(i) == 0`, and `%length` reports 0 for an absent map. So the test for *present but empty*
+is the pair:
+
+```fortran
+if (.not. mc%is_null(i) .and. mc%is_empty(i)) then    ! present, and holds nothing
+```
+
+`%length(i)` is the column-level form of a handle's `%size()`, and takes a row index of either
+integer kind.
 
 **A key is never null.** Arrow's `MapType` declares its key field non-nullable and offers no way to
 change that, so there is no third level and no `%key_is_null`. An *empty* key string is a
@@ -147,7 +169,24 @@ string for the values.
 
 `%append_row`, `%append_null_row` and `%append_empty_row` grow the column geometrically, so
 building one row at a time is amortised O(1). `%reserve(n)` presizes it and `%shrink_to_fit`
-releases the slack.
+releases the slack. `%append_from(src)` appends every row of another map column, which must carry
+the same value kind.
+
+**`%append_row` TRIMS trailing blanks from keys and from string values.** Both arrive as a
+`character(len=*)` array, where every element shares one declared length, so the padding cannot be
+what the caller meant — the same rule the rest of the library applies to a character array. Lookups
+trim too, so `%get("ab")` and `%get("ab  ")` find the same entry. A key or value whose trailing
+blanks are meaningful therefore cannot be built this way; use `%adopt_rows`, which stores what it
+is given.
+
+**`%adopt_rows(offsets, keys, values, [row_valid])`** is the bulk counterpart: it takes over a
+whole column at once, moving in an offsets array and two filled `parquet_column`s — the flattened
+keys and the flattened values — and deriving the value kind and the row count from them. Reach for
+it when the totals are known before the values are (a file read is the worked example), when
+trailing blanks must survive, and when the value is a **container**: `%adopt_rows` accepts a
+`PK_LIST`, `PK_MAP` or `PK_STRUCT` value column, which `%append_row` has no form for. Every
+precondition is checked and fatal — the keys column must be `PK_STRING`, both must be scalar
+(width 1), and the offsets must start at 0.
 
 `%deep_copy` produces a fully independent copy; `%move_from` takes over another column's storage
 and leaves it empty. `%gather_rows(idx)` rebuilds the column so row *k* becomes the row that was at
@@ -156,7 +195,14 @@ row the permutation does not name.
 
 `%set_null(i)` is O(1): the row's entries are not removed and no later row moves, so every
 outstanding handle's index stays correct. The nulled row reports `%size() == 0` and finds no key
-from that moment on; its former entries are dropped by the next `%gather_rows`.
+from that moment on; its former entries are dropped by the next `%gather_rows`. Until then
+`%clear_null(i)` puts the row back exactly as it was, entries and all.
+
+`%validate([message])` checks the class invariants — offsets monotonic, `offsets(1) == 0`, keys and
+values holding the same entry count, the row bitmap allocated whenever the column claims a null —
+and is cheap enough to call from a test after any structural change. `%summary(out)` composes a
+one-line description and `%kind_text(out)` gives just the type spelling, `map<string,int32>`; both
+write into a string rather than printing, so the caller decides where it goes.
 
 ## Querying a column without reading a row
 
@@ -182,9 +228,17 @@ invalidated by it.
 
 ```fortran
 type(parquet_column) :: col
-call col%adopt_container(mc)     ! mc is left empty
+class(parquet_container_column), allocatable :: cc
+
+call mc%clone_into(cc)           ! or build the container and move_alloc it
+call col%adopt_container(cc)     ! cc comes back deallocated
 print *, col%kindof() == PK_MAP
 ```
+
+**The variable handed over must be declared `class(parquet_container_column), allocatable`**, not
+as the map type: `%adopt_container`'s argument is an allocatable polymorphic one, so a
+`type(parquet_map_column), allocatable` actual will not compile. `%clone_into(cc)` is the one-call
+way to fill it.
 
 ## Threading
 

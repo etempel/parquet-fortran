@@ -124,10 +124,10 @@ Notes on the `fields:` entries:
   type. `col_size:` does not apply to such a column — `auto` and any value above 1 are rejected,
   since a list row's length comes from the data — and neither does `array_size:`, which is not
   consulted for a `list[string]`.
-  > That makes the naming trap below four-way rather than two-way: `col_size` is how many elements
-  > a **vector** row holds, `array_size` is how many characters a **string** value holds, and
-  > neither a **list** column nor a **struct** column has either — a list's rows are not all the
-  > same length, and a struct's row is one instance rather than a row of values.
+  > That makes the naming trap below wider than two-way: `col_size` is how many elements a
+  > **vector** row holds, `array_size` is how many characters a **string** value holds, and no
+  > **container** column — `list[...]`, `map[...]` or `struct` — has either, because a container's
+  > rows carry their own lengths rather than sharing one width.
 - `struct` declares a **struct** column, whose every row holds one value per declared field — read
   and written through a [`parquet_struct_column`](../types/struct-columns.html). The token is bare
   and takes no bracket: **a struct's fields are never declared in MAML at all**, because the field
@@ -137,6 +137,21 @@ Notes on the `fields:` entries:
   of values — and neither does `array_size:`, which is not consulted for a struct column. So is
   `qc: min:`/`max:` rejected — quality-control ranges are scalar-leaf only. `qc: miss:` **is**
   supported and applies to row nullness (an absent struct instance).
+- `map[<valuetype>]` declares a **map** column, whose every row holds its own set of
+  `key -> value` entries — read and written through a
+  [`parquet_map_column`](../types/map-columns.html). `<valuetype>` is one of the same nine kinds
+  `list[...]` accepts (`map[timestamp[ms,utc]]` is a valid declaration) and is **required**: a bare
+  `map` is rejected as an unknown `data_type`. That is a different reason from the bare `list`'s —
+  a map's value type *is* expressible in MAML, so omitting it would be an omission rather than a
+  statement, which is exactly what makes bare `struct` the deliberate exception rather than the
+  pattern. **The token carries no key type**, because map keys are always strings: `map[int32]`
+  means `map<string,int32>`.
+  A container value type cannot be declared either: `map[list[int32]]` is rejected as an unknown
+  `data_type`, and a map whose values are containers can be read from a file but not written.
+  `col_size:` does not apply — `auto` and any value above 1 are rejected, since a map row's entry
+  count comes from the data — and neither does `array_size:`, which is not consulted for a map
+  column. `qc: min:`/`max:` is rejected on the same scalar-leaf-only terms as above; `qc: miss:`
+  **is** supported and applies to row nullness (an absent map).
 - `array_size` sets the maximum string length for `string` columns; it is ignored for other types.
   Writing a longer value through an ordinary `character` array is an error. A
   [`parquet_string_column`](../types/string-columns.html) write is the one exception: it stores each

@@ -23,18 +23,10 @@
 #      TRANSLATED here rather than dropped, into the -Xlinker spelling clang
 #      does accept. Upstream fix pending: fortran-lang/fpm PR #1312.
 #
-#      **Dropping it is NOT safe, although it looks it.** The flag reserves
-#      Mach-O header padding for a later install_name_tool edit, and nothing
-#      in `fpm build` or `fpm test` ever performs one -- but `fpm install`
-#      does, adding two rpaths (`@executable_path/../lib` and
-#      `@executable_path`) to the installed copy. Each LC_RPATH costs 40
-#      bytes; without the flag ld64 leaves its default 32-byte pad plus
-#      alignment slack, which measured 56 bytes on this project. The first
-#      rpath fits, the second does not, and `fpm install` dies with
-#      "larger updated load commands do not fit (the program must be
-#      relinked, and you may need to use -headerpad or
-#      -headerpad_max_install_names)". The translated flag reserves 0x200
-#      (512) bytes, which measured as a 520-byte pad -- room for both.
+#      **Translated rather than dropped because dropping it is not safe.**
+#      See item 5, which is the same problem from the other end: fpm 0.13.0
+#      turns out not to emit this flag on a NAG link line at all, so the
+#      shim has to supply the padding itself.
 #
 # Usage: prepend this directory to PATH before running fpm with FPM_FC=nagfor
 # (e.g. from the shell script that activates the NAG environment):
@@ -87,6 +79,32 @@
 #    `string_parallel` suite reports 9 passed / 0 skipped when the build really
 #    is threaded, and 1 / 8 under NAGFOR_OMP=0.
 
+# 5. macOS only: `fpm install` fails without extra Mach-O header padding, so
+#    this shim SUPPLIES `-Wl,-headerpad_max_install_names` on every link line.
+#
+#    fpm's install step copies the executable and then runs install_name_tool
+#    twice, adding the rpaths `@executable_path/../lib` and `@executable_path`.
+#    Each LC_RPATH costs 40 bytes and has to fit in the pad the LINKER reserved
+#    -- install_name_tool cannot make room, which is why its failure says "the
+#    program must be relinked". Left alone, ld64 reserves its default 32 bytes
+#    plus alignment slack: 56 bytes measured on 4most-visit-planner, so the
+#    first rpath fits and the second dies with
+#
+#      install_name_tool: changing install names or rpaths can't be redone
+#      ... because larger updated load commands do not fit
+#
+#    fpm knows about this and has a `-Wl,-headerpad,0x200` for it (item 3), but
+#    **0.13.0 does not put it on a NAG link line** -- verified with
+#    `fpm build --verbose`, whose nagfor link line carries only the -Wl,
+#    library names. So item 3's translation alone fixes nothing here, and the
+#    flag has to be supplied, exactly as -openmp is in item 4.
+#
+#    `-headerpad_max_install_names` rather than a literal size because clang
+#    accepts it as a driver option, so it needs no -Xlinker dance; it measured
+#    a 2056-byte pad against 56 without. Added to link lines only (never to a
+#    `-c` compile, where it is meaningless), never on a non-Darwin host, and
+#    never when the caller already asked for padding of its own.
+
 # Resolve the real nagfor: first PATH entry whose nagfor is not this script.
 real_nagfor=""
 self="$0"
@@ -116,7 +134,15 @@ omp_off=0
 
 args=()
 seen_openmp=0
+seen_headerpad=0
+compile_only=0
 for a in "$@"; do
+    # Noted separately from the case below: /bin/bash on macOS is 3.2, which has
+    # no `;;&` fallthrough, and these two are observations rather than rewrites.
+    case "$a" in
+        -c)          compile_only=1 ;;
+        *headerpad*) seen_headerpad=1 ;;
+    esac
     case "$a" in
         -openmp)
             [ "$omp_off" = "1" ] && continue
@@ -141,6 +167,12 @@ done
 # link line. NAGFOR_OMP=0 opts out; unset or anything else means on.
 if [ "$seen_openmp" = "0" ] && [ "$omp_off" = "0" ]; then
     args+=("-openmp")
+fi
+
+# Supply the Mach-O header pad on macOS link lines (item 5 above), so that
+# `fpm install`'s two install_name_tool rpath additions have room.
+if [ "$compile_only" = "0" ] && [ "$seen_headerpad" = "0" ] && [ "$(uname -s)" = "Darwin" ]; then
+    args+=("-Wl,-headerpad_max_install_names")
 fi
 
 exec "$real_nagfor" "${args[@]}"

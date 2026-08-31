@@ -1355,6 +1355,23 @@ contains
     !! that returned the same value everywhere, would satisfy a plain "two runs agree" check
     !! perfectly -- so the control fills from a shifted coordinate and requires the result to
     !! DIFFER. Without it this test passes against a generator that is not addressed at all.
+    !!
+    !! **Both fills run serially here, and that is a deliberate deviation from the page.** The
+    !! page's example is an `!$omp parallel do schedule(dynamic)`, but test-drive runs each suite's
+    !! tests inside its OWN `!$omp parallel do` (`examples` is not in `run_tester.f90`'s exclusion
+    !! list), so writing the page's directive here opens a NESTED region -- the same hazard
+    !! `test_per_thread_slices_example` above declines for, `feature_risks.md` Risk-104.
+    !!
+    !! Nothing is lost, and something is gained. Nested parallelism is off by default and nothing
+    !! in this project turns it on, so such a region gets a team of ONE: measured under ifx
+    !! 2026.1.1, `omp_get_max_active_levels()` is 1 and the inner `omp_get_num_threads()` is 1.
+    !! Written as the page writes it, this test therefore asserted schedule-independence while
+    !! never running on more than one thread -- green, and proving nothing, which is the failure
+    !! mode `test_runner_support.f90` calls this project's worst. The two loops below run in
+    !! OPPOSITE orders, which is what actually pins order-independence here; the threaded half of
+    !! the property belongs to the `random_omp` suite, which is excluded from test-drive's parallel
+    !! driver precisely so its regions are not nested and which carries its own vacuity guard on
+    !! the team size (`test_schedule_independence`).
     subroutine test_random_quickstart_example(error)
         type(error_type), allocatable, intent(out) :: error  !! test-drive error handle
         integer(int32), parameter :: n = 1000000
@@ -1365,7 +1382,8 @@ contains
         allocate(x(n), y(n))
         seed = 20260816_int64                     ! the seed the page's example uses
 
-        !$omp parallel do schedule(dynamic)
+        ! The page writes this as `!$omp parallel do schedule(dynamic)`; see the note above for
+        ! why it is serial here and where the threaded property is asserted instead.
         do i = 1, n
             x(i) = pf_random_at(seed, i)
         end do
@@ -1381,7 +1399,7 @@ contains
             "random.md: quickstart x(n) does not match the value the page prints")
         if (allocated(error)) return
 
-        ! Serial, and in the reverse order, so nothing about the schedule can survive into `y`.
+        ! In the REVERSE order, so nothing about the order of the fill above can survive into `y`.
         do i = n, 1, -1
             y(i) = pf_random_at(seed, i)
         end do

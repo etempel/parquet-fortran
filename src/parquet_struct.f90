@@ -607,12 +607,11 @@ contains
     !! * every name non-blank, unique, and free of `.` -- a dot would make this column's own leaf
     !!   path ambiguous against the dotted-path struct reader, which addresses `col.field`;
     !! * every kind one this type accepts as a field.
-    subroutine init(self, names, kinds, nrows, units)
+    subroutine init(self, names, kinds, nrows)
         class(parquet_struct_column), intent(inout) :: self !! the column.
         character(len=*), intent(in) :: names(:)            !! field names, in order (trimmed).
         integer, intent(in) :: kinds(:)                     !! PK_* kind per field, same length.
         integer(int64), intent(in), optional :: nrows       !! null rows to create (default 0).
-        character(len=*), intent(in), optional :: units(:)  !! unit string per field, same length.
         integer(int64) :: n
         integer :: nf, j, m
         character(len=:), allocatable :: kname
@@ -621,9 +620,6 @@ contains
         if (nf /= size(kinds)) error stop EP//"init: names and kinds have different lengths"
         if (nf < 1) error stop EP//"init: a struct column must declare at least one field"
         if (nf > MAX_FIELDS) error stop EP//"init: more fields than Arrow can address in a struct"
-        if (present(units)) then
-            if (size(units) /= nf) error stop EP//"init: units has a different length from names"
-        end if
         do j = 1, nf
             if (len_trim(names(j)) == 0) error stop EP//"init: a field name is blank"
             if (index(trim(names(j)), ".") > 0) then
@@ -661,11 +657,7 @@ contains
         do j = 1, nf
             ! Every field starts EMPTY whatever `nrows` says -- the rows being created are null,
             ! and %append_null_row grows each field by one null row of its own.
-            if (present(units)) then
-                call self%fields(j)%init(kinds(j), 0_int64, 1_int32, trim(units(j)))
-            else
-                call self%fields(j)%init(kinds(j), 0_int64)
-            end if
+            call self%fields(j)%init(kinds(j), 0_int64)
         end do
         if (n > 0_int64) call self%grow_rows(n)
     end subroutine init

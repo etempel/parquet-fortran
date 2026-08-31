@@ -132,9 +132,11 @@ Notes on the `fields:` entries:
   and written through a [`parquet_struct_column`](../types/struct-columns.html). The token is bare
   and takes no bracket: **a struct's fields are never declared in MAML at all**, because the field
   names, kinds and order come from the `parquet_struct_column` object passed to
-  `parquet_write_column`, which is data the caller already holds. `col_size:` and `array_size:` do
-  not apply and are rejected, and so is `qc: min:`/`max:` — quality-control ranges are scalar-leaf
-  only. `qc: miss:` **is** supported and applies to row nullness (an absent struct instance).
+  `parquet_write_column`, which is data the caller already holds. `col_size:` does not apply —
+  `auto` and any value above 1 are rejected, since a struct row is one instance rather than a row
+  of values — and neither does `array_size:`, which is not consulted for a struct column. So is
+  `qc: min:`/`max:` rejected — quality-control ranges are scalar-leaf only. `qc: miss:` **is**
+  supported and applies to row nullness (an absent struct instance).
 - `array_size` sets the maximum string length for `string` columns; it is ignored for other types.
   Writing a longer value through an ordinary `character` array is an error. A
   [`parquet_string_column`](../types/string-columns.html) write is the one exception: it stores each

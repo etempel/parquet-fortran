@@ -174,7 +174,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a struct's leaves by their dotted paths (`"person.age"`) is unchanged and still reaches any
   depth of nesting. A field may now be a list or a map **on read**, reached with
   `parquet_struct_row%nested`; a field that is itself a struct is still refused, and its leaves are
-  read by their dotted paths as before. **Not yet**: writing a struct whose field is a container.
+  read by their dotted paths as before. A `date`, `time` or `timestamp` field is written at
+  microsecond resolution — a struct's fields carry no unit declaration — and a value with finer
+  precision is refused rather than truncated. **Not yet**: writing a struct whose field is a
+  container.
 - **`parquet_map`: `parquet_map_column`, a `MAP` column, plus `parquet_map_row`, a lightweight
   handle to one of its rows.** Every row holds zero or more `key -> value` entries; keys are
   strings and the value kind is fixed by `%init(value_kind)` and covers the nine scalar kinds.

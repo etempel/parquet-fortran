@@ -73,6 +73,8 @@ contains
                 test_schema_constructor_matches_init), &
             new_unittest("schema%add_field builds exact fields: lines (incl. a qc: block)", &
                 test_schema_add_field_builds_maml_lines), &
+            new_unittest("a struct column accepts col_size: 1 and a positive array_size", &
+                test_struct_col_size_one_accepted), &
             new_unittest("schema%init + add_field round-trips through parquet_parse_maml", &
                 test_schema_init_add_field_parses_correctly), &
             new_unittest("schema%init + add_field writes/reads a real parquet file", &
@@ -995,6 +997,31 @@ contains
     !> least one of qc_min/qc_max/qc_miss is given (min/max quoted, exactly
     !> like %add_col_qc quotes its own min:/max: values). The "fields:"
     !> header is created once, on the first call.
+    !> The ACCEPTANCE side of the struct column's col_size:/array_size: rules.
+    !!
+    !! The refusals are covered by the struct_col_size_rejected scenario (col_size: 3) and by
+    !! parquet_metadata.f90's own auto/`> 1` arms. Nothing covered the boundary those refusals sit
+    !! on, so both would pass against a validator that rejected EVERY col_size: on a struct -- and
+    !! doc/pages/types/struct-columns.md said exactly that until this review measured it.
+    !!
+    !! `col_size: 1` is the default, so declaring it must be a no-op rather than an error; a
+    !! positive `array_size:` is accepted and simply never consulted for a struct column (only
+    !! `array_size: auto` is refused, by the general string-only rule). Each is parsed in its own
+    !! schema so that a failure names which one broke.
+    subroutine test_struct_col_size_one_accepted(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: s_col, s_arr
+        call s_col%init(table="struct_colsize_one")
+        call s_col%add_field("s", "struct", col_size=1)
+        call parquet_parse_maml(s_col)
+        call check(error, s_col%is_parsed(), "col_size: 1 on a struct column should parse")
+        if (allocated(error)) return
+        call s_arr%init(table="struct_arraysize")
+        call s_arr%add_field("s", "struct", array_size=8)
+        call parquet_parse_maml(s_arr)
+        call check(error, s_arr%is_parsed(), "a positive array_size: on a struct column should parse")
+    end subroutine test_struct_col_size_one_accepted
+
     subroutine test_schema_add_field_builds_maml_lines(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_schema) :: schema

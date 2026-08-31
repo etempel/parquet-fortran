@@ -1675,6 +1675,12 @@ contains
             new_unittest("a protected struct column with a null field aborts", &
                 test_struct_protected_field_null_aborts), &
             new_unittest("a protected null-free struct column writes normally", test_struct_protected_ok), &
+            new_unittest("a sub-microsecond timestamp in a struct field aborts on write", &
+                test_struct_timestamp_precision_aborts), &
+            new_unittest("a sub-microsecond time in a struct field aborts on write", &
+                test_struct_time_precision_aborts), &
+            new_unittest("microsecond-exact temporal struct fields write and read back", &
+                test_struct_temporal_precision_ok), &
             new_unittest("reading a struct whose field is a list works", &
                 test_struct_read_nested_field_aborts), &
             new_unittest("%view past the last struct row aborts", test_struct_view_out_of_range_aborts), &
@@ -2396,6 +2402,37 @@ contains
             failure_message="writing a struct column into an int32 schema slot was expected to abort", &
             required_stderr="expected struct, got int32")
     end subroutine test_struct_write_type_mismatch_aborts
+
+    !> A struct TIMESTAMP field with sub-microsecond precision is refused, naming the field.
+    !!
+    !! The assertion is on the message the push_struct_field guard emits, NOT on the one
+    !! parquet_timestamp%to_unix would emit -- that is the whole point of the guard, so asserting
+    !! "precision loss" instead would pass against the defect it was written to remove.
+    subroutine test_struct_timestamp_precision_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_timestamp_precision", expect_abort=.true., &
+            failure_message="a sub-microsecond timestamp in a struct field was expected to be refused", &
+            required_stderr="timestamp value has finer precision than the column's declared unit for field when")
+    end subroutine test_struct_timestamp_precision_aborts
+
+    !> The same for a struct TIME field, which is refused on the C++ side instead.
+    subroutine test_struct_time_precision_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_time_precision", expect_abort=.true., &
+            failure_message="a sub-microsecond time in a struct field was expected to be refused", &
+            required_stderr="time value has finer precision than the column's declared unit")
+    end subroutine test_struct_time_precision_aborts
+
+    !> The NEGATIVE CONTROL for the two above: microsecond-exact temporal fields must write.
+    !!
+    !! Without it both refusals are satisfied by a struct write that rejects every temporal field.
+    !! The scenario also reads the timestamp back and prints on mismatch, so a value that survived
+    !! the guard but not the round trip fails here rather than passing quietly.
+    subroutine test_struct_temporal_precision_ok(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status(error, "struct_temporal_precision_ok", expect_abort=.false., &
+            failure_message="microsecond-exact temporal struct fields were expected to write cleanly")
+    end subroutine test_struct_temporal_precision_ok
 
     subroutine test_struct_col_size_rejected(error)
         type(error_type), allocatable, intent(out) :: error

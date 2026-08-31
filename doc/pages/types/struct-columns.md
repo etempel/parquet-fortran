@@ -11,8 +11,8 @@ with `parquet_write_column`, whole or one row group at a time — see
 [Reading a struct column from a file](#reading-a-struct-column-from-a-file) and
 [Writing a struct column to a file](#writing-a-struct-column-to-a-file) below.
 
-**This is not the only way to reach a struct's contents, and the other way is unchanged.** A
-struct's leaves have always been addressable as ordinary columns by their *dotted paths* —
+**This is not the only way to reach a struct's contents.** A struct's leaves are also addressable
+as ordinary columns by their *dotted paths* —
 `parquet_read_column(reader, "person.age", ages)` — to any depth of nesting, and that mechanism is
 permanent. The two are complementary and the choice is about what you want back:
 
@@ -84,19 +84,44 @@ That is Arrow's own layout — a struct array is a validity bitmap over N equall
 
 ## The field set is fixed at `%init`
 
-`%init(names, kinds)` declares the fields, and nothing afterwards can change them. Four rules are
-checked, each with its own error message:
+`%init(names, kinds, [nrows])` declares the fields, and nothing afterwards can change them.
+Square brackets mark an optional argument here and throughout this page.
+
+- **`names`, `kinds`** — the field set, in order. Every rule below is checked against them.
+- **`nrows`** — how many **null** rows to create up front, defaulting to none. It is the presizing
+  form of `%append_null_row` and is what a reader hands over when the row count is known first.
+
+There is deliberately no per-field unit argument: a struct field's temporal unit cannot be
+declared anywhere, so it could not be honoured — see
+[Temporal fields are written at microseconds](#temporal-fields-are-written-at-microseconds).
+
+Every rule below is checked, each with its own error message:
 
 - at least one field — Arrow cannot construct a zero-field struct;
 - `names` and `kinds` the same length;
 - every name non-blank, unique, and free of `.` — a dot would collide with the dotted path a
   struct's own fields are addressed by;
+- `nrows`, when given, not negative;
 - every kind one of the nine scalar kinds (`PK_INT32`, `PK_INT64`, `PK_FLOAT32`, `PK_FLOAT64`,
   `PK_LOGICAL`, `PK_STRING`, `PK_DATE`, `PK_TIME`, `PK_TIMESTAMP`).
 
+**A container kind is refused here, and that is not the same as being unsupported.** `kinds(:)`
+carries one discriminator per field, while a list or map field is a kind *plus* an inner schema,
+which `%init` has no way to express — so `PK_LIST`, `PK_MAP` and `PK_STRUCT` get their own message
+directing you to `%adopt_fields`, which does accept them. That is the route to a struct holding a
+list or a map: build the inner container, hand it to a `parquet_column` with `%adopt_container`,
+and pass that column to `%adopt_fields`. Such a column reads back from a file but cannot be
+written — see [What this module does not do yet](#what-this-module-does-not-do-yet).
+
 Declaring the fields up front rather than inferring them from the first row appended is what lets
-`%field_count()` and `%field_name(k)` answer for an **empty** column — which a writer has to ask
-before any row exists, in order to build the file's schema at all.
+`%field_count()` and `%field_name(k, name)` answer for an **empty** column — which a writer has to
+ask before any row exists, in order to build the file's schema at all. `%field_name` is a
+subroutine writing into a `character(len=:), allocatable`, not a function returning one:
+
+```fortran
+character(len=:), allocatable :: nm
+call sc%field_name(2, nm)                ! nm is now "age"
+```
 
 Field names are trimmed, so `["name", "age "]` declares `name` and `age`.
 
@@ -151,6 +176,14 @@ slot = row%field("nope", warn=.true.)    ! warns, and slot%is_valid() is .false.
 `%field_index(name)` is the third option: it answers **0** rather than aborting, so it doubles as a
 presence test and as the lookup to hoist out of a loop.
 
+A handle answers three things about itself. `%row_index()` gives the row it refers to, which is
+what a loop over handles reports when something goes wrong with one of them. `%is_valid()` reports
+whether it still refers to a live row — a default-constructed handle answers `.false.`, and every
+other accessor on it, `%row_index()` included, aborts rather than returning a plausible answer.
+`%is_narrowed()` distinguishes a whole-row handle from one `%field` has narrowed, and
+`%field_kind()` gives the narrowed field's kind, which is what code dispatching over the nine kinds
+needs before it can pick a `%get`.
+
 ## Setting a field: by name or by index
 
 ```fortran
@@ -185,7 +218,18 @@ null. A caller comparing an in-memory column against a read-back one must expect
   operation serving reordering, filtering and duplication, applied to every field and to the row
   bitmap together.
 - `%adopt_fields(names, fields, [row_valid])` builds a whole column from field columns you already
-  have, moving them in. The row count and every field's kind come from what you hand over.
+  have, moving them in. The row count and every field's kind come from what you hand over, and it
+  is the one entry point that accepts a **container** field — see
+  [The field set is fixed at `%init`](#the-field-set-is-fixed-at-init).
+- `%append_from(src)` appends every row of another struct column, which must declare the same
+  fields in the same order with the same kinds; each mismatch has its own message.
+- `%validate([message])` checks the class invariants — one name per field column, every field the
+  same length as the struct, every field kind supported, and the row bitmap allocated whenever the
+  column claims to hold a null — and is cheap enough to call from a test after any structural
+  change.
+- `%summary(out)` composes a one-line description, and `%kind_text(out)` gives just the type
+  spelling, `struct<name:string,age:int32>`. Both write into a string rather than printing, so the
+  caller decides where it goes.
 
 ## Querying a column without reading a row
 
@@ -207,13 +251,20 @@ invalidated by it.
 
 ```fortran
 type(parquet_column) :: col
-type(parquet_struct_column), allocatable :: sc
-allocate(sc)
+type(parquet_struct_column) :: sc
+class(parquet_container_column), allocatable :: cc
+
 call sc%init(["v"], [PK_INT32])
-call col%adopt_container(sc)         ! col%kindof() is now PK_STRUCT
+call sc%clone_into(cc)               ! or build the container and move_alloc it
+call col%adopt_container(cc)         ! col%kindof() is now PK_STRUCT
 ```
 
-`%adopt_container` moves the struct column in; `sc` comes back deallocated. From that point the
+**The variable handed over must be declared `class(parquet_container_column), allocatable`**, not
+as the struct type: `%adopt_container`'s argument is an allocatable polymorphic one, so a
+`type(parquet_struct_column), allocatable` actual will not compile. `%clone_into(cc)` is the
+one-call way to fill it; `%move_alloc` from a container you built yourself does as well.
+
+`%adopt_container` moves the struct column in; `cc` comes back deallocated. From that point the
 column's kind is `PK_STRUCT` and `parquet_kind_is_container(col%kindof())` is `.true.`.
 
 ## Threading
@@ -265,15 +316,51 @@ fields:
     data_type: struct
 ```
 
-There is **no MAML syntax for a struct's fields**, and none is needed — the layout is data the
-caller already holds. `col_size:`, `array_size:` and `qc: min:`/`max:` are all refused for a struct
-column: a struct row is one instance and has no width, and quality-control ranges apply to scalar
-leaves only. `qc: miss:` **is** supported and applies to row nullness.
+There is **no MAML syntax for a struct's fields** — the field names, kinds and order come from the
+`parquet_struct_column` object itself, which is data the caller already holds.
+
+The other schema keys apply as follows, and the refusals are narrower than "not supported":
+
+- **`col_size:`** — `auto` and any value **above 1** are rejected, since a struct row is one
+  instance and has no width. `col_size: 1` is the default and is accepted, meaning nothing.
+- **`array_size:`** — `auto` is rejected, as it is for every non-`string` column. A positive value
+  is accepted and never consulted.
+- **`qc: min:`/`max:`** — rejected; quality-control ranges apply to scalar leaves only.
+- **`qc: miss:`** — supported, and applies to row nullness (an absent struct instance).
 
 A **protected** column (`extra: protected_cols:`) may contain no Null at either level — neither a
 null row nor a null field value. That is the only way to declare a *streamed* struct column
 null-free, because a struct column carries its null state inside itself and there is no mask whose
 presence could stand in for "might this contain a Null?".
+
+## Temporal fields are written at microseconds
+
+A `date`, `time` or `timestamp` field is written at **microsecond** resolution, timezone-naive, and
+there is no way to ask for anything else. The unit a temporal column normally takes from its schema
+declaration has nowhere to come from here: the MAML token is a bare `struct`, so no per-field unit
+can be declared.
+
+**A value carrying sub-microsecond precision therefore aborts rather than being truncated.**
+`parquet_timestamp` and `parquet_time` hold nanoseconds internally, so a field set from one keeps
+whatever precision it was given, and the write refuses it:
+
+```fortran
+call ts%set(2024, 3, 1, 12, 0, 0, 123456789)   ! nanosecond-of-second: not a whole microsecond
+call sc%set_field(1, "when", ts)
+call parquet_write_column(w, "ev", sc)          ! aborts, naming the field and the file
+```
+
+The same value with a whole number of microseconds (`123456000`) round-trips exactly.
+
+Both kinds report it the same way, naming the field:
+*"timestamp value has finer precision than the column's declared unit for field when"*. They reach
+it by different routes — a `time` field is checked as it crosses into Arrow, a `timestamp` field
+before it is converted — so the two aborts differ in exit status but not in what they tell you.
+
+Nothing is lost silently: the choice here is an abort over a quiet truncation. But it does mean a
+struct is not the place for nanosecond timestamps. Where that precision matters, write the leaf as
+its own column, whose `timestamp[ns]` declaration is honoured — see
+[Dates, times and timestamps](date-time.html).
 
 ## In a `parquet_table`
 

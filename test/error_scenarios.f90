@@ -135,6 +135,12 @@ program error_scenarios
         call scenario_struct_protected_field_null()
     case ("struct_protected_ok")
         call scenario_struct_protected_ok()
+    case ("struct_timestamp_precision")
+        call scenario_struct_timestamp_precision()
+    case ("struct_time_precision")
+        call scenario_struct_time_precision()
+    case ("struct_temporal_precision_ok")
+        call scenario_struct_temporal_precision_ok()
     case ("struct_read_nested_field")
         call scenario_struct_read_nested_field()
     case ("struct_read_not_a_struct")
@@ -18536,6 +18542,85 @@ contains
         call parquet_write_column(writer, "s", sc)
         call parquet_close_writer(writer)
     end subroutine scenario_struct_protected_ok
+
+    !> A struct TIMESTAMP field carrying sub-microsecond precision must be refused on write.
+    !!
+    !! A struct field's temporal unit cannot be declared -- the MAML token is a bare `struct` --
+    !! so the write is always at microseconds and a nanosecond-of-second that is not a whole
+    !! microsecond has nowhere to go. It aborts rather than truncating, and the guard in
+    !! push_struct_field (src/parquet_write_struct.f90) is what makes the message name the field
+    !! and the file instead of naming parquet_timestamp%to_unix and suggesting an `exact=.false.`
+    !! argument this path cannot pass. Its negative control is
+    !! scenario_struct_temporal_precision_ok, which writes the same field one nanosecond-count
+    !! later -- a whole microsecond -- and must exit cleanly.
+    subroutine scenario_struct_timestamp_precision()
+        type(parquet_writer) :: writer
+        type(parquet_struct_column) :: sc
+        type(parquet_timestamp) :: ts
+        call ts%set(2024, 3, 1, 12, 0, 0, 123456789)
+        call sc%init(["when"], [PK_TIMESTAMP])
+        call sc%append_row()
+        call sc%set_field(1, "when", ts)
+        call parquet_open_writer(writer, "test_run/error_scenario_struct_ts_precision.parquet")
+        call parquet_write_column(writer, "ev", sc)
+        call parquet_close_writer(writer)
+    end subroutine scenario_struct_timestamp_precision
+
+    !> The same refusal for a struct TIME field, which reaches it by a different route.
+    !!
+    !! A time field crosses to C++ as canonical nanoseconds-of-day and is refused by
+    !! build_time_array (src/parquet_wrapper.cpp), so this aborts through the C++ fatal path
+    !! (exit 134) where its timestamp sibling aborts through Fortran. Both are asserted, because
+    !! it is the pair that shows the two kinds now fail with the same shape of message.
+    subroutine scenario_struct_time_precision()
+        type(parquet_writer) :: writer
+        type(parquet_struct_column) :: sc
+        type(parquet_time) :: tm
+        call tm%set(12, 34, 56, 123456789)
+        call sc%init(["when"], [PK_TIME])
+        call sc%append_row()
+        call sc%set_field(1, "when", tm)
+        call parquet_open_writer(writer, "test_run/error_scenario_struct_time_precision.parquet")
+        call parquet_write_column(writer, "ev", sc)
+        call parquet_close_writer(writer)
+    end subroutine scenario_struct_time_precision
+
+    !> The NEGATIVE CONTROL for the two scenarios above: microsecond-exact temporal fields write.
+    !!
+    !! Without it both refusals pass just as happily against a struct write that rejected every
+    !! temporal field, which is the failure this pair exists to distinguish. It writes BOTH kinds
+    !! in one struct, so a regression in either guard is caught here as well as by its own
+    !! scenario, and it reads the timestamp back to show the value survived rather than merely
+    !! that nothing aborted.
+    subroutine scenario_struct_temporal_precision_ok()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_struct_column) :: sc
+        type(parquet_struct_column), target :: back
+        type(parquet_struct_row) :: row
+        type(parquet_timestamp) :: ts, got
+        type(parquet_time) :: tm
+        integer(int64) :: secs
+        integer(int32) :: nanos
+        call ts%set(2024, 3, 1, 12, 0, 0, 123456000)
+        call tm%set(12, 34, 56, 123456000)
+        call sc%init(["when", "clok"], [PK_TIMESTAMP, PK_TIME])
+        call sc%append_row()
+        call sc%set_field(1, "when", ts)
+        call sc%set_field(1, "clok", tm)
+        call parquet_open_writer(writer, "test_run/error_scenario_struct_temporal_ok.parquet")
+        call parquet_write_column(writer, "ev", sc)
+        call parquet_close_writer(writer)
+        call parquet_open_reader(reader, "test_run/error_scenario_struct_temporal_ok.parquet")
+        call parquet_read_column(reader, "ev", back)
+        call parquet_close_reader(reader)
+        row = back%view(1_int64)
+        call row%get_field("when", got)
+        call got%get_raw(secs, nanos)
+        if (nanos /= 123456000) then
+            print '(a,i0)', "microsecond-exact timestamp field did not survive the round trip: ", nanos
+        end if
+    end subroutine scenario_struct_temporal_precision_ok
 
     ! ==================================================================================
     ! MAP column scenarios

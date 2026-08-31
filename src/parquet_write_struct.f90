@@ -132,6 +132,8 @@ contains
         character(len=:), allocatable :: kname, ctx
         integer :: wunit
         integer(c_int32_t) :: wutc
+        integer(int64) :: ns_per_unit, ts_secs
+        integer(int32) :: ts_nanos
 
         ! Microseconds, timezone-naive, unless the caller declared otherwise -- which only a map
         ! write does, since a struct field has no MAML declaration to carry a unit.
@@ -204,10 +206,31 @@ contains
             b_i64 = 0_c_int64_t
             if (nrows > 0_int64) then
                 call parquet_column_data_ptr(fcol, p_ts)
-                ! A null instant has no value to convert, and %to_unix would abort on one; the
-                ! validity buffer carries its nullness across, so 0 is never read.
+                ! Refuse sub-unit precision HERE rather than letting %to_unix do it. Both refuse
+                ! the same values -- %to_unix tests `mod(nanoseconds, ns_per_unit) /= 0` and so
+                ! does the guard below -- but its message names the temporal element and suggests
+                ! an `exact=.false.` argument this write path has no way to pass, leaving a caller
+                ! with no idea which field or column was at fault. A struct/map field's unit is
+                ! never declared (see doc/pages/types/struct-columns.md), so this is reachable
+                ! from ordinary use, and a scalar time column's write already refuses the same
+                ! mistake naming the column (build_time_array, src/parquet_wrapper.cpp).
+                !
+                ! Only the nanosecond-of-second part can carry sub-unit precision: the seconds
+                ! part is a whole number of seconds, and every unit divides one second exactly.
+                ! So this needs no wide arithmetic and cannot overflow, unlike a conversion to
+                ! nanoseconds since the epoch.
+                ns_per_unit = ns_per_unit_of(wunit)
                 do k = 1_int64, nrows
-                    if (.not. p_ts(k)%is_null()) b_i64(k) = p_ts(k)%to_unix(wunit)
+                    if (p_ts(k)%is_null()) cycle
+                    call p_ts(k)%get_raw(ts_secs, ts_nanos)
+                    if (mod(int(ts_nanos, int64), ns_per_unit) /= 0_int64) then
+                        call writer_context_suffix(writer, ctx)
+                        error stop "parquet_write_column: timestamp value has finer precision " // &
+                            "than the column's declared unit for field " // trim(fname) // ctx
+                    end if
+                    ! A null instant has no value to convert, and %to_unix would abort on one; the
+                    ! validity buffer carries its nullness across, so 0 is never read.
+                    b_i64(k) = p_ts(k)%to_unix(wunit)
                 end do
             end if
             call parquet_struct_field_timestamp(writer%handle, trim(fname)//char(0), b_i64, nrows, val_ptr, &
@@ -396,5 +419,31 @@ contains
         call lk%claim(writer)
         call write_struct_common(writer, name, values, .true.)
     end procedure parquet_write_struct_column_chunk
+
+    !> Nanoseconds per value of `unit`, for the sub-unit-precision guard in push_struct_field.
+    !!
+    !! This mirrors `unit_scale` in src/parquet_temporal.f90, which is private there, so the two
+    !! are separate copies of one mapping. That is deliberate rather than an oversight: publishing
+    !! `unit_scale` would widen parquet_temporal's public surface for a single internal caller.
+    !! A divergence degrades rather than corrupts: this guard stops firing and `%to_unix` aborts
+    !! again with the context-free message the guard exists to replace. The
+    !! `struct_timestamp_precision` scenario pins that for MICROSECONDS, which is the only unit a
+    !! struct write ever uses -- a struct field's unit cannot be declared. The other units are
+    !! reachable only through a map write's schema and are not pinned; see
+    !! feature_doc_struct_columns.md.
+    pure function ns_per_unit_of(unit) result(res)
+        integer, intent(in) :: unit !! one of the parquet_unit_* constants.
+        integer(int64) :: res       !! nanoseconds in one value of that unit.
+        select case (unit)
+        case (parquet_unit_seconds)
+            res = parquet_ns_per_sec
+        case (parquet_unit_millis)
+            res = parquet_ns_per_sec/1000_int64
+        case (parquet_unit_micros)
+            res = parquet_ns_per_sec/1000000_int64
+        case default
+            res = 1_int64   ! nanoseconds: every value is exact
+        end select
+    end function ns_per_unit_of
 
 end submodule parquet_write_struct

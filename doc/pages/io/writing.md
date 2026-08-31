@@ -249,25 +249,53 @@ columns](../types/string-columns.html#reading-and-writing-compact-string-columns
 and a full example; this is purely an alternative to the `character(len=...)` form above, not a
 different file format.
 
-## Writing a variable-length list column with parquet_list_column
+## Writing a container column
 
-A column whose rows hold **different numbers of values** is written from a
-`type(parquet_list_column)` (`call parquet_write_column(writer, "flux", lc)`), which produces a
-genuine Parquet `LIST` column rather than the fixed-width `FIXED_SIZE_LIST` a 2-D array produces.
-No `is_valid` mask is needed or accepted: the column tracks both its null rows and its null
-elements itself. See [Writing a list column to a
-file](../types/list-columns.html#writing-a-list-column-to-a-file) for the details, the
-`list[<elemtype>]` schema declaration and a full example.
+Three column types hold something other than one value per row, and `parquet_write_column` takes
+each of them — `parquet_write_column_chunk` has the matching row-group form for all three:
+
+| Fortran type | written as | declared as | its page |
+|---|---|---|---|
+| `type(parquet_list_column)` | `LIST` | `list[<elemtype>]` | [List columns](../types/list-columns.html#writing-a-list-column-to-a-file) |
+| `type(parquet_map_column)` | `MAP` | `map[<valuetype>]` | [Map columns](../types/map-columns.html) |
+| `type(parquet_struct_column)` | `STRUCT` | `struct` | [Struct columns](../types/struct-columns.html) |
+
+```fortran
+type(parquet_list_column) :: flux
+call parquet_write_column(writer, "flux", flux)   ! rows may differ in length
+```
+
+**No `is_valid` mask is needed or accepted** for any of the three: each column tracks its own null
+rows and null elements, so there is no separate mask to keep in step with it — the same rule the
+[date/time types](../types/date-time.html) follow. The type pages above carry the details and a
+full example each; the notes below are the ones that belong to the writer rather than to the type.
+
+A struct column is written as **one object**, and the file's field set, names and order come from
+the column itself rather than from the schema, which declares only the bare `struct` token.
+
+**Writing a nested container is refused** — a `list<struct<...>>`, a map whose values are lists,
+and so on — with an `error stop` naming the column and the payload kind. Reading one is supported,
+so a file this library cannot write is not necessarily a file it cannot read; see
+[Reading a container column](reading.html#reading-a-container-column).
 
 Two notes that belong here rather than there. **The type you pass decides the file's physical
 shape** — a `parquet_list_column` always writes a `LIST`, a 2-D array always writes a
 `FIXED_SIZE_LIST`, and neither is substituted for the other even when the data would allow it.
 And **one row group may hold at most 2,147,483,647 list elements**, a hard limit of Parquet's own
-level generation; the automatic row-group sizing below already accounts for it, so only an
-explicitly chosen `chunk_size` (or `parquet_new_row_group` row count) that conflicts with it
-aborts rather than being silently resized. That is the variable-length counterpart of the
-`col_size` ceiling described under [Important
-behavior](../../index.html#important-behavior).
+level generation. That is the variable-length counterpart of the `col_size` ceiling described
+under [Important behavior](../../index.html#important-behavior), and it can be reached three ways,
+which behave differently on purpose:
+
+- **Automatic row-group sizing absorbs it.** The sizing below clamps the row group down by the
+  column's longest row, so an auto-sized write never aborts for this reason — it just produces
+  more, smaller row groups.
+- **A size you chose yourself aborts instead of being silently overridden**, whether it came from
+  `chunk_size` or from a `parquet_new_row_group` row count. The message names the value to reduce.
+  Only an explicit choice is refused, and it is checked exactly, by walking the column's real
+  offsets — so a `chunk_size` that genuinely fits is never rejected however ragged the column is.
+- **A single row longer than the ceiling aborts whatever you do**, because a row is never split
+  across row groups, so no row-group size can rescue it. This is the one case no sizing choice
+  can avoid.
 
 ## Streaming/chunked writes
 

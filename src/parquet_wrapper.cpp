@@ -3310,6 +3310,26 @@ extern "C"
 		return type->id() == arrow::Type::LIST || type->id() == arrow::Type::LARGE_LIST;
 	}
 
+	// The word for a container column's shape, as used in the messages that REFUSE one -- the
+	// filter and sort-key guards, which reject the same three type ids for the same reason.
+	//
+	// Both messages used to say "is a vector column" for all three, which is wrong for two of
+	// them and contradicts this library's own vocabulary everywhere else: "vector" means a
+	// FIXED_SIZE_LIST and only that (see parquet_reader_get_column_shape_name, and the guide's
+	// shape table). A user filtering on a ragged list column was told their column was something
+	// it is not, which is a bad thing for an error message to do -- the message is the only
+	// explanation they get.
+	static const char *container_shape_word(arrow::Type::type id)
+	{
+		switch (id)
+		{
+		case arrow::Type::FIXED_SIZE_LIST: return "vector";
+		case arrow::Type::LIST:
+		case arrow::Type::LARGE_LIST: return "variable-length list";
+		default: return "container"; // GCOVR_EXCL_LINE -- callers test the three ids above first.
+		}
+	}
+
 	// Returns the vector-column element count of a fixed-size-list or list array (1 for a scalar
 	// column; 0 only for an EMPTY list column).
 	static int64_t get_col_size(const std::shared_ptr<arrow::Array> &array)
@@ -3588,6 +3608,55 @@ extern "C"
 			} // GCOVR_EXCL_STOP
 		}
 		return candidate;
+	}
+
+	// The total number of ELEMENTS a plain LIST/LARGE_LIST column holds across the 1-based
+	// inclusive row-group range [rg_lo, rg_hi] (rg_lo <= 0 meaning every row group) -- the sum of
+	// every row's length, which is what parquet_reader_get_column_total_elements reports for such
+	// a column.
+	//
+	// THE FOOTER CANNOT ANSWER THIS, which is the whole reason this reads anything. A column
+	// chunk's num_values counts LEAF slots, and a null or empty list occupies exactly one slot
+	// (see list_width_candidate, where that same fact is what screens a ragged column out), so
+	// summing num_values over-counts by the number of null and empty rows. Measured on
+	// test/fixtures/map_list_types.parquet: list_col's rows hold 2, 0 and 3 elements -- 5 in all
+	// -- while its leaf num_values sums to 6. The offsets are the only honest source.
+	//
+	// Reads ONE ROW GROUP AT A TIME, never the whole column, so this stays safe on a column far
+	// larger than memory -- the same bound list_width_verified keeps, and for the same reason.
+	// The outer offsets are what is summed, so a nested list<list<...>> reports the OUTER
+	// element count (how many elements each row holds), not the innermost value count.
+	static int64_t list_payload_elements(
+		ParquetReaderHandle *reader_handle, const char *name, int64_t rg_lo, int64_t rg_hi)
+	{
+		// With a mask or a permutation active, "the rows" are the surviving ones, and the
+		// whole-column path is what yields them (get_single_chunk_array applies the mask).
+		// Measuring per row group would count elements of rows the caller filtered away. Same
+		// branch, same reasoning, as list_width_verified above.
+		if (reader_handle->live_mask || reader_has_sort_permutation(reader_handle))
+		{
+			auto array = get_single_chunk_array(reader_handle, name);
+			if (!array || array->length() == 0)
+			{
+				return 0;
+			}
+			return list_array_value_offset(array.get(), array->length()) -
+				list_array_value_offset(array.get(), 0);
+		}
+		int64_t lo = rg_lo > 0 ? rg_lo : 1;
+		int64_t hi = rg_hi > 0 ? rg_hi : reader_handle->num_row_groups;
+		int64_t total = 0;
+		for (int64_t rg = lo; rg <= hi; ++rg)
+		{
+			auto array = read_row_group_array_for_measuring(reader_handle, name, rg);
+			if (!array || array->length() == 0)
+			{
+				continue;
+			}
+			total += list_array_value_offset(array.get(), array->length()) -
+				list_array_value_offset(array.get(), 0);
+		}
+		return total;
 	}
 
 	// context identifies the calling extern "C" entry point (parquet_read_*_array_column/
@@ -7074,7 +7143,8 @@ extern "C"
 				leaf_type == arrow::Type::LARGE_LIST)
 			{
 				std::snprintf(err_out, static_cast<size_t>(err_cap),
-					"filter column '%s' is a vector column; filtering only supports scalar columns", name.c_str());
+					"filter column '%s' is a %s column; filtering only supports scalar columns",
+					name.c_str(), container_shape_word(leaf_type));
 				return 1;
 			}
 
@@ -7561,7 +7631,8 @@ extern "C"
 			leaf_type == arrow::Type::LARGE_LIST)
 		{
 			std::snprintf(err_out, static_cast<size_t>(err_cap),
-				"sort key '%s' is a vector column; sorting only supports scalar columns", name.c_str());
+				"sort key '%s' is a %s column; sorting only supports scalar columns",
+				name.c_str(), container_shape_word(leaf_type));
 			return false;
 		}
 
@@ -8805,27 +8876,26 @@ extern "C"
 		{
 			return nrows;
 		}
-		// A plain LIST/LARGE_LIST. Screened from the footer, then proven one row group at a time --
-		// the SAME helper parquet_reader_get_column_col_size uses, so the two size queries answer
-		// identically and neither materializes the whole column (see the "Measuring a plain LIST
-		// column's width" section above).
+		// A plain LIST/LARGE_LIST: the sum of the rows' own lengths, read one row group at a time.
 		//
-		// This used to be get_single_chunk_array + get_col_size, i.e. decode every row group at
-		// once purely to answer a size query. That is the exact peak-memory hazard the
-		// FIXED_SIZE_LIST branch above exists to avoid, and it hid well: the answer was correct
-		// either way, so only a memory measurement could see it. The two helpers agree by
-		// construction -- get_col_size returns 0 for an empty column, 1 for a ragged one, else the
-		// uniform width, which is list_width_verified's contract exactly -- so this is a cost fix,
-		// not a behaviour change. list_width_verified still takes the whole-column path when a
-		// filter mask or a sort permutation is active, because a per-row-group width would then
-		// answer about rows the caller removed; that branch lives in the helper, where both
-		// callers get it.
+		// This deliberately does NOT go through list_width_verified. That helper answers the
+		// WIDTH question -- 1 for a ragged column, by contract -- so nrows * width answered
+		// `nrows` for exactly the columns whose element count is interesting: a 3-row column
+		// holding 2, 0 and 3 elements reported 3 rather than 5. The two size queries used to
+		// share the helper so that they "answer identically", which is the wrong goal here;
+		// col_size and total_elements ask different questions of a ragged column, and only
+		// col_size has a uniform-width answer to give. See list_payload_elements above for why
+		// the footer cannot supply this and the offsets must.
 		//
-		// Calls the static helper rather than the exported parquet_reader_get_column_col_size:
-		// going through the exported function would re-enter as_reader_handle on the same handle
-		// while this call's own guard is still held, which ConcurrencyGuard now admits (the owner
-		// may re-enter) but only after a second, pointless atomic claim/release pair.
-		return nrows * list_width_verified(reader_handle, name, 0, 0);
+		// Peak memory is unchanged -- one row group, the bound the FIXED_SIZE_LIST branch above
+		// exists to keep -- and the mask/permutation branch lives in the helper, as it does for
+		// list_width_verified.
+		//
+		// Calls the static helper rather than an exported entry point: going through one would
+		// re-enter as_reader_handle on the same handle while this call's own guard is still held,
+		// which ConcurrencyGuard admits (the owner may re-enter) but only after a second,
+		// pointless atomic claim/release pair.
+		return list_payload_elements(reader_handle, name, 0, 0);
 	}
 
 	// Returns the longest non-null string value actually present in string column `name`.

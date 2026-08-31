@@ -17,6 +17,33 @@ read and metadata APIs, both as scalars/1D arrays and as 2D vector columns:
 Vector column entries use the shape convention `(col_size, nrows)` for arrays passed to
 `parquet_write_column` or produced by `parquet_read_column`.
 
+## Container columns: `LIST`, `MAP` and `STRUCT`
+
+Three further column types hold a *variable* amount of data per row rather than one value or a
+fixed-width vector. Each has its own type, its own MAML token and its own page:
+
+| Fortran type | MAML `data_type` | every row holds |
+|---|---|---|
+| [`parquet_list_column`](list-columns.html) | `list[<elemtype>]` | zero or more values, a different count per row |
+| [`parquet_map_column`](map-columns.html) | `map[<valuetype>]` | zero or more `key -> value` entries; keys are strings |
+| [`parquet_struct_column`](struct-columns.html) | `struct` | one value per declared field, the fields differing in type |
+
+All three are read with `parquet_read_column` and written with `parquet_write_column`, whole or one
+row group at a time, exactly as the scalar types are. Two properties set them apart from everything
+else on this page, and both follow from a row's contents being variable:
+
+- **They carry their own nullness**, so they take neither `null_value=` nor `is_valid=` — see
+  [Null values](#null-values) below. Each tracks two levels separately: whether the row itself is
+  absent, and whether a value within it is missing. For a list or a map an absent row is also
+  distinct from a *present but empty* one; a struct row has a fixed field set and so has no empty
+  form.
+- **A container may hold another container on READ but not on WRITE.** A list of structs, a map of
+  lists and a struct with a list field all read from a file produced by any tool; writing one is
+  refused, naming the offending payload, value or field. Each type's own page has the detail.
+
+`col_size:` and `array_size:` do not apply to any of them, because both declare a width that is the
+same in every row — which is exactly the property a container does not have.
+
 ## Date, time and timestamp columns
 
 Three additional element-level types — `parquet_date`, `parquet_time`, `parquet_timestamp` (module
@@ -135,8 +162,8 @@ one of the following:
 
 `int8`/`int16`/`uint8`/`uint16`/`uint32`/`uint64`/`half_float`/`decimal` here are physical
 Parquet/Arrow storage types this library's own writer never produces (writing stays limited to the
-six types in the table at the top of this page, plus `date`/`time`/`timestamp`, in scalar, vector
-and variable-length-`LIST` form) — they only ever
+six types in the table at the top of this page, plus `date`/`time`/`timestamp` — in scalar, vector,
+and the three container forms `LIST`, `MAP` and `STRUCT`) — they only ever
 arise from a file written by some other tool. There is nothing to declare for them in a MAML schema
 or anywhere else: the conversion is purely internal to the read path, triggered automatically by
 whatever physical type the column already has on disk.
@@ -204,14 +231,21 @@ not a Fortran `error stop` — the same class of failure as the physical-type-mi
 [Limitations](../../index.html#limitations).
 
 To read a Null-containing column instead of erroring, pass one or both of these optional keyword
-arguments (supported by all three of the read families above, for every data type in the table at
-the top of this page — the two element types that carry their own null state, the temporal types
-above and `parquet_string_column` below, take neither):
+arguments, supported by all three of the read families above for every data type in the table at
+the top of this page:
 
 - `null_value=nullval` — a scalar of the same type as `values`; every Null in the column is replaced
   with `nullval` in the returned `values`.
 - `is_valid=mask` — a `logical` array of the same shape as `values`; `.false.` wherever the Parquet
   value was Null, `.true.` otherwise.
+
+**Every type that carries its own null state takes neither**, because there is nothing for an
+external mask to add: the temporal types above, `parquet_string_column` below, and the three
+container types — `parquet_list_column`, `parquet_map_column` and `parquet_struct_column` — whose
+read specifics take `(reader, name, values)` and nothing else. A container's row nullness and its
+per-element or per-field nullness both travel inside the column; see
+[Null rows, empty rows and null values](map-columns.html#null-rows-empty-rows-and-null-values) for
+how those two levels differ.
 
 If only `is_valid` is given (no `null_value`), Null slots in `values` are still filled with a safe
 type-appropriate default (`0` / `.false.` / blank string) rather than left as undefined data — check
@@ -378,7 +412,9 @@ passing a dot-separated path as the `name` argument to `parquet_read_column`,
 `parquet_read_array_row_mode`/`parquet_read_array_element_mode`, `parquet_read_column_chunk`,
 `parquet_get_col_size`/`parquet_get_column_total_elements`, `qc:` bounds in a MAML schema, and
 `parquet_filter` rules — every one of these dispatches on `name` the same way, so a struct-nested
-column is used identically to a top-level one everywhere. Given a file with
+column is used identically to a top-level one everywhere. That holds for a **field** path, the
+kind described in this section; the **descent** paths of the next section are deliberately narrower
+and `qc:`, `parquet_filter` and `sort_by=` all refuse them. Given a file with
 
 ```
 main : STRUCT

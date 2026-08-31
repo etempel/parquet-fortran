@@ -1202,17 +1202,20 @@ module parquet_core
         module procedure parquet_get_metadata_string_array
     end interface parquet_get_metadata
 
-    !> Returns the total element count of a vector (array) column named
-    !> `name`, read from an open parquet_reader (reader), across every row
-    !> (i.e. nrows * col_size) in `total_elements`, dispatched by its
-    !> integer(int32)/integer(int64) kind. Reads no column data for a scalar or FIXED_SIZE_LIST
-    !> column (nrows and col_size are both already known from the file footer/schema), so this is
-    !> safe to call even on a column whose total element count itself exceeds int32 -- unlike an
-    !> earlier implementation, which materialized the whole column just to answer this query and
-    !> could hit Arrow's own int32 list-index ceiling on a large enough column (see CLAUDE.md's
-    !> "Guarding a hard Arrow int32-only ceiling"). A plain LIST/LARGE_LIST column has no
-    !> schema-level width, so it is measured one row group at a time by the same helper
-    !> parquet_get_col_size uses -- data is read, but never more than one row group at once.
+    !> Returns the total number of ELEMENTS column `name` holds across every row of an open
+    !> parquet_reader (reader), in `total_elements`, dispatched by its
+    !> integer(int32)/integer(int64) kind. `nrows` for a scalar column and `nrows * col_size` for
+    !> a FIXED_SIZE_LIST one, both known from the file footer/schema, so no column data is read --
+    !> which is what makes this safe on a column whose element count itself exceeds int32 (see
+    !> CLAUDE.md's "Guarding a hard Arrow int32-only ceiling").
+    !>
+    !> For a plain LIST/LARGE_LIST column it is the SUM OF THE ROWS' OWN LENGTHS, which for a
+    !> ragged column is not `nrows * col_size`: a 3-row column holding 2, 0 and 3 elements answers
+    !> 5, while parquet_get_col_size answers 1, because a ragged column has no uniform width to
+    !> report. The two queries ask different things of such a column and only col_size has a width
+    !> to give. Measured from the rows' offsets one row group at a time -- data is read, but never
+    !> more than one row group at once, and the footer cannot answer it (a null or empty list
+    !> occupies a leaf slot, so the footer's own value count over-counts).
     interface parquet_get_column_total_elements
         module procedure parquet_get_column_total_elements_int64
         module procedure parquet_get_column_total_elements_int32
@@ -3175,8 +3178,12 @@ module parquet_core
             character(len=:), allocatable, intent(out) :: type_name !! resolved canonical type token.
         end subroutine parquet_get_column_type
         !> Reports existing column `name`'s CONTAINER SHAPE in `shape`, as one of the tokens
-        !> `"scalar"`, `"vector"`, `"list"`, `"map"`, `"struct"` or `"unknown"`. A schema-only
-        !> query: it reads no column data at all.
+        !> `"scalar"`, `"vector"`, `"list"`, `"map"` or `"struct"`. A schema-only query: it reads
+        !> no column data at all.
+        !>
+        !> There is no "unrecognized" answer: anything that is not one of the four container
+        !> shapes is a `"scalar"`, including a leaf whose ELEMENT type this library cannot read.
+        !> That is the other query's business -- a decimal column is `("unknown", "scalar")`.
         !>
         !> Orthogonal to parquet_get_column_type, which reports the ELEMENT type and deliberately
         !> unwraps a list to it -- so a `list<double>` column answers `"float64"` there and

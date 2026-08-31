@@ -248,6 +248,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`parquet_get_column_total_elements` reports a variable-length `list` column's element count** —
+  the sum of its rows' own lengths — rather than its row count.
 - Many other minor fixes and improvements.
 
 ## [2.0.0] - 2026-08-24

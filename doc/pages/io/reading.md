@@ -56,7 +56,7 @@ Notes:
   into a `type(parquet_string_column)` instead, which needs no pre-sizing; see
   [Reading and writing compact string columns](../types/string-columns.html#reading-and-writing-compact-string-columns).
   Not sure how long is long enough? `parquet_get_string_length` answers that directly — see
-  [Column shape and size queries](#column-shape-and-size-queries) below.
+  [Column size queries](#column-size-queries) below.
 - For vector columns, allocate 2D arrays with shape `(col_size, nrows)`.
 - A `DATE`/`TIME`/`TIMESTAMP` column reads into a
   `parquet_date`/`parquet_time`/`parquet_timestamp` array instead — see
@@ -111,7 +111,7 @@ columns are.
 (a vector column stored as `fixed_size_list`): they answer straight from the schema/footer,
 reading no column data at all — so they're safe to call even on a column whose total element count
 (`nrows * col_size`) is enormous. See
-[Column shape and size queries](#column-shape-and-size-queries) for the one column layout where
+[Column size queries](#column-size-queries) for the one column layout where
 they do have to read.
 
 `parquet_read_array_row_mode` reads only the one row group the requested row lives in, not the
@@ -238,14 +238,23 @@ column. Neither is single-row I/O in the strictest sense (both still decode a fu
 worth of data at a time), but both are genuine random access at row-group granularity rather than
 a whole-column read.
 
-## Column shape and size queries
+## Column size queries
 
-Three procedures answer questions about a column's shape:
+Three procedures answer questions about how much a column holds. What *kind* of column it is —
+scalar, vector, list, map or struct — is a separate question, answered by
+[`parquet_get_column_shape`](#which-kind-of-container-a-column-is-parquet_get_column_shape) below.
 
 - **`parquet_get_col_size(reader, name, col_size)`** — a vector column's fixed per-row width (`1`
   for a plain scalar column).
-- **`parquet_get_column_total_elements(reader, name, total_elements)`** — the column's total
-  flattened element count (`nrows * col_size` for a vector column; `nrows` for a scalar one).
+- **`parquet_get_column_total_elements(reader, name, total_elements)`** — the number of elements
+  the column holds across every row: `nrows` for a scalar column, `nrows * col_size` for a vector
+  one, and for a variable-length `list` column the **sum of the rows' own lengths**, so a 3-row
+  column holding 2, 0 and 3 elements answers `5`. Note that is deliberately *not*
+  `nrows * col_size` for a ragged column, whose `col_size` is `1` (see `parquet_measure_list_width`
+  below): the two queries ask different things of such a column, and only `col_size` has a single
+  width to report. It agrees with
+  [`%total_elements()`](../types/list-columns.html) on a `parquet_list_column` read from the same
+  data.
 - **`parquet_get_string_length(reader, name, max_string_length)`** — for a `string` column (or a
   vector column whose elements are strings): the longest value actually present, unaffected by
   Nulls (a Null is always skipped when computing this maximum) — the direct answer to "how long
@@ -253,11 +262,15 @@ Three procedures answer questions about a column's shape:
   [minimal example](#reading-only-touches-the-columns-you-ask-for) notes above.
 
 The first two normally answer straight from the file's schema/footer and read no column data at
-all. The exception is a column stored as a plain variable-length `list`/`large_list` (which this
-library never writes, but another producer may): its width is a property of the data rather than
-of the schema, so measuring it has to read the column. Even then it is bounded — each row group is
-screened from the footer first, and only a surviving candidate is proved by reading, one row group
-at a time, so peak memory is one row group rather than the whole column.
+all. The exception is a column stored as a plain variable-length `list`/`large_list` — which this
+library writes from a
+[`parquet_list_column`](../types/list-columns.html#writing-a-list-column-to-a-file), and which
+another producer may write too: what its rows hold is a property of the data rather than of the
+schema, so measuring it has to read the column. Even then it is bounded to **one row group at a
+time**, so peak memory is a row group rather than the whole column. The two differ in how much
+they can avoid: `parquet_get_col_size` screens each row group from the footer first and reads only
+to prove a surviving candidate, so a visibly ragged column costs it nothing, while
+`parquet_get_column_total_elements` has to sum the rows' own lengths and so always reads.
 
 `parquet_get_string_length` is different in kind: it **always** reads the column, because the
 longest string can only be found by looking at every value, and the column then stays cached like
@@ -294,7 +307,10 @@ call parquet_close_reader(reader)
 
 All three accept a struct-nested dotted `name` (see
 [Reading a nested struct field](../types/supported-data-types.html#reading-a-nested-struct-field))
-and fail immediately with `error stop` if `name` doesn't exist.
+and fail immediately with `error stop` if `name` doesn't exist. They also accept the wider
+[descent paths](../types/supported-data-types.html#descent-paths-addressing-a-containers-child) — `[]` for a
+list's elements, `{key}` and `{value}` for a map's — as do the type and shape queries below, so
+`parquet_get_col_size(reader, "events[].id", ...)` is a legal question about a list of structs.
 
 **`parquet_column_has_nulls(reader, name, row_group_lo, row_group_hi)`** answers the one remaining
 shape question — whether a column contains any Null — from the per-column-chunk null counts Parquet
@@ -392,15 +408,19 @@ because that column's target kind is `int32`. The two ask different questions: *
 float at all?* against *is `float64` the right declaration?* Both are useful, so neither was made to
 imply the other.
 
-A container column reports its **element** type: an `int32` vector (`FIXED_SIZE_LIST`) column and a
-variable-length `list<int32>` column both report `"int32"`. `parquet_get_column_type` fails with
+A **vector or list** column reports its **element** type: an `int32` vector (`FIXED_SIZE_LIST`)
+column and a variable-length `list<int32>` column both report `"int32"`. That unwrapping goes
+exactly one level, so it does not extend to the other containers — a `map` column reports
+`"unknown"` (ask `parquet_get_map_value_type` for its value type instead), and so does a
+`list<list<int32>>`, whose element is itself a list rather than one of the nine types.
+`parquet_get_column_type` fails with
 `error stop` only if `name` doesn't exist — that is a caller mistake, and `parquet_column_exists` is
 the query for it. A type it cannot read is an answer (`"unknown"`), not an error.
 
 ### Which kind of container a column is: `parquet_get_column_shape`
 
 `parquet_get_column_shape(reader, name, shape)` answers the orthogonal question — *is this a plain
-value, a fixed-width vector, or a variable-length list?* — as one of six tokens:
+value, a fixed-width vector, or a variable-length list?* — as one of five tokens:
 
 ```fortran
 character(len=:), allocatable :: shape
@@ -414,7 +434,12 @@ call parquet_get_column_shape(reader, "flux", shape)   ! e.g. "list"
 | `"list"` | a variable-length `LIST`/`LARGE_LIST` |
 | `"map"` | a `MAP` — not readable |
 | `"struct"` | a `STRUCT` reached as a whole — not readable; address its leaves by dotted path |
-| `"unknown"` | anything else |
+
+There is no "unrecognized" answer, and that is deliberate: the question is *is this a container?*,
+so **anything that is not one of the four container shapes is a `"scalar"`** — including a column
+whose element type this library cannot read at all. A `decimal128` column answers `"scalar"` here
+while `parquet_get_column_type` answers `"unknown"`, and the pair is the useful reading: a plain
+value, of a type you cannot have.
 
 It is schema-only: no column data is read, whatever the answer. Together with
 `parquet_get_column_type` it gives a complete description of a column — `("float64", "list")` — and
@@ -425,6 +450,62 @@ three elements reads perfectly well into a 2-D array, and this query still calls
 because whether the rows are uniform is a property of the *data*, and answering it would mean
 reading the column. Ask `parquet_get_col_size` if that is the question; it does look (one row group
 at a time, never the whole column). `"vector"` means the *schema* declares a width.
+
+### What a map column's values are: `parquet_get_map_value_type`
+
+`parquet_get_column_type` answers `"unknown"` for a map, because a map cell is not one value and
+the question that query asks is *what element type would I declare?*.
+`parquet_get_map_value_type(reader, name, type_name)` answers the narrower question you have once
+the shape query has already told you the column is a `"map"`: what kind will the values come back
+as?
+
+```fortran
+character(len=:), allocatable :: value_type
+call parquet_get_map_value_type(reader, "attrs", value_type)   ! e.g. "int32"
+```
+
+It reports one of the same nine tokens `parquet_get_column_type` uses; or `"list"`, `"map"` or
+`"struct"` when the values are themselves containers; or `"unknown"` — and here, unlike the shape
+query, `"unknown"` really is reachable. It covers three cases a caller does not need to tell
+apart: `name` is not a map at all, its keys are not strings (only string keys are supported), or
+its values are of a type outside those tokens. Schema-only, like the two queries above, and it
+`error stop`s only if `name` doesn't exist.
+
+Keys are always strings, so there is no query for their type. See
+[Map columns](../types/map-columns.html) for reading one.
+
+## Reading a container column
+
+A column whose rows hold a *variable* number of values, key/value pairs, or a set of named fields
+of different types is read into one of the three container types rather than into an array.
+`parquet_read_column` takes each of them, and `parquet_read_column_chunk` has the matching
+row-group form:
+
+| stored as | read into | its page |
+|---|---|---|
+| `LIST`/`LARGE_LIST` | `type(parquet_list_column)` | [List columns](../types/list-columns.html) |
+| `MAP` | `type(parquet_map_column)` | [Map columns](../types/map-columns.html) |
+| `STRUCT` read as one object | `type(parquet_struct_column)` | [Struct columns](../types/struct-columns.html) |
+
+```fortran
+type(parquet_list_column) :: flux
+call parquet_read_column(reader, "flux", flux)    ! rows may differ in length
+```
+
+Each type carries its own null state — both the row's and each element's — so `null_value=` and
+`is_valid=` do not apply, exactly as for the
+[date/time types](../types/date-time.html). The three type pages
+above are the reference; this page's queries work on container columns too, and
+[`parquet_get_column_shape`](#which-kind-of-container-a-column-is-parquet_get_column_shape) is how
+you find out which of them a column is before reading it.
+
+Two things worth knowing before you reach for them. A `STRUCT`'s individual leaves can also be read
+as ordinary columns by
+[dotted path](../types/supported-data-types.html#reading-a-nested-struct-field), which is usually
+what you want when only one field interests you — reading the whole struct is for when you need the
+object. And **reading a nested container is supported where writing one is not**: a
+`list<struct<...>>` reads back, and writing that same column is refused, so a read-modify-write
+round trip through a nested container will not complete.
 
 ## Prefetching multiple columns at once with `parquet_prefetch_columns`
 

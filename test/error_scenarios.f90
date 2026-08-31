@@ -499,6 +499,8 @@ program error_scenarios
         call scenario_filter_unknown_column()
     case ("filter_vector_column")
         call scenario_filter_vector_column()
+    case ("filter_list_column")
+        call scenario_filter_list_column()
     case ("filter_malformed_rule")
         call scenario_filter_malformed_rule()
     case ("filter_rule_too_long")
@@ -903,6 +905,8 @@ program error_scenarios
         call scenario_sort_unknown_column()
     case ("sort_vector_column")
         call scenario_sort_vector_column()
+    case ("sort_list_column")
+        call scenario_sort_list_column()
     case ("sort_empty_key")
         call scenario_sort_empty_key()
     case ("sort_bad_direction")
@@ -4804,6 +4808,26 @@ contains
         print '(a)', "unexpectedly sorted by a vector column"
     end subroutine scenario_sort_vector_column
 
+    !> A VARIABLE-LENGTH list column as a sort key. The same guard as scenario_sort_vector_column
+    !> above, but its other arm: that one writes a 2-D array, i.e. a FIXED_SIZE_LIST, so the
+    !> guard's LIST/LARGE_LIST arm was reached by no test at all until this one.
+    !>
+    !! The distinction is not cosmetic. A ragged list column's col_size is 1, so anything keyed on
+    !! "col_size > 1" -- which is how the refusal read on the guide page until this was found --
+    !! lets exactly this column through. What a leaked container does next is not an abort but a
+    !! wrong answer, one entry per ELEMENT against a row-shaped result.
+    !!
+    !! Asserts the shape word too, which is the other half: the message used to call this a
+    !! "vector column", which it is not.
+    subroutine scenario_sort_list_column()
+        type(parquet_reader) :: reader
+        type(parquet_sortkey) :: srt
+
+        call srt%add("list_col asc")
+        call parquet_open_reader(reader, "test/fixtures/map_list_types.parquet", sort_by=srt)
+        print '(a)', "unexpectedly sorted by a variable-length list column"
+    end subroutine scenario_sort_list_column
+
     !> ---- Process-global settings (parquet_settings) abort paths ----
 
     !> A thread-pool capacity below 1 is rejected in Fortran, before the C++ side is called at all
@@ -6957,6 +6981,18 @@ contains
         call parquet_open_reader(reader, "test_run/filter_vector_column.parquet", filter=filt)
         print '(a)', "unexpectedly opened a reader with a filter naming a vector column"
     end subroutine scenario_filter_vector_column
+
+    !> A VARIABLE-LENGTH list column in a filter rule -- the LIST/LARGE_LIST arm of the same guard
+    !> scenario_filter_vector_column covers the FIXED_SIZE_LIST arm of. See scenario_sort_list_column
+    !> for why the two arms need separate scenarios and what a leaked container would do.
+    subroutine scenario_filter_list_column()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+
+        call filt%add("list_col > 0")
+        call parquet_open_reader(reader, "test/fixtures/map_list_types.parquet", filter=filt)
+        print '(a)', "unexpectedly filtered on a variable-length list column"
+    end subroutine scenario_filter_list_column
 
     !> parquet_tokenize_filter_rule (parquet_read.f90) rejects a rule that
     !> doesn't have the "<column> <op> [value]" shape (here: no operator at
@@ -11664,18 +11700,23 @@ contains
         call parquet_get_col_size(reader, "large_lst", large_col_size)
         ! parquet_get_col_size (above) is answered by the footer screen alone here, which already
         ! settles "mismatch" without ever calling get_col_size itself (a non-integral mean rejects
-        ! it for free). parquet_get_column_total_elements has no such screen for a plain LIST/
-        ! LARGE_LIST column -- it always reads the whole column and calls get_col_size directly, so
-        ! this is what actually exercises get_col_size's own heterogeneous-row-width branch (as
-        ! opposed to list_width_candidate's footer-only one) for both list kinds.
+        ! it for free). parquet_get_column_total_elements asks the OTHER question of the same
+        ! ragged column and cannot share that answer: the rows hold 0, 2 and 3 elements, so the
+        ! width is 1 by contract while the element count is 5. It sums the rows' own lengths from
+        ! the offsets, one row group at a time (list_payload_elements) -- the footer cannot supply
+        ! it, because a null or empty list occupies a leaf slot and num_values sums to 6 here.
+        !
+        ! The 5-versus-3 distinction is the whole point of this assertion: reverting to the old
+        ! nrows * list_width_verified spelling answers 3 -- the ROW count -- for exactly the
+        ! columns whose element count a caller would ask about.
         call parquet_get_column_total_elements(reader, "lst", total_elem)
         call parquet_get_column_total_elements(reader, "large_lst", large_total_elem)
         call parquet_close_reader(reader)
         if (col_size /= 1) error stop "list fixture: mismatched-width LIST column should report col_size=1"
         if (large_col_size /= 1) error stop "list fixture: mismatched-width LARGE_LIST column should report col_size=1"
-        if (total_elem /= 3) error stop "list fixture: mismatched-width LIST column should report 3 total elements"
-        if (large_total_elem /= 3) &
-            error stop "list fixture: mismatched-width LARGE_LIST column should report 3 total elements"
+        if (total_elem /= 5) error stop "list fixture: mismatched-width LIST column should report 5 total elements"
+        if (large_total_elem /= 5) &
+            error stop "list fixture: mismatched-width LARGE_LIST column should report 5 total elements"
 
         ! "empty": both columns have zero rows -- get_col_size's whole-array-empty branch, both
         ! list kinds (distinct from an individual row's list being empty, already exercised above).

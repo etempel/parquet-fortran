@@ -426,6 +426,8 @@ contains
                 test_sort_unknown_column_aborts), &
             new_unittest("sort: vector column key aborts", &
                 test_sort_vector_column_aborts), &
+            new_unittest("sort: variable-length list column key aborts", &
+                test_sort_list_column_aborts), &
             new_unittest("sort: empty key aborts", &
                 test_sort_empty_key_aborts), &
             new_unittest("sort: unrecognized direction aborts", &
@@ -458,6 +460,8 @@ contains
                 test_adopt_transform_other_file_aborts), &
             new_unittest("filter: vector column aborts", &
                 test_filter_vector_column_aborts), &
+            new_unittest("filter: variable-length list column aborts", &
+                test_filter_list_column_aborts), &
             new_unittest("filter: malformed rule aborts", &
                 test_filter_malformed_rule_aborts), &
             new_unittest("filter: rule longer than the supported maximum aborts", &
@@ -6999,6 +7003,17 @@ contains
             required_stderr="sort key 'vec' is a vector column")
     end subroutine test_sort_vector_column_aborts
 
+    !> The SAME guard's variable-length-list arm, which no test reached while both scenarios wrote
+    !> a 2-D array. Asserts the shape word as well as the refusal: a ragged list is not a "vector
+    !> column", and saying so was the defect this pairs with.
+    subroutine test_sort_list_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sort_list_column", expect_abort=.true., &
+            failure_message="opening a reader sorted by a variable-length list column was expected to abort", &
+            required_stderr="sort key 'list_col' is a variable-length list column")
+    end subroutine test_sort_list_column_aborts
+
     !> Read-time sort abort path: see scenario_sort_empty_key in test/error_scenarios.f90
     !> for what it does and why that state is rejected.
     subroutine test_sort_empty_key_aborts(error)
@@ -7218,6 +7233,16 @@ contains
             failure_message="opening a reader with a filter naming a vector column was expected to abort", &
             required_stderr="filter column 'vec' is a vector column")
     end subroutine test_filter_vector_column_aborts
+
+    !> The SAME guard's variable-length-list arm -- see test_sort_list_column_aborts for why the
+    !> two arms need separate tests.
+    subroutine test_filter_list_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_list_column", expect_abort=.true., &
+            failure_message="opening a reader with a filter naming a variable-length list column was expected to abort", &
+            required_stderr="filter column 'list_col' is a variable-length list column")
+    end subroutine test_filter_list_column_aborts
 
     !> A filter rule missing its operator ("<column> <op> [value]" shape)
     !> aborts with a clean, syntax-specific message from the Fortran-side

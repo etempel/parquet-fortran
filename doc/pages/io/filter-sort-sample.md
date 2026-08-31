@@ -144,8 +144,11 @@ call filt%add('obs_ts == "2024-01-31T12:30:00"')
 
 ### Validation and cost
 
-Only plain scalar columns can be filtered — naming a vector (`col_size > 1`) column in a rule
-fails immediately with `error stop` when `parquet_open_reader` is called. So does naming a column
+Only plain scalar columns can be filtered — naming a **vector or variable-length `list`** column in
+a rule fails immediately with `error stop` when `parquet_open_reader` is called. (Both are refused
+for the same reason, that a row holds no single value to compare, so do not read this as a
+`col_size > 1` test: a ragged `list` column measures `col_size` `1` and is refused just the same.)
+So does naming a column
 that doesn't exist in the file, or a rule with invalid syntax (an unbalanced parenthesis, a
 dangling `and`, an unknown operator, an unquoted string value, a non-numeric value against a
 numeric column, ...) — every rule is fully parsed and validated (column existence,
@@ -320,9 +323,11 @@ Rows that tie on **every** key keep their original file order (the sort is stabl
 ### What can be sorted, and what it costs
 
 Any scalar column can be a sort key: `int32`/`int64`, `float32`/`float64`, `boolean`, `string`,
-and `date`/`time`/`timestamp`. A **vector** (`col_size > 1`) column has no single value per row to
-order by and is rejected with `error stop` — from the schema, before any data is read. So is a key
-naming a column the file doesn't have, or one whose text doesn't parse.
+and `date`/`time`/`timestamp`. A **vector** or a **variable-length `list`** column has no single
+value per row to order by and is rejected with `error stop` — from the schema, before any data is
+read. (As with filtering, that is not a `col_size > 1` test: a ragged `list` column measures
+`col_size` `1` and is refused just the same.) So is a key naming a column the file doesn't have,
+or one whose text doesn't parse.
 
 A sort has its own limits, each reported as a clean `error stop` rather than a crash: **16 keys**
 per `parquet_sortkey`, **320 characters** per key, and **64 characters** for the column name inside

@@ -55,9 +55,15 @@ gfortran:    source /opt/fortran/activate_gcc.sh
 ifx:         source /opt/fortran/activate_ifx.sh
 ```
 
-The only machine for **ifx**, for **threading at scale** (192 physical cores) and for **AVX-512**,
-and the only one that can compare gfortran against ifx with everything else held constant. Four
-traps live here, all documented at length in `CLAUDE.md` and all of which have cost a campaign:
+The only machine for **ifx**, for **threading at scale** and for **AVX-512**, and the only one that
+can compare gfortran against ifx with everything else held constant. It is **192 physical cores and
+384 logical** — SMT is on, so `nproc` and `omp_get_num_procs()` both report 384 while only half of
+those are cores. Size a thread ladder against the number you mean.
+
+Both activation scripts also export **`OMP_PLACES=sockets`**, and the ifx one sets **`ulimit -s
+unlimited`**. Neither is visible in a command line, and the first one shapes every threading
+measurement taken here, so quote it when reporting one. Six traps live here, most of them
+documented at length in `CLAUDE.md` and all of which have cost a campaign:
 
 - an activation script sourced **non-interactively** may exit before it finishes, leaving the
   system toolchain active while its exported variables make the shell look configured — redirect
@@ -68,8 +74,15 @@ traps live here, all documented at length in `CLAUDE.md` and all of which have c
 - the **system `gfortran` is 11.5.0**, below this project's minimum of 13, and silently
   miscompiles it. Confirm the activated `gfortran --version` is the toolset's, not `11.5.0`;
 - the gfortran environment exports `-ffree-line-length-none`, so **line length cannot be checked
-  here** — a too-long line compiles cleanly and fails everywhere else.
-- threads beyond 64 cores do not provide any meaningful speed gain. 64-cores is a sweet spot.
+  here** — a too-long line compiles cleanly and fails everywhere else;
+- **`set -u` kills the ifx activation, silently, in combination with the redirection the first
+  trap above calls for.** `source /opt/fortran/activate_ifx.sh` under `set -u` dies on
+  `PKG_CONFIG_PATH: unbound variable` at its line 11, and oneAPI's own `setvars.sh` — which it
+  sources — dies on `OCL_ICD_FILENAMES` even if that were fixed, so this is the whole chain rather
+  than one line. The diagnostic goes to **stderr**, which `>/dev/null 2>&1` swallows, leaving a
+  wrapper that exits nonzero with an empty log and no clue. `set -o pipefail` alone is safe; do not
+  add `-u` to a script that sources these, or drop it around the `source` line;
+- threads beyond 64 cores do not provide any meaningful speed gain. 64 cores is a sweet spot.
 
 ## Machine C (intel iMac)
 

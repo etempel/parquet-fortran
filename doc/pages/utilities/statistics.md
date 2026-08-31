@@ -119,9 +119,9 @@ compaction each cost **one** pass, and `pf_moments` asking only for `n_valid`, `
 `vmax` costs one too. Everything from `pf_mean` upward costs two, because even the mean is refined
 against the first pass's estimate — see [Accuracy is a documented
 property](#accuracy-is-a-documented-property-not-an-implementation-detail). Measured on a
-2-socket EPYC 9654 at ten million `real64`, serially: `pf_sum` 0.83 ns/element against `pf_mean`'s
-2.07, where a bare `s = s + x(i)` loop over the same array is 0.24 and `pf_count_valid` is 0.76.
-So if the sum is all you want, ask for the sum.
+2-socket EPYC 9654 at ten million `real64`, one thread, `--profile release`: `pf_sum` 1.37
+ns/element against `pf_mean`'s 2.19, where a bare `s = s + x(i)` loop over the same array is 0.82
+and `pf_count_valid` is 0.76. So if the sum is all you want, ask for the sum.
 
 Its `ok=` reports whether every output the caller **asked for** came back defined — only the present
 ones are tested, which is the only reading that works here: `vsum` over an empty population is a
@@ -309,9 +309,10 @@ Three things worth knowing before reaching for `threads=`:
 - **The shape of the call matters more than the thread count**, for anything but a plain array,
   and by a wide margin. Both `weights=` and `is_valid=` leave the fast path, which forces the
   population to be compacted into a buffer instead of being read where it lies. Measured on the
-  same machine at ten million elements, serially, against a plain `pf_variance` at 2.08
-  ns/element: `is_valid=` costs 6.77, `skipnan=.false.` 6.65 and `weights=` 11.28 — three to five
-  times the plain call, where threading the second pass returns well under two. Threading does not
+  same machine at ten million elements, one thread, against a plain `pf_variance` at 2.21
+  ns/element: `is_valid=` costs 6.25, `skipnan=.false.` 6.19 and `weights=` 10.41 — roughly three
+  to five times the plain call, where threading the second pass returns well under two. Threading
+  does not
   recover that, and on the compacting shapes a wide team can make it worse rather than better,
   for the cache reason above. If a mask is mostly true and you are calling in a loop, compacting
   once yourself and reducing the plain array is worth measuring.

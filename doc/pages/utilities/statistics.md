@@ -605,6 +605,12 @@ Two identities hold **exactly**, and the test suite asserts them with `==` rathe
   the identity would fail for any caller who asked the variance for frequency weights.
 - `pf_corr(x, x)` is exactly `1`, and `pf_corr(x, -x)` exactly `-1`.
 
+**An infinity in either sample leaves all of `pf_cov` and `pf_corr` undefined**, reported as a
+NaN with `ok = .false.` rather than as an abort — the same rule the single-variable family follows,
+where a population holding an infinity has every central moment NaN. It applies whichever sample
+holds the infinity: a covariance is a statistic of the pair, so there is no half of it left to
+report. `pf_variance(y)` is what to call for a property of `y` alone.
+
 **`pf_corr` has neither `ddof` nor `weight_type`** — the `ddof` in the covariance and the two in
 the standard deviations cancel exactly, and the two weight conventions differ only in the count
 `ddof` is charged against, so neither argument could ever change the answer. Spearman is Pearson over **midranks**: each

@@ -914,11 +914,32 @@ contains
         real(real64), intent(out) :: sd        !! its standard deviation at ddof=0, or NaN.
         real(real64) :: s, d
         integer(int64) :: i, n
+        logical :: pinf, ninf
 
         n = hi - lo + 1_int64
         mean = stats_nan()
         sd = stats_nan()
         if (n <= 0_int64) return
+        ! **An infinity in the slice is answered from the ENDS, never summed over.** `xs` is
+        ! sorted, so its two extremes settle in O(1) whether the slice holds an infinity and of
+        ! which sign, and the answers below are exactly what the arithmetic would have produced:
+        ! one sign sums to that infinity, both signs to a NaN, and every deviation from an infinite
+        ! mean is either infinite or `Inf - Inf`, so the standard deviation is a NaN either way
+        ! (the non-finite table in doc/pages/utilities/statistics.md).
+        !
+        ! Screening rather than computing is what keeps `Inf + (-Inf)` and `Inf - Inf` from being
+        ! EXECUTED. Both raise IEEE_INVALID, and nagfor unmasks the IEEE traps by default
+        ! (`-ieee=stop`), so reaching either kills the process -- on data this module documents
+        ! itself as answering rather than refusing. Two comparisons for the whole slice, so the
+        ! screen is free where a per-element test would not be.
+        pinf = (xs(hi) > huge(0.0_real64))
+        ninf = (xs(lo) < -huge(0.0_real64))
+        if (pinf .or. ninf) then
+            if (pinf .and. ninf) return
+            if (pinf) mean = xs(hi)
+            if (ninf) mean = xs(lo)
+            return
+        end if
         s = 0.0_real64
         do i = lo, hi
             s = s + xs(i)
@@ -989,7 +1010,7 @@ contains
         real(real64) :: centre, scale, slo, shi, blo, bhi, junk
         integer(int64) :: m, nnull, nnan, lo, hi, prev_lo, prev_hi, i, rounds, cap
         integer :: iters
-        logical :: poisoned, use_mean, use_mad, done
+        logical :: poisoned, use_mean, use_mad, done, bad, no_spread
 
         ! There is no `weights` dummy at all, which is stronger than a runtime refusal: a weighted
         ! scale estimator is a further definitional choice that no workload in evidence asks for,
@@ -1005,7 +1026,13 @@ contains
         end if
         if (present(sigma_lower)) slo = sigma_lower
         if (present(sigma_upper)) shi = sigma_upper
-        if (slo /= slo .or. shi /= shi .or. slo < 0.0_real64 .or. shi < 0.0_real64) &
+        ! Two statements, not one expression: Fortran does not short-circuit, so a combined test
+        ! would evaluate `slo < 0` on a NaN and raise IEEE_INVALID -- which under nagfor's default
+        ! `-ieee=stop` kills the process instead of issuing the abort this line exists to issue.
+        ! Only `==` and `/=` are quiet on a NaN.
+        bad = (slo /= slo) .or. (shi /= shi)
+        if (.not. bad) bad = (slo < 0.0_real64) .or. (shi < 0.0_real64)
+        if (bad) &
             error stop "pf_sigma_clipped_stats: sigma, sigma_lower and sigma_upper must be " // &
                 "non-negative numbers; a NaN or negative clip width can only be a caller mistake"
         iters = 5
@@ -1057,7 +1084,14 @@ contains
                 call slice_mean_sd(keep_x, lo, hi, junk, scale)
             end if
             if (use_mad) call slice_mad_std(keep_x, lo, hi, scale)
-            if (.not. (scale > 0.0_real64)) then
+            ! The NaN test stands alone, and ahead of the `>`: `scale` is a NaN whenever the
+            ! slice holds an infinity (`slice_mean_sd` answers one there by construction), and
+            ! `NaN > 0` raises IEEE_INVALID -- a dead process under nagfor's default `-ieee=stop`,
+            ! on the very population this procedure documents itself as reporting `ok = .false.`
+            ! for. The verdict is unchanged: `.not. (NaN > 0)` was already `.true.`.
+            no_spread = (scale /= scale)
+            if (.not. no_spread) no_spread = .not. (scale > 0.0_real64)
+            if (no_spread) then
                 ! No spread left to clip against -- a constant slice, or one too short for a
                 ! standard deviation. Stopping is the answer: every remaining point is at the
                 ! centre, so no interval could remove one.

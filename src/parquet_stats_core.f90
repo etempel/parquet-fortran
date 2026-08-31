@@ -45,7 +45,8 @@
 !! both spellings are QUIET on a quiet NaN, which `<` and `>` are not. Producing a NaN still goes
 !! through `ieee_value`, because building one with `anint`/`int` traps under nagfor's `-ieee=stop`.
 submodule (parquet_stats) parquet_stats_core
-    use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_quiet_nan
+    use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_positive_inf, &
+        ieee_negative_inf
 #ifdef _OPENMP
     ! Only for the team observable below, which is written from inside the region so that it
     ! reports what RAN rather than what was decided. No other OpenMP entry point is called here:
@@ -376,7 +377,9 @@ contains
                     x = values(i)
                     if (x /= x) exit
                     m = m + 1_int64
-                    sx = sx + x
+                    ! **An infinity is counted and ranged, but never added.** See the fold-back
+                    ! below `pair_reduce` for why, and for where it comes back.
+                    if (abs(x) <= huge(0.0_real64)) sx = sx + x
                     if (m == 1_int64) then
                         vmin_l = x
                         vmax_l = x
@@ -414,7 +417,7 @@ contains
                 end if
                 m = m + 1_int64
                 xb(m) = x
-                sx = sx + x
+                if (abs(x) <= huge(0.0_real64)) sx = sx + x   ! infinity kept out; see the fold-back
                 if (m == 1_int64) then
                     vmin_l = x
                     vmax_l = x
@@ -467,8 +470,12 @@ contains
                         if (x < vmin_l) vmin_l = x
                         if (x > vmax_l) vmax_l = x
                     end if
+                    ! Inside the `saw_nan_l` guard so that `abs(x)` is never applied to a NaN: a
+                    ! `<=` against one raises IEEE_INVALID exactly as the infinity arithmetic
+                    ! would. A population that has already seen a kept NaN answers NaN whatever
+                    ! this sum holds, so leaving it out of the accumulation costs nothing.
+                    if (abs(x) <= huge(0.0_real64)) sx = sx + x
                 end if
-                sx = sx + x
                 c = c + 1_int64
                 if (c == STATS_BLOCK) then
                     nb = nb + 1_int64
@@ -519,9 +526,12 @@ contains
                         if (x < vmin_l) vmin_l = x
                         if (x > vmax_l) vmax_l = x
                     end if
+                    ! `w` is finite and strictly positive here (`stats_check_weight`, and a zero
+                    ! weight has already been cycled), so `w * x` is infinite exactly when `x` is
+                    ! and the same screen serves. Guarded against a NaN `x` as the arm above is.
+                    if (abs(x) <= huge(0.0_real64)) sx = sx + w * x
                 end if
                 sw = sw + w
-                sx = sx + w * x
                 c = c + 1_int64
                 if (c == STATS_BLOCK) then
                     nb = nb + 1_int64
@@ -577,6 +587,33 @@ contains
 
         call pair_reduce(px, nb)
         acc%vsum = px(1)
+        ! ---- The infinities, folded back in ----
+        !
+        ! **Pass one keeps every infinity out of the block sums, and this is where it returns.**
+        ! The reason is that `Inf + (-Inf)` raises IEEE_INVALID, and nagfor unmasks the IEEE traps
+        ! by default (`-ieee=stop`), so executing it kills the process -- on data this module
+        ! documents itself as ANSWERING rather than refusing (the non-finite table in
+        ! doc/pages/utilities/statistics.md). The trap cannot be masked away instead: NAG's
+        ! `ieee_set_halting_mode` does not lift it under `-ieee=stop`, measured against 7.2, so
+        ! the offending operation has to not happen.
+        !
+        ! **The signs come from the extremes pass one already tracked, so the screen costs one
+        ! comparison per element and nothing per population.** `vmax` is `+Inf` exactly when the
+        ! population held one, and `vmin` likewise -- both are maintained on the unscreened value,
+        ! and a zero-weighted element never reaches them because it is cycled before `m` moves.
+        ! The answers below are exactly what the addition would have produced: both signs cancel
+        ! to a NaN, and one sign swallows whatever finite partial sum sits beside it.
+        !
+        ! Bit-exact on a finite population, which is every population any accuracy test uses: the
+        ! screen excludes nothing there, the block tree is unchanged -- an excluded element still
+        ! advances `c` -- and this branch is not taken.
+        if (acc%vmax > huge(0.0_real64) .and. acc%vmin < -huge(0.0_real64)) then
+            acc%vsum = stats_nan()
+        else if (acc%vmax > huge(0.0_real64)) then
+            acc%vsum = acc%vmax
+        else if (acc%vmin < -huge(0.0_real64)) then
+            acc%vsum = acc%vmin
+        end if
         if (weighted) then
             call pair_reduce(pw, nb)
             acc%w_sum = pw(1)
@@ -594,6 +631,31 @@ contains
             return
         end if
         mu = acc%vsum / acc%w_sum
+
+        ! **A population holding an infinity never enters pass two at all.** `mu` is then an
+        ! infinity (or, with both signs present, a NaN), so `x - mu` is `Inf - Inf` for the
+        ! infinite element itself -- an IEEE_INVALID, and so a dead process under nagfor's default
+        ! `-ieee=stop`, on data this module documents itself as answering rather than refusing.
+        ! Every central moment is a NaN there -- `(x - Inf)**2` is `Inf` for a finite element and
+        ! `Inf - Inf` for the infinite one -- which is numpy's answer and this file's own (the
+        ! non-finite table in doc/pages/utilities/statistics.md), so the pass could not have
+        ! produced anything else and skipping it is a saving rather than a compromise.
+        !
+        ! The same extremes pass one tracked answer it, so the screen is two comparisons for the
+        ! whole population and pass two is not entered at all.
+        !
+        ! An `mu` made infinite by OVERFLOW rather than by an infinite element is deliberately NOT
+        ! caught: nothing in the population is then infinite, so every `x - mu` is finite minus
+        ! infinite and raises nothing, and the `nonfinite_mean` branch below still gives that case
+        ! its own answer. `stats_scan_count` is not bumped either, because no second pass ran.
+        if (acc%vmax > huge(0.0_real64) .or. acc%vmin < -huge(0.0_real64)) then
+            acc%mean = mu
+            acc%m2 = stats_nan()
+            acc%m3 = stats_nan()
+            acc%m4 = stats_nan()
+            call stats_hand_over(xb, wb, keep_x, keep_w)
+            return
+        end if
         stats_scan_count = stats_scan_count + 1_int64   ! pass two
 
         ! ---- Pass two: the central moments, against the mean pass one produced ----
@@ -1925,6 +1987,18 @@ contains
         call stats_require_live(self, "pf_stats%gmean")
         call stats_require_hold(self, "pf_stats%gmean")
         call stats_ensure(self)
+        ! **An accumulator that has retained nothing has no array to hand on.** `%init` leaves
+        ! `keep` unallocated and only `%update`'s first value allocates it, so a `%gmean` called
+        ! straight after `%init` would associate an unallocated allocatable with
+        ! `power_mean_kept`'s non-optional `keep` dummy -- not permitted (F2018 15.5.2.12), and
+        ! reported as `ALLOCATABLE SELF%KEEP is not currently allocated` by nagfor's `-C=all`.
+        ! Every other compiler in the fleet runs it silently, which is why this needed a checked
+        ! build to see. The answer is unchanged: `power_mean_kept` returns NaN for an empty
+        ! population in its first statement, so the guard reproduces it rather than replacing it.
+        if (self%keep_n == 0_int64) then
+            res = stats_nan()
+            return
+        end if
         if (self%wtd) then
             call power_mean_kept(self%keep, self%keep_n, .false., self%acc%saw_nan, res, good, &
                 w=self%keep_w)
@@ -1938,6 +2012,18 @@ contains
         call stats_require_live(self, "pf_stats%hmean")
         call stats_require_hold(self, "pf_stats%hmean")
         call stats_ensure(self)
+        ! **An accumulator that has retained nothing has no array to hand on.** `%init` leaves
+        ! `keep` unallocated and only `%update`'s first value allocates it, so a `%hmean` called
+        ! straight after `%init` would associate an unallocated allocatable with
+        ! `power_mean_kept`'s non-optional `keep` dummy -- not permitted (F2018 15.5.2.12), and
+        ! reported as `ALLOCATABLE SELF%KEEP is not currently allocated` by nagfor's `-C=all`.
+        ! Every other compiler in the fleet runs it silently, which is why this needed a checked
+        ! build to see. The answer is unchanged: `power_mean_kept` returns NaN for an empty
+        ! population in its first statement, so the guard reproduces it rather than replacing it.
+        if (self%keep_n == 0_int64) then
+            res = stats_nan()
+            return
+        end if
         if (self%wtd) then
             call power_mean_kept(self%keep, self%keep_n, .true., self%acc%saw_nan, res, good, &
                 w=self%keep_w)
@@ -2076,9 +2162,13 @@ contains
         real(real64), allocatable :: q1x(:), q1y(:), qxx(:), qxy(:), qyy(:)
         real(real64) :: sx, sy, sw, mux, muy, dx, dy
         integer(int64) :: i, c, nb
-        logical :: weighted
+        logical :: weighted, xpinf, xninf, ypinf, yninf
 
         weighted = allocated(kw)
+        xpinf = .false.
+        xninf = .false.
+        ypinf = .false.
+        yninf = .false.
         mean_x = stats_nan()
         mean_y = stats_nan()
         sxx = 0.0_real64
@@ -2101,13 +2191,43 @@ contains
         sy = 0.0_real64
         sw = 0.0_real64
         do i = 1_int64, m
-            if (weighted) then
+            ! **An infinity is recorded and never added**, exactly as `stats_engine`'s pass one
+            ! does it and for the same reason: `Inf + (-Inf)` raises IEEE_INVALID, and nagfor
+            ! unmasks the IEEE traps by default (`-ieee=stop`), so executing it kills the process
+            ! on data this module answers rather than refuses. The fold-back is below the
+            ! reduction. Each arm keeps the exact expression it had, because `pf_cov(x, x)` is
+            ! asserted to be `pf_variance(x)` bit for bit and both sides must stay unchanged on a
+            ! finite population, which is every population that assertion uses.
+            !
+            ! No NaN guard is needed on the `abs`, unlike `stats_engine`: the pair compaction in
+            ! parquet_stats_relate.f90 drops an element whose x OR y is a NaN unconditionally --
+            ! there is no `skipnan = .false.` route into this procedure -- so neither array can
+            ! hold one here.
+            if (abs(kx(i)) > huge(0.0_real64)) then
+                if (kx(i) > 0.0_real64) then
+                    xpinf = .true.
+                else
+                    xninf = .true.
+                end if
+            else if (weighted) then
                 sx = sx + kw(i) * kx(i)
-                sy = sy + kw(i) * ky(i)
-                sw = sw + kw(i)
             else
                 sx = sx + kx(i)
+            end if
+            if (abs(ky(i)) > huge(0.0_real64)) then
+                if (ky(i) > 0.0_real64) then
+                    ypinf = .true.
+                else
+                    yninf = .true.
+                end if
+            else if (weighted) then
+                sy = sy + kw(i) * ky(i)
+            else
                 sy = sy + ky(i)
+            end if
+            if (weighted) then
+                sw = sw + kw(i)
+            else
                 sw = sw + 1.0_real64
             end if
             c = c + 1_int64
@@ -2130,6 +2250,23 @@ contains
         end if
         call pair_reduce(px, nb)
         call pair_reduce(py, nb)
+        ! The infinities, folded back: both signs cancel to a NaN, one sign swallows whatever
+        ! finite partial sum sits beside it. Same rule as `stats_engine`'s, which reads its signs
+        ! off the extremes it already tracks; this procedure tracks none, so it carries flags.
+        if (xpinf .and. xninf) then
+            px(1) = stats_nan()
+        else if (xpinf) then
+            px(1) = ieee_value(1.0_real64, ieee_positive_inf)
+        else if (xninf) then
+            px(1) = ieee_value(1.0_real64, ieee_negative_inf)
+        end if
+        if (ypinf .and. yninf) then
+            py(1) = stats_nan()
+        else if (ypinf) then
+            py(1) = ieee_value(1.0_real64, ieee_positive_inf)
+        else if (yninf) then
+            py(1) = ieee_value(1.0_real64, ieee_negative_inf)
+        end if
         if (weighted) then
             call pair_reduce(pw, nb)
             w_sum = pw(1)
@@ -2142,7 +2279,26 @@ contains
         mux = px(1) / w_sum
         muy = py(1) / w_sum
 
+        ! **An infinity in EITHER variable stops here, before pass two runs at all.** The matching
+        ! mean is then infinite (or NaN), so `kx(i) - mux` is `Inf - Inf` for the infinite element
+        ! itself -- IEEE_INVALID, and a dead process under nagfor's default `-ieee=stop`. All
+        ! three centred sums are reported undefined rather than only the two the poisoned variable
+        ! enters: this procedure answers about a PAIR, and `syy` alone is what `pf_variance(y)`
+        ! is for. That matches the single-variable family's own rule, where a population holding
+        ! an infinity has every central moment NaN (the non-finite table in
+        ! doc/pages/utilities/statistics.md), so `pf_cov` and `pf_corr` come back NaN with
+        ! `ok = .false.` there rather than aborting.
+        if (xpinf .or. xninf .or. ypinf .or. yninf) then
+            mean_x = mux
+            mean_y = muy
+            sxx = stats_nan()
+            sxy = stats_nan()
+            syy = stats_nan()
+            return
+        end if
+
         ! ---- Pass two: the three centred sums, then the same re-centring correction.
+        !
         allocate(q1x(nb), q1y(nb), qxx(nb), qxy(nb), qyy(nb))
         do i = 1_int64, nb
             call stats_pair_block(kx, ky, mux=mux, muy=muy, j=i, m=m, kw=kw, o1x=q1x(i), &

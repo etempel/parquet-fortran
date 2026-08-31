@@ -234,7 +234,9 @@ contains
             new_unittest("pf_cov(x,x) is pf_variance(x) under BOTH weight conventions", &
                 test_cov_weight_type), &
             new_unittest("the streaming accuracy loss is bounded, and the two-pass route is exact", &
-                test_streaming_accuracy_bound) &
+                test_streaming_accuracy_bound), &
+            new_unittest("an infinity in either variable leaves pf_cov and pf_corr NaN, never aborting", &
+                test_pair_non_finite) &
             ]
     end subroutine collect_tests_parquet_stats
 
@@ -5513,6 +5515,74 @@ contains
     !!
     !! `==` rather than a tolerance, deliberately -- the two reach the same arithmetic, so
     !! anything short of equality is a defect rather than rounding.
+    !> An infinity in EITHER variable of a pair leaves every paired statistic undefined -- and,
+    !! like everything else in this module, reports that rather than aborting.
+    !!
+    !! **The single-variable family had this covered and the paired one did not**, which is why
+    !! the paired route reached `Inf - Inf` on `nagfor`, whose default `-ieee=stop` unmasks the
+    !! IEEE traps and turns that into a dead process. Every other compiler in the fleet answers
+    !! quietly, so nothing but a NAG build can fail this test -- which is exactly why it has to
+    !! exist rather than being left to the equivalent single-variable one.
+    !!
+    !! All three of `pf_cov`, `pf_corr` and the `+Inf`/`-Inf`-together case are exercised, because
+    !! they reach the two screens separately: one sign poisons the centred sums through an
+    !! infinite mean, both signs poison the running total itself through `Inf + (-Inf)`.
+    !!
+    !! The negative control matters as much as the assertions: the same call on a finite pair must
+    !! still come back with `ok = .true.` and the covariance it always had, or a screen that fired
+    !! unconditionally would pass every line above it.
+    subroutine test_pair_non_finite(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: x(5), y(5), c, inf
+        logical :: ok
+
+        inf = ieee_value(1.0_real64, ieee_positive_inf)
+        call check(error, .not. ieee_is_nan(inf) .and. inf > huge(1.0_real64), &
+            "the fixture's +Inf is not an infinity -- the assertions below prove nothing")
+        if (allocated(error)) return
+        y = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64]
+
+        ! The negative control first, so a screen that fired for every population would be caught
+        ! here rather than passing as a NaN three lines further down.
+        x = [2.0_real64, 4.0_real64, 6.0_real64, 8.0_real64, 10.0_real64]
+        call pf_cov(x, y, c, ok=ok)
+        call check(error, ok .and. c == 5.0_real64, &
+            "a finite pair must still give pf_cov its ordinary answer with ok=.true.")
+        if (allocated(error)) return
+
+        ! One infinity in x: the mean of x is infinite, so every centred sum is undefined.
+        x = [1.0_real64, 2.0_real64, inf, 4.0_real64, 5.0_real64]
+        call pf_cov(x, y, c, ok=ok)
+        call check(error, ieee_is_nan(c) .and. .not. ok, &
+            "an infinity in x must leave pf_cov NaN with ok=.false.")
+        if (allocated(error)) return
+        call pf_corr(x, y, c, ok=ok)
+        call check(error, ieee_is_nan(c) .and. .not. ok, &
+            "an infinity in x must leave pf_corr NaN with ok=.false.")
+        if (allocated(error)) return
+
+        ! The mirror, so the screen is not keyed on one argument position.
+        call pf_cov(y, x, c, ok=ok)
+        call check(error, ieee_is_nan(c) .and. .not. ok, &
+            "an infinity in y must leave pf_cov NaN with ok=.false. too")
+        if (allocated(error)) return
+
+        ! Both signs: the running total itself is `Inf + (-Inf)`, a different screen from the one
+        ! above, and the only one a single-sign fixture cannot reach.
+        x = [1.0_real64, -inf, 3.0_real64, inf, 5.0_real64]
+        call pf_cov(x, y, c, ok=ok)
+        call check(error, ieee_is_nan(c) .and. .not. ok, &
+            "both signs of infinity must leave pf_cov NaN with ok=.false.")
+        if (allocated(error)) return
+
+        ! And the control again, after the infinite calls, so that nothing above has left the
+        ! accumulator or a screen flag in a state the next ordinary call inherits.
+        x = [2.0_real64, 4.0_real64, 6.0_real64, 8.0_real64, 10.0_real64]
+        call pf_cov(x, y, c, ok=ok)
+        call check(error, ok .and. c == 5.0_real64, &
+            "a finite pair must still answer correctly after an infinite one")
+    end subroutine test_pair_non_finite
+
     subroutine test_cov_weight_type(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
         real(real64) :: x(3), w(3), c, v

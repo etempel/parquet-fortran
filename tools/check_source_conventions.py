@@ -3769,9 +3769,12 @@ def check_contributing_is_an_index():
 
     Three clauses, and the first two keep the index honest in both directions:
 
-    1. Every executable script under tools/ and bench/ has exactly one row in the index. Without
-       this a new tool is simply absent and nobody finds out, which is how one benchmark wrapper
-       stayed undocumented until this check existed.
+    1. Every executable script under tools/ and bench/ has exactly one row in the index, as does
+       every `bench/` run-sheet template. Without this a new tool is simply absent and nobody finds
+       out, which is how one benchmark wrapper stayed undocumented until this check existed. A
+       `tools/*.md` is deliberately exempt -- those are internal development notes rather than
+       tools, and CONTRIBUTING.md is for people arriving from outside; see the comment at the
+       enumeration below.
     2. Every index row resolves to a file that exists in one of the two directories, so a deleted
        or renamed tool cannot leave a row behind.
     3. Inside the section every tools/ or bench/ mention is a table row, the section stays at most
@@ -3802,8 +3805,16 @@ def check_contributing_is_an_index():
             rel = f.relative_to(REPO_ROOT).as_posix()
             if f.suffix in (".sh", ".py") or (f.suffix == "" and f.read_bytes()[:2] == b"#!"):
                 scripts.add(rel)
-            elif f.suffix == ".md":
-                scripts.add(rel)          # a run-sheet template is a tool too
+            elif f.suffix == ".md" and d == "bench":
+                # A `bench/` .md is a run-sheet template -- something a campaign RUNS -- so it is
+                # a tool and needs its row. A `tools/` .md is NOT, and that asymmetry is the whole
+                # point: those are the maintainer's own internal development notes (the machine
+                # environments, the doc-review procedure), written for someone already working on
+                # this repository. CONTRIBUTING.md's reader is the opposite person -- someone who
+                # has just arrived and has none of those machines -- so indexing a private note
+                # there would advertise it as part of the contribution workflow and charge its
+                # length to every reader. An existing row for one is harmless and none is required.
+                scripts.add(rel)
 
     start = end = None
     for i, ln in enumerate(lines):

@@ -2439,6 +2439,22 @@ and because this project already has one case (CLAUDE.md's materialize note) whe
 measured 1.84x under one toolchain and parity under another. There is **no Docker** on machine A, so
 the CI-environment image is not a route to a second toolchain; anything needing one runs on B or C.
 
+**How to ACTIVATE a toolchain on each machine lives in `tools/developer_environments.md`, and that
+file is the authority for the COMMANDS — read it before building anywhere.** It carries the
+per-machine activation lines, what each one actually leaves in `FPM_FC`/`FPM_FFLAGS`/`PATH`, how to
+verify the activation took, and which of them needs `conda activate astro` (exactly one lint check
+does). This section stays the authority for what each machine *is*: the table below, and the
+campaign-level notes after it.
+
+**The split is by kind, not by machine, and the two overlap today.** The subsections below still
+carry the machine-B activation lines and the traps around them, which predate that file and are
+written at campaign length; read them as the elaboration and `tools/developer_environments.md` as
+the short answer. **Where they disagree, that file wins and this one is stale** — it is edited when
+a machine changes, and this section is not. Do not add a *new* activation command here; put it
+there. That file is a maintainer's internal note rather than a tool, which is why it is absent from
+CONTRIBUTING.md's index and why `check_contributing_is_an_index` exempts every `tools/*.md` while
+still requiring a row for a `bench/` run-sheet.
+
 | | **A — laptop** | **B — `bunyip.to.ee`** | **C — desktop** |
 |---|---|---|---|
 | CPU | Apple M1 Pro, 8 cores | 2 x AMD EPYC 9654, **192 physical / 384 logical**, 2 sockets, 2 NUMA nodes | Intel i7-10700K, 8 physical / 16 logical |

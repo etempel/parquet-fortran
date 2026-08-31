@@ -67,7 +67,7 @@ contains
         integer(int64), intent(out) :: m                      !! how many pairs survived.
         integer(int64), intent(out) :: n_null                 !! pairs dropped as null.
         integer(int64), intent(out) :: n_nan                  !! pairs dropped for a NaN.
-        integer(int64) :: n, i
+        integer(int64) :: n, i, wbits
 
         n = size(x, kind=int64)
         if (size(y, kind=int64) /= n) &
@@ -94,8 +94,15 @@ contains
                 cycle
             end if
             if (present(weights)) then
-                call stats_check_weight(weights(i), i, what)
-                if (weights(i) <= 0.0_real64) cycle
+                ! One integer compare on the happy path; see STATS_W_LIM. The validator is
+                ! reached only by a weight that cannot be valid.
+                wbits = transfer(weights(i), 0_int64)
+                if (wbits < 0_int64 .or. wbits >= STATS_W_LIM) then
+                    call stats_check_weight(weights(i), i, what)
+                    if (weights(i) <= 0.0_real64) cycle
+                else if (wbits == 0_int64) then
+                    cycle
+                end if
             end if
             m = m + 1_int64
             kx(m) = x(i)

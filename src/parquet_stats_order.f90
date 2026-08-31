@@ -1150,7 +1150,7 @@ contains
         !! "unweighted" rather than carrying a separate flag.
         integer(int64), intent(out) :: m                    !! how many survived.
         integer(int64), intent(out) :: n_null               !! how many `is_valid` excluded.
-        integer(int64) :: i
+        integer(int64) :: i, wbits
 
         call stats_check_sizes(n, what, is_valid, weights)
         allocate(idx(n))
@@ -1167,8 +1167,15 @@ contains
             ! Nullness first, then weight -- the family's exclusion ORDER, so a weight column that
             ! is garbage exactly where the value column is null costs nothing and aborts nothing.
             if (present(weights)) then
-                call stats_check_weight(weights(i), i, what)
-                if (weights(i) <= 0.0_real64) cycle
+                ! One integer compare on the happy path; see STATS_W_LIM. The validator is
+                ! reached only by a weight that cannot be valid.
+                wbits = transfer(weights(i), 0_int64)
+                if (wbits < 0_int64 .or. wbits >= STATS_W_LIM) then
+                    call stats_check_weight(weights(i), i, what)
+                    if (weights(i) <= 0.0_real64) cycle
+                else if (wbits == 0_int64) then
+                    cycle
+                end if
             end if
             m = m + 1_int64
             idx(m) = i
@@ -1533,7 +1540,7 @@ contains
         character(len=:), allocatable :: a, b
         integer :: wid
         integer(int64), allocatable :: tied(:)
-        integer(int64) :: n, nv, nnull, i, at, cnt
+        integer(int64) :: n, nv, nnull, i, at, cnt, wbits
 
         if (present(is_valid)) &
             error stop "pf_mode: a parquet_string_column carries its own validity, so passing " // &
@@ -1552,8 +1559,15 @@ contains
         do i = 1_int64, n
             if (parquet_string_column_is_null(values, perm(i))) cycle
             if (present(weights)) then
-                call stats_check_weight(weights(perm(i)), perm(i), "pf_mode")
-                if (weights(perm(i)) <= 0.0_real64) cycle
+                ! One integer compare on the happy path; see STATS_W_LIM. The validator is
+                ! reached only by a weight that cannot be valid.
+                wbits = transfer(weights(perm(i)), 0_int64)
+                if (wbits < 0_int64 .or. wbits >= STATS_W_LIM) then
+                    call stats_check_weight(weights(perm(i)), perm(i), "pf_mode")
+                    if (weights(perm(i)) <= 0.0_real64) cycle
+                else if (wbits == 0_int64) then
+                    cycle
+                end if
             end if
             nv = nv + 1_int64
             order(nv) = perm(i)

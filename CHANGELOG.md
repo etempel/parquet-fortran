@@ -34,7 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its central moments are NaN. The moment
   family follows over `real(real64)` arrays: `pf_sum`, `pf_mean`, `pf_variance`, `pf_stddev`,
   `pf_sem`, `pf_skewness`, `pf_kurtosis`, and `pf_moments`, which produces all of them plus the
-  counts, the sum and the extremes in one pair of passes, with `ok=` over the outputs asked for. They are weighted (`weights=`,
+  counts, the sum and the extremes in at most one pair of passes, with `ok=` over the outputs asked
+  for -- a call needing nothing from the second pass, `pf_sum` among them, makes only the first. They are weighted (`weights=`,
   `weight_type=`), take `ddof=`/`bias=`/`excess=` with pandas' defaults rather than numpy's, are
   computed two-pass over a fixed pairwise block tree so that the variance is shift-invariant, and
   return a quiet NaN with `ok=.false.` wherever a statistic is undefined. A `pf_stats` accumulator

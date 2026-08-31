@@ -106,10 +106,22 @@ call pf_moments(mag, n_valid=nv, mean=m, stddev=sd, skewness=g)   ! all of it, i
 ```
 
 **`pf_moments` is the form to reach for in a per-group loop.** Asking for eight statistics costs
-exactly what asking for one costs: the population is traversed twice however many outputs are
-requested — once for the mean, once for the central moments — and nothing is computed that was not
-asked for. Its outputs come before the common argument block and are, in order, `n_valid`, `mean`,
-`variance`, `stddev`, `sem`, `skewness`, `kurtosis`, `vsum`, `vmin`, `vmax`.
+what asking for the most expensive one costs: the population is traversed at most twice however
+many outputs are requested — once to apply the exclusions and close the block sums, once for the
+central moments about the mean — and nothing is computed that was not asked for. Its outputs come
+before the common argument block and are, in order, `n_valid`, `mean`, `variance`, `stddev`, `sem`,
+`skewness`, `kurtosis`, `vsum`, `vmin`, `vmax`.
+
+**"At most twice" is exact rather than a hedge, and it is worth knowing which side of it you are
+on.** The second traversal exists only to compute the central moments about the mean, so a call
+that needs none of them does not make it: `pf_sum`, `pf_count_valid` and the order statistics'
+compaction each cost **one** pass, and `pf_moments` asking only for `n_valid`, `vsum`, `vmin` or
+`vmax` costs one too. Everything from `pf_mean` upward costs two, because even the mean is refined
+against the first pass's estimate — see [Accuracy is a documented
+property](#accuracy-is-a-documented-property-not-an-implementation-detail). Measured on a
+2-socket EPYC 9654 at ten million `real64`, serially: `pf_sum` 0.83 ns/element against `pf_mean`'s
+2.07, where a bare `s = s + x(i)` loop over the same array is 0.24 and `pf_count_valid` is 0.76.
+So if the sum is all you want, ask for the sum.
 
 Its `ok=` reports whether every output the caller **asked for** came back defined — only the present
 ones are tested, which is the only reading that works here: `vsum` over an empty population is a
@@ -294,9 +306,15 @@ Three things worth knowing before reaching for `threads=`:
   a 2-socket EPYC (8 cores per L3), the same four-thread team returned 1.13x inside one L3 and
   0.25x spread across eight. If you are pinning threads for other reasons, keeping a team inside
   one cache domain is worth more here than making it bigger.
-- **The shape of the call matters more than the thread count**, for anything but a plain array.
-  Passing `weights=` roughly doubles the cost of a reduction, and `is_valid=` adds about half
-  again, because both leave the fast path. Threading does not recover that.
+- **The shape of the call matters more than the thread count**, for anything but a plain array,
+  and by a wide margin. Both `weights=` and `is_valid=` leave the fast path, which forces the
+  population to be compacted into a buffer instead of being read where it lies. Measured on the
+  same machine at ten million elements, serially, against a plain `pf_variance` at 2.08
+  ns/element: `is_valid=` costs 6.77, `skipnan=.false.` 6.65 and `weights=` 11.28 — three to five
+  times the plain call, where threading the second pass returns well under two. Threading does not
+  recover that, and on the compacting shapes a wide team can make it worse rather than better,
+  for the cache reason above. If a mask is mostly true and you are calling in a loop, compacting
+  once yourself and reducing the plain array is worth measuring.
 
 `bench/benchmark_stats.sh` measures all of this, and its `--mode=thread` refuses to report a
 timing until it has confirmed the bit-exactness above on the machine it is running on. Its

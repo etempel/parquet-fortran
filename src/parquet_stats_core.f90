@@ -263,7 +263,7 @@ contains
     !! nearly every call has, and giving it a loop with no per-element `present` test or weight
     !! branch is the difference between a tight copy and a predicted branch per element.
     subroutine stats_engine(values, what, is_valid, weights, skipnan, acc, keep_x, keep_w, threads, &
-            moments)
+            nmom)
         real(real64), intent(in) :: values(:)                 !! the population, before exclusions.
         character(len=*), intent(in) :: what                  !! the public procedure's name.
         logical, intent(in), optional :: is_valid(:)          !! per element: .false. marks a null.
@@ -276,11 +276,28 @@ contains
         !! re-deriving it is what lets a retaining `%compute` cost two traversals rather than three.
         real(real64), allocatable, intent(out), optional :: keep_w(:)
         !! likewise their weights, allocated only when `weights` was supplied.
-        logical, intent(in), optional :: moments
-        !! .true. by default. `.false.` stops after pass one, leaving the counts, `vsum`, the
-        !! extremes and the compacted survivors, and marking every central moment undefined. That
-        !! is what an ORDER statistic wants: it needs the survivors and would discard the four
-        !! central moments, which are roughly half the cost of the call.
+        integer, intent(in), optional :: nmom
+        !! **How many central moments pass two must produce. Absent means all four.**
+        !!
+        !! Pass two is a second traversal of the whole population and roughly half the cost of a
+        !! call, so a caller that needs none of it should not pay for it, and one that needs the
+        !! mean should not pay for the fourth moment. The levels are cumulative:
+        !!
+        !! * **0** stops after pass one, leaving the counts, `vsum` and the compacted survivors,
+        !!   and marking every central moment -- and the extremes, `w_sum` and `w_sq` -- undefined.
+        !!   That is what `pf_sum` and an ORDER statistic want.
+        !! * **1** adds the refined mean, and nothing else. `pf_mean`.
+        !! * **2** adds `m2`, so the variance family. `pf_variance`, `pf_stddev`, `pf_sem`.
+        !! * **3** adds `m3`. `pf_skewness`.
+        !! * **4** adds `m4`, the full set. `pf_kurtosis`, `pf_moments`, `pf_stats`.
+        !!
+        !! **The answer at any level is bit-for-bit what level 4 would have produced for the same
+        !! output.** A level below 4 changes only whether pass two runs at all (level 0) and which
+        !! of its four block arrays are reduced and read afterwards -- never how any surviving
+        !! accumulator is summed. `stats_block_moments` therefore keeps ONE loop body for every
+        !! level, and its header says what happened when that was specialised instead.
+        !! `test_moment_levels_are_bit_exact` asserts the property against the level-4 answer for
+        !! every entry point, over four populations that reach different pass-one branches.
         integer, intent(in), optional :: threads
         !! how many threads pass two may use. Absent takes the automatic rule; see
         !! `stats_pass_two_team`. **The answer does not depend on this argument** -- the block
@@ -288,17 +305,19 @@ contains
         !! including 1 and including a serial build, returns the identical bits.
 
         real(real64), allocatable :: xb(:), wb(:), pw(:), px(:), q1(:), q2(:), q3(:), q4(:)
-        real(real64) :: x, w, sw, sx, mu, delta
-        integer(int64) :: nv, m, nb, i, c, team, istart
-        logical :: skip, weighted, masked, want_moments, deferrable, compacting, nonfinite_mean
+        real(real64) :: x, w, sw, sx, mu, delta, vmin_l, vmax_l
+        integer(int64) :: nv, m, nb, i, c, team, istart, n_null_l, n_nan_l, wbits
+        logical :: saw_nan_l
+        logical :: skip, weighted, masked, deferrable, compacting, nonfinite_mean
+        integer :: nm
 
         nv = size(values, kind=int64)
         call stats_check_sizes(nv, what, is_valid, weights)
         stats_scan_count = stats_scan_count + 1_int64   ! pass one
         skip = .true.
         if (present(skipnan)) skip = skipnan
-        want_moments = .true.
-        if (present(moments)) want_moments = moments
+        nm = 4
+        if (present(nmom)) nm = nmom
         weighted = present(weights)
         masked = present(is_valid)
 
@@ -321,6 +340,19 @@ contains
         if (weighted) allocate(pw(nv / STATS_BLOCK + 1_int64))
 
         ! ---- Pass one: exclude, compact, and close each block's sums ----
+        !
+        ! **The counters, the extremes and the NaN flag are LOCALS here and are written back to
+        ! `acc` once, after the loop.** They are logically `acc`'s, but as components of a dummy
+        ! argument every read and write of them is memory the compiler must assume can alias
+        ! `values`, `weights` or `is_valid` -- so `if (.not. acc%saw_nan)` became a load on every
+        ! element and `acc%vmin` a load-compare-store. As locals they live in registers for the
+        ! whole traversal. Nothing about the arithmetic or its order changes, which is what makes
+        ! this safe to do to a routine whose whole contract is bit-reproducibility.
+        n_null_l = acc%n_null
+        n_nan_l = acc%n_nan
+        saw_nan_l = acc%saw_nan
+        vmin_l = acc%vmin
+        vmax_l = acc%vmax
         m = 0_int64
         nb = 0_int64
         c = 0_int64
@@ -346,11 +378,11 @@ contains
                     m = m + 1_int64
                     sx = sx + x
                     if (m == 1_int64) then
-                        acc%vmin = x
-                        acc%vmax = x
+                        vmin_l = x
+                        vmax_l = x
                     else
-                        if (x < acc%vmin) acc%vmin = x
-                        if (x > acc%vmax) acc%vmax = x
+                        if (x < vmin_l) vmin_l = x
+                        if (x > vmax_l) vmax_l = x
                     end if
                     c = c + 1_int64
                     if (c == STATS_BLOCK) then
@@ -377,19 +409,66 @@ contains
             do i = istart, nv
                 x = values(i)
                 if (x /= x) then
-                    acc%n_nan = acc%n_nan + 1_int64
+                    n_nan_l = n_nan_l + 1_int64
                     cycle
                 end if
                 m = m + 1_int64
                 xb(m) = x
                 sx = sx + x
                 if (m == 1_int64) then
-                    acc%vmin = x
-                    acc%vmax = x
+                    vmin_l = x
+                    vmax_l = x
                 else
-                    if (x < acc%vmin) acc%vmin = x
-                    if (x > acc%vmax) acc%vmax = x
+                    if (x < vmin_l) vmin_l = x
+                    if (x > vmax_l) vmax_l = x
                 end if
+                c = c + 1_int64
+                if (c == STATS_BLOCK) then
+                    nb = nb + 1_int64
+                    px(nb) = sx
+                    sx = 0.0_real64
+                    c = 0_int64
+                end if
+            end do
+        else if (.not. weighted) then
+            ! **The unweighted arm of the general branch, split out for the same reason the two
+            ! fast loops above are split.** A caller with `is_valid=` or `skipnan=.false.` but no
+            ! weights is a common shape and pays nothing here for the weighted one: no `weights(i)`
+            ! load, no screen, no `wb(m)` store, no `sw`, and `sx + x` rather than `sx + w*x`.
+            !
+            ! Bit-exact against the merged loop it replaces: `w` is exactly `1.0` on this path, and
+            ! multiplying a `real64` by one is exact for every value including the infinities and
+            ! NaNs, so `sx + 1.0*x` and `sx + x` are the same number -- contracted into an FMA or
+            ! not, since a single-rounding `fma(1.0, x, sx)` is also `sx + x` rounded once. The
+            ! element order and the block boundaries are untouched.
+            do i = 1_int64, nv
+                if (masked) then
+                    if (.not. is_valid(i)) then
+                        n_null_l = n_null_l + 1_int64
+                        cycle
+                    end if
+                end if
+                x = values(i)
+                if (skip) then
+                    if (x /= x) then
+                        n_nan_l = n_nan_l + 1_int64
+                        cycle
+                    end if
+                else if (x /= x) then
+                    saw_nan_l = .true.
+                end if
+                m = m + 1_int64
+                xb(m) = x
+                if (.not. saw_nan_l) then
+                    if (m == 1_int64) then
+                        vmin_l = x
+                        vmax_l = x
+                    else
+                        if (x < vmin_l) vmin_l = x
+                        if (x > vmax_l) vmax_l = x
+                    end if
+                end if
+                sx = sx + x
                 c = c + 1_int64
                 if (c == STATS_BLOCK) then
                     nb = nb + 1_int64
@@ -405,35 +484,40 @@ contains
                 ! weight beside a null value -- the shape `1/err**2` produces -- from aborting.
                 if (masked) then
                     if (.not. is_valid(i)) then
-                        acc%n_null = acc%n_null + 1_int64
+                        n_null_l = n_null_l + 1_int64
                         cycle
                     end if
                 end if
                 x = values(i)
                 if (skip) then
                     if (x /= x) then
-                        acc%n_nan = acc%n_nan + 1_int64
+                        n_nan_l = n_nan_l + 1_int64
                         cycle
                     end if
                 else if (x /= x) then
-                    acc%saw_nan = .true.
+                    saw_nan_l = .true.
                 end if
                 w = 1.0_real64
                 if (weighted) then
-                    call stats_check_weight(weights(i), i, what)
-                    if (weights(i) <= 0.0_real64) cycle
                     w = weights(i)
+                    wbits = transfer(w, 0_int64)
+                    if (wbits < 0_int64 .or. wbits >= STATS_W_LIM) then
+                        call stats_check_weight(w, i, what)
+                        if (w <= 0.0_real64) cycle
+                    else if (wbits == 0_int64) then
+                        cycle
+                    end if
                 end if
                 m = m + 1_int64
                 xb(m) = x
                 if (weighted) wb(m) = w
-                if (.not. acc%saw_nan) then
+                if (.not. saw_nan_l) then
                     if (m == 1_int64) then
-                        acc%vmin = x
-                        acc%vmax = x
+                        vmin_l = x
+                        vmax_l = x
                     else
-                        if (x < acc%vmin) acc%vmin = x
-                        if (x > acc%vmax) acc%vmax = x
+                        if (x < vmin_l) vmin_l = x
+                        if (x > vmax_l) vmax_l = x
                     end if
                 end if
                 sw = sw + w
@@ -454,6 +538,11 @@ contains
             px(nb) = sx
             if (weighted) pw(nb) = sw
         end if
+        acc%n_null = n_null_l
+        acc%n_nan = n_nan_l
+        acc%saw_nan = saw_nan_l
+        acc%vmin = vmin_l
+        acc%vmax = vmax_l
 
         ! A caller that asked to keep the survivors gets the buffer whether or not pass one needed
         ! one for itself. Deferring the copy is an internal saving and must not change what
@@ -496,7 +585,7 @@ contains
             acc%w_sum = real(m, real64)
             acc%w_sq = real(m, real64)
         end if
-        if (.not. want_moments) then
+        if (nm <= 0) then
             ! Pass one answered everything this caller asked for. `stats_undefine` marks the
             ! central moments NaN rather than leaving them zero, so a caller that reads one anyway
             ! gets the module's own "undefined" answer instead of a plausible wrong number.
@@ -526,6 +615,13 @@ contains
         ! slot an element lands in depends on how many earlier ones were excluded -- so threading it
         ! needs a count-then-scatter restructure rather than a directive. It is roughly half the
         ! call and the restructure is not free; see feature_pandas_S4.md's P5 section.
+        !
+        ! **The four block arrays are all allocated whatever `nm` is, and that is deliberate.**
+        ! `nb` is the population over `STATS_BLOCK`, so the four together are `m/4` bytes -- 2.5 MB
+        ! against 80 MB of population at ten million elements -- while making them conditional
+        ! would put an unallocated actual argument against `stats_block_moments`'s scalar dummies,
+        ! which cannot be optional the way `wb` is. What `nm` saves is the per-element arithmetic
+        ! and the `pair_reduce` walks, which is where the cost actually is.
         allocate(q1(nb), q2(nb), q3(nb), q4(nb))
         team = stats_pass_two_team(threads, m)
         ! `xb` is unallocated exactly when pass one found nothing to exclude and no caller asked to
@@ -537,9 +633,9 @@ contains
             call stats_pass_two(values, wb, mu, m, nb, team, q1, q2, q3, q4)
         end if
         call pair_reduce(q1, nb)
-        call pair_reduce(q2, nb)
-        call pair_reduce(q3, nb)
-        call pair_reduce(q4, nb)
+        if (nm >= 2) call pair_reduce(q2, nb)
+        if (nm >= 3) call pair_reduce(q3, nb)
+        if (nm >= 4) call pair_reduce(q4, nb)
 
         ! Re-centre on `mu + delta`. Expanding `sum(w*(d-delta)**k)` and using `sum(w*d) = delta*W`
         ! collapses every cross term, leaving these four lines. `delta` is a rounding error, so the
@@ -561,19 +657,27 @@ contains
         else if (abs(mu) > huge(0.0_real64)) then
             nonfinite_mean = .true.
         end if
+        !
+        ! A moment above `nm` was never accumulated, so it is marked undefined rather than left
+        ! holding whatever its block array happened to contain -- the same contract `stats_undefine`
+        ! gives the `nm == 0` path, for the same reason: a caller that reads one anyway gets this
+        ! module's own "undefined" answer instead of a plausible wrong number.
         if (nonfinite_mean) then
             acc%mean = mu
-            acc%m2 = q2(1)
-            acc%m3 = q3(1)
-            acc%m4 = q4(1)
+            acc%m2 = merge(q2(1), stats_nan(), nm >= 2)
+            acc%m3 = merge(q3(1), stats_nan(), nm >= 3)
+            acc%m4 = merge(q4(1), stats_nan(), nm >= 4)
             call stats_hand_over(xb, wb, keep_x, keep_w)
             return
         end if
         delta = q1(1) / acc%w_sum
         acc%mean = mu + delta
-        acc%m2 = q2(1) - delta * delta * acc%w_sum
-        acc%m3 = q3(1) - 3.0_real64 * delta * q2(1) + 2.0_real64 * delta**3 * acc%w_sum
-        acc%m4 = q4(1) - 4.0_real64 * delta * q3(1) + 6.0_real64 * delta * delta * q2(1) &
+        acc%m2 = stats_nan()
+        acc%m3 = stats_nan()
+        acc%m4 = stats_nan()
+        if (nm >= 2) acc%m2 = q2(1) - delta * delta * acc%w_sum
+        if (nm >= 3) acc%m3 = q3(1) - 3.0_real64 * delta * q2(1) + 2.0_real64 * delta**3 * acc%w_sum
+        if (nm >= 4) acc%m4 = q4(1) - 4.0_real64 * delta * q3(1) + 6.0_real64 * delta * delta * q2(1) &
             - 3.0_real64 * delta**4 * acc%w_sum
         call stats_hand_over(xb, wb, keep_x, keep_w)
     end subroutine stats_engine
@@ -615,6 +719,19 @@ contains
         s2 = 0.0_real64
         s3 = 0.0_real64
         s4 = 0.0_real64
+        ! **One loop, whatever `nmom` is, and that is a correctness requirement rather than an
+        ! oversight.** Specialising the body per level -- one `addpd` chain for level 1 where level
+        ! 4 has four -- was written first and is NOT bit-exact: with fewer live accumulators the
+        ! compiler unrolls and vectorises differently, which regroups the partial sums inside the
+        ! block and moves the last bits of `q1`. `pf_mean` and `pf_stats%mean` then stopped
+        ! matching `pf_moments`, which the suite catches in three places.
+        !
+        ! Nothing is lost by it, because the arithmetic was never the cost. Measured on machine B
+        ! at ten million elements, the specialised arms ran 1.930 (level 1), 1.943 (level 2) and
+        ! 1.963 ns/elem (level 4) -- a 1.7% spread across dropping three of four accumulators,
+        ! because pass two streams the whole population and is bound by that, not by its flops.
+        ! What `nmom` is worth is the level-0 short circuit in `stats_engine`, which skips this
+        ! traversal outright and is worth 2.2x on `pf_sum`.
         if (present(wb)) then
             do i = lo, hi
                 d = xb(i) - mu
@@ -945,7 +1062,7 @@ contains
 
     module procedure sum_f64
         type(stats_acc) :: acc
-        call stats_engine(values, "pf_sum", is_valid, weights, skipnan, acc, threads=threads)
+        call stats_engine(values, "pf_sum", is_valid, weights, skipnan, acc, threads=threads, nmom=0)
         if (present(n_null)) n_null = acc%n_null
         if (present(n_nan)) n_nan = acc%n_nan
         s = acc%vsum
@@ -954,7 +1071,7 @@ contains
 
     module procedure mean_f64
         type(stats_acc) :: acc
-        call stats_engine(values, "pf_mean", is_valid, weights, skipnan, acc, threads=threads)
+        call stats_engine(values, "pf_mean", is_valid, weights, skipnan, acc, threads=threads, nmom=1)
         if (present(n_null)) n_null = acc%n_null
         if (present(n_nan)) n_nan = acc%n_nan
         m = acc%mean
@@ -1079,7 +1196,7 @@ contains
         call stats_weight_kind("pf_variance", weight_type, freq)
         dd = 1
         if (present(ddof)) dd = ddof
-        call stats_engine(values, "pf_variance", is_valid, weights, skipnan, acc, threads=threads)
+        call stats_engine(values, "pf_variance", is_valid, weights, skipnan, acc, threads=threads, nmom=2)
         if (present(n_null)) n_null = acc%n_null
         if (present(n_nan)) n_nan = acc%n_nan
         v = stats_var(acc, dd, freq)
@@ -1093,7 +1210,7 @@ contains
         call stats_weight_kind("pf_stddev", weight_type, freq)
         dd = 1
         if (present(ddof)) dd = ddof
-        call stats_engine(values, "pf_stddev", is_valid, weights, skipnan, acc, threads=threads)
+        call stats_engine(values, "pf_stddev", is_valid, weights, skipnan, acc, threads=threads, nmom=2)
         if (present(n_null)) n_null = acc%n_null
         if (present(n_nan)) n_nan = acc%n_nan
         sd = stats_sqrt(stats_var(acc, dd, freq))
@@ -1107,7 +1224,7 @@ contains
         call stats_weight_kind("pf_sem", weight_type, freq)
         dd = 1
         if (present(ddof)) dd = ddof
-        call stats_engine(values, "pf_sem", is_valid, weights, skipnan, acc, threads=threads)
+        call stats_engine(values, "pf_sem", is_valid, weights, skipnan, acc, threads=threads, nmom=2)
         if (present(n_null)) n_null = acc%n_null
         if (present(n_nan)) n_nan = acc%n_nan
         se = stats_sem(acc, dd, freq)
@@ -1120,7 +1237,7 @@ contains
         call stats_weight_kind("pf_skewness", weight_type, freq)
         bs = .false.
         if (present(bias)) bs = bias
-        call stats_engine(values, "pf_skewness", is_valid, weights, skipnan, acc, threads=threads)
+        call stats_engine(values, "pf_skewness", is_valid, weights, skipnan, acc, threads=threads, nmom=3)
         if (present(n_null)) n_null = acc%n_null
         if (present(n_nan)) n_nan = acc%n_nan
         g = stats_skew(acc, bs, freq)
@@ -1145,7 +1262,7 @@ contains
     module procedure moments_f64
         type(stats_acc) :: acc
         logical :: freq, bs, ex
-        integer :: dd
+        integer :: dd, nm
 
         call stats_weight_kind("pf_moments", weight_type, freq)
         dd = 1
@@ -1154,7 +1271,19 @@ contains
         if (present(bias)) bs = bias
         ex = .true.
         if (present(excess)) ex = excess
-        call stats_engine(values, "pf_moments", is_valid, weights, skipnan, acc, threads=threads)
+
+        ! **Only the moments the caller asked for are computed.** `pf_moments` is the one entry
+        ! point whose cost is genuinely a function of its argument list rather than of its name, so
+        ! it derives its level instead of naming one: asking for the mean and the variance costs
+        ! two accumulators in pass two, not four. The floor is 1 rather than 0 because level 0 is
+        ! the "pass one only" path, which marks the EXTREMES undefined along with the moments --
+        ! and `vmin=`/`vmax=` are pass-one products a caller may legitimately ask for alone.
+        nm = 1
+        if (present(variance) .or. present(stddev) .or. present(sem)) nm = 2
+        if (present(skewness)) nm = max(nm, 3)
+        if (present(kurtosis)) nm = 4
+        call stats_engine(values, "pf_moments", is_valid, weights, skipnan, acc, threads=threads, &
+            nmom=nm)
 
         if (present(n_null)) n_null = acc%n_null
         if (present(n_nan)) n_nan = acc%n_nan
@@ -2052,7 +2181,7 @@ contains
 
         dd = 1
         if (present(ddof)) dd = ddof
-        call stats_engine(values, what, is_valid, skipnan=skipnan, acc=acc)
+        call stats_engine(values, what, is_valid, skipnan=skipnan, acc=acc, nmom=2)
         mean = acc%mean
         sd = sqrt(stats_var(acc, dd, .false.))
         n_valid = acc%n_valid
@@ -2064,7 +2193,7 @@ contains
     module procedure stats_compact
         type(stats_acc) :: acc
         call stats_engine(values, what, is_valid, weights, skipnan, acc, keep_x, keep_w, &
-            moments=.false.)
+            nmom=0)
         n_valid = acc%n_valid
         n_null = acc%n_null
         n_nan = acc%n_nan

@@ -158,6 +158,29 @@ module parquet_stats
     implicit none
     private
 
+    !> The `int64` bit pattern of a `real64` whose exponent field is all ones.
+    !!
+    !! **The fast weight screen, and it is an INTEGER test on purpose.** Every `weights=` loop in
+    !! this module has to reject a NaN, a negative and an infinity, and `stats_check_weight` is the
+    !! procedure that says so with a message naming the element. It lives in another submodule, so
+    !! calling it PER ELEMENT is an out-of-line call per element -- which is what it used to be.
+    !!
+    !! A valid weight is finite and non-negative, i.e. its bit pattern read as a signed `int64`
+    !! lies in `[0, STATS_W_LIM)`: a negative has the sign bit set and so reads negative, and a NaN
+    !! or `+Inf` reads at or above the limit. So `b < 0 .or. b >= STATS_W_LIM` is ONE branch that
+    !! is true for every weight the validator could object to and false for every one it could not,
+    !! which puts the call on the failure path where it belongs.
+    !!
+    !! It has to be an integer test rather than `w >= 0.0 .and. w <= huge(...)`, because `<` and
+    !! `>=` are SIGNALLING comparisons: on a NaN they raise `IEEE_INVALID`, which nagfor's default
+    !! `-ieee=stop` turns into a dead process -- the same reason `stats_check_weight`'s own three
+    !! tests are separate statements in a fixed order. Reading the bits raises nothing at all.
+    !!
+    !! `-0.0` reads negative and so takes the slow path, where the validator accepts it and the
+    !! caller's own `<= 0` test then excludes it as the zero weight it is: the same answer, one
+    !! branch later, on a value that does not occur in practice.
+    integer(int64), parameter :: STATS_W_LIM = int(z'7FF0000000000000', int64)
+
 """
 
 KERNEL_HEAD = BANNER + """!> The per-kind entry points of `parquet_stats`.
@@ -2764,7 +2787,7 @@ def body(tag, decl, what, is_real):
     """One implementation of count_valid_<tag>."""
     out = []
     out.append("    module procedure count_valid_%s" % tag)
-    out.append("        integer(int64) :: i, nv, nnull%s" % (", nnan" if is_real else ""))
+    out.append("        integer(int64) :: i, nv, nnull%s, wbits" % (", nnan" if is_real else ""))
     if is_real:
         out.append("        logical :: skip")
     out.append("")
@@ -2798,8 +2821,15 @@ def body(tag, decl, what, is_real):
         out.append("                end if")
         out.append("            end if")
     out.append("            if (present(weights)) then")
-    out.append('                call stats_check_weight(weights(i), i, "pf_count_valid")')
-    out.append("                if (weights(i) <= 0.0_real64) cycle")
+    out.append("                ! One integer compare on the happy path; see STATS_W_LIM. The")
+    out.append("                ! validator is reached only by a weight that cannot be valid.")
+    out.append("                wbits = transfer(weights(i), 0_int64)")
+    out.append("                if (wbits < 0_int64 .or. wbits >= STATS_W_LIM) then")
+    out.append('                    call stats_check_weight(weights(i), i, "pf_count_valid")')
+    out.append("                    if (weights(i) <= 0.0_real64) cycle")
+    out.append("                else if (wbits == 0_int64) then")
+    out.append("                    cycle")
+    out.append("                end if")
     out.append("            end if")
     out.append("            n = n + 1_int64")
     out.append("        end do")

@@ -185,6 +185,8 @@ contains
                 test_sigma_clip_keep_mask), &
             new_unittest("the sigma clip's empty, constant and two-element cases", &
                 test_sigma_clip_degenerate), &
+            new_unittest("every moment level returns bit-for-bit what level four returns", &
+                test_moment_levels_are_bit_exact), &
             new_unittest("the P8 procedures agree between int32 and real32", &
                 test_p8_kinds_agree), &
             new_unittest("the four properties P8's first mutation round found unasserted", &
@@ -986,6 +988,106 @@ contains
         call check(error, s%n() == 1000_int64 .and. s%n_valid() == 1000_int64, &
             "a clean population must report every element as seen and valid")
     end subroutine test_object_matches_one_shot
+
+    !> Every entry point asks the engine for only the central moments it needs. This asserts that
+    !> doing so costs nothing in the answer.
+    !!
+    !! **Why an EXACT comparison and not a tolerance.** `stats_engine`'s `nmom` levels drop whole
+    !! accumulators; they never change how a surviving one is summed, so each level's arithmetic is
+    !! textually the same expression over the same elements in the same order, and the only way the
+    !! result can move is if the compiler contracts (`a*b + c` into an FMA) differently in a loop
+    !! carrying two accumulators than in one carrying four. That is exactly the failure this test
+    !! exists to catch, and a tolerance would hide it -- see CLAUDE.md's note on restating a
+    !! formula inline, which is the same hazard one step further along.
+    !!
+    !! `pf_moments` asking for all nine outputs is the level-4 reference, because its level is
+    !! derived from its argument list. Each other entry point is compared against the output of
+    !! that one call, over four populations that reach four different pass-one branches: plain,
+    !! masked, weighted, and NaN-propagating.
+    subroutine test_moment_levels_are_bit_exact(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: v(:), w(:)
+        logical, allocatable :: ok_mask(:)
+        integer(int64) :: i, n
+        integer :: shape_no
+
+        n = 4099_int64
+        call golden_fixture(n, v)
+        allocate(w(n), ok_mask(n))
+        do i = 1_int64, n
+            w(i) = 0.25_real64 + real(mod(i, 17_int64), real64)
+            ok_mask(i) = (mod(i, 5_int64) /= 0_int64)
+        end do
+
+        ! Four shapes, so the comparison covers the deferred fast loop and the general one.
+        do shape_no = 1, 4
+            select case (shape_no)
+            case (1)
+                call compare_levels(error, v)
+            case (2)
+                call compare_levels(error, v, is_valid=ok_mask)
+            case (3)
+                call compare_levels(error, v, weights=w)
+            case (4)
+                call compare_levels(error, v, is_valid=ok_mask, weights=w)
+            end select
+            if (allocated(error)) return
+        end do
+    end subroutine test_moment_levels_are_bit_exact
+
+    !> One population, every entry point against the all-nine `pf_moments` call over the same data.
+    subroutine compare_levels(error, v, is_valid, weights)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), intent(in) :: v(:)                    !! the population.
+        logical, intent(in), optional :: is_valid(:)        !! its validity mask, if any.
+        real(real64), intent(in), optional :: weights(:)    !! its weights, if any.
+        real(real64) :: r_mean, r_var, r_sd, r_sem, r_skew, r_kurt, r_sum, r_min, r_max, got
+        integer(int64) :: r_nvalid
+
+        ! The reference: all nine outputs asked for, so the engine runs at level 4.
+        call pf_moments(v, is_valid=is_valid, weights=weights, n_valid=r_nvalid, mean=r_mean, &
+            variance=r_var, stddev=r_sd, sem=r_sem, skewness=r_skew, kurtosis=r_kurt, &
+            vsum=r_sum, vmin=r_min, vmax=r_max)
+
+        call pf_sum(v, got, is_valid=is_valid, weights=weights)
+        call check(error, got == r_sum, "pf_sum (level 0) must equal the level-4 vsum bit for bit")
+        if (allocated(error)) return
+        call pf_mean(v, got, is_valid=is_valid, weights=weights)
+        call check(error, got == r_mean, "pf_mean (level 1) must equal the level-4 mean bit for bit")
+        if (allocated(error)) return
+        call pf_variance(v, got, is_valid=is_valid, weights=weights)
+        call check(error, got == r_var, &
+            "pf_variance (level 2) must equal the level-4 variance bit for bit")
+        if (allocated(error)) return
+        call pf_stddev(v, got, is_valid=is_valid, weights=weights)
+        call check(error, got == r_sd, &
+            "pf_stddev (level 2) must equal the level-4 stddev bit for bit")
+        if (allocated(error)) return
+        call pf_sem(v, got, is_valid=is_valid, weights=weights)
+        call check(error, got == r_sem, "pf_sem (level 2) must equal the level-4 sem bit for bit")
+        if (allocated(error)) return
+        call pf_skewness(v, got, is_valid=is_valid, weights=weights)
+        call check(error, got == r_skew, &
+            "pf_skewness (level 3) must equal the level-4 skewness bit for bit")
+        if (allocated(error)) return
+        call pf_kurtosis(v, got, is_valid=is_valid, weights=weights)
+        call check(error, got == r_kurt, &
+            "pf_kurtosis (level 4) must equal the level-4 kurtosis bit for bit")
+        if (allocated(error)) return
+
+        ! The extremes and the count are pass-one products, so a reduced level must not disturb
+        ! them either -- level 1 is the floor for pf_moments precisely so this holds.
+        block
+            real(real64) :: a_min, a_max
+            integer(int64) :: a_n
+            call pf_moments(v, is_valid=is_valid, weights=weights, n_valid=a_n, vmin=a_min, &
+                vmax=a_max)
+            call check(error, a_n == r_nvalid, "a vmin/vmax-only pf_moments must agree on n_valid")
+            if (allocated(error)) return
+            call check(error, a_min == r_min .and. a_max == r_max, &
+                "a vmin/vmax-only pf_moments must return the level-4 extremes bit for bit")
+        end block
+    end subroutine compare_levels
 
     !> The whole point of the type: two traversals, however many statistics are asked for.
     subroutine test_compute_costs_two_scans(error)

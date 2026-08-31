@@ -133,7 +133,7 @@ contains
 
     module procedure bucketize_f64
         logical :: skip, use_right
-        integer(int64) :: n, nbins, nnull, nnan, nout, i, k
+        integer(int64) :: n, nbins, nnull, nnan, nout, i, k, wbits
 
         n = size(values, kind=int64)
         if (size(codes, kind=int64) /= n) &
@@ -171,8 +171,15 @@ contains
                 ! to satisfy. The weight is examined last, in the module's usual exclusion order,
                 ! so garbage sitting where a value is null cannot abort the call, and it never
                 ! scales anything: a code is a bin number.
-                call stats_check_weight(weights(i), i, "pf_bucketize")
-                if (weights(i) <= 0.0_real64) cycle
+                ! One integer compare on the happy path; see STATS_W_LIM. The validator is
+                ! reached only by a weight that cannot be valid.
+                wbits = transfer(weights(i), 0_int64)
+                if (wbits < 0_int64 .or. wbits >= STATS_W_LIM) then
+                    call stats_check_weight(weights(i), i, "pf_bucketize")
+                    if (weights(i) <= 0.0_real64) cycle
+                else if (wbits == 0_int64) then
+                    cycle
+                end if
             end if
             k = bin_of(values(i), edges, nbins, use_right)
             if (k == 0_int64) then
@@ -195,7 +202,7 @@ contains
 
     module procedure histogram_f64
         logical :: skip, use_right, as_density
-        integer(int64) :: n, nbins, nnull, nnan, nout, i, k
+        integer(int64) :: n, nbins, nnull, nnan, nout, i, k, wbits
         real(real64) :: w, base
 
         n = size(values, kind=int64)
@@ -234,8 +241,15 @@ contains
                 ! The same exclusion ORDER the whole module uses: null, then NaN, then weight. A
                 ! weight is never examined for an element that has already left the population,
                 ! so garbage sitting where a value is null cannot abort the call.
-                call stats_check_weight(weights(i), i, "pf_histogram")
-                if (weights(i) <= 0.0_real64) cycle
+                ! One integer compare on the happy path; see STATS_W_LIM. The validator is
+                ! reached only by a weight that cannot be valid.
+                wbits = transfer(weights(i), 0_int64)
+                if (wbits < 0_int64 .or. wbits >= STATS_W_LIM) then
+                    call stats_check_weight(weights(i), i, "pf_histogram")
+                    if (weights(i) <= 0.0_real64) cycle
+                else if (wbits == 0_int64) then
+                    cycle
+                end if
                 w = weights(i)
             end if
             k = bin_of(values(i), edges, nbins, use_right)
@@ -291,7 +305,7 @@ contains
     !! strictly increasing edges.
     module procedure bin_edges_f64
         real(real64) :: lo, hi, span, e
-        integer(int64) :: n, i, k, kept
+        integer(int64) :: n, i, k, kept, wbits
         integer :: j
         logical :: skip, fine, nonfinite
 
@@ -330,8 +344,15 @@ contains
                 end if
             end if
             if (present(weights)) then
-                call stats_check_weight(weights(i), i, "pf_bin_edges")
-                if (weights(i) <= 0.0_real64) cycle
+                ! One integer compare on the happy path; see STATS_W_LIM. The validator is
+                ! reached only by a weight that cannot be valid.
+                wbits = transfer(weights(i), 0_int64)
+                if (wbits < 0_int64 .or. wbits >= STATS_W_LIM) then
+                    call stats_check_weight(weights(i), i, "pf_bin_edges")
+                    if (weights(i) <= 0.0_real64) cycle
+                else if (wbits == 0_int64) then
+                    cycle
+                end if
             end if
             ! **A non-finite value joins the population but never the RANGE**, and that is a
             ! contract requirement rather than a policy choice. An infinity reached here would

@@ -128,7 +128,7 @@ contains
     end subroutine col_to_real64
 
     module procedure count_valid_i32
-        integer(int64) :: i, nv, nnull
+        integer(int64) :: i, nv, nnull, wbits
 
         nv = size(values, kind=int64)
         call stats_check_sizes(nv, "pf_count_valid", is_valid, weights)
@@ -145,8 +145,15 @@ contains
                 end if
             end if
             if (present(weights)) then
-                call stats_check_weight(weights(i), i, "pf_count_valid")
-                if (weights(i) <= 0.0_real64) cycle
+                ! One integer compare on the happy path; see STATS_W_LIM. The
+                ! validator is reached only by a weight that cannot be valid.
+                wbits = transfer(weights(i), 0_int64)
+                if (wbits < 0_int64 .or. wbits >= STATS_W_LIM) then
+                    call stats_check_weight(weights(i), i, "pf_count_valid")
+                    if (weights(i) <= 0.0_real64) cycle
+                else if (wbits == 0_int64) then
+                    cycle
+                end if
             end if
             n = n + 1_int64
         end do
@@ -154,7 +161,7 @@ contains
     end procedure count_valid_i32
 
     module procedure count_valid_i64
-        integer(int64) :: i, nv, nnull
+        integer(int64) :: i, nv, nnull, wbits
 
         nv = size(values, kind=int64)
         call stats_check_sizes(nv, "pf_count_valid", is_valid, weights)
@@ -171,8 +178,15 @@ contains
                 end if
             end if
             if (present(weights)) then
-                call stats_check_weight(weights(i), i, "pf_count_valid")
-                if (weights(i) <= 0.0_real64) cycle
+                ! One integer compare on the happy path; see STATS_W_LIM. The
+                ! validator is reached only by a weight that cannot be valid.
+                wbits = transfer(weights(i), 0_int64)
+                if (wbits < 0_int64 .or. wbits >= STATS_W_LIM) then
+                    call stats_check_weight(weights(i), i, "pf_count_valid")
+                    if (weights(i) <= 0.0_real64) cycle
+                else if (wbits == 0_int64) then
+                    cycle
+                end if
             end if
             n = n + 1_int64
         end do
@@ -180,7 +194,7 @@ contains
     end procedure count_valid_i64
 
     module procedure count_valid_f32
-        integer(int64) :: i, nv, nnull, nnan
+        integer(int64) :: i, nv, nnull, nnan, wbits
         logical :: skip
 
         nv = size(values, kind=int64)
@@ -210,8 +224,15 @@ contains
                 end if
             end if
             if (present(weights)) then
-                call stats_check_weight(weights(i), i, "pf_count_valid")
-                if (weights(i) <= 0.0_real64) cycle
+                ! One integer compare on the happy path; see STATS_W_LIM. The
+                ! validator is reached only by a weight that cannot be valid.
+                wbits = transfer(weights(i), 0_int64)
+                if (wbits < 0_int64 .or. wbits >= STATS_W_LIM) then
+                    call stats_check_weight(weights(i), i, "pf_count_valid")
+                    if (weights(i) <= 0.0_real64) cycle
+                else if (wbits == 0_int64) then
+                    cycle
+                end if
             end if
             n = n + 1_int64
         end do
@@ -220,7 +241,7 @@ contains
     end procedure count_valid_f32
 
     module procedure count_valid_f64
-        integer(int64) :: i, nv, nnull, nnan
+        integer(int64) :: i, nv, nnull, nnan, wbits
         logical :: skip
 
         nv = size(values, kind=int64)
@@ -250,8 +271,15 @@ contains
                 end if
             end if
             if (present(weights)) then
-                call stats_check_weight(weights(i), i, "pf_count_valid")
-                if (weights(i) <= 0.0_real64) cycle
+                ! One integer compare on the happy path; see STATS_W_LIM. The
+                ! validator is reached only by a weight that cannot be valid.
+                wbits = transfer(weights(i), 0_int64)
+                if (wbits < 0_int64 .or. wbits >= STATS_W_LIM) then
+                    call stats_check_weight(weights(i), i, "pf_count_valid")
+                    if (weights(i) <= 0.0_real64) cycle
+                else if (wbits == 0_int64) then
+                    cycle
+                end if
             end if
             n = n + 1_int64
         end do
@@ -260,7 +288,7 @@ contains
     end procedure count_valid_f64
 
     module procedure count_valid_bool
-        integer(int64) :: i, nv, nnull
+        integer(int64) :: i, nv, nnull, wbits
 
         nv = size(values, kind=int64)
         call stats_check_sizes(nv, "pf_count_valid", is_valid, weights)
@@ -277,8 +305,15 @@ contains
                 end if
             end if
             if (present(weights)) then
-                call stats_check_weight(weights(i), i, "pf_count_valid")
-                if (weights(i) <= 0.0_real64) cycle
+                ! One integer compare on the happy path; see STATS_W_LIM. The
+                ! validator is reached only by a weight that cannot be valid.
+                wbits = transfer(weights(i), 0_int64)
+                if (wbits < 0_int64 .or. wbits >= STATS_W_LIM) then
+                    call stats_check_weight(weights(i), i, "pf_count_valid")
+                    if (weights(i) <= 0.0_real64) cycle
+                else if (wbits == 0_int64) then
+                    cycle
+                end if
             end if
             n = n + 1_int64
         end do

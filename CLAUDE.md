@@ -75,7 +75,7 @@ working rules).
   - [The `parquet_strings` module](#the-parquet_strings-module)
   - [The `parquet_temporal` module (date/time/timestamp)](#the-parquet_temporal-module-datetimetimestamp)
 - [Build & compiler notes](#build--compiler-notes)
-  - [The three machines available for testing](#the-three-machines-available-for-testing)
+  - [Building and measuring across machines](#building-and-measuring-across-machines)
   - [Writing benchmarking instructions for another machine](#writing-benchmarking-instructions-for-another-machine)
   - [Compiler & language gotchas](#compiler--language-gotchas)
     - [General Fortran & language gotchas](#general-fortran--language-gotchas)
@@ -334,7 +334,7 @@ reasons, and both are easy to get wrong in the direction of "add the flag to be 
   shows directly (the flags line carries only `-cpp` and the `-I` paths, where gfortran's carries
   `-fopenmp`). So the "setting nothing at all" advice above is compiler-specific; on flang the build
   fails at `use omp_lib` rather than quietly running serially. See the flang note under
-  [The three machines available for testing](#the-three-machines-available-for-testing).
+  [Building and measuring across machines](#building-and-measuring-across-machines).
 - **`FPM_FFLAGS` clobbers what the environment exported, but it does NOT suppress fpm's profile
   flags — the missing `-O`/`-fcheck=bounds` comes from omitting `--profile`.** Setting it on a
   command line replaces whatever the environment already exports (a dev machine typically puts
@@ -2430,169 +2430,48 @@ counterpart. User guide: `doc/pages/types/date-time.md`.
 
 ## Build & compiler notes
 
-### The three machines available for testing
+### Building and measuring across machines
 
-Three physical machines are available for building, testing and benchmarking this library, and they
-differ in ways that matter — architecture, SIMD width, Fortran compiler, core count and Arrow
-version. **Recorded here because a performance claim is only meaningful with the machine attached**,
-and because this project already has one case (CLAUDE.md's materialize note) where the same change
-measured 1.84x under one toolchain and parity under another. There is **no Docker** on machine A, so
-the CI-environment image is not a route to a second toolchain; anything needing one runs on B or C.
+This library is developed and measured on three physical machines, referred to throughout this file
+as **machine A**, **B** and **C**. **What each machine is, and how to activate a toolchain on it,
+lives in `tools/developer_environments.md`** — CPU, architecture, SIMD width, core count, RAM,
+compiler and Arrow versions, the activation commands, what each one leaves in
+`FPM_FC`/`FPM_FFLAGS`/`PATH`, the traps around getting one to take, and which machine needs
+`conda activate astro`. **That file is the sole authority for all of it; this section carries none
+of it and must not reacquire any.** Read it before building or measuring anywhere.
 
-**How to ACTIVATE a toolchain on each machine lives in `tools/developer_environments.md`, and that
-file is the authority for the COMMANDS — read it before building anywhere.** It carries the
-per-machine activation lines, what each one actually leaves in `FPM_FC`/`FPM_FFLAGS`/`PATH`, how to
-verify the activation took, and which of them needs `conda activate astro` (exactly one lint check
-does). This section stays the authority for what each machine *is*: the table below, and the
-campaign-level notes after it.
+**What stays here is what is true of the TOOLCHAIN rather than of a machine** — how fpm, the
+compilers and the linker behave when this library is built, whichever box it happens to be built
+on. The test is whether a note would still hold on a fourth machine with the same compilers
+installed: if yes it belongs here, if it names a path, a script or a core count it belongs in
+`tools/developer_environments.md`. That file is a maintainer's internal note rather than a tool,
+which is why it is absent from CONTRIBUTING.md's index and why `check_contributing_is_an_index`
+exempts every `tools/*.md` while still requiring a row for a `bench/` run-sheet.
 
-**The split is by kind, not by machine, and the two overlap today.** The subsections below still
-carry the machine-B activation lines and the traps around them, which predate that file and are
-written at campaign length; read them as the elaboration and `tools/developer_environments.md` as
-the short answer. **Where they disagree, that file wins and this one is stale** — it is edited when
-a machine changes, and this section is not. Do not add a *new* activation command here; put it
-there. That file is a maintainer's internal note rather than a tool, which is why it is absent from
-CONTRIBUTING.md's index and why `check_contributing_is_an_index` exempts every `tools/*.md` while
-still requiring a row for a `bench/` run-sheet.
-
-| | **A — laptop** | **B — `bunyip.to.ee`** | **C — desktop** |
-|---|---|---|---|
-| CPU | Apple M1 Pro, 8 cores | 2 x AMD EPYC 9654, **192 physical / 384 logical**, 2 sockets, 2 NUMA nodes | Intel i7-10700K, 8 physical / 16 logical |
-| arch / SIMD | **arm64, NEON (128-bit)** | **x86-64 Zen 4, AVX-512** (f/bw/dq/vl/vnni/bf16/…) | **x86-64 Comet Lake, AVX2 (256-bit)** |
-| RAM | 32 GB | **1132 GB** | 128 GB |
-| OS | macOS (arm64) | RHEL 9.7, kernel 5.14 | macOS (x86_64) |
-| Fortran | gfortran 15.2 (MacPorts), **flang 22.1.8** | **ifx 2026.1.1**; gfortran 15.2.1 (gcc-toolset-15, what `activate_gcc.sh` now selects); gfortran 14.2.1 (gcc-toolset-14); system gfortran 11.5 — *see the warning below* | gfortran 15.2 (MacPorts), **flang-mp-22** |
-| C++ | Apple clang 21, **`g++-mp-15`** (GCC 15.2) | **icpx 2026.1.1**; g++ 14.2.1 (toolset) or 11.5 (system) | Apple clang, MacPorts GCC |
-| Arrow / Parquet | 25.0.0 | **24.0.0** | 25.0.0 |
-| fpm | 0.13.0 alpha | 0.13.0 alpha | 0.13.0 alpha |
-
-**Activating an environment on machine B.** B carries two complete toolchains and neither is
-implicit — a shell there starts in the ifx environment:
-
-- **ifx** (the default): `source /storage/projektid/qmost/activate_qmost_env.sh`. Sets `FPM_FC=ifx`
-  and exports `FPM_CXXFLAGS`/`FPM_LDFLAGS` carrying Arrow's paths.
-- **gfortran**: `source /opt/fortran/activate_gcc.sh`, plus the `scl` line below. It sets
-  `FPM_FC=gfortran` and ends with `scl enable gcc-toolset-15 /bin/bash`.
-
-**Which toolset that script selects has CHANGED, and the number is worth checking rather than
-copying from here.** It used to end with `scl enable gcc-toolset-14`; it now selects **15**
-(gfortran/g++ 15.2.1), which is what made UBSan possible on this machine — gcc-toolset-14 shipped
-only a 32-bit `libubsan`, and 15 has the x86-64 one. Read the last line of the script rather than
-trusting this paragraph, and use whatever toolset it names in the `enable` line below.
-
-**Both activations need help to survive being sourced NON-INTERACTIVELY, and the gfortran one needs
-two commands rather than one:**
-
-```bash
-source /opt/fortran/activate_gcc.sh </dev/null >/dev/null 2>&1
-source /opt/rh/gcc-toolset-15/enable      # REQUIRED -- the line above is not sufficient
-```
-
-Without the redirection the script's trailing interactive subshell exits immediately with no tty and
-everything after it runs under the *system* toolchain, while the variables it exported beforehand make
-the shell look correctly configured; without the second line `gfortran` stays at **11.5.0**, which is
-the miscompilation hazard below. Both were confirmed on machine B by a run that checked
-`gfortran --version` before building — which is the only thing that catches either.
-
-**A third hazard, and it is the one a benchmarking driver walks straight into: a sourced script
-inherits the CALLER'S POSITIONAL PARAMETERS.** A driver invoked as `./run.sh ifx` that then sources
-an activation script hands that script `$1="ifx"`, and a script which inspects `$@` takes a
-different path. Demonstrated on machine B against `activate_qmost_env.sh`:
-
-```bash
-bash -c 'source activate_qmost_env.sh; echo $FPM_FC'          # -> ifx
-bash -c 'source activate_qmost_env.sh; echo $FPM_FC' _ ifx    # -> (empty)
-```
-
-With `FPM_FC` unset, fpm fell back to the **system gfortran 11.5.0** — the compiler this project's
-floor exists to exclude. **That run failed safe only by luck of a second mechanism**: the same
-inactive environment left `FPM_CXXFLAGS` unset, Arrow's headers were not found, and the C++ half
-would not compile. **Had Arrow been on the default search path it would have produced a complete set
-of plausible numbers from a miscompiling compiler**, with nothing in the output saying so — the
-benchmark wrapper's own banner reads `fortran : gfortran (fpm default)`, which is easy to read past.
-
-The fix is one line — `set --` before sourcing anything — plus a hard assertion that `FPM_FC` is the
-toolchain that was asked for and that `FPM_CXXFLAGS` is non-empty. **Assert, do not merely print**:
-all three of these hazards are invisible in a log that a human skims and fatal to every number below
-them.
-
-**`ld.lld` is NOT on the `PATH` the ifx activation sets, and `-ipo` cannot link this library without
-it.** `activate_qmost_env.sh` adds `/opt/intel/oneapi/compiler/2026.1/bin`; the linker lives one
-directory further down, at `/opt/intel/oneapi/compiler/2026.1/bin/compiler/ld.lld`. Without it an
-`-ipo` build of this library dies with **8087 undefined `<module>_mp_<proc>_` references**, which
-reads as a defect in this project and is not (the system `ld`'s gold plugin cannot parse oneAPI's
-bitcode). Extend `PATH` explicitly, and note that a tool gated on `command -v ld.lld` will silently
-decline here — see "A wrapper must fail rather than degrade" below.
-
-**DANGER on machine B: the system `gfortran` is 11.5.0, which is BELOW this project's minimum of 13
-and will silently miscompile it.** In the ifx environment `/usr/bin/gfortran` (11.5.0) is what
-`gfortran` resolves to, so anyone overriding `FPM_FC=gfortran` there without first sourcing
-`activate_gcc.sh` gets a compiler that miscompiles the optional allocatable-`character` argument in
-`schema%add_col_qc` — surfacing as a spurious "column not found" abort at runtime, far from the
-cause (see "Compiler & language gotchas" for the underlying bug). **Always source
-`activate_gcc.sh` before building with gfortran on B**, and check `gfortran --version` reports the
-toolset's version (15.2.1 as of 2026-08-17, 14.2.1 before that) rather than 11.5.0 before trusting a
-result from there. The check is "not 11.5.0", not a specific number — the toolset has moved once
-already.
-
-**Machine B's gfortran environment exports `-ffree-line-length-none` in `FPM_FFLAGS`.** That is
-directly contrary to this project's enforced 132-column limit, so **a build on B cannot be used to
-verify line length** — a too-long line compiles cleanly there and fails elsewhere. Check line length
-on A or C, or with `tools/run_lint_check.sh`.
-
-**Machines A and C cannot be told apart from a compiler listing — only `uname -m` separates them.**
-Both run macOS, both carry MacPorts gfortran 15.2 and flang 22.x, and both are on Arrow 25.0.0; they
-differ in *architecture*, A being Apple M1 Pro (arm64, NEON-128) and C Intel (x86-64, AVX2). So a
-report that identifies its machine by listing compilers has not identified it. This has already gone
-wrong once: a gfortran 15.2 result taken on C was first written up as "macOS arm64", which would have
-turned a **confirmation of an existing `feature_risks.md` entry** into a spurious claim about a
-**new architecture**. Have every run print `uname -m` — `tools/machine_report.sh` does, and takes
-seconds — and read it before writing any figure down.
-
-**What each machine is good for:**
-
-- **A** — everyday development, and the only machine with a local `flang`. Quiet, so it gives the
-  most stable small deltas.
-- **B** — anything about **ifx**, about **threading at scale** (384 threads), or about **AVX-512**.
-  It is also the only machine that can compare **gfortran against ifx with everything else held
-  constant**, which is the cleanest compiler experiment available. Its size cuts both ways: a large
-  NUMA machine is *bad* for small measurements (a cold destination is dominated by page faults —
-  this project has recorded 5.6x run-to-run variation there at one size), so use it for scaling
-  questions and take small deltas on A.
-- **C** — x86-64 with the **same gfortran and Arrow as A**, so an A-vs-C comparison isolates
-  **architecture alone** (NEON-128 against AVX2-256). That is the only clean single-variable
-  vector-width experiment available and it is worth remembering it exists.
-
-**Arrow differs**: B is on 24.0.0, A and C on 25.0.0. Irrelevant to anything measured purely in
-Fortran, a confound for anything going through `src/parquet_wrapper.cpp` or an end-to-end read/write
-timing. Do not compare those figures across B and C.
-
-**Never override `FPM_FFLAGS`/`FPM_CXXFLAGS`/`FPM_LDFLAGS` on any of the three** — on all of them
-those variables carry Arrow's (and other libraries') include and link paths, and setting them on a
-command line *replaces* rather than appends, producing `fatal error: 'arrow/api.h' file not found`,
-which reads like a missing dependency rather than a flag mistake. Append when a flag must be added:
-`FPM_FFLAGS="${FPM_FFLAGS:-} -flto"`.
+**A performance claim is only meaningful with its machine attached**, and this project has one case
+where the same change measured 1.84x under one toolchain and parity under another. Name the machine
+and the toolchain on every figure; `tools/machine_report.sh` prints both.
 
 **A minimal mixed Fortran/C++ `bind(C)` program links under LTO on all three** — `-flto` for
 gfortran + g++, **`-ipo`** (not `-flto`) for ifx + icpx, and `-flto` for `flang-mp-22` +
 `clang++-mp-22` on machine C.
 
 **That is NOT the same as "the library links".**
-Machine B's `--lto-probe` passed while the real `-ipo` build of this library failed with the 8087
-undefined references described above. The probe links objects **directly**; the actual failure
-mechanism is a static ARCHIVE of bitcode objects being read by the system linker, which the probe
-never builds. So the probe answers "can these two compilers emit and consume LTO objects at all",
+Machine B's `--lto-probe` passed while the real `-ipo` build of this library failed to link at all,
+with thousands of undefined `<module>_mp_<proc>_` references — a missing `ld.lld`, which
+`tools/developer_environments.md` covers under machine B. The probe links objects **directly**; the
+actual failure mechanism is a static ARCHIVE of bitcode objects being read by the system linker,
+which the probe never builds. So the probe answers "can these two compilers emit and consume LTO objects at all",
 never "can this library be built that way" — see "A pre-flight probe is evidence only if it
 reproduces the real build's structure" below, which is the generalised form of the same trap.
 
-**A flang build here is SERIAL-ONLY, and that is a property of the installation rather than of this
-code.** MacPorts' `flang-mp-22` ships **no `omp_lib.mod` at all** — confirmed with a three-line
-standalone program (`use omp_lib` under `-fopenmp` fails identically, so this is nothing to do with
-fpm or with this project), and the only `omp_lib.mod` anywhere under `/opt/local` belongs to GCC. So
-on machines A and C:
+**A flang build is SERIAL-ONLY on both macOS machines, and that is a property of the installation
+rather than of this code** — MacPorts ships no `omp_lib.mod`, so there is nothing to be done from
+this repository (`tools/developer_environments.md` has the confirmation and the probe). What that
+means for a build:
 
 - **with** `-fopenmp`, a flang build cannot get past the first `use omp_lib` inside an
-  `#ifdef _OPENMP` — nothing to be done from this repository;
+  `#ifdef _OPENMP`;
 - **without** it — which is what fpm actually does under flang, since the metapackage contributes no
   `-fopenmp` there — every OpenMP block is preprocessed away and **the whole project builds**:
   `FPM_FC=flang-mp-22 fpm build` compiles every `src/` file and links all 17 `app/` executables, and
@@ -2823,7 +2702,7 @@ particular linker — and either reproduce it or say plainly what the probe does
 **A wrapper must FAIL rather than degrade when it cannot engage the configuration it was asked
 for.** A since-deleted LTO wrapper gated `-fuse-ld=lld` on `command -v ld.lld`, warned when it was
 absent, and continued — so on machine B, where the documented activation script does not put it on
-`PATH` (see the machine table above), the campaign's headline fix silently did nothing and the run
+`PATH` (see `tools/developer_environments.md`), the campaign's headline fix silently did nothing and the run
 reproduced the exact failure the fix existed to remove. `tools/fpm_lto.sh` refuses instead, which is
 the behaviour to copy. A warning on stderr, hundreds of lines above
 the eventual error, is not a defence. **Two rules follow:** resolve a companion tool relative to the
@@ -3188,8 +3067,9 @@ Compiler-independent rules. Anything specific to one compiler is in its own sect
   available to the optimiser as a range assumption. Use the cross-implementation agreement sweep to
   answer that question, never a trapping build.
 
-  **UBSan answers it properly, and is a machine-B-only instrument** (gcc-toolset-15 has the x86-64
-  `libubsan`; MacPorts gcc15 ships none, and flang rejects `-fsanitize` for Fortran). **Run it with
+  **UBSan answers it properly, and is a machine-B-only instrument** — only that machine's gfortran
+  ships an x86-64 `libubsan`, and flang rejects `-fsanitize` for Fortran
+  (`tools/developer_environments.md` has the per-machine detail). **Run it with
   `tools/check_random_ubsan.sh`**, which drives both arms of the fork — UBSan on a gfortran build
   alone only ever exercises the `int128` arm. **What it found on its first run is the reason to keep
   running it**: the two forced arms reported exactly the documented deliberate sites, while the
@@ -3511,7 +3391,7 @@ Compiler-independent rules. Anything specific to one compiler is in its own sect
 #### flang-specific gotchas
 
 flang builds here are **serial only** and `--profile release` does not link — see
-[The three machines available for testing](#the-three-machines-available-for-testing) for both.
+[Building and measuring across machines](#building-and-measuring-across-machines) for both.
 
 - **A CHARACTER TEMPORARY built inside a loop may never be reclaimed until the procedure returns, so
   a long loop dies of stack exhaustion far from its cause.** Every `call sub("%" // what // ": ...")`
@@ -3745,7 +3625,7 @@ its own build tree and **`--verbose`**, because fpm prints compiler diagnostics 
 conclude there is nothing to do):
 
 ```bash
-source ~/.activate_nag.sh
+# activate NAG first -- tools/developer_environments.md names the command for this machine
 export PATH="$PWD/tools/nagfor_fpm_shim:$PATH"     # see tools/nagfor_fpm_shim/nagfor
 FPM_BUILD_DIR=test_run/nag-warnsurvey fpm build --verbose 2>&1 | grep '^Warning:'
 ```
@@ -4231,7 +4111,7 @@ Three consequences worth carrying to any future hot-path work:
   this. Appending `-fno-semantic-interposition` on Linux took one arm from **7.89 to 4.45 ns**.
 - **There is no `fpm.toml` route to the flag**, so it cannot simply be adopted; it would have to come
   from `FPM_FFLAGS`, which on a dev machine carries Arrow's paths and must be appended to, never
-  assigned (see "The three machines available for testing").
+  assigned (see `tools/developer_environments.md`, "Standing rules on every machine").
 - **The source-side fix was tried and REVERTED, and the negative result is the useful part.** Moving
   the hot helpers into *internal* procedures — the only Fortran construct with local linkage, and
   yes, both `module procedure` and a private submodule-contained procedure are still global — did
@@ -5331,7 +5211,7 @@ compilers from a fixed set of unsuffixed names (`gfortran flang g++ …`), while
 most distributions ship them suffixed — `flang-mp-22`, `g++-mp-15`, `gcc-13`, `clang++-18`. On
 machine C it therefore reported flang as absent when flang 22.1.8 was on `PATH`, its `--lto-probe`
 skipped the flang arm **silently**, and a benchmarking report went on to record both that the machine
-had no flang and that this file's own machine table was stale. Both conclusions were wrong, and
+had no flang and that the project's own machine table was stale. Both conclusions were wrong, and
 nothing in the tool's output looked incomplete. Two rules follow, and they generalise to any future
 environment probe:
 

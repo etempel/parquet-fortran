@@ -1829,7 +1829,7 @@ def check_stats_optional_argument_order():
     # procedure's list a subsequence of it, which appending inside an unused block does. See
     # feature_pandas_S4.md's signature matrix.
     canonical = ["n_valid", "mean", "variance", "stddev", "sem", "skewness", "kurtosis",
-                 "vsum", "vmin", "vmax", "count",
+                 "vsum", "vmin", "vmax", "count", "modes",
                  "retain", "consume",
                  "sigma", "sigma_lower", "sigma_upper", "maxiters", "cenfunc", "stdfunc",
                  "n_clipped", "keep", "converged", "right", "density",

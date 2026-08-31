@@ -3,12 +3,22 @@
 # reports per-file + total line coverage for src/*.f90.
 #
 # Usage:
-#   tools/coverage.sh              # full run_tester suite + all error_scenarios
-#   tools/coverage.sh reading       # only the "reading" run_tester testsuite
-#                                   # (passed through to `fpm test run_tester --`;
-#                                   # error_scenarios/run_error_scenarios.sh are
+#   tools/coverage.sh              # every test runner + all error_scenarios
+#   tools/coverage.sh reading       # only the "reading" testsuite
+#                                   # (error_scenarios/run_error_scenarios.sh are
 #                                   # skipped in this mode, since they're
-#                                   # independent of run_tester's suite selection)
+#                                   # independent of a runner's suite selection)
+#
+# THE SUITES ARE SPREAD ACROSS FIVE RUNNERS, not one, so neither half of the usage
+# above can assume `run_tester`. `test/run_tester{,_pf,_cpp,_errors,_noundef}.f90`
+# partition them (tools/check_source_conventions.py's check_test_runner_partition
+# enforces that), so a named suite belongs to exactly one runner and a full run has
+# to drive all of them. This script therefore derives the suite -> runner map from
+# those files' own `new_testsuite("name", ...)` registrations rather than carrying a
+# list: a list of that shape goes stale in the direction that stops measuring, and
+# did -- `tools/coverage.sh stats` used to exit 1 with a testsuite listing that did
+# not contain "stats", and a bare `tools/coverage.sh` silently excluded every suite
+# outside run_tester (which is most of them, `parquet_stats` included).
 #
 # Requires a `gcov` build whose version matches the gfortran used to compile
 # (a mismatched gcov fails with "Invalid .gcno file!"), so this script derives
@@ -68,6 +78,31 @@ echo "Using gcov:      $GCOV" >&2
 # and is cleaned separately below. Run before FPM_BUILD_DIR is exported so `fpm clean`
 # targets the default `build/`; </dev/null + `|| true` keep it non-interactive and
 # non-fatal if there is nothing to clean.
+# The suite -> runner map, derived from the runners' own registrations. `sed` rather than
+# `grep -o`, for BSD grep, which has no -o on some of the machines this repo is built on.
+runner_for_suite() {
+    local want="$1" f name
+    for f in "$ROOT_DIR"/test/run_tester*.f90; do
+        for name in $(sed -n 's/.*new_testsuite("\([a-z_0-9]*\)".*/\1/p' "$f"); do
+            if [ "$name" = "$want" ]; then
+                basename "$f" .f90
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+
+if [ "$#" -gt 0 ]; then
+    if ! COVERAGE_RUNNER="$(runner_for_suite "$1")"; then
+        echo "tools/coverage.sh: no test runner registers a suite named '$1'." >&2
+        echo "Known suites:" >&2
+        sed -n 's/.*new_testsuite("\([a-z_0-9]*\)".*/  \1/p' "$ROOT_DIR"/test/run_tester*.f90 \
+            | sort >&2
+        exit 1
+    fi
+fi
+
 echo "Cleaning fpm default build tree (fpm clean --all)..." >&2
 fpm clean --skip </dev/null >/dev/null 2>&1 || true
 
@@ -113,8 +148,17 @@ cleanup_coverage_build() {
 }
 trap cleanup_coverage_build EXIT
 
-echo "Building + running run_tester with coverage instrumentation..." >&2
-fpm test run_tester -- "$@"
+if [ "$#" -eq 0 ]; then
+    echo "Building + running every test runner with coverage instrumentation..." >&2
+    for runner in "$ROOT_DIR"/test/run_tester*.f90; do
+        runner="$(basename "$runner" .f90)"
+        echo "  ... $runner" >&2
+        fpm test "$runner"
+    done
+else
+    echo "Building + running $COVERAGE_RUNNER -- $1 with coverage instrumentation..." >&2
+    fpm test "$COVERAGE_RUNNER" -- "$@"
+fi
 
 if [ "$#" -eq 0 ]; then
     echo "Running tools/run_error_scenarios.sh for additional error-path coverage..." >&2

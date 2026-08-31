@@ -1731,6 +1731,14 @@ contains
                 test_stats_object_query_before_compute_aborts), &
             new_unittest("merging across a retain mismatch aborts", &
                 test_stats_object_merge_retain_mismatch_aborts), &
+            new_unittest("merging across a weight_type mismatch aborts", &
+                test_stats_object_merge_weight_type_mismatch_aborts), &
+            new_unittest("merging across a skipnan mismatch aborts", &
+                test_stats_object_merge_skipnan_mismatch_aborts), &
+            new_unittest("%gmean on a streaming pf_stats aborts", &
+                test_stats_object_gmean_without_retain_aborts), &
+            new_unittest("%hmean on a streaming pf_stats aborts", &
+                test_stats_object_hmean_without_retain_aborts), &
             new_unittest("merging a pf_stats that holds no population aborts", &
                 test_stats_object_merge_uncomputed_source_aborts), &
             new_unittest("a string column has no numeric statistics and aborts naming its kind", &
@@ -6047,6 +6055,51 @@ contains
             failure_message="merging across a retain mismatch was expected to abort", &
             required_stderr="pf_stats%merge: the destination and the source disagree on retain")
     end subroutine test_stats_object_merge_retain_mismatch_aborts
+
+    !> pf_stats abort path: see scenario_stats_object_merge_weight_type_mismatch in
+    !> test/error_scenarios.f90.
+    subroutine test_stats_object_merge_weight_type_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, &
+            "stats_object_merge_weight_type_mismatch", expect_abort=.true., &
+            failure_message="merging across a weight_type mismatch was expected to abort", &
+            required_stderr="pf_stats%merge: the destination and the source disagree on weight_type")
+    end subroutine test_stats_object_merge_weight_type_mismatch_aborts
+
+    !> pf_stats abort path: see scenario_stats_object_merge_skipnan_mismatch in
+    !> test/error_scenarios.f90. The third of the three policy flags, and the one `%merge` used to
+    !> accept silently -- so this scenario is what stops the guard being lost again.
+    subroutine test_stats_object_merge_skipnan_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_object_merge_skipnan_mismatch", &
+            expect_abort=.true., &
+            failure_message="merging across a skipnan mismatch was expected to abort", &
+            required_stderr="pf_stats%merge: the destination and the source disagree on skipnan")
+    end subroutine test_stats_object_merge_skipnan_mismatch_aborts
+
+    !> pf_stats abort path: see scenario_stats_object_gmean_without_retain in
+    !> test/error_scenarios.f90.
+    subroutine test_stats_object_gmean_without_retain_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_object_gmean_without_retain", &
+            expect_abort=.true., &
+            failure_message="%gmean on a streaming pf_stats was expected to abort", &
+            required_stderr="pf_stats%gmean: this accumulator was created with retain=.false.")
+    end subroutine test_stats_object_gmean_without_retain_aborts
+
+    !> pf_stats abort path: see scenario_stats_object_hmean_without_retain in
+    !> test/error_scenarios.f90.
+    subroutine test_stats_object_hmean_without_retain_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "stats_object_hmean_without_retain", &
+            expect_abort=.true., &
+            failure_message="%hmean on a streaming pf_stats was expected to abort", &
+            required_stderr="pf_stats%hmean: this accumulator was created with retain=.false.")
+    end subroutine test_stats_object_hmean_without_retain_aborts
 
     !> pf_stats abort path: see scenario_stats_object_merge_uncomputed_source in
     !> test/error_scenarios.f90.

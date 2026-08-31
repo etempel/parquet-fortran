@@ -182,7 +182,9 @@ contains
         real(real64) :: mx, my, sxx, sxy, syy, w_sum, w_sq, denom
         integer(int64) :: m, nnull, nnan
         integer :: dd
+        logical :: freq
 
+        call stats_weight_kind("pf_cov", weight_type, freq)
         dd = 1
         if (present(ddof)) dd = ddof
         call pair_compact(x, y, "pf_cov", is_valid, weights, kx, ky, kw, m, nnull, nnan)
@@ -194,10 +196,19 @@ contains
 
         call stats_pair_moments(kx, ky, kw, m, mx, my, sxx, sxy, syy, w_sum, w_sq)
         if (w_sum <= 0.0_real64) return
-        ! The reliability convention, which is `pf_variance`'s default and therefore the one that
-        ! makes `pf_cov(x, x)` equal `pf_variance(x)` at the same `ddof`. Unweighted, `w_sq` is
-        ! `w_sum` and this collapses to the familiar `n - ddof`.
-        denom = w_sum - real(dd, real64) * w_sq / w_sum
+        ! **The same two denominators `pf_variance` uses, and that is the requirement rather than
+        ! a convenience.** `pf_cov(x, x, ddof=d)` IS `pf_variance(x, ddof=d)` by definition, so
+        ! offering only the reliability convention here would make the two disagree for any caller
+        ! who asked the variance for frequency weights. A FREQUENCY weight of 3 says the value
+        ! occurred three times, so `ddof` is charged against `sum(w)`; a RELIABILITY weight says it
+        ! is that much more precise, so it is charged against Kish's effective size
+        ! `sum(w)**2 / sum(w**2)`. Unweighted, `w_sq` is `w_sum`, both collapse to `n - ddof`, and
+        ! the argument cannot be observed at all.
+        if (freq) then
+            denom = w_sum - real(dd, real64)
+        else
+            denom = w_sum - real(dd, real64) * w_sq / w_sum
+        end if
         if (denom <= 0.0_real64) return
         c = sxy / denom
         if (present(ok)) ok = (c == c)

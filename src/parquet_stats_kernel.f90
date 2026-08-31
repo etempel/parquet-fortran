@@ -128,17 +128,21 @@ contains
     end subroutine col_to_real64
 
     module procedure count_valid_i32
-        integer(int64) :: i, nv
+        integer(int64) :: i, nv, nnull
 
         nv = size(values, kind=int64)
         call stats_check_sizes(nv, "pf_count_valid", is_valid, weights)
         n = 0_int64
+        nnull = 0_int64
         do i = 1_int64, nv
             ! The family's exclusion order: nullness, then NaN, then weight. A weight is
             ! examined only for an element still in the population, which is what keeps a NaN
             ! weight beside a null value from aborting.
             if (present(is_valid)) then
-                if (.not. is_valid(i)) cycle
+                if (.not. is_valid(i)) then
+                    nnull = nnull + 1_int64
+                    cycle
+                end if
             end if
             if (present(weights)) then
                 call stats_check_weight(weights(i), i, "pf_count_valid")
@@ -146,20 +150,25 @@ contains
             end if
             n = n + 1_int64
         end do
+        if (present(n_null)) n_null = nnull
     end procedure count_valid_i32
 
     module procedure count_valid_i64
-        integer(int64) :: i, nv
+        integer(int64) :: i, nv, nnull
 
         nv = size(values, kind=int64)
         call stats_check_sizes(nv, "pf_count_valid", is_valid, weights)
         n = 0_int64
+        nnull = 0_int64
         do i = 1_int64, nv
             ! The family's exclusion order: nullness, then NaN, then weight. A weight is
             ! examined only for an element still in the population, which is what keeps a NaN
             ! weight beside a null value from aborting.
             if (present(is_valid)) then
-                if (.not. is_valid(i)) cycle
+                if (.not. is_valid(i)) then
+                    nnull = nnull + 1_int64
+                    cycle
+                end if
             end if
             if (present(weights)) then
                 call stats_check_weight(weights(i), i, "pf_count_valid")
@@ -167,10 +176,11 @@ contains
             end if
             n = n + 1_int64
         end do
+        if (present(n_null)) n_null = nnull
     end procedure count_valid_i64
 
     module procedure count_valid_f32
-        integer(int64) :: i, nv
+        integer(int64) :: i, nv, nnull, nnan
         logical :: skip
 
         nv = size(values, kind=int64)
@@ -178,18 +188,26 @@ contains
         skip = .true.
         if (present(skipnan)) skip = skipnan
         n = 0_int64
+        nnull = 0_int64
+        nnan = 0_int64
         do i = 1_int64, nv
             ! The family's exclusion order: nullness, then NaN, then weight. A weight is
             ! examined only for an element still in the population, which is what keeps a NaN
             ! weight beside a null value from aborting.
             if (present(is_valid)) then
-                if (.not. is_valid(i)) cycle
+                if (.not. is_valid(i)) then
+                    nnull = nnull + 1_int64
+                    cycle
+                end if
             end if
             if (skip) then
                 ! `x /= x` rather than `ieee_is_nan`: this is a per-element path, and
                 ! `ieee_is_nan` is a runtime call on ifx and nagfor. Both are quiet on a
                 ! quiet NaN, so the only cost is a -Wcompare-reals warning under -Wall.
-                if (values(i) /= values(i)) cycle
+                if (values(i) /= values(i)) then
+                    nnan = nnan + 1_int64
+                    cycle
+                end if
             end if
             if (present(weights)) then
                 call stats_check_weight(weights(i), i, "pf_count_valid")
@@ -197,10 +215,12 @@ contains
             end if
             n = n + 1_int64
         end do
+        if (present(n_null)) n_null = nnull
+        if (present(n_nan)) n_nan = nnan
     end procedure count_valid_f32
 
     module procedure count_valid_f64
-        integer(int64) :: i, nv
+        integer(int64) :: i, nv, nnull, nnan
         logical :: skip
 
         nv = size(values, kind=int64)
@@ -208,18 +228,26 @@ contains
         skip = .true.
         if (present(skipnan)) skip = skipnan
         n = 0_int64
+        nnull = 0_int64
+        nnan = 0_int64
         do i = 1_int64, nv
             ! The family's exclusion order: nullness, then NaN, then weight. A weight is
             ! examined only for an element still in the population, which is what keeps a NaN
             ! weight beside a null value from aborting.
             if (present(is_valid)) then
-                if (.not. is_valid(i)) cycle
+                if (.not. is_valid(i)) then
+                    nnull = nnull + 1_int64
+                    cycle
+                end if
             end if
             if (skip) then
                 ! `x /= x` rather than `ieee_is_nan`: this is a per-element path, and
                 ! `ieee_is_nan` is a runtime call on ifx and nagfor. Both are quiet on a
                 ! quiet NaN, so the only cost is a -Wcompare-reals warning under -Wall.
-                if (values(i) /= values(i)) cycle
+                if (values(i) /= values(i)) then
+                    nnan = nnan + 1_int64
+                    cycle
+                end if
             end if
             if (present(weights)) then
                 call stats_check_weight(weights(i), i, "pf_count_valid")
@@ -227,20 +255,26 @@ contains
             end if
             n = n + 1_int64
         end do
+        if (present(n_null)) n_null = nnull
+        if (present(n_nan)) n_nan = nnan
     end procedure count_valid_f64
 
     module procedure count_valid_bool
-        integer(int64) :: i, nv
+        integer(int64) :: i, nv, nnull
 
         nv = size(values, kind=int64)
         call stats_check_sizes(nv, "pf_count_valid", is_valid, weights)
         n = 0_int64
+        nnull = 0_int64
         do i = 1_int64, nv
             ! The family's exclusion order: nullness, then NaN, then weight. A weight is
             ! examined only for an element still in the population, which is what keeps a NaN
             ! weight beside a null value from aborting.
             if (present(is_valid)) then
-                if (.not. is_valid(i)) cycle
+                if (.not. is_valid(i)) then
+                    nnull = nnull + 1_int64
+                    cycle
+                end if
             end if
             if (present(weights)) then
                 call stats_check_weight(weights(i), i, "pf_count_valid")
@@ -248,13 +282,14 @@ contains
             end if
             n = n + 1_int64
         end do
+        if (present(n_null)) n_null = nnull
     end procedure count_valid_bool
 
     module procedure count_valid_col
         real(real64), allocatable :: wide(:)
         logical, allocatable :: mask(:)
         call col_to_real64(values, "pf_count_valid", is_valid, wide, mask)
-        call count_valid_f64(wide, n, mask, weights, skipnan)
+        call count_valid_f64(wide, n, mask, weights, skipnan, n_null, n_nan)
     end procedure count_valid_col
 
     module procedure sum_i32
@@ -332,7 +367,7 @@ contains
         call moments_f64(wide, n_valid=n_valid, mean=mean, variance=variance, stddev=stddev, sem=sem, &
             skewness=skewness, kurtosis=kurtosis, vsum=vsum, vmin=vmin, vmax=vmax, &
             is_valid=is_valid, weights=weights, weight_type=weight_type, ddof=ddof, bias=bias, &
-            excess=excess, n_null=n_null, threads=threads)
+            excess=excess, n_null=n_null, ok=ok, threads=threads)
     end procedure moments_i32
 
     module procedure median_i32
@@ -395,7 +430,7 @@ contains
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
         wide = real(values, real64)
-        call describe_f64(wide, s, is_valid=is_valid, weights=weights, weight_type=weight_type, &
+        call describe_f64(wide, s, is_valid=is_valid, weights=weights, weight_type=weight_type, ok=ok, &
             threads=threads)
     end procedure describe_i32
 
@@ -404,8 +439,8 @@ contains
         allocate(wx(size(x, kind=int64)), wy(size(y, kind=int64)))
         wx = real(x, real64)
         wy = real(y, real64)
-        call cov_f64(wx, wy, c, is_valid=is_valid, weights=weights, ddof=ddof, n_null=n_null, n_nan=n_nan, &
-            ok=ok)
+        call cov_f64(wx, wy, c, is_valid=is_valid, weights=weights, weight_type=weight_type, ddof=ddof, &
+            n_null=n_null, n_nan=n_nan, ok=ok)
     end procedure cov_i32
 
     module procedure corr_i32
@@ -466,8 +501,8 @@ contains
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
         wide = real(values, real64)
-        call bucketize_f64(wide, edges, codes, right=right, is_valid=is_valid, n_null=n_null, &
-            n_outside=n_outside, ok=ok)
+        call bucketize_f64(wide, edges, codes, right=right, is_valid=is_valid, weights=weights, &
+            n_null=n_null, n_outside=n_outside, ok=ok)
     end procedure bucketize_i32
 
     module procedure histogram_i32
@@ -560,7 +595,7 @@ contains
         call moments_f64(wide, n_valid=n_valid, mean=mean, variance=variance, stddev=stddev, sem=sem, &
             skewness=skewness, kurtosis=kurtosis, vsum=vsum, vmin=vmin, vmax=vmax, &
             is_valid=is_valid, weights=weights, weight_type=weight_type, ddof=ddof, bias=bias, &
-            excess=excess, n_null=n_null, threads=threads)
+            excess=excess, n_null=n_null, ok=ok, threads=threads)
     end procedure moments_i64
 
     module procedure median_i64
@@ -623,7 +658,7 @@ contains
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
         wide = real(values, real64)
-        call describe_f64(wide, s, is_valid=is_valid, weights=weights, weight_type=weight_type, &
+        call describe_f64(wide, s, is_valid=is_valid, weights=weights, weight_type=weight_type, ok=ok, &
             threads=threads)
     end procedure describe_i64
 
@@ -632,8 +667,8 @@ contains
         allocate(wx(size(x, kind=int64)), wy(size(y, kind=int64)))
         wx = real(x, real64)
         wy = real(y, real64)
-        call cov_f64(wx, wy, c, is_valid=is_valid, weights=weights, ddof=ddof, n_null=n_null, n_nan=n_nan, &
-            ok=ok)
+        call cov_f64(wx, wy, c, is_valid=is_valid, weights=weights, weight_type=weight_type, ddof=ddof, &
+            n_null=n_null, n_nan=n_nan, ok=ok)
     end procedure cov_i64
 
     module procedure corr_i64
@@ -694,8 +729,8 @@ contains
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
         wide = real(values, real64)
-        call bucketize_f64(wide, edges, codes, right=right, is_valid=is_valid, n_null=n_null, &
-            n_outside=n_outside, ok=ok)
+        call bucketize_f64(wide, edges, codes, right=right, is_valid=is_valid, weights=weights, &
+            n_null=n_null, n_outside=n_outside, ok=ok)
     end procedure bucketize_i64
 
     module procedure histogram_i64
@@ -792,7 +827,7 @@ contains
         call moments_f64(wide, n_valid=n_valid, mean=mean, variance=variance, stddev=stddev, sem=sem, &
             skewness=skewness, kurtosis=kurtosis, vsum=vsum, vmin=vmin, vmax=vmax, &
             is_valid=is_valid, weights=weights, weight_type=weight_type, ddof=ddof, bias=bias, &
-            excess=excess, skipnan=skipnan, n_null=n_null, n_nan=n_nan, threads=threads)
+            excess=excess, skipnan=skipnan, n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
     end procedure moments_f32
 
     module procedure median_f32
@@ -856,7 +891,7 @@ contains
         allocate(wide(size(values, kind=int64)))
         wide = real(values, real64)
         call describe_f64(wide, s, is_valid=is_valid, weights=weights, weight_type=weight_type, &
-            skipnan=skipnan, threads=threads)
+            skipnan=skipnan, ok=ok, threads=threads)
     end procedure describe_f32
 
     module procedure cov_f32
@@ -864,8 +899,8 @@ contains
         allocate(wx(size(x, kind=int64)), wy(size(y, kind=int64)))
         wx = real(x, real64)
         wy = real(y, real64)
-        call cov_f64(wx, wy, c, is_valid=is_valid, weights=weights, ddof=ddof, n_null=n_null, n_nan=n_nan, &
-            ok=ok)
+        call cov_f64(wx, wy, c, is_valid=is_valid, weights=weights, weight_type=weight_type, ddof=ddof, &
+            n_null=n_null, n_nan=n_nan, ok=ok)
     end procedure cov_f32
 
     module procedure corr_f32
@@ -931,8 +966,8 @@ contains
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
         wide = real(values, real64)
-        call bucketize_f64(wide, edges, codes, right=right, is_valid=is_valid, skipnan=skipnan, &
-            n_null=n_null, n_nan=n_nan, n_outside=n_outside, ok=ok)
+        call bucketize_f64(wide, edges, codes, right=right, is_valid=is_valid, weights=weights, &
+            skipnan=skipnan, n_null=n_null, n_nan=n_nan, n_outside=n_outside, ok=ok)
     end procedure bucketize_f32
 
     module procedure histogram_f32
@@ -1027,7 +1062,7 @@ contains
         call moments_f64(wide, n_valid=n_valid, mean=mean, variance=variance, stddev=stddev, sem=sem, &
             skewness=skewness, kurtosis=kurtosis, vsum=vsum, vmin=vmin, vmax=vmax, &
             is_valid=is_valid, weights=weights, weight_type=weight_type, ddof=ddof, bias=bias, &
-            excess=excess, n_null=n_null, threads=threads)
+            excess=excess, n_null=n_null, ok=ok, threads=threads)
     end procedure moments_bool
 
     module procedure median_bool
@@ -1090,7 +1125,7 @@ contains
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
         wide = merge(1.0_real64, 0.0_real64, values)
-        call describe_f64(wide, s, is_valid=is_valid, weights=weights, weight_type=weight_type, &
+        call describe_f64(wide, s, is_valid=is_valid, weights=weights, weight_type=weight_type, ok=ok, &
             threads=threads)
     end procedure describe_bool
 
@@ -1099,8 +1134,8 @@ contains
         allocate(wx(size(x, kind=int64)), wy(size(y, kind=int64)))
         wx = merge(1.0_real64, 0.0_real64, x)
         wy = merge(1.0_real64, 0.0_real64, y)
-        call cov_f64(wx, wy, c, is_valid=is_valid, weights=weights, ddof=ddof, n_null=n_null, n_nan=n_nan, &
-            ok=ok)
+        call cov_f64(wx, wy, c, is_valid=is_valid, weights=weights, weight_type=weight_type, ddof=ddof, &
+            n_null=n_null, n_nan=n_nan, ok=ok)
     end procedure cov_bool
 
     module procedure corr_bool
@@ -1161,8 +1196,8 @@ contains
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))
         wide = merge(1.0_real64, 0.0_real64, values)
-        call bucketize_f64(wide, edges, codes, right=right, is_valid=is_valid, n_null=n_null, &
-            n_outside=n_outside, ok=ok)
+        call bucketize_f64(wide, edges, codes, right=right, is_valid=is_valid, weights=weights, &
+            n_null=n_null, n_outside=n_outside, ok=ok)
     end procedure bucketize_bool
 
     module procedure histogram_bool
@@ -1259,7 +1294,7 @@ contains
         call moments_f64(wide, n_valid=n_valid, mean=mean, variance=variance, stddev=stddev, sem=sem, &
             skewness=skewness, kurtosis=kurtosis, vsum=vsum, vmin=vmin, vmax=vmax, &
             is_valid=mask, weights=weights, weight_type=weight_type, ddof=ddof, bias=bias, &
-            excess=excess, skipnan=skipnan, n_null=n_null, n_nan=n_nan, threads=threads)
+            excess=excess, skipnan=skipnan, n_null=n_null, n_nan=n_nan, ok=ok, threads=threads)
     end procedure moments_col
 
     module procedure median_col
@@ -1323,7 +1358,7 @@ contains
         logical, allocatable :: mask(:)
         call col_to_real64(values, "pf_describe", is_valid, wide, mask)
         call describe_f64(wide, s, is_valid=mask, weights=weights, weight_type=weight_type, skipnan=skipnan, &
-            threads=threads)
+            ok=ok, threads=threads)
     end procedure describe_col
 
     module procedure cov_col
@@ -1332,7 +1367,8 @@ contains
         call col_to_real64(x, "pf_cov", is_valid, wx, mx)
         call col_to_real64(y, "pf_cov", v=wy, mask=my)
         call pair_mask(mx, my, size(wx, kind=int64), both)
-        call cov_f64(wx, wy, c, is_valid=both, weights=weights, ddof=ddof, n_null=n_null, n_nan=n_nan, ok=ok)
+        call cov_f64(wx, wy, c, is_valid=both, weights=weights, weight_type=weight_type, ddof=ddof, &
+            n_null=n_null, n_nan=n_nan, ok=ok)
     end procedure cov_col
 
     module procedure corr_col
@@ -1399,8 +1435,8 @@ contains
         real(real64), allocatable :: wide(:)
         logical, allocatable :: mask(:)
         call col_to_real64(values, "pf_bucketize", is_valid, wide, mask)
-        call bucketize_f64(wide, edges, codes, right=right, is_valid=mask, skipnan=skipnan, n_null=n_null, &
-            n_nan=n_nan, n_outside=n_outside, ok=ok)
+        call bucketize_f64(wide, edges, codes, right=right, is_valid=mask, weights=weights, skipnan=skipnan, &
+            n_null=n_null, n_nan=n_nan, n_outside=n_outside, ok=ok)
     end procedure bucketize_col
 
     module procedure histogram_col

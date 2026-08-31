@@ -755,6 +755,14 @@ program error_scenarios
         call scenario_stats_object_query_before_compute()
     case ("stats_object_merge_retain_mismatch")
         call scenario_stats_object_merge_retain_mismatch()
+    case ("stats_object_merge_weight_type_mismatch")
+        call scenario_stats_object_merge_weight_type_mismatch()
+    case ("stats_object_merge_skipnan_mismatch")
+        call scenario_stats_object_merge_skipnan_mismatch()
+    case ("stats_object_gmean_without_retain")
+        call scenario_stats_object_gmean_without_retain()
+    case ("stats_object_hmean_without_retain")
+        call scenario_stats_object_hmean_without_retain()
     case ("stats_object_merge_uncomputed_source")
         call scenario_stats_object_merge_uncomputed_source()
     case ("stats_column_string_kind")
@@ -16741,6 +16749,64 @@ contains
         call keeper%merge(streamer)    ! -> aborts (retain disagrees)
         print '(a,i0)', "unexpectedly merged across a retain mismatch, n=", keeper%n()
     end subroutine scenario_stats_object_merge_retain_mismatch
+
+    !> The second of `%merge`'s three policy guards: the weight convention.
+    !!
+    !! Both accumulators hold perfectly good populations and the fold itself would succeed --
+    !! `weight_type` does not enter the Chan/Pebay combination at all. It enters every QUERY made
+    !! afterwards, because it decides which count `ddof` is charged against, so a merged object
+    !! would answer with one convention over a population assembled under two.
+    subroutine scenario_stats_object_merge_weight_type_mismatch()
+        type(pf_stats) :: rel, freq
+
+        call rel%init()
+        call freq%init(weight_type="frequency")
+        call rel%update([1.0_real64, 2.0_real64], weights=[1.0_real64, 2.0_real64])
+        call freq%update([3.0_real64, 4.0_real64], weights=[1.0_real64, 2.0_real64])
+        call rel%merge(freq)           ! -> aborts (weight_type disagrees)
+        print '(a,es12.5)', "unexpectedly merged across a weight_type mismatch, var=", rel%variance()
+    end subroutine scenario_stats_object_merge_weight_type_mismatch
+
+    !> The third policy guard, and the one that used to be missing.
+    !!
+    !! `skipnan` decides what the POPULATION IS: one accumulator dropped its NaNs and counted them
+    !! in `%n_nan()`, the other kept them and is poisoned by construction. Folding the first into
+    !! the second produces a number describing neither convention, with every count still
+    !! plausible -- which is why the guard is worth as much as the other two.
+    subroutine scenario_stats_object_merge_skipnan_mismatch()
+        type(pf_stats) :: skipper, keeper
+
+        call skipper%init()
+        call keeper%init(skipnan=.false.)
+        call skipper%update([1.0_real64, 2.0_real64])
+        call keeper%update([3.0_real64, 4.0_real64])
+        call skipper%merge(keeper)     ! -> aborts (skipnan disagrees)
+        print '(a,es12.5)', "unexpectedly merged across a skipnan mismatch, mean=", skipper%mean()
+    end subroutine scenario_stats_object_merge_skipnan_mismatch
+
+    !> `%gmean` needs the retained values, which a streaming accumulator does not have.
+    !!
+    !! A log-sum is a fifth quantity the four central moments do not contain, so this is not a
+    !! statistic that could be answered approximately from the accumulator -- it cannot be
+    !! answered at all. The message says so and names the fix.
+    subroutine scenario_stats_object_gmean_without_retain()
+        type(pf_stats) :: streamer
+
+        call streamer%init(retain=.false.)
+        call streamer%update([1.0_real64, 2.0_real64, 8.0_real64])
+        print '(a,es12.5)', "unexpectedly read a geometric mean off a streaming pf_stats, g=", &
+            streamer%gmean()           ! -> aborts (retain=.false.)
+    end subroutine scenario_stats_object_gmean_without_retain
+
+    !> `%hmean`'s half of the same guard, so neither binding can lose it alone.
+    subroutine scenario_stats_object_hmean_without_retain()
+        type(pf_stats) :: streamer
+
+        call streamer%init(retain=.false.)
+        call streamer%update([1.0_real64, 2.0_real64, 8.0_real64])
+        print '(a,es12.5)', "unexpectedly read a harmonic mean off a streaming pf_stats, h=", &
+            streamer%hmean()           ! -> aborts (retain=.false.)
+    end subroutine scenario_stats_object_hmean_without_retain
 
     !> A source that was never computed contributes nothing and almost certainly means a bug.
     !!

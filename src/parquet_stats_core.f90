@@ -290,7 +290,7 @@ contains
         real(real64), allocatable :: xb(:), wb(:), pw(:), px(:), q1(:), q2(:), q3(:), q4(:)
         real(real64) :: x, w, sw, sx, mu, delta
         integer(int64) :: nv, m, nb, i, c, team, istart
-        logical :: skip, weighted, masked, want_moments, deferrable, compacting
+        logical :: skip, weighted, masked, want_moments, deferrable, compacting, nonfinite_mean
 
         nv = size(values, kind=int64)
         call stats_check_sizes(nv, what, is_valid, weights)
@@ -544,6 +544,31 @@ contains
         ! Re-centre on `mu + delta`. Expanding `sum(w*(d-delta)**k)` and using `sum(w*d) = delta*W`
         ! collapses every cross term, leaving these four lines. `delta` is a rounding error, so the
         ! corrections are tiny and none of them can cancel anything significant away.
+        ! **A non-finite mean is never refined, and that is a correctness requirement.** `mu` is
+        ! an infinity when the population holds one (or overflows), and a NaN when it holds both
+        ! signs of one. Every term of `q1 = sum(w*(x - mu))` is then `Inf - Inf`, so `delta` is a
+        ! NaN and `mu + delta` would replace an answer that IS correct with one that is not:
+        ! numpy and pandas both answer `inf` for the mean of a population containing `+Inf`, and
+        ! so does this module's own `pf_sum` over the same data, which does not go through the
+        ! refinement. Refining would leave `sum` and `mean` disagreeing on one population.
+        !
+        ! The central moments are handed on unrefined for the same reason and are NaN in their own
+        ! right -- `(x - Inf)**2` is `Inf` for a finite element and `Inf - Inf` for the infinite
+        ! one -- which is numpy's answer for the variance here, so nothing needs forcing.
+        nonfinite_mean = .false.
+        if (mu /= mu) then
+            nonfinite_mean = .true.
+        else if (abs(mu) > huge(0.0_real64)) then
+            nonfinite_mean = .true.
+        end if
+        if (nonfinite_mean) then
+            acc%mean = mu
+            acc%m2 = q2(1)
+            acc%m3 = q3(1)
+            acc%m4 = q4(1)
+            call stats_hand_over(xb, wb, keep_x, keep_w)
+            return
+        end if
         delta = q1(1) / acc%w_sum
         acc%mean = mu + delta
         acc%m2 = q2(1) - delta * delta * acc%w_sum
@@ -959,16 +984,42 @@ contains
         integer(int64), intent(out), optional :: n_nan    !! how many were NaN.
         logical, intent(out), optional :: ok              !! .false. when the answer is NaN.
         real(real64), allocatable :: keep(:), keep_w(:)
-        real(real64) :: acc_sum, w_sum, w, x
-        integer(int64) :: m, nnull, nnan, i
-        logical :: poisoned, saw_zero
+        integer(int64) :: m, nnull, nnan
+        logical :: poisoned, good
 
         call stats_compact(values, what, is_valid, weights, skipnan, keep, keep_w, m, nnull, &
             nnan, poisoned)
         if (present(n_null)) n_null = nnull
         if (present(n_nan)) n_nan = nnan
+        if (allocated(keep_w)) then
+            call power_mean_kept(keep, m, harmonic, poisoned, res, good, w=keep_w)
+        else
+            call power_mean_kept(keep, m, harmonic, poisoned, res, good)
+        end if
+        if (present(ok)) ok = good
+    end subroutine power_mean
+
+    !> The domain screen and the accumulation, over an ALREADY-COMPACTED population.
+    !!
+    !! Split out of `power_mean` so that `pf_stats%gmean`/`%hmean` can answer off the object's
+    !! retained buffer without compacting a second time -- and, more to the point, so that the two
+    !! routes cannot drift on the domain rules, which are the part of a power mean that is easy to
+    !! get quietly wrong (a zero is the limit and not an error; a negative is undefined; a
+    !! population holding both is undefined, not zero).
+    subroutine power_mean_kept(keep, m, harmonic, poisoned, res, ok, w)
+        real(real64), intent(in) :: keep(:)         !! the survivors; the first `m` are live.
+        integer(int64), intent(in) :: m             !! how many survivors there are.
+        logical, intent(in) :: harmonic             !! .true. for hmean, .false. for gmean.
+        logical, intent(in) :: poisoned             !! .true. when a kept NaN makes every answer NaN.
+        real(real64), intent(out) :: res            !! the mean, or NaN.
+        logical, intent(out) :: ok                  !! .false. when the answer is a NaN.
+        real(real64), intent(in), optional :: w(:)  !! the survivors' weights, when weighted.
+        real(real64) :: acc_sum, w_sum, wi, x
+        integer(int64) :: i
+        logical :: saw_zero
+
         res = stats_nan()
-        if (present(ok)) ok = .false.
+        ok = .false.
         if (m == 0_int64 .or. poisoned) return
 
         ! Pass one: the domain screen, in full, before any arithmetic. A negative anywhere makes
@@ -984,22 +1035,22 @@ contains
             ! Exactly 0, which is the limit of both means and what scipy returns. Reported as a
             ! defined answer -- `ok` is .true. -- because it is one.
             res = 0.0_real64
-            if (present(ok)) ok = .true.
+            ok = .true.
             return
         end if
 
         acc_sum = 0.0_real64
         w_sum = 0.0_real64
         do i = 1_int64, m
-            w = 1.0_real64
-            if (allocated(keep_w)) w = keep_w(i)
+            wi = 1.0_real64
+            if (present(w)) wi = w(i)
             x = keep(i)
             if (harmonic) then
-                acc_sum = acc_sum + w / x
+                acc_sum = acc_sum + wi / x
             else
-                acc_sum = acc_sum + w * log(x)
+                acc_sum = acc_sum + wi * log(x)
             end if
-            w_sum = w_sum + w
+            w_sum = w_sum + wi
         end do
         if (w_sum <= 0.0_real64) return
         if (harmonic) then
@@ -1008,8 +1059,8 @@ contains
         else
             res = exp(acc_sum / w_sum)
         end if
-        if (present(ok)) ok = (res == res)
-    end subroutine power_mean
+        ok = (res == res)
+    end subroutine power_mean_kept
 
     module procedure gmean_f64
         call power_mean(values, "pf_gmean", .false., is_valid, weights, skipnan, g, &
@@ -1117,6 +1168,23 @@ contains
         if (present(vsum)) vsum = acc%vsum
         if (present(vmin)) vmin = acc%vmin
         if (present(vmax)) vmax = acc%vmax
+        ! **Only the outputs the caller asked for are tested**, which is the one reading of `ok`
+        ! that works on a procedure with nine of them: `vsum` over an empty population is a
+        ! correct `0` and `vmin` is a NaN, so testing all nine would report a failure to a caller
+        ! who asked only for the sum and got the right answer. The counts are always defined and
+        ! are not tested.
+        if (present(ok)) then
+            ok = .true.
+            if (present(mean)) ok = ok .and. (mean == mean)
+            if (present(variance)) ok = ok .and. (variance == variance)
+            if (present(stddev)) ok = ok .and. (stddev == stddev)
+            if (present(sem)) ok = ok .and. (sem == sem)
+            if (present(skewness)) ok = ok .and. (skewness == skewness)
+            if (present(kurtosis)) ok = ok .and. (kurtosis == kurtosis)
+            if (present(vsum)) ok = ok .and. (vsum == vsum)
+            if (present(vmin)) ok = ok .and. (vmin == vmin)
+            if (present(vmax)) ok = ok .and. (vmax == vmax)
+        end if
     end procedure moments_f64
 
     ! ==================================================================================
@@ -1536,6 +1604,12 @@ contains
             "would leave the retained values describing only part of its own population"
         if (other%freq .neqv. self%freq) error stop "pf_stats%merge: the destination and the " // &
             "source disagree on weight_type"
+        ! The third policy flag, guarded for the same reason as the other two: `skipnan` decides
+        ! what the population IS, so folding a NaN-skipping partial into a NaN-propagating one
+        ! produces a number describing neither convention. All three are fixed at `%init`/
+        ! `%compute` and all three must agree across a merge.
+        if (other%skip .neqv. self%skip) error stop "pf_stats%merge: the destination and the " // &
+            "source disagree on skipnan"
         ! After the guards, before anything is written: a refused merge must leave the destination
         ! exactly as it was, ordering included.
         call stats_invalidate_order(self)
@@ -1703,6 +1777,45 @@ contains
         call stats_ensure(self)
         res = self%acc%mean
     end procedure obj_mean
+
+    !> The retain guard the two power-mean bindings share.
+    !!
+    !! Separate from `stats_require_live` because the two failures have different fixes and a
+    !! caller reading the message needs to be told which one they hit.
+    subroutine stats_require_hold(self, what)
+        class(pf_stats), intent(in) :: self  !! the accumulator.
+        character(len=*), intent(in) :: what !! the binding's name, for the message.
+        if (.not. self%hold) &
+            error stop what // ": this accumulator was created with retain=.false., so no " // &
+                "values were kept and a power mean cannot be formed from the central moments; " // &
+                "use retain=.true. (the default for %compute) if you need one"
+    end subroutine stats_require_hold
+
+    module procedure obj_gmean
+        logical :: good
+        call stats_require_live(self, "pf_stats%gmean")
+        call stats_require_hold(self, "pf_stats%gmean")
+        call stats_ensure(self)
+        if (self%wtd) then
+            call power_mean_kept(self%keep, self%keep_n, .false., self%acc%saw_nan, res, good, &
+                w=self%keep_w)
+        else
+            call power_mean_kept(self%keep, self%keep_n, .false., self%acc%saw_nan, res, good)
+        end if
+    end procedure obj_gmean
+
+    module procedure obj_hmean
+        logical :: good
+        call stats_require_live(self, "pf_stats%hmean")
+        call stats_require_hold(self, "pf_stats%hmean")
+        call stats_ensure(self)
+        if (self%wtd) then
+            call power_mean_kept(self%keep, self%keep_n, .true., self%acc%saw_nan, res, good, &
+                w=self%keep_w)
+        else
+            call power_mean_kept(self%keep, self%keep_n, .true., self%acc%saw_nan, res, good)
+        end if
+    end procedure obj_hmean
 
     module procedure obj_variance
         integer :: dd

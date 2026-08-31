@@ -453,6 +453,8 @@ TYPE_BLOCK = """    !
         procedure :: sum_weights => obj_sum_weights !! `sum(w)` over the population.
         procedure :: sum => obj_sum !! `sum(w*x)` over the population.
         procedure :: mean => obj_mean !! The weighted mean.
+        procedure :: gmean => obj_gmean !! The weighted geometric mean; needs `retain`.
+        procedure :: hmean => obj_hmean !! The weighted harmonic mean; needs `retain`.
         procedure :: variance => obj_variance !! The variance, at `ddof` degrees of freedom.
         procedure :: stddev => obj_stddev !! The standard deviation.
         procedure :: sem => obj_sem !! The standard error of the mean.
@@ -508,8 +510,9 @@ LIFECYCLE_IFACES = """        !> Summarises a resident array: the usual way to b
         end subroutine obj_update_f64
         !> Folds one other accumulator into this one.
         !!
-        !! Both must agree on `retain` and on the weight convention, and the source must have been
-        !! computed; a mismatch aborts, naming which. A source with no elements at all is a no-op.
+        !! Both must agree on all THREE of the policies fixed at `%compute`/`%init` -- `retain`,
+        !! `weight_type` and `skipnan` -- and the source must have been computed; a mismatch
+        !! aborts, naming which. A source with no elements at all is a no-op.
         module subroutine obj_merge_one(self, other, consume)
             class(pf_stats), intent(inout) :: self !! the destination.
             type(pf_stats), intent(inout) :: other
@@ -581,6 +584,26 @@ QUERIES = [
       "quantity here that emptiness still defines, and it is what numpy and pandas both return."]),
     ("obj_mean", "real(real64)", "the weighted mean, or NaN for an empty population.", [],
      ["The mean of the population."]),
+    ("obj_gmean", "real(real64)", "the weighted geometric mean, or NaN when it is undefined.",
+     [],
+     ["The geometric mean of the population -- `exp(sum(w*log(x)) / sum(w))`.",
+      "",
+      "**Needs the retained values, so it aborts on a streaming accumulator**",
+      "(`retain = .false.`), exactly as the order statistics do. It is not derivable from the",
+      "four central moments the accumulator carries -- a log-sum is a fifth quantity, and",
+      "accumulating it in the hot loop would charge a transcendental per element to every",
+      "population that never asks for one. Unlike `%median` it orders nothing.",
+      "",
+      "NaN for an empty population and for one holding a negative value; **exactly 0 when any",
+      "value is 0**, which is the limit and what scipy returns."]),
+    ("obj_hmean", "real(real64)", "the weighted harmonic mean, or NaN when it is undefined.",
+     [],
+     ["The harmonic mean of the population -- `sum(w) / sum(w/x)`.",
+      "",
+      "Aborts on a streaming accumulator for the reason `%gmean` does, and orders nothing.",
+      "",
+      "NaN for an empty population and for one holding a negative value; **exactly 0 when any",
+      "value is 0**, as scipy returns."]),
     ("obj_variance", "real(real64)", "the variance, or NaN when it is undefined.", ["ddof"],
      ["The variance of the population.",
       "",
@@ -961,8 +984,11 @@ SKEW_OPTS = ["is_valid", "weights", "weight_type", "bias", "skipnan", "n_null", 
              "threads"]
 KURT_OPTS = ["is_valid", "weights", "weight_type", "bias", "excess", "skipnan", "n_null", "n_nan",
              "ok", "threads"]
+#: `pf_moments` -- `ok` here means "every quantity you ASKED for came back defined", which is the
+#: only reading available on a procedure with nine optional outputs: testing all nine would report
+#: `.false.` for a caller who asked for the sum of an empty population and got the correct `0`.
 MOMENTS_OPTS = ["is_valid", "weights", "weight_type", "ddof", "bias", "excess", "skipnan",
-                "n_null", "n_nan", "threads"]
+                "n_null", "n_nan", "ok", "threads"]
 
 #: The order family's option lists. Every one is a subsequence of the canonical order that
 #: `check_stats_optional_argument_order` enforces, with `kind` sitting in `method`'s block -- both
@@ -975,13 +1001,15 @@ PCTS_OPTS = ["is_valid", "weights", "skipnan", "kind", "n_null", "n_nan", "ok", 
 #: deviation median is numpy's linear interpolation because scipy's `median_abs_deviation` reaches
 #: `np.median`, and offering a token that would silently disagree with scipy is worse than none.
 MAD_OPTS = ["is_valid", "weights", "skipnan", "scale", "center", "n_null", "n_nan", "ok", "threads"]
-#: `pf_describe` -- it FILLS an object rather than answering, so `n_null`/`n_nan`/`ok` are absent:
-#: the object carries all three and answering them twice would let the two copies disagree.
-DESCRIBE_OPTS = ["is_valid", "weights", "weight_type", "skipnan", "threads"]
+#: `pf_describe` -- it FILLS an object rather than answering, so `n_null`/`n_nan` are absent: the
+#: object carries both and answering them twice would let the two copies disagree. `ok` is not in
+#: that class, because the object has no `%ok()` to disagree with -- it is the one thing a caller
+#: cannot read off the result without picking a statistic and NaN-testing it by hand.
+DESCRIBE_OPTS = ["is_valid", "weights", "weight_type", "skipnan", "ok", "threads"]
 #: `pf_mode` -- no `skipnan`/`n_nan` on ANY specific, because no kind it accepts can hold a NaN,
 #: and no `threads`, because the ordering it does is `pf_argsort`'s own and takes the same
 #: automatic rule every other unthreaded caller does.
-MODE_OPTS = ["count", "is_valid", "weights", "n_null", "ok"]
+MODE_OPTS = ["count", "modes", "is_valid", "weights", "n_null", "ok"]
 #: `pf_zscore` -- a VECTOR-valued procedure, so `out_valid` reports which output elements are
 #: undefined. No `weights`: a weighted z-score would need a weighted mean and a weighted scale,
 #: and then the standardised values would not have unit variance under any convention worth
@@ -990,10 +1018,16 @@ ZSCORE_OPTS = ["is_valid", "ddof", "skipnan", "out_valid", "n_null", "ok"]
 #: `pf_cov` -- no `skipnan`, because a NaN in EITHER array always drops the pair: a two-sample
 #: statistic has no meaning over two populations of different length, so there is nothing for
 #: `skipnan = .false.` to select.
-COV_OPTS = ["is_valid", "weights", "ddof", "n_null", "n_nan", "ok"]
-#: `pf_corr` -- as `pf_cov` but with `method` and WITHOUT `ddof`. The `ddof` in the covariance and
-#: the two in the standard deviations cancel exactly, so an argument here could never change the
-#: answer, and an argument that can never do anything is worse than an absent one.
+#:
+#: **`weight_type` IS here, for the same reason `pf_variance` has it.** `pf_cov(x, x, ddof=d)` is
+#: `pf_variance(x, ddof=d)` by definition, so a covariance that offered only the reliability
+#: convention would silently disagree with the variance whenever the caller asked `pf_variance`
+#: for frequency weights -- the same `ddof`, the same weights, two different denominators.
+COV_OPTS = ["is_valid", "weights", "weight_type", "ddof", "n_null", "n_nan", "ok"]
+#: `pf_corr` -- as `pf_cov` but with `method` and WITHOUT `ddof` or `weight_type`. The `ddof` in
+#: the covariance and the two in the standard deviations cancel exactly, and the two conventions
+#: differ only in the denominator `ddof` is charged against, so neither argument could ever change
+#: the answer -- and an argument that can never do anything is worse than an absent one.
 CORR_OPTS = ["is_valid", "weights", "method", "n_null", "n_nan", "ok"]
 #: `pf_sigma_clipped_stats` -- the clipping rule first, then its own outputs, then the population
 #: block. No `weights`: a weighted scale estimator is a further definitional choice and passing
@@ -1010,7 +1044,14 @@ CUM_OPTS = ["is_valid", "skipnan", "out_valid", "n_null", "n_nan", "ok"]
 #: The binning family. The bin rule comes first, before the population block, exactly as
 #: `pf_sigma_clipped_stats`' clipping rule does -- `right` says what the bins ARE, so it belongs
 #: with `edges` rather than among the exclusions.
-BUCKETIZE_OPTS = ["right", "is_valid", "skipnan", "n_null", "n_nan", "n_outside", "ok"]
+#:
+#: **`pf_bucketize` takes `weights` for one reason: without it the documented
+#: `pf_histogram == pf_bucketize`-tallied identity is FALSE whenever `pf_histogram` is weighted.**
+#: A zero weight removes an element from the population everywhere else in this module, so a
+#: bucketize that could not see weights assigned that element an ordinary bin code while the
+#: histogram over the same arguments left it out. The weight never scales a code -- a code is a
+#: bin number -- it only decides membership, which is what makes the identity hold again.
+BUCKETIZE_OPTS = ["right", "is_valid", "weights", "skipnan", "n_null", "n_nan", "n_outside", "ok"]
 #: `pf_histogram` adds `weights`, which is why `counts` is a real array: `np.histogram(weights=)`
 #: sums the weights of the values in each bin rather than counting them, and an integer output
 #: could not hold that.
@@ -1027,7 +1068,18 @@ CORE_IFACES = [
            "",
            "Weighted, this is `sum(w*x)`. An empty population sums to exactly `0` with",
            "`ok = .true.`, which is the additive identity and what numpy and pandas return -- it",
-           "is the one quantity in this family that an empty population still defines."],
+           "is the one quantity in this family that an empty population still defines.",
+           "",
+           "**An `integer(int64)` population is summed in `real64`, so it is exact only while",
+           "every value is**, i.e. while `abs(v) <= 2**53`. Above that the WIDENING loses the low",
+           "bits of each element before any addition happens, so no summation order recovers",
+           "them: `pf_sum([2**53+1, 1, 2**53+1, 1])` answers `1.8014398509481984e16` where the",
+           "exact integer total is `18014398509481988`. numpy and pandas keep an int64 sum in",
+           "int64 and stay exact (until they wrap). This module has one engine and one",
+           "`real(real64)` result -- which is what makes every kind return the same bits -- so",
+           "a population of genuinely huge integers has to be summed by the caller, in int64, or",
+           "shifted and scaled before it gets here. int32 is unaffected: every int32 value is",
+           "exactly representable."],
           ("s", "the sum."), PLAIN_OPTS),
     iface("mean_f64",
           ["`pf_mean` over a 64-bit real array: `sum(w*x) / sum(w)`, REFINED.",
@@ -1103,7 +1155,7 @@ MOMENTS_IFACE = '''        !> `pf_moments` over a 64-bit real array: every tier-
         !> exception to the canonical optional order, and their own order is fixed here.
         module subroutine moments_f64(values, n_valid, mean, variance, stddev, sem, skewness, &
                 kurtosis, vsum, vmin, vmax, is_valid, weights, weight_type, ddof, bias, excess, &
-                skipnan, n_null, n_nan, threads)
+                skipnan, n_null, n_nan, ok, threads)
             real(real64), intent(in) :: values(:) !! the population.
             integer(int64), intent(out), optional :: n_valid !! how many elements were used.
             real(real64), intent(out), optional :: mean !! the mean; NaN when empty.
@@ -1189,7 +1241,7 @@ COUNT_COL_IFACE = """        !> `pf_count_valid` over a scalar numeric `parquet_
         !> Same dispatch and same three refusals as the moment family: numeric scalar kinds only,
         !> width 1 only, and `is_valid=` alongside a column aborts because the column carries its
         !> own validity.
-        module subroutine count_valid_col(values, n, is_valid, weights, skipnan)
+        module subroutine count_valid_col(values, n, is_valid, weights, skipnan, n_null, n_nan)
             type(parquet_column), intent(in) :: values !! the column to count.
             integer(int64), intent(out) :: n !! how many elements are in the population.
             logical, intent(in), optional :: is_valid(:) !! must be absent; the column carries it.
@@ -1200,13 +1252,14 @@ COUNT_COL_IFACE = """        !> `pf_count_valid` over a scalar numeric `parquet_
             logical, intent(in), optional :: skipnan
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. counts it as an ordinary value.
+@@count_col_counts@@
         end subroutine count_valid_col"""
 
 COUNT_COL_BODY = """    module procedure count_valid_col
         real(real64), allocatable :: wide(:)
         logical, allocatable :: mask(:)
         call col_to_real64(values, "pf_count_valid", is_valid, wide, mask)
-        call count_valid_f64(wide, n, mask, weights, skipnan)
+        call count_valid_f64(wide, n, mask, weights, skipnan, n_null, n_nan)
     end procedure count_valid_col"""
 
 
@@ -1522,7 +1575,8 @@ RELATE_IFACES = """        !> `pf_cov` over two 64-bit real arrays: the PAIRWISE
         !! NaN, and the pair's weight non-zero. That is the only defensible rule for a two-sample
         !! statistic and it is what pandas does; handling nulls independently per array would
         !! produce a covariance between vectors of different lengths, which is not a number.
-        module subroutine cov_f64(x, y, c, is_valid, weights, ddof, n_null, n_nan, ok)
+        module subroutine cov_f64(x, y, c, is_valid, weights, weight_type, ddof, n_null, &
+                n_nan, ok)
             real(real64), intent(in) :: x(:) !! the first sample.
             real(real64), intent(in) :: y(:) !! the second sample, element for element.
             real(real64), intent(out) :: c !! the covariance; NaN when `n_valid <= ddof`.
@@ -1593,8 +1647,8 @@ BIN_IFACES = """        !> `pf_bucketize` over a 64-bit real array: which bin ea
         !! number or **0** for a value that joined none -- excluded, or outside the edge range.
         !! `pd.cut` spells that last case -1 over 0-based codes; 0 is the 1-based spelling of the
         !! same idea, and it is the value a Fortran caller can test without knowing the bin count.
-        module subroutine bucketize_f64(values, edges, codes, right, is_valid, skipnan, n_null, &
-                n_nan, n_outside, ok)
+        module subroutine bucketize_f64(values, edges, codes, right, is_valid, weights, &
+                skipnan, n_null, n_nan, n_outside, ok)
             real(real64), intent(in) :: values(:) !! the values to classify.
             real(real64), intent(in) :: edges(:) !! the bin boundaries, strictly increasing, at least two.
             integer(int32), intent(out) :: codes(:) !! the 1-based bin of each value, or 0. Same size as `values`.
@@ -1636,7 +1690,11 @@ CUM_DOC = {
         "A running sum is sequential by definition, so it accumulates left to right; `pf_sum` is",
         "PAIRWISE over a fixed block tree. The two agree to within the accumulated rounding of a",
         "naive sum, which on a large or badly scaled population is several ulps and occasionally",
-        "more. Compare them with a tolerance, or take the total from `pf_sum`."],
+        "more. Compare them with a tolerance, or take the total from `pf_sum`.",
+        "",
+        "**An `integer(int64)` population widens to `real64` first**, so a value above `2**53` is",
+        "rounded on the way in and the running sum inherits that -- see `pf_sum` for the bound",
+        "and for what to do instead. int32 is unaffected."],
     "pf_cumprod": [
         "The running product of a population -- pandas' `Series.cumprod()`.",
         "",
@@ -1691,8 +1749,11 @@ BIN_DOC = {
         "The primitive behind a histogram, a grouped aggregation over ranges, and every",
         "hand-written `if (x < a) then ... else if (x < b)` ladder. `codes(i)` is the 1-based",
         "number of the bin holding `values(i)`, or **0** when it joined none: excluded by",
-        "`is_valid`, a NaN, or outside `[edges(1), edges(nbins+1)]`. `n_null`, `n_nan` and",
-        "`n_outside` separate those three causes exactly.",
+        "`is_valid`, a NaN, carrying a zero weight, or outside `[edges(1), edges(nbins+1)]`.",
+        "`n_null`, `n_nan` and `n_outside` separate three of those four exactly; a zero-weighted",
+        "element is deliberately in none of them and leaves `ok` alone, exactly as it does in",
+        "`pf_histogram`, because it was removed from the POPULATION rather than failing to reach",
+        "a bin. `pf_count_valid` over the same arguments is what reports it.",
         "",
         "The search is binary, so the cost is `O(n log nbins)` and an edge array with thousands",
         "of bins is as cheap as one with four."],
@@ -1704,8 +1765,10 @@ BIN_DOC = {
         "rather than integer. Values outside the edge range join no bin and are reported through",
         "`n_outside`; numpy drops them silently, so this is strictly more information.",
         "",
-        "This is `pf_bucketize` followed by a tally, and the two agree by construction: the count",
-        "in bin k is the number of `codes` equal to k over the same arguments."],
+        "This is `pf_bucketize` followed by a tally, and the two agree by construction -- the",
+        "count in bin k is the total WEIGHT of the `codes` equal to k over the same arguments,",
+        "which is why `pf_bucketize` takes `weights` even though a weight cannot change a bin",
+        "number. Unweighted, that total weight is a count."],
 }
 
 BIN_DOC["pf_bin_edges"] = [
@@ -1899,26 +1962,44 @@ _DESCRIBE_COMMON = """    !>
 MODE_KINDS = [
     ("i32", "integer(int32), intent(in) :: values(:) !! the population.",
      "integer(int32), intent(out) :: m", "the modal value; unchanged when the population is empty.",
-     "a 32-bit integer array"),
+     "a 32-bit integer array",
+     "integer(int32), allocatable, intent(out) :: modes(:)"),
     ("i64", "integer(int64), intent(in) :: values(:) !! the population.",
      "integer(int64), intent(out) :: m", "the modal value; unchanged when the population is empty.",
-     "a 64-bit integer array"),
+     "a 64-bit integer array",
+     "integer(int64), allocatable, intent(out) :: modes(:)"),
     ("bool", "logical, intent(in) :: values(:) !! the population.",
      "logical, intent(out) :: m",
      "the modal value; unchanged when the population is empty. `.false.` sorts below `.true.`, "
      "so an even split answers `.false.`.",
-     "a logical array"),
+     "a logical array",
+     "logical, allocatable, intent(out) :: modes(:)"),
     ("chr", "character(len=*), intent(in) :: values(:) !! the population; each element is trimmed.",
      "character(len=:), allocatable, intent(out) :: m",
      "the modal value, allocated to its own trimmed length. **Left unallocated when the "
      "population is empty**, which is the one shape in this module where `ok = .false.` and an "
      "unallocated result coincide -- test `ok`, or `allocated(m)`, before reading it.",
-     "a character array"),
+     "a character array",
+     "character(len=:), allocatable, intent(out) :: modes(:)"),
     ("str", "type(parquet_string_column), intent(in) :: values !! the population.",
      "character(len=:), allocatable, intent(out) :: m",
      "the modal value, allocated to its own length. Left unallocated when the population is "
      "empty.",
-     "a `parquet_string_column`"),
+     "a `parquet_string_column`",
+     "character(len=:), allocatable, intent(out) :: modes(:)"),
+]
+
+#: `modes`' shared doc-comment. Per-kind only in its DECLARATION -- the element type is the
+#: result's -- so the prose is written once here and the type line comes from the kind row.
+MODES_DOC = [
+    "**every** modal value, in ascending order, allocated to exactly the number that tie --",
+    "which is pandas' `Series.mode()`, where `m` alone is scipy's `stats.mode`. `m` is always",
+    "`modes(1)`, since both take the smallest of a tie, so asking for both costs one extra",
+    "gather and no second pass. Allocated to size 0 for an empty population, never left",
+    "unallocated: `size(modes)` is then the only test a caller needs, and an unallocated",
+    "result would make it undefined behaviour instead. For the two character forms every",
+    "element shares one length, which is the LONGEST tied value's -- a shorter one is",
+    "blank-padded, so compare with `trim()`.",
 ]
 
 #: `pf_mode`'s generic doc-comment. Not shared with `_ORDER_COMMON`: this generic accepts a
@@ -1935,6 +2016,12 @@ MODE_DOC = [
     "**Ties go to the SMALLEST value**, matching `scipy.stats.mode`, and never to the first",
     "occurrence: an answer that depended on input order would differ between an array and its",
     "own permutation, which is a reproducibility defect rather than a preference.",
+    "",
+    "**`modes` gives every tied value instead of just the smallest**, in ascending order, which",
+    "is what pandas' `Series.mode()` returns. It is allocated to exactly the number that tie, so",
+    "`size(modes)` says how many there were and `modes(1)` is always `m`. A population with one",
+    "clear winner gives a one-element array, and an empty one gives a zero-length array rather",
+    "than an unallocated result.",
     "",
     "`count` reports how many elements hold the modal value. Nulls are excluded and counted",
     "through `n_null`, as everywhere in this module; no kind here can hold a NaN, so there is",
@@ -1978,6 +2065,64 @@ CORR_D["is_valid"] = """            logical, intent(in), optional :: is_valid(:)
             !! two-sample statistic is taken over pairs; a caller holding a separate mask for each
             !! column passes `mask_x .and. mask_y`, which says what it does. A NaN on either side
             !! drops the pair as well, and is counted through `n_nan` rather than here."""
+
+
+#: The ORDER family's `threads` doc. The shared `D["threads"]` text names the central-moment pass,
+#: which `pf_median` and its siblings do not have -- their `threads=` reaches `pf_argsort`. Two
+#: texts rather than one vaguer one, because the reproducibility ARGUMENT differs: the moments are
+#: reproducible because the block tree is a function of the population size, and an order statistic
+#: is reproducible because a sort is a permutation.
+ORDER_D = dict(D)
+ORDER_D["threads"] = """            integer, intent(in), optional :: threads
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one."""
+
+#: `pf_describe` alone does both, so it gets its own text rather than either of the other two.
+DESCRIBE_D = dict(D)
+DESCRIBE_D["threads"] = """            integer, intent(in), optional :: threads
+            !! how many threads the central-moment pass and the ordering may use -- `pf_describe`
+            !! does both, which no other entry point in this module does. Absent takes the
+            !! automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- the block
+            !! decomposition is a function of the population size alone and a sort is a
+            !! permutation, so 1, 8 and a build with no OpenMP at all return the same bits. It is
+            !! a speed control and never an accuracy one."""
+
+
+#: `pf_moments`' and `pf_describe`'s own `ok` texts. Both are aggregate entry points, so the shared
+#: "the result is then a quiet NaN" wording does not say which result.
+MOMENTS_D = dict(D)
+MOMENTS_D["ok"] = """            logical, intent(out), optional :: ok
+            !! .false. when any output that was ASKED for came back a quiet NaN -- an empty
+            !! population, a `ddof` that leaves nothing to divide by, a constant population for
+            !! the shape statistics, or a non-finite value under `skipnan = .false.`. Only the
+            !! PRESENT outputs are tested, which is the only reading that works here: `vsum` over
+            !! an empty population is a correct `0`, and testing an output the caller never asked
+            !! for would report a failure that is not one. `n_valid`, `n_null` and `n_nan` are
+            !! counts and are always defined, so they are not tested.
+            !!
+            !! An infinity is NOT a failure: `mean` answers `+Inf` over a population containing
+            !! one, exactly as `pf_mean` and numpy do, and `ok` stays .true. for it while the
+            !! variance -- genuinely a NaN there -- turns it .false. if it was asked for."""
+
+DESCRIBE_D["ok"] = """            logical, intent(out), optional :: ok
+            !! .false. when the object describes a population with no defined moments -- one that
+            !! is empty after the exclusions, or that kept a NaN under `skipnan = .false.` In
+            !! either case every tier-A query on `s` answers a quiet NaN. The object itself
+            !! carries the counts (`%n_valid()`, `%n_null()`, `%n_nan()`), so this is the one
+            !! thing about the result a caller cannot otherwise read without picking a statistic
+            !! and NaN-testing it by hand."""
+
+
+def order_dmap(base):
+    """Which `threads` doc an ORDER_FAMILY row gets: `pf_describe` alone does both passes."""
+    return DESCRIBE_D if base == "describe" else ORDER_D
 
 
 def pair_iface(base, out_name, out_doc, opts, tag, decl, kindword, doc):
@@ -2072,7 +2217,7 @@ def sigclip_iface(tag, decl, has_nan, kindword):
                       ("stddev", "their POPULATION standard deviation (`ddof = 0`), as astropy reports.")):
         lines.append("            real(real64), intent(out) :: %s !! %s" % (name, doc))
     for key in mine:
-        lines.append(D[key])
+        lines.append(ORDER_D[key])
     lines.append("        end subroutine sigma_clipped_stats_%s" % tag)
     return "\n".join(lines)
 
@@ -2215,7 +2360,7 @@ def edges_body(tag, widen, has_nan):
     return "\n".join(lines)
 
 
-def mode_iface(tag, decl, res_decl, res_doc, kindword):
+def mode_iface(tag, decl, res_decl, res_doc, kindword, modes_decl):
     """One interface body for a `pf_mode` specific."""
     args = wrap_args(["values", "m"] + MODE_OPTS)
     lines = ["        !> `pf_mode` over %s." % kindword]
@@ -2225,7 +2370,12 @@ def mode_iface(tag, decl, res_decl, res_doc, kindword):
     for line in _wrap_doc(res_doc):
         lines.append("            !! " + line)
     for key in MODE_OPTS:
-        lines.append(MODE_D[key])
+        if key == "modes":
+            lines.append("            " + modes_decl.replace("intent(out)", "intent(out), optional"))
+            for line in MODES_DOC:
+                lines.append("            !! " + line)
+        else:
+            lines.append(MODE_D[key])
     lines.append("        end subroutine mode_%s" % tag)
     return "\n".join(lines)
 
@@ -2289,7 +2439,7 @@ def entry_moments_iface(tag, decl, has_nan, kindword):
     lines.append("            " + decl.strip())
     lines.append(MOMENTS_OUT_DECLS)
     for key in mine:
-        lines.append(D[key])
+        lines.append(MOMENTS_D[key])
     lines.append("        end subroutine moments_%s" % tag)
     return "\n".join(lines)
 
@@ -2343,8 +2493,9 @@ def entry_moments_body(tag, widen, has_nan):
     return "\n".join(lines)
 
 
-def order_core_iface(base, extra, out_name, out_decl, out_doc, opts, doc):
+def order_core_iface(base, extra, out_name, out_decl, out_doc, opts, doc, dmap=None):
     """One interface body for an order procedure's real64 core."""
+    dmap = dmap or D
     args = ["values"] + [e[0] for e in extra] + [out_name] + opts
     lines = [("        !> " + line).rstrip() for line in doc]
     lines.append("        module subroutine %s_f64(%s)" % (base, wrap_args(args)))
@@ -2354,13 +2505,15 @@ def order_core_iface(base, extra, out_name, out_decl, out_doc, opts, doc):
     for line in _wrap_doc(out_doc):
         lines.append("            !! " + line)
     for key in opts:
-        lines.append(D[key])
+        lines.append(dmap[key])
     lines.append("        end subroutine %s_f64" % base)
     return "\n".join(lines)
 
 
-def order_entry_iface(base, extra, out_name, out_decl, out_doc, opts, tag, decl, has_nan, kindword):
+def order_entry_iface(base, extra, out_name, out_decl, out_doc, opts, tag, decl, has_nan,
+                      kindword, dmap=None):
     """One interface body for an order procedure's per-kind entry point."""
+    dmap = dmap or D
     mine = kind_opts(opts, has_nan)
     args = ["values"] + [e[0] for e in extra] + [out_name] + mine
     lines = ["        !> `pf_%s` over %s." % (base, kindword)]
@@ -2373,7 +2526,7 @@ def order_entry_iface(base, extra, out_name, out_decl, out_doc, opts, tag, decl,
     for line in _wrap_doc(out_doc):
         lines.append("            !! " + line)
     for key in mine:
-        lines.append(D[key])
+        lines.append(dmap[key])
     lines.append("        end subroutine %s_%s" % (base, tag))
     return "\n".join(lines)
 
@@ -2469,7 +2622,8 @@ ORDER_DOC = {
         "are different questions.",
         "",
         "`method=` selects the rule (see `pf_quantile`); `pf_median` is exactly",
-        "`pf_quantile(values, 0.5, med)`."],
+        "`pf_quantile(values, 0.5, med)`, and `pf_quantile`\'s doc-comment sets out the three",
+        "ways `pf_nth_quantile` differs from both."],
     "pf_quantile": [
         "One quantile of a population, interpolated between the bracketing order statistics.",
         "",
@@ -2484,7 +2638,15 @@ ORDER_DOC = {
         "escape hatch, and is what `weight_type=\"frequency\"` selects by default.",
         "",
         "One call with one probability uses SELECTION rather than a sort where it can, so it is",
-        "O(n). Asking for several probabilities should use `pf_quantiles`, which sorts once."],
+        "O(n). Asking for several probabilities should use `pf_quantiles`, which sorts once.",
+        "",
+        "**`pf_nth_quantile` in `parquet_sorting` is the other one**, and the two differ in three",
+        "ways rather than one: it returns an ELEMENT of the input (with `index=` saying which)",
+        "instead of an interpolated value, it accepts every element type this library sorts",
+        "including `character` and the temporal kinds, and it takes no weights. Its `ok` also",
+        "means the opposite of this module\'s -- omitting `ok` there makes a degenerate",
+        "population ABORT, where omitting it here is the ordinary way to call. Reach for it when",
+        "the question is *which row*, and for this one when the question is *what value*."],
     "pf_quantiles": [
         "Several quantiles of one population, from ONE ordering of it.",
         "",
@@ -2573,8 +2735,13 @@ def spec_iface(tag, decl, what, is_real):
     """One interface body for count_valid_<tag>."""
     out = []
     out.append("        !> `pf_count_valid` over a %s array." % what)
-    out.append("        module subroutine count_valid_%s(values, n, is_valid, weights%s)"
-               % (tag, ", skipnan" if is_real else ""))
+    out.append("        !>")
+    out.append("        !> `n_null`/`n_nan` report WHY elements left, which is the whole reason to")
+    out.append("        !> reach for this procedure rather than `size(values)`: the three numbers")
+    out.append("        !> together account for every element except the zero-weighted ones, and")
+    out.append("        !> that difference is what a zero weight IS.")
+    out.append("        module subroutine count_valid_%s(values, n, is_valid, weights%s, n_null%s)"
+               % (tag, ", skipnan" if is_real else "", ", n_nan" if is_real else ""))
     out.append("            %s, intent(in) :: values(:) !! the population to count." % decl)
     out.append("            integer(int64), intent(out) :: n !! how many elements are in the population.")
     out.append("            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.")
@@ -2586,6 +2753,9 @@ def spec_iface(tag, decl, what, is_real):
         out.append("            logical, intent(in), optional :: skipnan")
         out.append("            !! .true. (the default) excludes a NaN from the population, as a null is excluded and")
         out.append("            !! as `pf_minmax` has always done; .false. counts it as an ordinary value.")
+    out.append(D["n_null"])
+    if is_real:
+        out.append(D["n_nan"])
     out.append("        end subroutine count_valid_%s" % tag)
     return "\n".join(out)
 
@@ -2594,7 +2764,7 @@ def body(tag, decl, what, is_real):
     """One implementation of count_valid_<tag>."""
     out = []
     out.append("    module procedure count_valid_%s" % tag)
-    out.append("        integer(int64) :: i, nv")
+    out.append("        integer(int64) :: i, nv, nnull%s" % (", nnan" if is_real else ""))
     if is_real:
         out.append("        logical :: skip")
     out.append("")
@@ -2604,19 +2774,28 @@ def body(tag, decl, what, is_real):
         out.append("        skip = .true.")
         out.append("        if (present(skipnan)) skip = skipnan")
     out.append("        n = 0_int64")
+    out.append("        nnull = 0_int64")
+    if is_real:
+        out.append("        nnan = 0_int64")
     out.append("        do i = 1_int64, nv")
     out.append("            ! The family's exclusion order: nullness, then NaN, then weight. A weight is")
     out.append("            ! examined only for an element still in the population, which is what keeps a NaN")
     out.append("            ! weight beside a null value from aborting.")
     out.append("            if (present(is_valid)) then")
-    out.append("                if (.not. is_valid(i)) cycle")
+    out.append("                if (.not. is_valid(i)) then")
+    out.append("                    nnull = nnull + 1_int64")
+    out.append("                    cycle")
+    out.append("                end if")
     out.append("            end if")
     if is_real:
         out.append("            if (skip) then")
         out.append("                ! `x /= x` rather than `ieee_is_nan`: this is a per-element path, and")
         out.append("                ! `ieee_is_nan` is a runtime call on ifx and nagfor. Both are quiet on a")
         out.append("                ! quiet NaN, so the only cost is a -Wcompare-reals warning under -Wall.")
-        out.append("                if (values(i) /= values(i)) cycle")
+        out.append("                if (values(i) /= values(i)) then")
+        out.append("                    nnan = nnan + 1_int64")
+        out.append("                    cycle")
+        out.append("                end if")
         out.append("            end if")
     out.append("            if (present(weights)) then")
     out.append('                call stats_check_weight(weights(i), i, "pf_count_valid")')
@@ -2624,6 +2803,9 @@ def body(tag, decl, what, is_real):
     out.append("            end if")
     out.append("            n = n + 1_int64")
     out.append("        end do")
+    out.append("        if (present(n_null)) n_null = nnull")
+    if is_real:
+        out.append("        if (present(n_nan)) n_nan = nnan")
     out.append("    end procedure count_valid_%s" % tag)
     return "\n".join(out)
 
@@ -2690,7 +2872,8 @@ def gen_spec():
     out.append("    ! ---- Counting ----")
     out.append("    interface")
     out.append("\n".join(spec_iface(*t) for t in TYPES))
-    out.append(COUNT_COL_IFACE)
+    out.append(COUNT_COL_IFACE.replace("@@count_col_counts@@",
+                                       D["n_null"] + "\n" + D["n_nan"]))
     out.append("    end interface")
     for name in ("pf_sum", "pf_mean", "pf_gmean", "pf_hmean", "pf_variance", "pf_stddev",
                  "pf_sem", "pf_skewness", "pf_kurtosis", "pf_moments"):
@@ -2763,7 +2946,7 @@ def gen_spec():
     for line in MODE_DOC:
         out.append(("    !> " + line).rstrip())
     out.append("    interface pf_mode")
-    for tag, _, _, _, _ in MODE_KINDS:
+    for tag, _, _, _, _, _ in MODE_KINDS:
         out.append("        module procedure mode_%s" % tag)
     out.append("    end interface pf_mode")
     out.append(GUARD_SPEC.rstrip("\n"))
@@ -2772,14 +2955,14 @@ def gen_spec():
     out.append("    interface")
     for text in CORE_IFACES:
         out.append("\n".join(line.rstrip() for line in text.split("\n")))
-    out.append(MOMENTS_IFACE % "\n".join(D[k] for k in MOMENTS_OPTS))
+    out.append(MOMENTS_IFACE % "\n".join(MOMENTS_D[k] for k in MOMENTS_OPTS))
     out.append("    end interface")
     out.append("    !")
     out.append("    ! ---- The real64 order core (implemented in parquet_stats_order) ----")
     out.append("    interface")
     for base, extra, out_name, out_decl, out_doc, opts in ORDER_FAMILY:
         out.append(order_core_iface(base, extra, out_name, out_decl, out_doc, opts,
-                                    ORDER_DOC["pf_" + base]))
+                                    ORDER_DOC["pf_" + base], dmap=order_dmap(base)))
     out.append(ORDER_HELPER_IFACES.rstrip("\n"))
     out.append("    end interface")
     out.append("    !")
@@ -2789,7 +2972,7 @@ def gen_spec():
     relate = relate.replace("@@cov_opts@@", "\n".join(CORR_D[k] for k in COV_OPTS))
     relate = relate.replace("@@corr_opts@@", "\n".join(CORR_D[k] for k in CORR_OPTS))
     relate = relate.replace("@@zscore_opts@@", "\n".join(D[k] for k in ZSCORE_OPTS))
-    relate = relate.replace("@@sigclip_opts@@", "\n".join(D[k] for k in SIGCLIP_OPTS))
+    relate = relate.replace("@@sigclip_opts@@", "\n".join(ORDER_D[k] for k in SIGCLIP_OPTS))
     out.append(relate)
     cum = CUM_IFACES.replace("@@cum_opts@@", "\n".join(D[k] for k in CUM_OPTS))
     out.append(cum)
@@ -2817,7 +3000,8 @@ def gen_spec():
         out.append(entry_moments_iface(tag, decl, has_nan, kindword))
         for base, extra, out_name, out_decl, out_doc, opts in ORDER_FAMILY:
             out.append(order_entry_iface(base, extra, out_name, out_decl, out_doc, opts,
-                                         tag, decl, has_nan, kindword))
+                                         tag, decl, has_nan, kindword,
+                                         dmap=order_dmap(base)))
         out.append(pair_iface("cov", "c", "the covariance; NaN when `n_valid <= ddof`.",
                               COV_OPTS, tag, decl, kindword, []))
         out.append(pair_iface("corr", "r",

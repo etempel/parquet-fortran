@@ -29,12 +29,21 @@ call pf_count_valid(mag, n)                      ! how many elements there are
 call pf_count_valid(mag, n, is_valid=ok)         ! ... excluding the nulls
 call pf_count_valid(mag, n, weights=w)           ! ... and the zero-weighted
 call pf_count_valid(mag, n, skipnan=.false.)     ! ... counting NaNs as ordinary values
+call pf_count_valid(mag, n, is_valid=ok, n_null=nn, n_nan=nx)   ! ... and WHY they left
 ```
 
 Square brackets in a signature below mark an optional argument.
 
-**`pf_count_valid(values, n, [is_valid], [weights], [skipnan])`** answers pandas' `Series.count()`:
-how many elements of `values` are in the population. `n` is an `integer(int64)`.
+**`pf_count_valid(values, n, [is_valid], [weights], [skipnan], [n_null], [n_nan])`** answers
+pandas' `Series.count()`: how many elements of `values` are in the population. `n`, `n_null` and
+`n_nan` are all `integer(int64)`.
+
+`n_null` and `n_nan` report *why* elements left, which is the reason to reach for this procedure
+rather than `size(values)`. The three numbers together account for every element except the
+zero-weighted ones, and that difference is what a zero weight is:
+`size(values) - n_null - n_nan - n` is how many were dropped for carrying no weight. There is no
+`ok` here — a count is defined for every population, including an empty one, so there would be
+nothing for it to report.
 
 `skipnan` is offered only on the two real kinds and on a `parquet_column`. An integer or logical
 array has no NaN to skip, and an argument that can never do anything is worse than an absent one.
@@ -102,8 +111,21 @@ requested — once for the mean, once for the central moments — and nothing is
 asked for. Its outputs come before the common argument block and are, in order, `n_valid`, `mean`,
 `variance`, `stddev`, `sem`, `skewness`, `kurtosis`, `vsum`, `vmin`, `vmax`.
 
+Its `ok=` reports whether every output the caller **asked for** came back defined — only the present
+ones are tested, which is the only reading that works here: `vsum` over an empty population is a
+correct `0` and `vmin` is a NaN, so testing all ten would report a failure to a caller who asked
+only for the sum and got the right answer. The three counts are always defined and are not tested.
+
 The one-shot forms are `pf_sum`, `pf_mean`, `pf_variance`, `pf_stddev`, `pf_sem`, `pf_skewness` and
 `pf_kurtosis`. Each is that same engine with one output, so they agree with `pf_moments` bit for bit.
+
+**An `integer(int64)` population is exact only while every value is.** Every kind widens to
+`real64` on the way in — that is what makes all six return the same bits — so a value above `2⁵³`
+loses its low bits *before* any arithmetic, and no summation order recovers them:
+`pf_sum([2**53+1, 1, 2**53+1, 1])` answers `1.8014398509481984e16` where the exact integer total is
+`18014398509481988`. numpy and pandas keep an int64 sum in int64 and stay exact until it wraps. A
+population of genuinely huge integers has to be summed by the caller in `int64`, or shifted and
+scaled first. `int32` is unaffected: every `int32` value is exactly representable in `real64`.
 
 **`pf_mean` is not literally `sum/n`.** The quotient is taken and then refined by
 `sum(w*(x - mu))/sum(w)`, which is algebraically zero and in floating point is the rounding error
@@ -141,6 +163,59 @@ can be charged against two different counts, so `weight_type` names which you me
 With every weight equal the two agree with each other and with the unweighted answer, which is why
 this only has to be decided once, for data that is actually weighted. An unrecognised token aborts.
 
+Worked, on a population of three values where one occurred twice:
+
+```fortran
+real(real64) :: x(3) = [10.0_real64, 12.0_real64, 14.0_real64]
+real(real64) :: w(3) = [1.0_real64,  2.0_real64,  1.0_real64]
+real(real64) :: v
+
+call pf_variance(x, v, weights=w)                          ! reliability -- the default
+! -> 3.2   The weighted mean is 12 and sum(w*(x-12)**2) is 8. Kish's effective size
+!          is sum(w)**2/sum(w**2) = 16/6 = 2.667, so ddof=1 leaves 4 - 1*6/4 = 2.5
+!          to divide by: a weight of 2 says "more precise", not "seen twice", and
+!          buys less than one extra independent observation.
+
+call pf_variance(x, v, weights=w, weight_type="frequency")
+! -> 2.6667  ddof=1 charged against sum(w) = 4, so the divisor is 3.
+
+call pf_variance([10.0_real64, 12.0_real64, 12.0_real64, 14.0_real64], v)
+! -> 2.6667  the same number, which is the property that DEFINES the token: a
+!            frequency weight of 2 must agree with writing the value out twice.
+```
+
+The same distinction reaches `pf_stddev`, `pf_sem`, `pf_skewness`, `pf_kurtosis`, `pf_moments`,
+`pf_cov`, `pf_describe`, every weighted quantile and `pf_stats%init`. It does **not** reach
+`pf_corr`, `pf_trim_mean`, `pf_mad` or `pf_percentile_of_score`: in a correlation the `ddof` in the
+covariance and the two in the standard deviations cancel exactly, and the other three have no
+degrees-of-freedom question to charge anything against. An argument that could never change an
+answer is worse than an absent one, so those procedures do not take it.
+
+### Which procedures take `weights`, and why the rest do not
+
+The rule is the reference libraries' own: a procedure here takes `weights` exactly where numpy,
+scipy or pandas offers a weighted form of the same statistic.
+
+**Takes `weights`** — `pf_count_valid`, `pf_sum`, `pf_mean`, `pf_gmean`, `pf_hmean`, `pf_variance`,
+`pf_stddev`, `pf_sem`, `pf_skewness`, `pf_kurtosis`, `pf_moments`, `pf_median`, `pf_quantile`,
+`pf_quantiles`, `pf_iqr`, `pf_trim_mean`, `pf_percentile_of_score`, `pf_mad`, `pf_describe`,
+`pf_cov`, `pf_corr` (Pearson only), `pf_mode`, `pf_bucketize`, `pf_histogram`, `pf_bin_edges`,
+and `pf_stats%compute`/`%update`.
+
+**Does not, and the argument is absent rather than ignored** — so passing one is a compile error
+rather than something to discover at run time:
+
+| procedure | why |
+|---|---|
+| `pf_zscore` | scipy's `zscore` has no weighted form. A weighted mean over an unweighted scale, or both weighted, are different standardisations and neither leaves the output with unit variance under every convention |
+| `pf_sigma_clipped_stats` | astropy's `sigma_clipped_stats` has none either; a weighted scale estimator inside an iterative clip is a further definitional choice |
+| `pf_cumsum`, `pf_cumprod`, `pf_cummax`, `pf_cummin` | pandas' `cum*` are per-element by nature. A weighted running sum is `pf_cumsum(w*x)`, written at the call site, and the other three have no weighted meaning worth choosing between |
+| `pf_corr(method="spearman")` | no reference library defines a weighted midrank; passing `weights` with that token aborts rather than inventing one |
+
+`pf_bucketize` takes `weights` for one reason only: a zero weight has to remove an element there
+too, or the documented `pf_histogram` = `pf_bucketize`-tallied identity would be false whenever the
+histogram is weighted. A weight never changes a bin number.
+
 ### Accuracy is a documented property, not an implementation detail
 
 The variance and the higher moments are computed in **two passes** — the mean first, then the
@@ -168,9 +243,18 @@ exactly when the value beside it is not a NaN.
 | `ddof >= n_valid` — including one element at the default `ddof=1` | variance, stddev and sem are NaN |
 | every value identical | variance exactly `0`; skewness and kurtosis NaN |
 | fewer than 3 (skewness) or 4 (kurtosis) elements, bias-corrected | that statistic is NaN |
+| contains `+Inf` (or only `-Inf`) | `sum` and `mean` are that infinity with `ok = .true.`; every central moment is NaN |
+| contains **both** `+Inf` and `-Inf` | `sum` and `mean` are NaN too |
 
 The empty sum is `0` rather than NaN because that is the additive identity and what numpy and pandas
 both return; `n_valid` sits beside it, so nothing is hidden by it.
+
+**An infinity is a value, not a failure**, so a mean of `+Inf` comes back with `ok = .true.` — which
+is numpy's and pandas' answer, and this module's own `pf_sum`'s, and they must not disagree over one
+population. Only a NaN sets `ok = .false.`, and the variance genuinely *is* NaN there: every
+deviation from an infinite mean is either infinite or `Inf - Inf`. Nothing on this page aborts on a
+non-finite **value**; a non-finite **weight**, a non-finite `center=` and a non-finite `score=` all
+abort, because those can only come from the caller's own arithmetic rather than from data.
 
 ### Threading
 
@@ -385,6 +469,22 @@ variable is not a statistic, and floating-point equality is a trap rather than a
 - **An empty population gives `ok = .false.` and `count = 0`,** and `m` must not be read. For the
   two character forms `m` is then left *unallocated*, which is the one place in this module where
   `ok = .false.` and an unallocated result coincide.
+- **`modes=` gives every tied value**, ascending, which is what pandas' `Series.mode()` returns
+  where `m` alone is scipy's. It comes back allocated to exactly the number that tie, so
+  `size(modes)` says how many there were and `modes(1)` is always `m`. A population with one clear
+  winner gives a one-element array, and an empty one a **zero-length** array rather than an
+  unallocated one — so `size(modes)` is always safe to read.
+
+```fortran
+integer(int32), allocatable :: all_modes(:)
+
+call pf_mode([1, 1, 2, 2, 3, 3, 4, 5, 5], m, count=n, modes=all_modes)
+! m = 1, n = 2, all_modes = [1, 2, 3, 5] -- exactly pandas' Series.mode()
+```
+
+For the two character forms `modes` is a `character(len=:), allocatable` array, so every element
+shares one length: the **longest** tied value's, with the shorter ones blank-padded. Compare with
+`trim()`.
 
 The result has the type of `values`, so the character forms return a `character(len=:), allocatable`
 through an `intent(out)` argument. A `character(len=*)` array's answer is **trimmed**, so it comes
@@ -406,7 +506,10 @@ call s%print(name="mag")
 
 `pf_describe` is `%compute` followed by `%prepare_order`: **one pair of traversals and one
 ordering**, after which the count, the mean, the standard deviation, the extremes and every quantile
-are reads. `%print` renders the block pandas' `describe()` prints:
+are reads. Its `ok=` is `.false.` for exactly the two populations that leave every tier-A query on
+the object a NaN — one that is empty after the exclusions, and one that kept a NaN under
+`skipnan = .false.` — so it is the one thing about the result a caller cannot read off the object
+itself, which carries the counts but no `%ok()`. `%print` renders the block pandas' `describe()` prints:
 
 ```
 pf_stats mag
@@ -478,12 +581,15 @@ is not a number. `n_null` and `n_nan` therefore count **pairs** here, not elemen
 
 Two identities hold **exactly**, and the test suite asserts them with `==` rather than a tolerance:
 
-- `pf_cov(x, x)` is `pf_variance(x)` bit for bit, at any `ddof`. That is why the covariance is
-  accumulated by the same block tree the variance is, rather than by a loop of its own.
+- `pf_cov(x, x)` is `pf_variance(x)` bit for bit, at any `ddof` **and under either
+  `weight_type`**. That is why the covariance is accumulated by the same block tree the variance
+  is, rather than by a loop of its own, and why `pf_cov` takes `weight_type=` at all: without it
+  the identity would fail for any caller who asked the variance for frequency weights.
 - `pf_corr(x, x)` is exactly `1`, and `pf_corr(x, -x)` exactly `-1`.
 
-**`pf_corr` has no `ddof`** — the one in the covariance and the two in the standard deviations cancel
-exactly, so the argument could never change the answer. Spearman is Pearson over **midranks**: each
+**`pf_corr` has neither `ddof` nor `weight_type`** — the `ddof` in the covariance and the two in
+the standard deviations cancel exactly, and the two weight conventions differ only in the count
+`ddof` is charged against, so neither argument could ever change the answer. Spearman is Pearson over **midranks**: each
 run of equal values receives the mean of the sorted positions it spans, so it measures any monotone
 relationship rather than a linear one. `weights` with `method="spearman"` **aborts**: a weighted
 midrank is a further definitional choice that no reference library makes.
@@ -619,9 +725,26 @@ their weights** when `weights` is present, which is what `np.histogram(weights=)
 `counts` is real rather than integer. Unweighted the counts are whole numbers exactly, up to 2⁵³
 elements in one bin.
 
-The two are the same operation: `counts(k)` is the number of `codes` equal to `k` over the same
-arguments, and they share one edge search, so that identity cannot drift. (It holds with `density`
-absent, naturally — the whole point of `density` is to stop being a count.)
+The two are the same operation: `counts(k)` is the **total weight** of the `codes` equal to `k` over
+the same arguments, and they share one edge search, so that identity cannot drift. Unweighted, that
+total weight is a count. (It holds with `density` absent, naturally — the whole point of `density`
+is to stop being a count.)
+
+**That is why `pf_bucketize` takes `weights` too**, although a weight can never change a bin
+number. It decides *membership*: a zero weight removes the element from the population, here as
+everywhere else in this module, so a bucketize blind to weights would hand that element an ordinary
+code while the histogram beside it left the element out — and the identity above would be false for
+every weighted call.
+
+```fortran
+call pf_histogram(x, edges, counts, weights=w)
+call pf_bucketize(x, edges, codes, weights=w)
+tally = 0.0_real64
+do i = 1, size(x)
+    if (codes(i) > 0) tally(codes(i)) = tally(codes(i)) + w(i)
+end do
+! tally == counts, element for element
+```
 
 **`density = .true.`** divides each bin by its own *width* and by the total that was binned, giving
 a probability density: `np.histogram(density=True)`, so `sum(counts * widths)` is 1 and an uneven
@@ -675,15 +798,24 @@ extreme value does not stretch the range over data that will not be counted.
 **The edges are always strictly increasing.** That is a contract, not an observation: they exist to
 be passed to `pf_histogram`, which *aborts* on a pair that is not, so a degenerate population must
 never produce edges that abort one call later. `ok = .false.` says the edges do not describe the
-data's own range, and there are three ways to get it:
+data's own range, and there are four ways to get it:
 
 | population | edges | why |
 |---|---|---|
 | empty | `[0, 1]` split `nbins` ways | numpy's own fallback; there is no range to describe |
 | constant at `x` | `[x - 0.5, x + 0.5]` split `nbins` ways | also numpy's |
 | `nbins` finer than the range resolves | the boundaries nudged apart by one ulp each | the spacing underflowed |
+| holds `+Inf`, `-Inf`, or a NaN kept by `skipnan = .false.` | the range of the **finite** values | an infinity cannot be a boundary, and every interior edge would come out infinite |
 
-In all three the edges are still usable, which is what `ok` is *not* saying.
+In all four the edges are still usable, which is what `ok` is *not* saying.
+
+The last row is the one worth reading twice, because it is the one an ordinary data condition
+reaches: an upstream division by zero or an overflowed unit conversion puts an `+Inf` in a column,
+and edges taken over it would be `[1, Inf, Inf, Inf, Inf]` — not increasing, so `pf_histogram`
+would abort one call later on data that is merely unusual. Non-finite values are therefore excluded
+from the **range scan** only; they remain in the population everywhere else, and `pf_histogram` puts
+them in `n_outside`, since an infinity matches no finite bin. numpy raises `ValueError` on the same
+input.
 
 There is deliberately no explicit range pair. A caller who already knows the bounds can write the
 `nbins + 1` values directly; what earns a procedure is finding the range under this module's
@@ -772,6 +904,7 @@ population is a no-op — which is what lets a threaded fold run over slots a sh
 |---|---|
 | counts | `%n()`, `%n_valid()`, `%n_null()`, `%n_nan()`, `%sum_weights()` |
 | moments | `%sum()`, `%mean()`, `%variance([ddof])`, `%stddev([ddof])`, `%sem([ddof])`, `%skewness([bias])`, `%kurtosis([bias], [excess])` |
+| power means | `%gmean()`, `%hmean()` — **need `retain`**, see below |
 | extremes | `%vmin()`, `%vmax()`, `%range()` |
 | order | `%median([method])`, `%quantile(p, [method])`, `%quantiles(probs, out, [method])`, `%iqr([method])`, `%trim_mean(prop)`, `%percentile_of_score(score, [kind])` |
 | deviation | `%mad([scale], [center])` |
@@ -781,6 +914,19 @@ population is a no-op — which is what lets a threaded fold run over slots a sh
 The arguments mean exactly what they mean on the one-shot procedures, including every default in
 the table above, and the exclusion rules are the same ones. `weight_type` and `skipnan` are fixed at
 `%compute`/`%init` rather than passed per query, because a population cannot be two populations.
+
+Those two, and `retain`, are the **three policies `%merge` checks**: folding one accumulator into
+another aborts when they disagree on any of them, naming which. A `skipnan` mismatch is as much a
+mistake as the other two — it decides what the population *is*, so a NaN-skipping partial merged
+into a NaN-propagating one would produce a number describing neither convention.
+
+`%gmean` and `%hmean` are the two queries that need the *retained values* rather than the
+accumulator, so they **abort on a streaming accumulator** (`retain = .false.`), exactly as the
+order statistics do — and, unlike those, they order nothing. A log-sum is a fifth quantity the four
+central moments do not contain, and accumulating it in the hot loop would charge a transcendental
+per element to every population that never asks for one. Both answer exactly what the one-shot
+`pf_gmean`/`pf_hmean` would over the same population, including the domain rules: NaN for a
+negative value anywhere, and exactly `0` when any value is `0`.
 
 A query may complete a deferred recomputation, so each takes the object as `intent(inout)`: a
 `pf_stats` passed as `intent(in)` cannot be queried. **Reading a statistic off an object that was
@@ -859,6 +1005,28 @@ it, and omission is exactly what a subsequence permits.
 A procedure omits the ones it has no use for and never reorders the rest. In Fortran the order of
 optional arguments is part of the public contract — a caller may pass them positionally — so this is
 a compatibility promise, not a style preference, and a lint check enforces it against the source.
+
+## Related operations that live elsewhere
+
+Several things a reader arrives at this page looking for are reductions over an array, and are in
+`parquet_sorting` rather than here — because they answer *which element* rather than *what value*,
+which is the line between the two modules. `use parquet_stats` already brings that module in, so
+none of these needs a second import:
+
+| you want | reach for | notes |
+|---|---|---|
+| the smallest and largest value | `pf_minmax` | one pass, every element type; also `pf_argminmax` for their positions |
+| the rank of every element | `pf_rank` | ties by `"min"`, `"max"`, `"average"`, `"dense"` or `"ordinal"`; this is what `pf_corr(method="spearman")` uses internally |
+| the distinct values | `pf_unique` | with `counts=` for a value-count table |
+| an ELEMENT at a given quantile | `pf_nth_quantile` | returns a member of the input, with `index=` saying which — see [`pf_median` is not `pf_nth_quantile`](#pf_median-is-not-pf_nth_quantile) |
+| the k-th smallest element | `pf_nth_element` | O(n) selection, no full sort |
+| a sorted copy, or the permutation | `pf_sort` / `pf_argsort` | the ordering every quantile here is built on |
+
+They are documented on [Sorting, ranking and selection](sorting.html). **Their `ok` argument means
+the opposite of this module's**: omitting it there makes a degenerate population *abort*, where
+omitting it here is the ordinary way to call and a degenerate population answers a quiet NaN. That
+difference is deliberate — an order statistic that has no element to return has nothing to answer
+with — but it is the one thing to check when moving a call between the two.
 
 ## What it costs to import
 

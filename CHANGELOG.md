@@ -24,20 +24,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under `pf_*` names, for reducing arrays a program already has rather than anything about a
   parquet file. It opens with `pf_count_valid`, which answers how many elements are in the
   population over `integer(int32)`, `integer(int64)`, `real(real32)`, `real(real64)` and `logical`
-  arrays, and with it the conventions the rest of the family follows: a null (`is_valid=`), a
-  NaN (`skipnan=`, defaulting to excluded as `pf_minmax` already does) and a zero weight
-  (`weights=`) each leave the population, in that order, so a weight belonging to an excluded
-  element is never examined; an empty or fully excluded population answers zero rather than
-  aborting; and every procedure declares its optional arguments in one fixed order. The moment
+  arrays — with `n_null=`/`n_nan=` reporting why the rest left — and with it the conventions the
+  rest of the family follows: a null (`is_valid=`), a NaN (`skipnan=`, defaulting to excluded as
+  `pf_minmax` already does) and a zero weight (`weights=`) each leave the population, in that
+  order, so a weight belonging to an excluded element is never examined; an empty or fully
+  excluded population answers zero rather than aborting; and every procedure declares its optional
+  arguments in one fixed order. A non-finite value is data rather than an error: a population
+  containing `+Inf` sums and means to `+Inf` with `ok=.true.`, as numpy and pandas answer, while
+  its central moments are NaN. The moment
   family follows over `real(real64)` arrays: `pf_sum`, `pf_mean`, `pf_variance`, `pf_stddev`,
   `pf_sem`, `pf_skewness`, `pf_kurtosis`, and `pf_moments`, which produces all of them plus the
-  counts, the sum and the extremes in one pair of passes. They are weighted (`weights=`,
+  counts, the sum and the extremes in one pair of passes, with `ok=` over the outputs asked for. They are weighted (`weights=`,
   `weight_type=`), take `ddof=`/`bias=`/`excess=` with pandas' defaults rather than numpy's, are
   computed two-pass over a fixed pairwise block tree so that the variance is shift-invariant, and
   return a quiet NaN with `ok=.false.` wherever a statistic is undefined. A `pf_stats` accumulator
   summarises a population once and answers any number of queries off it: `%compute` for a resident
   array, `%init` plus `%update` for one arriving in pieces, and `%merge` — whose array form folds in
-  index order — for accumulating in parallel. Everything in the module takes any of six inputs:
+  index order, and which requires the two accumulators to agree on all three of `retain`,
+  `weight_type` and `skipnan` — for accumulating in parallel. Everything in the module takes any of six inputs:
   `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` and `logical` arrays, all
   widened exactly, and a scalar numeric `type(parquet_column)` dispatched on its kind. The
   central-moment pass is threaded on a large population, with `threads=` to override the automatic
@@ -49,10 +53,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ordering, dropping it whenever `%update` or `%merge` changes the population. `pf_mad` gives the
   median absolute deviation, scaled by default so that it estimates the standard deviation of clean
   Gaussian data, with `scale=` and `center=`; `pf_mode` gives the most common value over the
-  integer, logical and string kinds, breaking ties to the smallest value. `pf_describe` fills a
-  `pf_stats` in one pair of passes and one ordering, and `%print` renders the summary block pandas'
-  `describe()` prints. `pf_gmean` and `pf_hmean` give the geometric and harmonic means; `pf_cov`
-  and `pf_corr` the pairwise-complete covariance and correlation, Pearson or Spearman; `pf_zscore`
+  integer, logical and string kinds, breaking ties to the smallest value — or, through `modes=`,
+  returning every tied value as pandas' `Series.mode()` does. `pf_describe` fills a `pf_stats` in
+  one pair of passes and one ordering, with `ok=`, and `%print` renders the summary block pandas'
+  `describe()` prints. `pf_gmean` and `pf_hmean` give the geometric and harmonic means, also as
+  `pf_stats` queries; `pf_cov` and `pf_corr` the pairwise-complete covariance and correlation,
+  Pearson or Spearman, with `pf_cov(x, x)` reproducing `pf_variance(x)` bit for bit under either
+  `weight_type`; `pf_zscore`
   standardises a whole array; and `pf_sigma_clipped_stats` reproduces astropy's iterative clip on a
   single ordering, reporting the surviving mask so the same clip can be applied to another column.
   `pf_cumsum`, `pf_cumprod`, `pf_cummax` and `pf_cummin` give the running folds, where an excluded
@@ -60,8 +67,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pandas does. `pf_bucketize` says which bin of a sorted edge array each value falls in, and
   `pf_histogram` how many values — or how much weight — landed in each, under either numpy's or
   pandas' edge convention, reporting the values that reached no bin rather than dropping them
-  silently, and optionally as a `density=` normalised the way `np.histogram` normalises one.
-  `pf_bin_edges` supplies the edges themselves, spanning the population's own range.
+  silently, and optionally as a `density=` normalised the way `np.histogram` normalises one; both
+  take `weights=`, so the histogram is the bucketize tally in every case. `pf_bin_edges` supplies
+  the edges themselves, spanning the finite part of the population's own range, and always
+  strictly increasing so that the `pf_histogram` call they exist for cannot abort.
   See [Array statistics](doc/pages/utilities/statistics.md).
 - **`parquet_logging`: general-purpose logging for the calling program.** A `pf_logger` type and a
   matching set of `pf_log_*` procedures on a process-wide default logger: eight ascending severity

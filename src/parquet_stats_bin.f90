@@ -10,9 +10,15 @@
 !!
 !! **`pf_histogram` IS `pf_bucketize` followed by a tally, and that is a property rather than an
 !! implementation note.** Both reach `bin_of` for every value, so the count in bin k is exactly
-!! the number of codes equal to k over the same arguments -- there is no second edge-search rule
-!! that could drift from the first. A test asserts the identity in both edge conventions; keep
-!! them sharing `bin_of` and it holds by construction.
+!! the total weight of the codes equal to k over the same arguments -- there is no second
+!! edge-search rule that could drift from the first. A test asserts the identity in both edge
+!! conventions, weighted and not; keep them sharing `bin_of` and the same exclusion order and it
+!! holds by construction.
+!!
+!! **That is why `pf_bucketize` takes `weights` at all**, since a weight cannot change a bin
+!! number. It decides MEMBERSHIP: a zero weight removes the element from the population, here as
+!! everywhere else in this module, and a bucketize blind to weights would hand that element an
+!! ordinary code while the histogram beside it left the element out.
 !!
 !! **The two conventions are mirror images and cover the closed range exactly once.** With
 !! `right = .false.` (numpy's, the default) bin k is `[edges(k), edges(k+1))` and the LAST bin
@@ -133,7 +139,7 @@ contains
         if (size(codes, kind=int64) /= n) &
             error stop "pf_bucketize: codes has " // trim(stats_i2s(size(codes, kind=int64))) // &
                 " elements but values has " // trim(stats_i2s(n))
-        call stats_check_sizes(n, "pf_bucketize", is_valid)
+        call stats_check_sizes(n, "pf_bucketize", is_valid, weights)
         call check_edges(edges, "pf_bucketize", nbins)
         skip = .true.
         if (present(skipnan)) skip = skipnan
@@ -157,6 +163,17 @@ contains
                     cycle
                 end if
             end if
+            if (present(weights)) then
+                ! **The whole reason this procedure takes weights**: a zero weight removes the
+                ! element from the population everywhere else in this module, and without this
+                ! branch a bucketize would give it an ordinary bin code while `pf_histogram` over
+                ! the same arguments left it out -- breaking the identity the two are documented
+                ! to satisfy. The weight is examined last, in the module's usual exclusion order,
+                ! so garbage sitting where a value is null cannot abort the call, and it never
+                ! scales anything: a code is a bin number.
+                call stats_check_weight(weights(i), i, "pf_bucketize")
+                if (weights(i) <= 0.0_real64) cycle
+            end if
             k = bin_of(values(i), edges, nbins, use_right)
             if (k == 0_int64) then
                 nout = nout + 1_int64
@@ -170,7 +187,9 @@ contains
         if (present(n_nan)) n_nan = nnan
         if (present(n_outside)) n_outside = nout
         ! ONE flag with three causes, and the three counts separate them exactly -- the same shape
-        ! `pf_zscore` uses, and the reason no second flag is offered.
+        ! `pf_zscore` uses, and the reason no second flag is offered. A zero-weighted element is
+        ! deliberately in none of the three and leaves this alone, exactly as it does in
+        ! `pf_histogram`: it left the POPULATION rather than failing to reach a bin.
         if (present(ok)) ok = (nnull + nnan + nout == 0_int64)
     end procedure bucketize_f64
 
@@ -264,11 +283,17 @@ contains
     !! degenerate population must not produce edges that abort one call later, and every branch
     !! below ends in a usable array. `ok` reports that the edges do not describe the data's own
     !! range; it never means "unusable".
+    !!
+    !! There are four such branches, and the range scan's non-finite exclusion is the one that is
+    !! easy to leave out: an empty population, a constant one, a span too fine for double
+    !! precision to resolve into `nbins` distinct edges, and a population holding an infinity or
+    !! (under `skipnan = .false.`) a NaN. All four set `ok = .false.` and all four still return
+    !! strictly increasing edges.
     module procedure bin_edges_f64
         real(real64) :: lo, hi, span, e
         integer(int64) :: n, i, k, kept
         integer :: j
-        logical :: skip, fine
+        logical :: skip, fine, nonfinite
 
         n = size(values, kind=int64)
         if (nbins < 1) &
@@ -286,6 +311,7 @@ contains
         ! otherwise a zero-weighted extreme would stretch the edges over data that never lands in
         ! one. The same three exclusions in the same order as everywhere else in this module.
         kept = 0_int64
+        nonfinite = .false.
         lo = 0.0_real64
         hi = 0.0_real64
         if (present(n_null)) n_null = 0_int64
@@ -307,6 +333,27 @@ contains
                 call stats_check_weight(weights(i), i, "pf_bin_edges")
                 if (weights(i) <= 0.0_real64) cycle
             end if
+            ! **A non-finite value joins the population but never the RANGE**, and that is a
+            ! contract requirement rather than a policy choice. An infinity reached here would
+            ! make `span` infinite (or NaN, with both signs present), every interior edge would
+            ! come out infinite, and the repair below cannot separate two infinities -- so the
+            ! edges would fail the strict-increase test `pf_histogram` aborts on, which is
+            ! precisely what these edges exist to satisfy. A NaN is excluded here even under
+            ! `skipnan = .false.`, where it is otherwise a member of the population: it is still
+            ! not a number this scan can order. numpy raises `ValueError` on the same input; this
+            ! module never aborts on a data condition, so the range is taken over the finite
+            ! survivors and `ok = .false.` says the edges do not span the data's own range.
+            !
+            ! The counter deliberately advances only for a FINITE survivor, so a population that
+            ! is entirely non-finite takes the empty fallback below rather than the constant one.
+            if (values(i) /= values(i)) then
+                nonfinite = .true.
+                cycle
+            end if
+            if (abs(values(i)) > huge(0.0_real64)) then
+                nonfinite = .true.
+                cycle
+            end if
             kept = kept + 1_int64
             if (kept == 1_int64) then
                 lo = values(i)
@@ -320,7 +367,7 @@ contains
         ! numpy's two degenerate answers, reproduced rather than invented: an EMPTY population
         ! falls back to [0, 1] and a CONSTANT one widens to [x - 0.5, x + 0.5]. Both are arbitrary
         ! -- there is no range to describe -- which is exactly what `ok = .false.` says.
-        fine = .true.
+        fine = .not. nonfinite
         if (kept == 0_int64) then
             lo = 0.0_real64
             hi = 1.0_real64

@@ -219,6 +219,8 @@ module parquet_stats
         procedure :: sum_weights => obj_sum_weights !! `sum(w)` over the population.
         procedure :: sum => obj_sum !! `sum(w*x)` over the population.
         procedure :: mean => obj_mean !! The weighted mean.
+        procedure :: gmean => obj_gmean !! The weighted geometric mean; needs `retain`.
+        procedure :: hmean => obj_hmean !! The weighted harmonic mean; needs `retain`.
         procedure :: variance => obj_variance !! The variance, at `ddof` degrees of freedom.
         procedure :: stddev => obj_stddev !! The standard deviation.
         procedure :: sem => obj_sem !! The standard error of the mean.
@@ -263,7 +265,12 @@ module parquet_stats
     ! ---- Counting ----
     interface
         !> `pf_count_valid` over a 32-bit integer array.
-        module subroutine count_valid_i32(values, n, is_valid, weights)
+        !>
+        !> `n_null`/`n_nan` report WHY elements left, which is the whole reason to
+        !> reach for this procedure rather than `size(values)`: the three numbers
+        !> together account for every element except the zero-weighted ones, and
+        !> that difference is what a zero weight IS.
+        module subroutine count_valid_i32(values, n, is_valid, weights, n_null)
             integer(int32), intent(in) :: values(:) !! the population to count.
             integer(int64), intent(out) :: n !! how many elements are in the population.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
@@ -271,9 +278,16 @@ module parquet_stats
             !! per element weight. A zero weight REMOVES the element from the population, so a
             !! weighted count and an unweighted one over the same array legitimately differ.
             !! A negative, NaN or infinite weight aborts.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
         end subroutine count_valid_i32
         !> `pf_count_valid` over a 64-bit integer array.
-        module subroutine count_valid_i64(values, n, is_valid, weights)
+        !>
+        !> `n_null`/`n_nan` report WHY elements left, which is the whole reason to
+        !> reach for this procedure rather than `size(values)`: the three numbers
+        !> together account for every element except the zero-weighted ones, and
+        !> that difference is what a zero weight IS.
+        module subroutine count_valid_i64(values, n, is_valid, weights, n_null)
             integer(int64), intent(in) :: values(:) !! the population to count.
             integer(int64), intent(out) :: n !! how many elements are in the population.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
@@ -281,9 +295,16 @@ module parquet_stats
             !! per element weight. A zero weight REMOVES the element from the population, so a
             !! weighted count and an unweighted one over the same array legitimately differ.
             !! A negative, NaN or infinite weight aborts.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
         end subroutine count_valid_i64
         !> `pf_count_valid` over a 32-bit real array.
-        module subroutine count_valid_f32(values, n, is_valid, weights, skipnan)
+        !>
+        !> `n_null`/`n_nan` report WHY elements left, which is the whole reason to
+        !> reach for this procedure rather than `size(values)`: the three numbers
+        !> together account for every element except the zero-weighted ones, and
+        !> that difference is what a zero weight IS.
+        module subroutine count_valid_f32(values, n, is_valid, weights, skipnan, n_null, n_nan)
             real(real32), intent(in) :: values(:) !! the population to count.
             integer(int64), intent(out) :: n !! how many elements are in the population.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
@@ -294,9 +315,18 @@ module parquet_stats
             logical, intent(in), optional :: skipnan
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. counts it as an ordinary value.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
         end subroutine count_valid_f32
         !> `pf_count_valid` over a 64-bit real array.
-        module subroutine count_valid_f64(values, n, is_valid, weights, skipnan)
+        !>
+        !> `n_null`/`n_nan` report WHY elements left, which is the whole reason to
+        !> reach for this procedure rather than `size(values)`: the three numbers
+        !> together account for every element except the zero-weighted ones, and
+        !> that difference is what a zero weight IS.
+        module subroutine count_valid_f64(values, n, is_valid, weights, skipnan, n_null, n_nan)
             real(real64), intent(in) :: values(:) !! the population to count.
             integer(int64), intent(out) :: n !! how many elements are in the population.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
@@ -307,9 +337,18 @@ module parquet_stats
             logical, intent(in), optional :: skipnan
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. counts it as an ordinary value.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
         end subroutine count_valid_f64
         !> `pf_count_valid` over a logical array.
-        module subroutine count_valid_bool(values, n, is_valid, weights)
+        !>
+        !> `n_null`/`n_nan` report WHY elements left, which is the whole reason to
+        !> reach for this procedure rather than `size(values)`: the three numbers
+        !> together account for every element except the zero-weighted ones, and
+        !> that difference is what a zero weight IS.
+        module subroutine count_valid_bool(values, n, is_valid, weights, n_null)
             logical, intent(in) :: values(:) !! the population to count.
             integer(int64), intent(out) :: n !! how many elements are in the population.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
@@ -317,13 +356,15 @@ module parquet_stats
             !! per element weight. A zero weight REMOVES the element from the population, so a
             !! weighted count and an unweighted one over the same array legitimately differ.
             !! A negative, NaN or infinite weight aborts.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
         end subroutine count_valid_bool
         !> `pf_count_valid` over a scalar numeric `parquet_column`.
         !>
         !> Same dispatch and same three refusals as the moment family: numeric scalar kinds only,
         !> width 1 only, and `is_valid=` alongside a column aborts because the column carries its
         !> own validity.
-        module subroutine count_valid_col(values, n, is_valid, weights, skipnan)
+        module subroutine count_valid_col(values, n, is_valid, weights, skipnan, n_null, n_nan)
             type(parquet_column), intent(in) :: values !! the column to count.
             integer(int64), intent(out) :: n !! how many elements are in the population.
             logical, intent(in), optional :: is_valid(:) !! must be absent; the column carries it.
@@ -334,6 +375,10 @@ module parquet_stats
             logical, intent(in), optional :: skipnan
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. counts it as an ordinary value.
+            integer(int64), intent(out), optional :: n_null
+            !! how many elements `is_valid` excluded.
+            integer(int64), intent(out), optional :: n_nan
+            !! how many were excluded as NaN and were not already null.
         end subroutine count_valid_col
     end interface
     !
@@ -629,7 +674,8 @@ module parquet_stats
     !> are different questions.
     !>
     !> `method=` selects the rule (see `pf_quantile`); `pf_median` is exactly
-    !> `pf_quantile(values, 0.5, med)`.
+    !> `pf_quantile(values, 0.5, med)`, and `pf_quantile`'s doc-comment sets out the three
+    !> ways `pf_nth_quantile` differs from both.
     !>
     !> Nulls, NaNs and zero-weight elements leave the population first, in that order, exactly as
     !> they do for the moments, and `n_null`/`n_nan` report how many. An empty population gives a
@@ -666,6 +712,14 @@ module parquet_stats
     !>
     !> One call with one probability uses SELECTION rather than a sort where it can, so it is
     !> O(n). Asking for several probabilities should use `pf_quantiles`, which sorts once.
+    !>
+    !> **`pf_nth_quantile` in `parquet_sorting` is the other one**, and the two differ in three
+    !> ways rather than one: it returns an ELEMENT of the input (with `index=` saying which)
+    !> instead of an interpolated value, it accepts every element type this library sorts
+    !> including `character` and the temporal kinds, and it takes no weights. Its `ok` also
+    !> means the opposite of this module's -- omitting `ok` there makes a degenerate
+    !> population ABORT, where omitting it here is the ordinary way to call. Reach for it when
+    !> the question is *which row*, and for this one when the question is *what value*.
     !>
     !> Nulls, NaNs and zero-weight elements leave the population first, in that order, exactly as
     !> they do for the moments, and `n_null`/`n_nan` report how many. An empty population gives a
@@ -1013,6 +1067,10 @@ module parquet_stats
     !> naive sum, which on a large or badly scaled population is several ulps and occasionally
     !> more. Compare them with a tolerance, or take the total from `pf_sum`.
     !>
+    !> **An `integer(int64)` population widens to `real64` first**, so a value above `2**53` is
+    !> rounded on the way in and the running sum inherits that -- see `pf_sum` for the bound
+    !> and for what to do instead. int32 is unaffected.
+    !>
     !> **An excluded element yields an excluded OUTPUT element, and the running value continues
     !> past it unchanged** -- which is what pandas does, and the whole reason this family needs a
     !> paragraph of its own. `pf_cumsum([1, null, 3])` is `[1, undefined, 4]`: the null contributes
@@ -1170,8 +1228,11 @@ module parquet_stats
     !> The primitive behind a histogram, a grouped aggregation over ranges, and every
     !> hand-written `if (x < a) then ... else if (x < b)` ladder. `codes(i)` is the 1-based
     !> number of the bin holding `values(i)`, or **0** when it joined none: excluded by
-    !> `is_valid`, a NaN, or outside `[edges(1), edges(nbins+1)]`. `n_null`, `n_nan` and
-    !> `n_outside` separate those three causes exactly.
+    !> `is_valid`, a NaN, carrying a zero weight, or outside `[edges(1), edges(nbins+1)]`.
+    !> `n_null`, `n_nan` and `n_outside` separate three of those four exactly; a zero-weighted
+    !> element is deliberately in none of them and leaves `ok` alone, exactly as it does in
+    !> `pf_histogram`, because it was removed from the POPULATION rather than failing to reach
+    !> a bin. `pf_count_valid` over the same arguments is what reports it.
     !>
     !> The search is binary, so the cost is `O(n log nbins)` and an edge array with thousands
     !> of bins is as cheap as one with four.
@@ -1205,8 +1266,10 @@ module parquet_stats
     !> rather than integer. Values outside the edge range join no bin and are reported through
     !> `n_outside`; numpy drops them silently, so this is strictly more information.
     !>
-    !> This is `pf_bucketize` followed by a tally, and the two agree by construction: the count
-    !> in bin k is the number of `codes` equal to k over the same arguments.
+    !> This is `pf_bucketize` followed by a tally, and the two agree by construction -- the
+    !> count in bin k is the total WEIGHT of the `codes` equal to k over the same arguments,
+    !> which is why `pf_bucketize` takes `weights` even though a weight cannot change a bin
+    !> number. Unweighted, that total weight is a count.
     !>
     !> `edges` must be **strictly increasing** and hold at least two entries, or the call aborts
     !> naming the offending index -- an equal pair would describe a bin no value can reach, and a
@@ -1288,6 +1351,12 @@ module parquet_stats
     !> occurrence: an answer that depended on input order would differ between an array and its
     !> own permutation, which is a reproducibility defect rather than a preference.
     !>
+    !> **`modes` gives every tied value instead of just the smallest**, in ascending order, which
+    !> is what pandas' `Series.mode()` returns. It is allocated to exactly the number that tie, so
+    !> `size(modes)` says how many there were and `modes(1)` is always `m`. A population with one
+    !> clear winner gives a one-element array, and an empty one gives a zero-length array rather
+    !> than an unallocated result.
+    !>
     !> `count` reports how many elements hold the modal value. Nulls are excluded and counted
     !> through `n_null`, as everywhere in this module; no kind here can hold a NaN, so there is
     !> deliberately no `skipnan` or `n_nan`.
@@ -1342,6 +1411,17 @@ module parquet_stats
         !> Weighted, this is `sum(w*x)`. An empty population sums to exactly `0` with
         !> `ok = .true.`, which is the additive identity and what numpy and pandas return -- it
         !> is the one quantity in this family that an empty population still defines.
+        !>
+        !> **An `integer(int64)` population is summed in `real64`, so it is exact only while
+        !> every value is**, i.e. while `abs(v) <= 2**53`. Above that the WIDENING loses the low
+        !> bits of each element before any addition happens, so no summation order recovers
+        !> them: `pf_sum([2**53+1, 1, 2**53+1, 1])` answers `1.8014398509481984e16` where the
+        !> exact integer total is `18014398509481988`. numpy and pandas keep an int64 sum in
+        !> int64 and stay exact (until they wrap). This module has one engine and one
+        !> `real(real64)` result -- which is what makes every kind return the same bits -- so
+        !> a population of genuinely huge integers has to be summed by the caller, in int64, or
+        !> shifted and scaled before it gets here. int32 is unaffected: every int32 value is
+        !> exactly representable.
         module subroutine sum_f64(values, s, is_valid, weights, skipnan, n_null, n_nan, ok, threads)
             real(real64), intent(in) :: values(:) !! the population.
             real(real64), intent(out) :: s !! the sum.
@@ -1693,7 +1773,7 @@ module parquet_stats
         !> exception to the canonical optional order, and their own order is fixed here.
         module subroutine moments_f64(values, n_valid, mean, variance, stddev, sem, skewness, &
                 kurtosis, vsum, vmin, vmax, is_valid, weights, weight_type, ddof, bias, excess, &
-                skipnan, n_null, n_nan, threads)
+                skipnan, n_null, n_nan, ok, threads)
             real(real64), intent(in) :: values(:) !! the population.
             integer(int64), intent(out), optional :: n_valid !! how many elements were used.
             real(real64), intent(out), optional :: mean !! the mean; NaN when empty.
@@ -1735,6 +1815,18 @@ module parquet_stats
             !! how many elements `is_valid` excluded.
             integer(int64), intent(out), optional :: n_nan
             !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when any output that was ASKED for came back a quiet NaN -- an empty
+            !! population, a `ddof` that leaves nothing to divide by, a constant population for
+            !! the shape statistics, or a non-finite value under `skipnan = .false.`. Only the
+            !! PRESENT outputs are tested, which is the only reading that works here: `vsum` over
+            !! an empty population is a correct `0`, and testing an output the caller never asked
+            !! for would report a failure that is not one. `n_valid`, `n_null` and `n_nan` are
+            !! counts and are always defined, so they are not tested.
+            !!
+            !! An infinity is NOT a failure: `mean` answers `+Inf` over a population containing
+            !! one, exactly as `pf_mean` and numpy do, and `ok` stays .true. for it while the
+            !! variance -- genuinely a NaN there -- turns it .false. if it was asked for.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
             !! the `parquet_sort_threads` setting, capped by the processors actually available and
@@ -1756,7 +1848,8 @@ module parquet_stats
         !> are different questions.
         !>
         !> `method=` selects the rule (see `pf_quantile`); `pf_median` is exactly
-        !> `pf_quantile(values, 0.5, med)`.
+        !> `pf_quantile(values, 0.5, med)`, and `pf_quantile`'s doc-comment sets out the three
+        !> ways `pf_nth_quantile` differs from both.
         module subroutine median_f64(values, med, is_valid, weights, weight_type, skipnan, method, n_null, n_nan, &
                 ok, threads)
             real(real64), intent(in) :: values(:) !! the population.
@@ -1793,12 +1886,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine median_f64
         !> One quantile of a population, interpolated between the bracketing order statistics.
         !>
@@ -1814,6 +1908,14 @@ module parquet_stats
         !>
         !> One call with one probability uses SELECTION rather than a sort where it can, so it is
         !> O(n). Asking for several probabilities should use `pf_quantiles`, which sorts once.
+        !>
+        !> **`pf_nth_quantile` in `parquet_sorting` is the other one**, and the two differ in three
+        !> ways rather than one: it returns an ELEMENT of the input (with `index=` saying which)
+        !> instead of an interpolated value, it accepts every element type this library sorts
+        !> including `character` and the temporal kinds, and it takes no weights. Its `ok` also
+        !> means the opposite of this module's -- omitting `ok` there makes a degenerate
+        !> population ABORT, where omitting it here is the ordinary way to call. Reach for it when
+        !> the question is *which row*, and for this one when the question is *what value*.
         module subroutine quantile_f64(values, p, q, is_valid, weights, weight_type, skipnan, method, n_null, n_nan, &
                 ok, threads)
             real(real64), intent(in) :: values(:) !! the population.
@@ -1852,12 +1954,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine quantile_f64
         !> Several quantiles of one population, from ONE ordering of it.
         !>
@@ -1906,12 +2009,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine quantiles_f64
         !> The interquartile range: `pf_quantile(v, 0.75) - pf_quantile(v, 0.25)`, from one sort.
         !>
@@ -1954,12 +2058,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine iqr_f64
         !> The mean of the population with a share trimmed from EACH tail -- scipy's `trim_mean`.
         !>
@@ -1997,12 +2102,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine trim_mean_f64
         !> The share of the population at or below a given value -- scipy's `percentileofscore`,
         !> on a **0-1 scale** rather than 0-100, matching every other probability in this module.
@@ -2043,12 +2149,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine percentile_of_score_f64
         !> The median absolute deviation -- scipy's `median_abs_deviation`, scaled by default.
         !>
@@ -2103,12 +2210,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine mad_f64
         !> Summarises a population into a `pf_stats`, ordered and ready -- pandas' `describe()`.
         !>
@@ -2119,7 +2227,7 @@ module parquet_stats
         !>
         !> Reach for `%compute` instead when the order statistics are not wanted -- this procedure
         !> pays for the ordering whether or not anything asks for it, which is the point.
-        module subroutine describe_f64(values, s, is_valid, weights, weight_type, skipnan, threads)
+        module subroutine describe_f64(values, s, is_valid, weights, weight_type, skipnan, ok, threads)
             real(real64), intent(in) :: values(:) !! the population.
             type(pf_stats), intent(out) :: s
             !! the filled summary object: tier A computed and tier B already ordered, so every query on it
@@ -2139,13 +2247,22 @@ module parquet_stats
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
             !! which one NaN makes every answer NaN.
+            logical, intent(out), optional :: ok
+            !! .false. when the object describes a population with no defined moments -- one that
+            !! is empty after the exclusions, or that kept a NaN under `skipnan = .false.` In
+            !! either case every tier-A query on `s` answers a quiet NaN. The object itself
+            !! carries the counts (`%n_valid()`, `%n_null()`, `%n_nan()`), so this is the one
+            !! thing about the result a caller cannot otherwise read without picking a statistic
+            !! and NaN-testing it by hand.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the central-moment pass and the ordering may use -- `pf_describe`
+            !! does both, which no other entry point in this module does. Absent takes the
+            !! automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- the block
+            !! decomposition is a function of the population size alone and a sort is a
+            !! permutation, so 1, 8 and a build with no OpenMP at all return the same bits. It is
+            !! a speed control and never an accuracy one.
         end subroutine describe_f64
         !> Applies the exclusion rules and hands back the surviving values, without the moments.
         !!
@@ -2242,7 +2359,8 @@ module parquet_stats
         !! NaN, and the pair's weight non-zero. That is the only defensible rule for a two-sample
         !! statistic and it is what pandas does; handling nulls independently per array would
         !! produce a covariance between vectors of different lengths, which is not a number.
-        module subroutine cov_f64(x, y, c, is_valid, weights, ddof, n_null, n_nan, ok)
+        module subroutine cov_f64(x, y, c, is_valid, weights, weight_type, ddof, n_null, &
+                n_nan, ok)
             real(real64), intent(in) :: x(:) !! the first sample.
             real(real64), intent(in) :: y(:) !! the second sample, element for element.
             real(real64), intent(out) :: c !! the covariance; NaN when `n_valid <= ddof`.
@@ -2255,6 +2373,12 @@ module parquet_stats
             !! per PAIR weight, non-negative. A ZERO weight removes the pair from the population;
             !! a negative, NaN or infinite one aborts. Absent means every weight is 1. Pearson
             !! only -- see `method`.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -2390,12 +2514,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine sigma_clipped_stats_f64
         !> `pf_cumsum` over a 64-bit real array: the running sum, element by element.
         module subroutine cumsum_f64(values, out, is_valid, skipnan, out_valid, n_null, n_nan, ok)
@@ -2499,8 +2624,8 @@ module parquet_stats
         !! number or **0** for a value that joined none -- excluded, or outside the edge range.
         !! `pd.cut` spells that last case -1 over 0-based codes; 0 is the 1-based spelling of the
         !! same idea, and it is the value a Fortran caller can test without knowing the bin count.
-        module subroutine bucketize_f64(values, edges, codes, right, is_valid, skipnan, n_null, &
-                n_nan, n_outside, ok)
+        module subroutine bucketize_f64(values, edges, codes, right, is_valid, weights, &
+                skipnan, n_null, n_nan, n_outside, ok)
             real(real64), intent(in) :: values(:) !! the values to classify.
             real(real64), intent(in) :: edges(:) !! the bin boundaries, strictly increasing, at least two.
             integer(int32), intent(out) :: codes(:) !! the 1-based bin of each value, or 0. Same size as `values`.
@@ -2515,6 +2640,9 @@ module parquet_stats
             !! joins.
             logical, intent(in), optional :: is_valid(:)
             !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
             logical, intent(in), optional :: skipnan
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
@@ -2618,7 +2746,7 @@ module parquet_stats
     ! ---- pf_mode, one specific per kind (implemented in parquet_stats_order) ----
     interface
         !> `pf_mode` over a 32-bit integer array.
-        module subroutine mode_i32(values, m, count, is_valid, weights, n_null, ok)
+        module subroutine mode_i32(values, m, count, modes, is_valid, weights, n_null, ok)
             integer(int32), intent(in) :: values(:) !! the population.
             integer(int32), intent(out) :: m
             !! the modal value; unchanged when the population is empty.
@@ -2626,6 +2754,15 @@ module parquet_stats
             !! how many elements hold the modal value. `0` when the population is empty. Counts
             !! ELEMENTS even when weights decided which value won, so a weighted mode reports the
             !! occurrences of the value carrying the greatest total weight.
+            integer(int32), allocatable, intent(out), optional :: modes(:)
+            !! **every** modal value, in ascending order, allocated to exactly the number that tie --
+            !! which is pandas' `Series.mode()`, where `m` alone is scipy's `stats.mode`. `m` is always
+            !! `modes(1)`, since both take the smallest of a tie, so asking for both costs one extra
+            !! gather and no second pass. Allocated to size 0 for an empty population, never left
+            !! unallocated: `size(modes)` is then the only test a caller needs, and an unallocated
+            !! result would make it undefined behaviour instead. For the two character forms every
+            !! element shares one length, which is the LONGEST tied value's -- a shorter one is
+            !! blank-padded, so compare with `trim()`.
             logical, intent(in), optional :: is_valid(:)
             !! per element: .false. marks a null. Absent means no element is null.
             real(real64), intent(in), optional :: weights(:)
@@ -2639,7 +2776,7 @@ module parquet_stats
             !! read; `count` is 0.
         end subroutine mode_i32
         !> `pf_mode` over a 64-bit integer array.
-        module subroutine mode_i64(values, m, count, is_valid, weights, n_null, ok)
+        module subroutine mode_i64(values, m, count, modes, is_valid, weights, n_null, ok)
             integer(int64), intent(in) :: values(:) !! the population.
             integer(int64), intent(out) :: m
             !! the modal value; unchanged when the population is empty.
@@ -2647,6 +2784,15 @@ module parquet_stats
             !! how many elements hold the modal value. `0` when the population is empty. Counts
             !! ELEMENTS even when weights decided which value won, so a weighted mode reports the
             !! occurrences of the value carrying the greatest total weight.
+            integer(int64), allocatable, intent(out), optional :: modes(:)
+            !! **every** modal value, in ascending order, allocated to exactly the number that tie --
+            !! which is pandas' `Series.mode()`, where `m` alone is scipy's `stats.mode`. `m` is always
+            !! `modes(1)`, since both take the smallest of a tie, so asking for both costs one extra
+            !! gather and no second pass. Allocated to size 0 for an empty population, never left
+            !! unallocated: `size(modes)` is then the only test a caller needs, and an unallocated
+            !! result would make it undefined behaviour instead. For the two character forms every
+            !! element shares one length, which is the LONGEST tied value's -- a shorter one is
+            !! blank-padded, so compare with `trim()`.
             logical, intent(in), optional :: is_valid(:)
             !! per element: .false. marks a null. Absent means no element is null.
             real(real64), intent(in), optional :: weights(:)
@@ -2660,7 +2806,7 @@ module parquet_stats
             !! read; `count` is 0.
         end subroutine mode_i64
         !> `pf_mode` over a logical array.
-        module subroutine mode_bool(values, m, count, is_valid, weights, n_null, ok)
+        module subroutine mode_bool(values, m, count, modes, is_valid, weights, n_null, ok)
             logical, intent(in) :: values(:) !! the population.
             logical, intent(out) :: m
             !! the modal value; unchanged when the population is empty. `.false.` sorts below `.true.`, so
@@ -2669,6 +2815,15 @@ module parquet_stats
             !! how many elements hold the modal value. `0` when the population is empty. Counts
             !! ELEMENTS even when weights decided which value won, so a weighted mode reports the
             !! occurrences of the value carrying the greatest total weight.
+            logical, allocatable, intent(out), optional :: modes(:)
+            !! **every** modal value, in ascending order, allocated to exactly the number that tie --
+            !! which is pandas' `Series.mode()`, where `m` alone is scipy's `stats.mode`. `m` is always
+            !! `modes(1)`, since both take the smallest of a tie, so asking for both costs one extra
+            !! gather and no second pass. Allocated to size 0 for an empty population, never left
+            !! unallocated: `size(modes)` is then the only test a caller needs, and an unallocated
+            !! result would make it undefined behaviour instead. For the two character forms every
+            !! element shares one length, which is the LONGEST tied value's -- a shorter one is
+            !! blank-padded, so compare with `trim()`.
             logical, intent(in), optional :: is_valid(:)
             !! per element: .false. marks a null. Absent means no element is null.
             real(real64), intent(in), optional :: weights(:)
@@ -2682,7 +2837,7 @@ module parquet_stats
             !! read; `count` is 0.
         end subroutine mode_bool
         !> `pf_mode` over a character array.
-        module subroutine mode_chr(values, m, count, is_valid, weights, n_null, ok)
+        module subroutine mode_chr(values, m, count, modes, is_valid, weights, n_null, ok)
             character(len=*), intent(in) :: values(:) !! the population; each element is trimmed.
             character(len=:), allocatable, intent(out) :: m
             !! the modal value, allocated to its own trimmed length. **Left unallocated when the population
@@ -2692,6 +2847,15 @@ module parquet_stats
             !! how many elements hold the modal value. `0` when the population is empty. Counts
             !! ELEMENTS even when weights decided which value won, so a weighted mode reports the
             !! occurrences of the value carrying the greatest total weight.
+            character(len=:), allocatable, intent(out), optional :: modes(:)
+            !! **every** modal value, in ascending order, allocated to exactly the number that tie --
+            !! which is pandas' `Series.mode()`, where `m` alone is scipy's `stats.mode`. `m` is always
+            !! `modes(1)`, since both take the smallest of a tie, so asking for both costs one extra
+            !! gather and no second pass. Allocated to size 0 for an empty population, never left
+            !! unallocated: `size(modes)` is then the only test a caller needs, and an unallocated
+            !! result would make it undefined behaviour instead. For the two character forms every
+            !! element shares one length, which is the LONGEST tied value's -- a shorter one is
+            !! blank-padded, so compare with `trim()`.
             logical, intent(in), optional :: is_valid(:)
             !! per element: .false. marks a null. Absent means no element is null.
             real(real64), intent(in), optional :: weights(:)
@@ -2705,7 +2869,7 @@ module parquet_stats
             !! read; `count` is 0.
         end subroutine mode_chr
         !> `pf_mode` over a `parquet_string_column`.
-        module subroutine mode_str(values, m, count, is_valid, weights, n_null, ok)
+        module subroutine mode_str(values, m, count, modes, is_valid, weights, n_null, ok)
             type(parquet_string_column), intent(in) :: values !! the population.
             character(len=:), allocatable, intent(out) :: m
             !! the modal value, allocated to its own length. Left unallocated when the population is empty.
@@ -2713,6 +2877,15 @@ module parquet_stats
             !! how many elements hold the modal value. `0` when the population is empty. Counts
             !! ELEMENTS even when weights decided which value won, so a weighted mode reports the
             !! occurrences of the value carrying the greatest total weight.
+            character(len=:), allocatable, intent(out), optional :: modes(:)
+            !! **every** modal value, in ascending order, allocated to exactly the number that tie --
+            !! which is pandas' `Series.mode()`, where `m` alone is scipy's `stats.mode`. `m` is always
+            !! `modes(1)`, since both take the smallest of a tie, so asking for both costs one extra
+            !! gather and no second pass. Allocated to size 0 for an empty population, never left
+            !! unallocated: `size(modes)` is then the only test a caller needs, and an unallocated
+            !! result would make it undefined behaviour instead. For the two character forms every
+            !! element shares one length, which is the LONGEST tied value's -- a shorter one is
+            !! blank-padded, so compare with `trim()`.
             logical, intent(in), optional :: is_valid(:)
             !! per element: .false. marks a null. Absent means no element is null.
             real(real64), intent(in), optional :: weights(:)
@@ -2984,7 +3157,7 @@ module parquet_stats
         !> `pf_moments` over a 32-bit integer array: every tier-A quantity in one pair of passes.
         module subroutine moments_i32(values, n_valid, mean, variance, stddev, sem, skewness, kurtosis, vsum, vmin, &
                 vmax, is_valid, weights, weight_type, ddof, bias, excess, &
-                n_null, threads)
+                n_null, ok, threads)
             integer(int32), intent(in) :: values(:) !! the population.
             integer(int64), intent(out), optional :: n_valid !! how many elements were used.
             real(real64), intent(out), optional :: mean !! the mean; NaN when empty.
@@ -3020,6 +3193,18 @@ module parquet_stats
             !! .false. adds 3 back, giving the raw fourth-moment ratio.
             integer(int64), intent(out), optional :: n_null
             !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when any output that was ASKED for came back a quiet NaN -- an empty
+            !! population, a `ddof` that leaves nothing to divide by, a constant population for
+            !! the shape statistics, or a non-finite value under `skipnan = .false.`. Only the
+            !! PRESENT outputs are tested, which is the only reading that works here: `vsum` over
+            !! an empty population is a correct `0`, and testing an output the caller never asked
+            !! for would report a failure that is not one. `n_valid`, `n_null` and `n_nan` are
+            !! counts and are always defined, so they are not tested.
+            !!
+            !! An infinity is NOT a failure: `mean` answers `+Inf` over a population containing
+            !! one, exactly as `pf_mean` and numpy do, and `ok` stays .true. for it while the
+            !! variance -- genuinely a NaN there -- turns it .false. if it was asked for.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
             !! the `parquet_sort_threads` setting, capped by the processors actually available and
@@ -3058,12 +3243,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine median_i32
         !> `pf_quantile` over a 32-bit integer array.
         module subroutine quantile_i32(values, p, q, is_valid, weights, weight_type, method, n_null, ok, threads)
@@ -3097,12 +3283,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine quantile_i32
         !> `pf_quantiles` over a 32-bit integer array.
         module subroutine quantiles_i32(values, probs, out, is_valid, weights, weight_type, method, n_null, ok, &
@@ -3137,12 +3324,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine quantiles_i32
         !> `pf_iqr` over a 32-bit integer array.
         module subroutine iqr_i32(values, r, is_valid, weights, weight_type, method, n_null, ok, threads)
@@ -3174,12 +3362,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine iqr_i32
         !> `pf_trim_mean` over a 32-bit integer array.
         module subroutine trim_mean_i32(values, prop, m, is_valid, weights, n_null, ok, threads)
@@ -3201,12 +3390,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine trim_mean_i32
         !> `pf_percentile_of_score` over a 32-bit integer array.
         module subroutine percentile_of_score_i32(values, score, p, is_valid, weights, kind, n_null, ok, threads)
@@ -3232,12 +3422,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine percentile_of_score_i32
         !> `pf_mad` over a 32-bit integer array.
         module subroutine mad_i32(values, m, is_valid, weights, scale, center, n_null, ok, threads)
@@ -3270,15 +3461,16 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine mad_i32
         !> `pf_describe` over a 32-bit integer array.
-        module subroutine describe_i32(values, s, is_valid, weights, weight_type, threads)
+        module subroutine describe_i32(values, s, is_valid, weights, weight_type, ok, threads)
             integer(int32), intent(in) :: values(:) !! the population.
             type(pf_stats), intent(out) :: s
             !! the filled summary object: tier A computed and tier B already ordered, so every query on it
@@ -3294,16 +3486,25 @@ module parquet_stats
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
             !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            logical, intent(out), optional :: ok
+            !! .false. when the object describes a population with no defined moments -- one that
+            !! is empty after the exclusions, or that kept a NaN under `skipnan = .false.` In
+            !! either case every tier-A query on `s` answers a quiet NaN. The object itself
+            !! carries the counts (`%n_valid()`, `%n_null()`, `%n_nan()`), so this is the one
+            !! thing about the result a caller cannot otherwise read without picking a statistic
+            !! and NaN-testing it by hand.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the central-moment pass and the ordering may use -- `pf_describe`
+            !! does both, which no other entry point in this module does. Absent takes the
+            !! automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- the block
+            !! decomposition is a function of the population size alone and a sort is a
+            !! permutation, so 1, 8 and a build with no OpenMP at all return the same bits. It is
+            !! a speed control and never an accuracy one.
         end subroutine describe_i32
         !> `pf_cov` over a 32-bit integer array.
-        module subroutine cov_i32(x, y, c, is_valid, weights, ddof, n_null, n_nan, ok)
+        module subroutine cov_i32(x, y, c, is_valid, weights, weight_type, ddof, n_null, n_nan, ok)
             integer(int32), intent(in) :: x(:) !! the first sample.
             integer(int32), intent(in) :: y(:) !! the second sample, element for element.
             real(real64), intent(out) :: c !! the covariance; NaN when `n_valid <= ddof`.
@@ -3316,6 +3517,12 @@ module parquet_stats
             !! per PAIR weight, non-negative. A ZERO weight removes the pair from the population;
             !! a negative, NaN or infinite one aborts. Absent means every weight is 1. Pearson
             !! only -- see `method`.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -3433,12 +3640,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine sigma_clipped_stats_i32
         !> `pf_cumsum` over a 32-bit integer array.
         module subroutine cumsum_i32(values, out, is_valid, out_valid, n_null, ok)
@@ -3517,7 +3725,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
         end subroutine cummin_i32
         !> `pf_bucketize` over a 32-bit integer array.
-        module subroutine bucketize_i32(values, edges, codes, right, is_valid, n_null, n_outside, ok)
+        module subroutine bucketize_i32(values, edges, codes, right, is_valid, weights, n_null, n_outside, ok)
             integer(int32), intent(in) :: values(:) !! the population.
             real(real64), intent(in) :: edges(:) !! the bin boundaries, strictly increasing, at least two.
             integer(int32), intent(out) :: codes(:)
@@ -3533,6 +3741,9 @@ module parquet_stats
             !! joins.
             logical, intent(in), optional :: is_valid(:)
             !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
             integer(int64), intent(out), optional :: n_null
             !! how many elements `is_valid` excluded.
             integer(int64), intent(out), optional :: n_outside
@@ -3909,7 +4120,7 @@ module parquet_stats
         !> for a median, which `pf_nth_quantile` computes exactly on the original array.
         module subroutine moments_i64(values, n_valid, mean, variance, stddev, sem, skewness, kurtosis, vsum, vmin, &
                 vmax, is_valid, weights, weight_type, ddof, bias, excess, &
-                n_null, threads)
+                n_null, ok, threads)
             integer(int64), intent(in) :: values(:) !! the population.
             integer(int64), intent(out), optional :: n_valid !! how many elements were used.
             real(real64), intent(out), optional :: mean !! the mean; NaN when empty.
@@ -3945,6 +4156,18 @@ module parquet_stats
             !! .false. adds 3 back, giving the raw fourth-moment ratio.
             integer(int64), intent(out), optional :: n_null
             !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when any output that was ASKED for came back a quiet NaN -- an empty
+            !! population, a `ddof` that leaves nothing to divide by, a constant population for
+            !! the shape statistics, or a non-finite value under `skipnan = .false.`. Only the
+            !! PRESENT outputs are tested, which is the only reading that works here: `vsum` over
+            !! an empty population is a correct `0`, and testing an output the caller never asked
+            !! for would report a failure that is not one. `n_valid`, `n_null` and `n_nan` are
+            !! counts and are always defined, so they are not tested.
+            !!
+            !! An infinity is NOT a failure: `mean` answers `+Inf` over a population containing
+            !! one, exactly as `pf_mean` and numpy do, and `ok` stays .true. for it while the
+            !! variance -- genuinely a NaN there -- turns it .false. if it was asked for.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
             !! the `parquet_sort_threads` setting, capped by the processors actually available and
@@ -3988,12 +4211,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine median_i64
         !> `pf_quantile` over a 64-bit integer array.
         !>
@@ -4032,12 +4256,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine quantile_i64
         !> `pf_quantiles` over a 64-bit integer array.
         !>
@@ -4077,12 +4302,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine quantiles_i64
         !> `pf_iqr` over a 64-bit integer array.
         !>
@@ -4119,12 +4345,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine iqr_i64
         !> `pf_trim_mean` over a 64-bit integer array.
         !>
@@ -4151,12 +4378,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine trim_mean_i64
         !> `pf_percentile_of_score` over a 64-bit integer array.
         !>
@@ -4187,12 +4415,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine percentile_of_score_i64
         !> `pf_mad` over a 64-bit integer array.
         !>
@@ -4230,12 +4459,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine mad_i64
         !> `pf_describe` over a 64-bit integer array.
         !>
@@ -4243,7 +4473,7 @@ module parquet_stats
         !> every statistic here is computed in. That is unavoidable for a mean and irrelevant for
         !> the workloads this serves -- nobody averages an object ID -- but it is NOT irrelevant
         !> for a median, which `pf_nth_quantile` computes exactly on the original array.
-        module subroutine describe_i64(values, s, is_valid, weights, weight_type, threads)
+        module subroutine describe_i64(values, s, is_valid, weights, weight_type, ok, threads)
             integer(int64), intent(in) :: values(:) !! the population.
             type(pf_stats), intent(out) :: s
             !! the filled summary object: tier A computed and tier B already ordered, so every query on it
@@ -4259,16 +4489,25 @@ module parquet_stats
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
             !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            logical, intent(out), optional :: ok
+            !! .false. when the object describes a population with no defined moments -- one that
+            !! is empty after the exclusions, or that kept a NaN under `skipnan = .false.` In
+            !! either case every tier-A query on `s` answers a quiet NaN. The object itself
+            !! carries the counts (`%n_valid()`, `%n_null()`, `%n_nan()`), so this is the one
+            !! thing about the result a caller cannot otherwise read without picking a statistic
+            !! and NaN-testing it by hand.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the central-moment pass and the ordering may use -- `pf_describe`
+            !! does both, which no other entry point in this module does. Absent takes the
+            !! automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- the block
+            !! decomposition is a function of the population size alone and a sort is a
+            !! permutation, so 1, 8 and a build with no OpenMP at all return the same bits. It is
+            !! a speed control and never an accuracy one.
         end subroutine describe_i64
         !> `pf_cov` over a 64-bit integer array.
-        module subroutine cov_i64(x, y, c, is_valid, weights, ddof, n_null, n_nan, ok)
+        module subroutine cov_i64(x, y, c, is_valid, weights, weight_type, ddof, n_null, n_nan, ok)
             integer(int64), intent(in) :: x(:) !! the first sample.
             integer(int64), intent(in) :: y(:) !! the second sample, element for element.
             real(real64), intent(out) :: c !! the covariance; NaN when `n_valid <= ddof`.
@@ -4281,6 +4520,12 @@ module parquet_stats
             !! per PAIR weight, non-negative. A ZERO weight removes the pair from the population;
             !! a negative, NaN or infinite one aborts. Absent means every weight is 1. Pearson
             !! only -- see `method`.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -4398,12 +4643,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine sigma_clipped_stats_i64
         !> `pf_cumsum` over a 64-bit integer array.
         module subroutine cumsum_i64(values, out, is_valid, out_valid, n_null, ok)
@@ -4482,7 +4728,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
         end subroutine cummin_i64
         !> `pf_bucketize` over a 64-bit integer array.
-        module subroutine bucketize_i64(values, edges, codes, right, is_valid, n_null, n_outside, ok)
+        module subroutine bucketize_i64(values, edges, codes, right, is_valid, weights, n_null, n_outside, ok)
             integer(int64), intent(in) :: values(:) !! the population.
             real(real64), intent(in) :: edges(:) !! the bin boundaries, strictly increasing, at least two.
             integer(int32), intent(out) :: codes(:)
@@ -4498,6 +4744,9 @@ module parquet_stats
             !! joins.
             logical, intent(in), optional :: is_valid(:)
             !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
             integer(int64), intent(out), optional :: n_null
             !! how many elements `is_valid` excluded.
             integer(int64), intent(out), optional :: n_outside
@@ -4878,7 +5127,7 @@ module parquet_stats
         !> `pf_moments` over a 32-bit real array: every tier-A quantity in one pair of passes.
         module subroutine moments_f32(values, n_valid, mean, variance, stddev, sem, skewness, kurtosis, vsum, vmin, &
                 vmax, is_valid, weights, weight_type, ddof, bias, excess, &
-                skipnan, n_null, n_nan, threads)
+                skipnan, n_null, n_nan, ok, threads)
             real(real32), intent(in) :: values(:) !! the population.
             integer(int64), intent(out), optional :: n_valid !! how many elements were used.
             real(real64), intent(out), optional :: mean !! the mean; NaN when empty.
@@ -4920,6 +5169,18 @@ module parquet_stats
             !! how many elements `is_valid` excluded.
             integer(int64), intent(out), optional :: n_nan
             !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when any output that was ASKED for came back a quiet NaN -- an empty
+            !! population, a `ddof` that leaves nothing to divide by, a constant population for
+            !! the shape statistics, or a non-finite value under `skipnan = .false.`. Only the
+            !! PRESENT outputs are tested, which is the only reading that works here: `vsum` over
+            !! an empty population is a correct `0`, and testing an output the caller never asked
+            !! for would report a failure that is not one. `n_valid`, `n_null` and `n_nan` are
+            !! counts and are always defined, so they are not tested.
+            !!
+            !! An infinity is NOT a failure: `mean` answers `+Inf` over a population containing
+            !! one, exactly as `pf_mean` and numpy do, and `ok` stays .true. for it while the
+            !! variance -- genuinely a NaN there -- turns it .false. if it was asked for.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
             !! the `parquet_sort_threads` setting, capped by the processors actually available and
@@ -4965,12 +5226,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine median_f32
         !> `pf_quantile` over a 32-bit real array.
         module subroutine quantile_f32(values, p, q, is_valid, weights, weight_type, skipnan, method, n_null, n_nan, &
@@ -5011,12 +5273,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine quantile_f32
         !> `pf_quantiles` over a 32-bit real array.
         module subroutine quantiles_f32(values, probs, out, is_valid, weights, weight_type, skipnan, method, n_null, &
@@ -5057,12 +5320,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine quantiles_f32
         !> `pf_iqr` over a 32-bit real array.
         module subroutine iqr_f32(values, r, is_valid, weights, weight_type, skipnan, method, n_null, n_nan, &
@@ -5101,12 +5365,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine iqr_f32
         !> `pf_trim_mean` over a 32-bit real array.
         module subroutine trim_mean_f32(values, prop, m, is_valid, weights, skipnan, n_null, n_nan, ok, threads)
@@ -5134,12 +5399,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine trim_mean_f32
         !> `pf_percentile_of_score` over a 32-bit real array.
         module subroutine percentile_of_score_f32(values, score, p, is_valid, weights, skipnan, kind, n_null, n_nan, ok, threads)
@@ -5171,12 +5437,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine percentile_of_score_f32
         !> `pf_mad` over a 32-bit real array.
         module subroutine mad_f32(values, m, is_valid, weights, skipnan, scale, center, n_null, n_nan, ok, &
@@ -5216,15 +5483,16 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine mad_f32
         !> `pf_describe` over a 32-bit real array.
-        module subroutine describe_f32(values, s, is_valid, weights, weight_type, skipnan, threads)
+        module subroutine describe_f32(values, s, is_valid, weights, weight_type, skipnan, ok, threads)
             real(real32), intent(in) :: values(:) !! the population.
             type(pf_stats), intent(out) :: s
             !! the filled summary object: tier A computed and tier B already ordered, so every query on it
@@ -5244,16 +5512,25 @@ module parquet_stats
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
             !! which one NaN makes every answer NaN.
+            logical, intent(out), optional :: ok
+            !! .false. when the object describes a population with no defined moments -- one that
+            !! is empty after the exclusions, or that kept a NaN under `skipnan = .false.` In
+            !! either case every tier-A query on `s` answers a quiet NaN. The object itself
+            !! carries the counts (`%n_valid()`, `%n_null()`, `%n_nan()`), so this is the one
+            !! thing about the result a caller cannot otherwise read without picking a statistic
+            !! and NaN-testing it by hand.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the central-moment pass and the ordering may use -- `pf_describe`
+            !! does both, which no other entry point in this module does. Absent takes the
+            !! automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- the block
+            !! decomposition is a function of the population size alone and a sort is a
+            !! permutation, so 1, 8 and a build with no OpenMP at all return the same bits. It is
+            !! a speed control and never an accuracy one.
         end subroutine describe_f32
         !> `pf_cov` over a 32-bit real array.
-        module subroutine cov_f32(x, y, c, is_valid, weights, ddof, n_null, n_nan, ok)
+        module subroutine cov_f32(x, y, c, is_valid, weights, weight_type, ddof, n_null, n_nan, ok)
             real(real32), intent(in) :: x(:) !! the first sample.
             real(real32), intent(in) :: y(:) !! the second sample, element for element.
             real(real64), intent(out) :: c !! the covariance; NaN when `n_valid <= ddof`.
@@ -5266,6 +5543,12 @@ module parquet_stats
             !! per PAIR weight, non-negative. A ZERO weight removes the pair from the population;
             !! a negative, NaN or infinite one aborts. Absent means every weight is 1. Pearson
             !! only -- see `method`.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -5393,12 +5676,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine sigma_clipped_stats_f32
         !> `pf_cumsum` over a 32-bit real array.
         module subroutine cumsum_f32(values, out, is_valid, skipnan, out_valid, n_null, n_nan, ok)
@@ -5501,7 +5785,8 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
         end subroutine cummin_f32
         !> `pf_bucketize` over a 32-bit real array.
-        module subroutine bucketize_f32(values, edges, codes, right, is_valid, skipnan, n_null, n_nan, n_outside, ok)
+        module subroutine bucketize_f32(values, edges, codes, right, is_valid, weights, skipnan, n_null, n_nan, &
+                n_outside, ok)
             real(real32), intent(in) :: values(:) !! the population.
             real(real64), intent(in) :: edges(:) !! the bin boundaries, strictly increasing, at least two.
             integer(int32), intent(out) :: codes(:)
@@ -5517,6 +5802,9 @@ module parquet_stats
             !! joins.
             logical, intent(in), optional :: is_valid(:)
             !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
             logical, intent(in), optional :: skipnan
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
@@ -5891,7 +6179,7 @@ module parquet_stats
         !> fraction that are true.
         module subroutine moments_bool(values, n_valid, mean, variance, stddev, sem, skewness, kurtosis, vsum, vmin, &
                 vmax, is_valid, weights, weight_type, ddof, bias, excess, &
-                n_null, threads)
+                n_null, ok, threads)
             logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
             integer(int64), intent(out), optional :: n_valid !! how many elements were used.
             real(real64), intent(out), optional :: mean !! the mean; NaN when empty.
@@ -5927,6 +6215,18 @@ module parquet_stats
             !! .false. adds 3 back, giving the raw fourth-moment ratio.
             integer(int64), intent(out), optional :: n_null
             !! how many elements `is_valid` excluded.
+            logical, intent(out), optional :: ok
+            !! .false. when any output that was ASKED for came back a quiet NaN -- an empty
+            !! population, a `ddof` that leaves nothing to divide by, a constant population for
+            !! the shape statistics, or a non-finite value under `skipnan = .false.`. Only the
+            !! PRESENT outputs are tested, which is the only reading that works here: `vsum` over
+            !! an empty population is a correct `0`, and testing an output the caller never asked
+            !! for would report a failure that is not one. `n_valid`, `n_null` and `n_nan` are
+            !! counts and are always defined, so they are not tested.
+            !!
+            !! An infinity is NOT a failure: `mean` answers `+Inf` over a population containing
+            !! one, exactly as `pf_mean` and numpy do, and `ok` stays .true. for it while the
+            !! variance -- genuinely a NaN there -- turns it .false. if it was asked for.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
             !! the `parquet_sort_threads` setting, capped by the processors actually available and
@@ -5968,12 +6268,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine median_bool
         !> `pf_quantile` over a logical array.
         !>
@@ -6010,12 +6311,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine quantile_bool
         !> `pf_quantiles` over a logical array.
         !>
@@ -6053,12 +6355,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine quantiles_bool
         !> `pf_iqr` over a logical array.
         !>
@@ -6093,12 +6396,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine iqr_bool
         !> `pf_trim_mean` over a logical array.
         !>
@@ -6123,12 +6427,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine trim_mean_bool
         !> `pf_percentile_of_score` over a logical array.
         !>
@@ -6157,12 +6462,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine percentile_of_score_bool
         !> `pf_mad` over a logical array.
         !>
@@ -6198,18 +6504,19 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine mad_bool
         !> `pf_describe` over a logical array.
         !>
         !> `.true.` widens to 1 and `.false.` to 0, so the mean of a logical array is the
         !> fraction that are true.
-        module subroutine describe_bool(values, s, is_valid, weights, weight_type, threads)
+        module subroutine describe_bool(values, s, is_valid, weights, weight_type, ok, threads)
             logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
             type(pf_stats), intent(out) :: s
             !! the filled summary object: tier A computed and tier B already ordered, so every query on it
@@ -6225,16 +6532,25 @@ module parquet_stats
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
             !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            logical, intent(out), optional :: ok
+            !! .false. when the object describes a population with no defined moments -- one that
+            !! is empty after the exclusions, or that kept a NaN under `skipnan = .false.` In
+            !! either case every tier-A query on `s` answers a quiet NaN. The object itself
+            !! carries the counts (`%n_valid()`, `%n_null()`, `%n_nan()`), so this is the one
+            !! thing about the result a caller cannot otherwise read without picking a statistic
+            !! and NaN-testing it by hand.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the central-moment pass and the ordering may use -- `pf_describe`
+            !! does both, which no other entry point in this module does. Absent takes the
+            !! automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- the block
+            !! decomposition is a function of the population size alone and a sort is a
+            !! permutation, so 1, 8 and a build with no OpenMP at all return the same bits. It is
+            !! a speed control and never an accuracy one.
         end subroutine describe_bool
         !> `pf_cov` over a logical array.
-        module subroutine cov_bool(x, y, c, is_valid, weights, ddof, n_null, n_nan, ok)
+        module subroutine cov_bool(x, y, c, is_valid, weights, weight_type, ddof, n_null, n_nan, ok)
             logical, intent(in) :: x(:) !! the first sample.
             logical, intent(in) :: y(:) !! the second sample, element for element.
             real(real64), intent(out) :: c !! the covariance; NaN when `n_valid <= ddof`.
@@ -6247,6 +6563,12 @@ module parquet_stats
             !! per PAIR weight, non-negative. A ZERO weight removes the pair from the population;
             !! a negative, NaN or infinite one aborts. Absent means every weight is 1. Pearson
             !! only -- see `method`.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -6364,12 +6686,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine sigma_clipped_stats_bool
         !> `pf_cumsum` over a logical array.
         module subroutine cumsum_bool(values, out, is_valid, out_valid, n_null, ok)
@@ -6448,7 +6771,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
         end subroutine cummin_bool
         !> `pf_bucketize` over a logical array.
-        module subroutine bucketize_bool(values, edges, codes, right, is_valid, n_null, n_outside, ok)
+        module subroutine bucketize_bool(values, edges, codes, right, is_valid, weights, n_null, n_outside, ok)
             logical, intent(in) :: values(:) !! the population; .true. is 1 and .false. is 0.
             real(real64), intent(in) :: edges(:) !! the bin boundaries, strictly increasing, at least two.
             integer(int32), intent(out) :: codes(:)
@@ -6464,6 +6787,9 @@ module parquet_stats
             !! joins.
             logical, intent(in), optional :: is_valid(:)
             !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
             integer(int64), intent(out), optional :: n_null
             !! how many elements `is_valid` excluded.
             integer(int64), intent(out), optional :: n_outside
@@ -6914,7 +7240,7 @@ module parquet_stats
         !> `is_valid=` alongside one aborts rather than silently preferring one of two sources.
         module subroutine moments_col(values, n_valid, mean, variance, stddev, sem, skewness, kurtosis, vsum, vmin, &
                 vmax, is_valid, weights, weight_type, ddof, bias, excess, &
-                skipnan, n_null, n_nan, threads)
+                skipnan, n_null, n_nan, ok, threads)
             type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
             integer(int64), intent(out), optional :: n_valid !! how many elements were used.
             real(real64), intent(out), optional :: mean !! the mean; NaN when empty.
@@ -6956,6 +7282,18 @@ module parquet_stats
             !! how many elements `is_valid` excluded.
             integer(int64), intent(out), optional :: n_nan
             !! how many were excluded as NaN and were not already null.
+            logical, intent(out), optional :: ok
+            !! .false. when any output that was ASKED for came back a quiet NaN -- an empty
+            !! population, a `ddof` that leaves nothing to divide by, a constant population for
+            !! the shape statistics, or a non-finite value under `skipnan = .false.`. Only the
+            !! PRESENT outputs are tested, which is the only reading that works here: `vsum` over
+            !! an empty population is a correct `0`, and testing an output the caller never asked
+            !! for would report a failure that is not one. `n_valid`, `n_null` and `n_nan` are
+            !! counts and are always defined, so they are not tested.
+            !!
+            !! An infinity is NOT a failure: `mean` answers `+Inf` over a population containing
+            !! one, exactly as `pf_mean` and numpy do, and `ok` stays .true. for it while the
+            !! variance -- genuinely a NaN there -- turns it .false. if it was asked for.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
             !! the `parquet_sort_threads` setting, capped by the processors actually available and
@@ -7008,12 +7346,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine median_col
         !> `pf_quantile` over a scalar numeric `parquet_column`.
         !>
@@ -7061,12 +7400,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine quantile_col
         !> `pf_quantiles` over a scalar numeric `parquet_column`.
         !>
@@ -7114,12 +7454,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine quantiles_col
         !> `pf_iqr` over a scalar numeric `parquet_column`.
         !>
@@ -7165,12 +7506,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine iqr_col
         !> `pf_trim_mean` over a scalar numeric `parquet_column`.
         !>
@@ -7205,12 +7547,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine trim_mean_col
         !> `pf_percentile_of_score` over a scalar numeric `parquet_column`.
         !>
@@ -7249,12 +7592,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine percentile_of_score_col
         !> `pf_mad` over a scalar numeric `parquet_column`.
         !>
@@ -7301,12 +7645,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine mad_col
         !> `pf_describe` over a scalar numeric `parquet_column`.
         !>
@@ -7316,7 +7661,7 @@ module parquet_stats
         !> a vector column into one population is a different statistic and nobody should get it
         !> by accident. **The column's own validity is the only source of nullness**, so passing
         !> `is_valid=` alongside one aborts rather than silently preferring one of two sources.
-        module subroutine describe_col(values, s, is_valid, weights, weight_type, skipnan, threads)
+        module subroutine describe_col(values, s, is_valid, weights, weight_type, skipnan, ok, threads)
             type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
             type(pf_stats), intent(out) :: s
             !! the filled summary object: tier A computed and tier B already ordered, so every query on it
@@ -7336,16 +7681,25 @@ module parquet_stats
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
             !! which one NaN makes every answer NaN.
+            logical, intent(out), optional :: ok
+            !! .false. when the object describes a population with no defined moments -- one that
+            !! is empty after the exclusions, or that kept a NaN under `skipnan = .false.` In
+            !! either case every tier-A query on `s` answers a quiet NaN. The object itself
+            !! carries the counts (`%n_valid()`, `%n_null()`, `%n_nan()`), so this is the one
+            !! thing about the result a caller cannot otherwise read without picking a statistic
+            !! and NaN-testing it by hand.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the central-moment pass and the ordering may use -- `pf_describe`
+            !! does both, which no other entry point in this module does. Absent takes the
+            !! automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- the block
+            !! decomposition is a function of the population size alone and a sort is a
+            !! permutation, so 1, 8 and a build with no OpenMP at all return the same bits. It is
+            !! a speed control and never an accuracy one.
         end subroutine describe_col
         !> `pf_cov` over a scalar numeric `parquet_column`.
-        module subroutine cov_col(x, y, c, is_valid, weights, ddof, n_null, n_nan, ok)
+        module subroutine cov_col(x, y, c, is_valid, weights, weight_type, ddof, n_null, n_nan, ok)
             type(parquet_column), intent(in) :: x !! the first sample.
             type(parquet_column), intent(in) :: y !! the second sample, element for element.
             real(real64), intent(out) :: c !! the covariance; NaN when `n_valid <= ddof`.
@@ -7358,6 +7712,12 @@ module parquet_stats
             !! per PAIR weight, non-negative. A ZERO weight removes the pair from the population;
             !! a negative, NaN or infinite one aborts. Absent means every weight is 1. Pearson
             !! only -- see `method`.
+            character(len=*), intent(in), optional :: weight_type
+            !! "reliability" (the default) or "frequency". The two differ only when the weights are
+            !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
+            !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
+            !! that much more precise, so the count is Kish's effective size
+            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -7485,12 +7845,13 @@ module parquet_stats
             !! .false. when the statistic is undefined for this population -- the result is then a
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
-            !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
-            !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
-            !! does not depend on this argument** -- the block decomposition is a function of the
-            !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
-            !! bits. It is a speed control and never an accuracy one.
+            !! how many threads the ORDERING may use -- this is an order statistic and has no
+            !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
+            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! actually available and by a measured work floor, and 1 inside a caller's own
+            !! parallel region. **The answer does not depend on this argument** -- a sort is a
+            !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
+            !! at all return the same bits. It is a speed control and never an accuracy one.
         end subroutine sigma_clipped_stats_col
         !> `pf_cumsum` over a scalar numeric `parquet_column`.
         module subroutine cumsum_col(values, out, is_valid, skipnan, out_valid, n_null, n_nan, ok)
@@ -7593,7 +7954,8 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
         end subroutine cummin_col
         !> `pf_bucketize` over a scalar numeric `parquet_column`.
-        module subroutine bucketize_col(values, edges, codes, right, is_valid, skipnan, n_null, n_nan, n_outside, ok)
+        module subroutine bucketize_col(values, edges, codes, right, is_valid, weights, skipnan, n_null, n_nan, &
+                n_outside, ok)
             type(parquet_column), intent(in) :: values !! the column; scalar numeric kinds only.
             real(real64), intent(in) :: edges(:) !! the bin boundaries, strictly increasing, at least two.
             integer(int32), intent(out) :: codes(:)
@@ -7609,6 +7971,9 @@ module parquet_stats
             !! joins.
             logical, intent(in), optional :: is_valid(:)
             !! per element: .false. marks a null. Absent means no element is null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight, non-negative. A ZERO weight removes the element from the
+            !! population; a negative, NaN or infinite one aborts. Absent means every weight is 1.
             logical, intent(in), optional :: skipnan
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
@@ -8007,8 +8372,9 @@ module parquet_stats
         end subroutine obj_update_f64
         !> Folds one other accumulator into this one.
         !!
-        !! Both must agree on `retain` and on the weight convention, and the source must have been
-        !! computed; a mismatch aborts, naming which. A source with no elements at all is a no-op.
+        !! Both must agree on all THREE of the policies fixed at `%compute`/`%init` -- `retain`,
+        !! `weight_type` and `skipnan` -- and the source must have been computed; a mismatch
+        !! aborts, naming which. A source with no elements at all is a no-op.
         module subroutine obj_merge_one(self, other, consume)
             class(pf_stats), intent(inout) :: self !! the destination.
             type(pf_stats), intent(inout) :: other
@@ -8116,6 +8482,32 @@ module parquet_stats
             !! the accumulator; a query may complete a deferred recomputation.
             real(real64) :: res !! the weighted mean, or NaN for an empty population.
         end function obj_mean
+        !> The geometric mean of the population -- `exp(sum(w*log(x)) / sum(w))`.
+        !>
+        !> **Needs the retained values, so it aborts on a streaming accumulator**
+        !> (`retain = .false.`), exactly as the order statistics do. It is not derivable from the
+        !> four central moments the accumulator carries -- a log-sum is a fifth quantity, and
+        !> accumulating it in the hot loop would charge a transcendental per element to every
+        !> population that never asks for one. Unlike `%median` it orders nothing.
+        !>
+        !> NaN for an empty population and for one holding a negative value; **exactly 0 when any
+        !> value is 0**, which is the limit and what scipy returns.
+        module function obj_gmean(self) result(res)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; a query may complete a deferred recomputation.
+            real(real64) :: res !! the weighted geometric mean, or NaN when it is undefined.
+        end function obj_gmean
+        !> The harmonic mean of the population -- `sum(w) / sum(w/x)`.
+        !>
+        !> Aborts on a streaming accumulator for the reason `%gmean` does, and orders nothing.
+        !>
+        !> NaN for an empty population and for one holding a negative value; **exactly 0 when any
+        !> value is 0**, as scipy returns.
+        module function obj_hmean(self) result(res)
+            class(pf_stats), intent(inout) :: self
+            !! the accumulator; a query may complete a deferred recomputation.
+            real(real64) :: res !! the weighted harmonic mean, or NaN when it is undefined.
+        end function obj_hmean
         !> The variance of the population.
         !>
         !> `ddof` at or above the effective size gives a NaN rather than a division -- including the

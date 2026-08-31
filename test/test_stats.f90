@@ -37,13 +37,17 @@ module test_stats
     use parquet_strings
     use test_stats_golden
     use iso_fortran_env, only : int32, int64, real32, real64
-    use ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_get_flag, ieee_set_flag, &
-        ieee_support_flag, ieee_divide_by_zero, ieee_is_nan
+    use ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_positive_inf, ieee_get_flag, &
+        ieee_set_flag, ieee_support_flag, ieee_divide_by_zero, ieee_is_nan
     use testdrive, only : new_unittest, unittest_type, error_type, check, skip_test
     implicit none
     private
 
     public :: collect_tests_parquet_stats
+
+    !> How many scalar reductions `test_kind_sweep` covers. Declared once so its six per-kind
+    !! arms, and the name table they share, cannot disagree about the count.
+    integer, parameter :: NSCALAR = 16
 
 contains
 
@@ -181,7 +185,7 @@ contains
                 test_sigma_clip_keep_mask), &
             new_unittest("the sigma clip's empty, constant and two-element cases", &
                 test_sigma_clip_degenerate), &
-            new_unittest("every P8 procedure agrees across all six input kinds", &
+            new_unittest("the P8 procedures agree between int32 and real32", &
                 test_p8_kinds_agree), &
             new_unittest("the four properties P8's first mutation round found unasserted", &
                 test_p8_mutation_gaps), &
@@ -207,10 +211,28 @@ contains
                 test_bin_edges_matches_numpy), &
             new_unittest("pf_bin_edges always emits edges pf_histogram will accept", &
                 test_bin_edges_are_always_usable), &
-            new_unittest("every generated per-kind specific is reached at least once", &
+            new_unittest("a hand-picked sample of the generated per-kind specifics is reached", &
                 test_every_kind_specific_is_reached), &
             new_unittest("deferring pass one's compaction changes no answer, wherever the first " // &
-                "exclusion falls", test_deferred_compaction_is_invisible) &
+                "exclusion falls", test_deferred_compaction_is_invisible), &
+            new_unittest("EVERY generated entry point agrees across all six input kinds", &
+                test_kind_sweep), &
+            new_unittest("a non-finite value never aborts, and answers what numpy answers", &
+                test_non_finite_values), &
+            new_unittest("pf_bin_edges survives an infinity, and pf_histogram still accepts it", &
+                test_bin_edges_survive_non_finite), &
+            new_unittest("pf_histogram IS pf_bucketize tallied WITH WEIGHTS too", &
+                test_weighted_bucketize_identity), &
+            new_unittest("pf_count_valid reports why every element left", test_count_valid_why), &
+            new_unittest("pf_moments and pf_describe report ok over the outputs asked for", &
+                test_aggregate_ok), &
+            new_unittest("%gmean and %hmean answer what the one-shot forms do", &
+                test_object_power_means), &
+            new_unittest("modes= returns every tied value, as pandas does", test_all_modes), &
+            new_unittest("pf_cov(x,x) is pf_variance(x) under BOTH weight conventions", &
+                test_cov_weight_type), &
+            new_unittest("the streaming accuracy loss is bounded, and the two-pass route is exact", &
+                test_streaming_accuracy_bound) &
             ]
     end subroutine collect_tests_parquet_stats
 
@@ -4266,6 +4288,1250 @@ contains
         call check(error, acc%n_valid() == 4_int64 .and. close_to(acc%mean(), 0.75_real64), &
             "%update over a logical array")
     end subroutine test_every_kind_specific_is_reached
+
+    ! ==================================================================================
+    ! The pre-release round: the exhaustive kind sweep, the non-finite contract, and the
+    ! arguments added while the API was still free to change.
+    ! ==================================================================================
+
+    !> EVERY generated entry point agrees across all six input kinds.
+    !!
+    !! **`test_every_kind_specific_is_reached` only SAMPLES, which is why this exists.** That test
+    !! names a couple of dozen call sites by hand while the generated forwarding layer has roughly
+    !! a hundred and eighty, and the gap is not hypothetical: a coverage run over this suite put
+    !! `src/parquet_stats_kernel.f90` at 44%, with 94 procedures never executed. Every one of them
+    !! was correct when checked by hand, and that is precisely the state worth protecting -- the
+    !! layer is GENERATED, so its risk is a template change, and a template change breaks every
+    !! kind at once rather than one.
+    !!
+    !! **The assertion is `==`, never a tolerance.** Each kind widens to `real64` and reaches the
+    !! same engine, so the answers are not merely close, they are the same bits; a tolerance here
+    !! would accept a forwarding bug that dropped an argument.
+    !!
+    !! The population is small integers, exactly representable in `real32`, `int32`, `int64` and
+    !! `real64` alike, in a scrambled order -- so a bug that summarised an index range instead of
+    !! the population could not agree by accident. `logical` cannot hold them and gets its own arm
+    !! against the 1/0 mapping written out by hand.
+    subroutine test_kind_sweep(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        integer, parameter :: N = 8
+        real(real64) :: xd(N), yd(N), wd(N), want, got
+        real(real32) :: xs(N), ys(N)
+        integer(int32) :: xi(N), yi(N)
+        integer(int64) :: xl(N), yl(N)
+        type(parquet_column) :: cx, cy
+        integer(int64) :: nw, ng
+        integer :: f, k
+
+        xd = [3.0_real64, 1.0_real64, 4.0_real64, 1.0_real64, 5.0_real64, 9.0_real64, &
+              2.0_real64, 6.0_real64]
+        yd = [2.0_real64, 7.0_real64, 1.0_real64, 8.0_real64, 2.0_real64, 8.0_real64, &
+              1.0_real64, 4.0_real64]
+        wd = [1.0_real64, 2.0_real64, 1.0_real64, 3.0_real64, 1.0_real64, 1.0_real64, &
+              2.0_real64, 1.0_real64]
+        xs = real(xd, real32);  ys = real(yd, real32)
+        xi = int(xd, int32);    yi = int(yd, int32)
+        xl = int(xd, int64);    yl = int(yd, int64)
+        call cx%init(PK_FLOAT64, int(N, int64))
+        call cy%init(PK_FLOAT64, int(N, int64))
+        do k = 1, N
+            call cx%set_at(int(k, int64), xd(k))
+            call cy%set_at(int(k, int64), yd(k))
+        end do
+
+        do f = 1, NSCALAR
+            call scalar_f64(f, xd, yd, wd, want)
+            call scalar_r32(f, xs, ys, wd, got)
+            call check(error, got == want, "real32 disagrees on " // trim(fam_name(f)))
+            if (allocated(error)) return
+            call scalar_i32(f, xi, yi, wd, got)
+            call check(error, got == want, "int32 disagrees on " // trim(fam_name(f)))
+            if (allocated(error)) return
+            call scalar_i64(f, xl, yl, wd, got)
+            call check(error, got == want, "int64 disagrees on " // trim(fam_name(f)))
+            if (allocated(error)) return
+            call scalar_col(f, cx, cy, wd, got)
+            call check(error, got == want, "parquet_column disagrees on " // trim(fam_name(f)))
+            if (allocated(error)) return
+        end do
+
+        ! `pf_count_valid` answers an integer, so it cannot ride the loop above.
+        call pf_count_valid(xd, nw)
+        call pf_count_valid(xs, ng); call check(error, ng == nw, "pf_count_valid over real32")
+        if (allocated(error)) return
+        call pf_count_valid(xi, ng); call check(error, ng == nw, "pf_count_valid over int32")
+        if (allocated(error)) return
+        call pf_count_valid(xl, ng); call check(error, ng == nw, "pf_count_valid over int64")
+        if (allocated(error)) return
+        call pf_count_valid(cx, ng); call check(error, ng == nw, "pf_count_valid over a column")
+        if (allocated(error)) return
+
+        call sweep_vectors(error, xd, xs, xi, xl, cx, yd, cy)
+        if (allocated(error)) return
+        call sweep_logical(error, wd)
+    end subroutine test_kind_sweep
+
+    !> The scalar reductions over the `real64` reference population.
+    subroutine scalar_f64(f, x, y, w, res)
+        integer, intent(in) :: f              !! which family, 1..NSCALAR.
+        real(real64), intent(in) :: x(:)      !! the population.
+        real(real64), intent(in) :: y(:)      !! the second sample, for the pairwise families.
+        real(real64), intent(in) :: w(:)      !! the weights, for the weighted arms.
+        real(real64), intent(out) :: res      !! the answer.
+        select case (f)
+        case (1);  call pf_sum(x, res)
+        case (2);  call pf_mean(x, res)
+        case (3);  call pf_gmean(x, res)
+        case (4);  call pf_hmean(x, res)
+        case (5);  call pf_variance(x, res)
+        case (6);  call pf_stddev(x, res)
+        case (7);  call pf_sem(x, res)
+        case (8);  call pf_skewness(x, res)
+        case (9);  call pf_kurtosis(x, res)
+        case (10); call pf_median(x, res)
+        case (11); call pf_quantile(x, 0.3_real64, res)
+        case (12); call pf_iqr(x, res)
+        case (13); call pf_trim_mean(x, 0.25_real64, res)
+        case (14); call pf_percentile_of_score(x, 4.0_real64, res)
+        case (15); call pf_mad(x, res)
+        case (16); call pf_mean(x, res, weights=w)
+        end select
+    end subroutine scalar_f64
+
+    !> The same reductions through the `real(real32)` generic.
+    subroutine scalar_r32(f, x, y, w, res)
+        integer, intent(in) :: f              !! which family, 1..NSCALAR.
+        real(real32), intent(in) :: x(:)      !! the population.
+        real(real32), intent(in) :: y(:)      !! the second sample.
+        real(real64), intent(in) :: w(:)      !! the weights.
+        real(real64), intent(out) :: res      !! the answer.
+        select case (f)
+        case (1);  call pf_sum(x, res)
+        case (2);  call pf_mean(x, res)
+        case (3);  call pf_gmean(x, res)
+        case (4);  call pf_hmean(x, res)
+        case (5);  call pf_variance(x, res)
+        case (6);  call pf_stddev(x, res)
+        case (7);  call pf_sem(x, res)
+        case (8);  call pf_skewness(x, res)
+        case (9);  call pf_kurtosis(x, res)
+        case (10); call pf_median(x, res)
+        case (11); call pf_quantile(x, 0.3_real64, res)
+        case (12); call pf_iqr(x, res)
+        case (13); call pf_trim_mean(x, 0.25_real64, res)
+        case (14); call pf_percentile_of_score(x, 4.0_real64, res)
+        case (15); call pf_mad(x, res)
+        case (16); call pf_mean(x, res, weights=w)
+        end select
+    end subroutine scalar_r32
+
+    !> The same reductions through the `integer(int32)` generic.
+    subroutine scalar_i32(f, x, y, w, res)
+        integer, intent(in) :: f              !! which family, 1..NSCALAR.
+        integer(int32), intent(in) :: x(:)    !! the population.
+        integer(int32), intent(in) :: y(:)    !! the second sample.
+        real(real64), intent(in) :: w(:)      !! the weights.
+        real(real64), intent(out) :: res      !! the answer.
+        select case (f)
+        case (1);  call pf_sum(x, res)
+        case (2);  call pf_mean(x, res)
+        case (3);  call pf_gmean(x, res)
+        case (4);  call pf_hmean(x, res)
+        case (5);  call pf_variance(x, res)
+        case (6);  call pf_stddev(x, res)
+        case (7);  call pf_sem(x, res)
+        case (8);  call pf_skewness(x, res)
+        case (9);  call pf_kurtosis(x, res)
+        case (10); call pf_median(x, res)
+        case (11); call pf_quantile(x, 0.3_real64, res)
+        case (12); call pf_iqr(x, res)
+        case (13); call pf_trim_mean(x, 0.25_real64, res)
+        case (14); call pf_percentile_of_score(x, 4.0_real64, res)
+        case (15); call pf_mad(x, res)
+        case (16); call pf_mean(x, res, weights=w)
+        end select
+    end subroutine scalar_i32
+
+    !> The same reductions through the `integer(int64)` generic.
+    subroutine scalar_i64(f, x, y, w, res)
+        integer, intent(in) :: f              !! which family, 1..NSCALAR.
+        integer(int64), intent(in) :: x(:)    !! the population.
+        integer(int64), intent(in) :: y(:)    !! the second sample.
+        real(real64), intent(in) :: w(:)      !! the weights.
+        real(real64), intent(out) :: res      !! the answer.
+        select case (f)
+        case (1);  call pf_sum(x, res)
+        case (2);  call pf_mean(x, res)
+        case (3);  call pf_gmean(x, res)
+        case (4);  call pf_hmean(x, res)
+        case (5);  call pf_variance(x, res)
+        case (6);  call pf_stddev(x, res)
+        case (7);  call pf_sem(x, res)
+        case (8);  call pf_skewness(x, res)
+        case (9);  call pf_kurtosis(x, res)
+        case (10); call pf_median(x, res)
+        case (11); call pf_quantile(x, 0.3_real64, res)
+        case (12); call pf_iqr(x, res)
+        case (13); call pf_trim_mean(x, 0.25_real64, res)
+        case (14); call pf_percentile_of_score(x, 4.0_real64, res)
+        case (15); call pf_mad(x, res)
+        case (16); call pf_mean(x, res, weights=w)
+        end select
+    end subroutine scalar_i64
+
+    !> The same reductions through the scalar-numeric `parquet_column` generic.
+    subroutine scalar_col(f, x, y, w, res)
+        integer, intent(in) :: f                    !! which family, 1..NSCALAR.
+        type(parquet_column), intent(in) :: x       !! the population.
+        type(parquet_column), intent(in) :: y       !! the second sample.
+        real(real64), intent(in) :: w(:)            !! the weights.
+        real(real64), intent(out) :: res            !! the answer.
+        select case (f)
+        case (1);  call pf_sum(x, res)
+        case (2);  call pf_mean(x, res)
+        case (3);  call pf_gmean(x, res)
+        case (4);  call pf_hmean(x, res)
+        case (5);  call pf_variance(x, res)
+        case (6);  call pf_stddev(x, res)
+        case (7);  call pf_sem(x, res)
+        case (8);  call pf_skewness(x, res)
+        case (9);  call pf_kurtosis(x, res)
+        case (10); call pf_median(x, res)
+        case (11); call pf_quantile(x, 0.3_real64, res)
+        case (12); call pf_iqr(x, res)
+        case (13); call pf_trim_mean(x, 0.25_real64, res)
+        case (14); call pf_percentile_of_score(x, 4.0_real64, res)
+        case (15); call pf_mad(x, res)
+        case (16); call pf_mean(x, res, weights=w)
+        end select
+    end subroutine scalar_col
+
+    !> The family names, so a failure message says which reduction disagreed.
+    pure function fam_name(f) result(res)
+        integer, intent(in) :: f       !! which family, 1..NSCALAR.
+        character(len=24) :: res       !! its public name, blank-padded.
+        character(len=24), parameter :: NAMES(NSCALAR) = [ &
+            "pf_sum                  ", "pf_mean                 ", "pf_gmean                ", &
+            "pf_hmean                ", "pf_variance             ", "pf_stddev               ", &
+            "pf_sem                  ", "pf_skewness             ", "pf_kurtosis             ", &
+            "pf_median               ", "pf_quantile             ", "pf_iqr                  ", &
+            "pf_trim_mean            ", "pf_percentile_of_score  ", "pf_mad                  ", &
+            "pf_mean(weights=)       "]
+        res = NAMES(f)
+    end function fam_name
+
+    !> The vector-valued, three-output, object-filling and two-sample families, across five kinds.
+    !!
+    !! Separate from the scalar loop because each returns something a `real(real64)` scalar cannot
+    !! hold, so none of them can share the `select case` dispatch above.
+    subroutine sweep_vectors(error, xd, xs, xi, xl, cx, yd, cy)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), intent(in) :: xd(:)                   !! the real64 reference population.
+        real(real32), intent(in) :: xs(:)                   !! the same values as real32.
+        integer(int32), intent(in) :: xi(:)                 !! ... as int32.
+        integer(int64), intent(in) :: xl(:)                 !! ... as int64.
+        type(parquet_column), intent(in) :: cx              !! ... as a scalar float64 column.
+        real(real64), intent(in) :: yd(:)                   !! the second sample, as real64.
+        type(parquet_column), intent(in) :: cy              !! the second sample, as a column.
+        real(real64) :: wv(size(xd)), gv(size(xd)), edges(4), wc(3), gc(3)
+        real(real64) :: wm, wmd, wsd, gm, gmd, gsd
+        integer(int32) :: wk(size(xd)), gk(size(xd))
+        type(pf_stats) :: sw, sg
+        integer :: c
+
+        edges = [0.0_real64, 3.0_real64, 6.0_real64, 10.0_real64]
+
+        call pf_zscore(xd, wv)
+        call pf_zscore(xs, gv); call check(error, all(gv == wv), "pf_zscore over real32")
+        if (allocated(error)) return
+        call pf_zscore(xi, gv); call check(error, all(gv == wv), "pf_zscore over int32")
+        if (allocated(error)) return
+        call pf_zscore(xl, gv); call check(error, all(gv == wv), "pf_zscore over int64")
+        if (allocated(error)) return
+        call pf_zscore(cx, gv); call check(error, all(gv == wv), "pf_zscore over a column")
+        if (allocated(error)) return
+
+        do c = 1, 4
+            call cum_f64(c, xd, wv)
+            call cum_r32(c, xs, gv)
+            call check(error, all(gv == wv), "real32 disagrees on " // trim(cum_name(c)))
+            if (allocated(error)) return
+            call cum_i32(c, xi, gv)
+            call check(error, all(gv == wv), "int32 disagrees on " // trim(cum_name(c)))
+            if (allocated(error)) return
+            call cum_i64(c, xl, gv)
+            call check(error, all(gv == wv), "int64 disagrees on " // trim(cum_name(c)))
+            if (allocated(error)) return
+            call cum_col(c, cx, gv)
+            call check(error, all(gv == wv), "parquet_column disagrees on " // trim(cum_name(c)))
+            if (allocated(error)) return
+        end do
+
+        call pf_histogram(xd, edges, wc)
+        call pf_histogram(xs, edges, gc); call check(error, all(gc == wc), "pf_histogram real32")
+        if (allocated(error)) return
+        call pf_histogram(xi, edges, gc); call check(error, all(gc == wc), "pf_histogram int32")
+        if (allocated(error)) return
+        call pf_histogram(xl, edges, gc); call check(error, all(gc == wc), "pf_histogram int64")
+        if (allocated(error)) return
+        call pf_histogram(cx, edges, gc); call check(error, all(gc == wc), "pf_histogram column")
+        if (allocated(error)) return
+        call pf_bucketize(xd, edges, wk)
+        call pf_bucketize(xs, edges, gk); call check(error, all(gk == wk), "pf_bucketize real32")
+        if (allocated(error)) return
+        call pf_bucketize(xi, edges, gk); call check(error, all(gk == wk), "pf_bucketize int32")
+        if (allocated(error)) return
+        call pf_bucketize(xl, edges, gk); call check(error, all(gk == wk), "pf_bucketize int64")
+        if (allocated(error)) return
+        call pf_bucketize(cx, edges, gk); call check(error, all(gk == wk), "pf_bucketize column")
+        if (allocated(error)) return
+        call pf_bin_edges(xd, 2, wc)
+        call pf_bin_edges(xs, 2, gc); call check(error, all(gc == wc), "pf_bin_edges real32")
+        if (allocated(error)) return
+        call pf_bin_edges(xi, 2, gc); call check(error, all(gc == wc), "pf_bin_edges int32")
+        if (allocated(error)) return
+        call pf_bin_edges(xl, 2, gc); call check(error, all(gc == wc), "pf_bin_edges int64")
+        if (allocated(error)) return
+        call pf_bin_edges(cx, 2, gc); call check(error, all(gc == wc), "pf_bin_edges column")
+        if (allocated(error)) return
+
+        call pf_sigma_clipped_stats(xd, wm, wmd, wsd)
+        call pf_sigma_clipped_stats(xs, gm, gmd, gsd)
+        call check(error, gm == wm .and. gmd == wmd .and. gsd == wsd, "sigma clip over real32")
+        if (allocated(error)) return
+        call pf_sigma_clipped_stats(xi, gm, gmd, gsd)
+        call check(error, gm == wm .and. gmd == wmd .and. gsd == wsd, "sigma clip over int32")
+        if (allocated(error)) return
+        call pf_sigma_clipped_stats(xl, gm, gmd, gsd)
+        call check(error, gm == wm .and. gmd == wmd .and. gsd == wsd, "sigma clip over int64")
+        if (allocated(error)) return
+        call pf_sigma_clipped_stats(cx, gm, gmd, gsd)
+        call check(error, gm == wm .and. gmd == wmd .and. gsd == wsd, "sigma clip over a column")
+        if (allocated(error)) return
+
+        call pf_describe(xd, sw)
+        call pf_describe(xs, sg)
+        call check(error, sg%mean() == sw%mean() .and. sg%median() == sw%median(), &
+            "pf_describe over real32")
+        if (allocated(error)) return
+        call pf_describe(xi, sg)
+        call check(error, sg%mean() == sw%mean() .and. sg%median() == sw%median(), &
+            "pf_describe over int32")
+        if (allocated(error)) return
+        call pf_describe(xl, sg)
+        call check(error, sg%mean() == sw%mean() .and. sg%median() == sw%median(), &
+            "pf_describe over int64")
+        if (allocated(error)) return
+        call pf_describe(cx, sg)
+        call check(error, sg%mean() == sw%mean() .and. sg%median() == sw%median(), &
+            "pf_describe over a column")
+        if (allocated(error)) return
+
+        ! `pf_moments` and `pf_quantiles`, which return several values at once and so cannot ride
+        ! the scalar loop either, and the two-sample pair over both arguments' kinds at once.
+        call sweep_multis(error, xd, xs, xi, xl, cx, yd, cy)
+    end subroutine sweep_vectors
+
+    !> The multi-output and two-sample families, across five kinds.
+    subroutine sweep_multis(error, xd, xs, xi, xl, cx, yd, cy)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), intent(in) :: xd(:)                   !! the real64 reference population.
+        real(real32), intent(in) :: xs(:)                   !! the same values as real32.
+        integer(int32), intent(in) :: xi(:)                 !! ... as int32.
+        integer(int64), intent(in) :: xl(:)                 !! ... as int64.
+        type(parquet_column), intent(in) :: cx              !! ... as a scalar float64 column.
+        real(real64), intent(in) :: yd(:)                   !! the second sample, as real64.
+        type(parquet_column), intent(in) :: cy              !! the same second sample, as a column.
+        real(real64) :: probs(3), wq(3), gq(3), wm(4), gm(4), want, got
+
+        probs = [0.1_real64, 0.5_real64, 0.9_real64]
+
+        call pf_quantiles(xd, probs, wq)
+        call pf_quantiles(xs, probs, gq); call check(error, all(gq == wq), "pf_quantiles real32")
+        if (allocated(error)) return
+        call pf_quantiles(xi, probs, gq); call check(error, all(gq == wq), "pf_quantiles int32")
+        if (allocated(error)) return
+        call pf_quantiles(xl, probs, gq); call check(error, all(gq == wq), "pf_quantiles int64")
+        if (allocated(error)) return
+        call pf_quantiles(cx, probs, gq); call check(error, all(gq == wq), "pf_quantiles column")
+        if (allocated(error)) return
+
+        call pf_moments(xd, mean=wm(1), variance=wm(2), skewness=wm(3), vmax=wm(4))
+        call pf_moments(xs, mean=gm(1), variance=gm(2), skewness=gm(3), vmax=gm(4))
+        call check(error, all(gm == wm), "pf_moments over real32")
+        if (allocated(error)) return
+        call pf_moments(xi, mean=gm(1), variance=gm(2), skewness=gm(3), vmax=gm(4))
+        call check(error, all(gm == wm), "pf_moments over int32")
+        if (allocated(error)) return
+        call pf_moments(xl, mean=gm(1), variance=gm(2), skewness=gm(3), vmax=gm(4))
+        call check(error, all(gm == wm), "pf_moments over int64")
+        if (allocated(error)) return
+        call pf_moments(cx, mean=gm(1), variance=gm(2), skewness=gm(3), vmax=gm(4))
+        call check(error, all(gm == wm), "pf_moments over a column")
+        if (allocated(error)) return
+
+        ! The second sample is a DIFFERENT population, not a copy of the first: a covariance of a
+        ! sample with itself is the variance and a correlation is exactly 1, either of which would
+        ! agree across kinds for a reason that has nothing to do with the forwarding under test.
+        call pf_cov(xd, yd, want)
+        call pf_cov(xs, real(yd, real32), got); call check(error, got == want, "pf_cov real32")
+        if (allocated(error)) return
+        call pf_cov(xi, int(yd, int32), got); call check(error, got == want, "pf_cov int32")
+        if (allocated(error)) return
+        call pf_cov(xl, int(yd, int64), got); call check(error, got == want, "pf_cov int64")
+        if (allocated(error)) return
+        call pf_cov(cx, cy, got); call check(error, got == want, "pf_cov over two columns")
+        if (allocated(error)) return
+        call pf_corr(xd, yd, want)
+        call pf_corr(xs, real(yd, real32), got); call check(error, got == want, "pf_corr real32")
+        if (allocated(error)) return
+        call pf_corr(xi, int(yd, int32), got); call check(error, got == want, "pf_corr int32")
+        if (allocated(error)) return
+        call pf_corr(xl, int(yd, int64), got); call check(error, got == want, "pf_corr int64")
+        if (allocated(error)) return
+        call pf_corr(cx, cy, got); call check(error, got == want, "pf_corr over two columns")
+    end subroutine sweep_multis
+
+    !> The four running folds over the `real64` reference population.
+    subroutine cum_f64(c, x, out)
+        integer, intent(in) :: c                !! which fold, 1..4.
+        real(real64), intent(in) :: x(:)        !! the population.
+        real(real64), intent(out) :: out(:)     !! the running value.
+        select case (c)
+        case (1); call pf_cumsum(x, out)
+        case (2); call pf_cumprod(x, out)
+        case (3); call pf_cummax(x, out)
+        case (4); call pf_cummin(x, out)
+        end select
+    end subroutine cum_f64
+
+    !> The four running folds through the `real(real32)` generic.
+    subroutine cum_r32(c, x, out)
+        integer, intent(in) :: c                !! which fold, 1..4.
+        real(real32), intent(in) :: x(:)        !! the population.
+        real(real64), intent(out) :: out(:)     !! the running value.
+        select case (c)
+        case (1); call pf_cumsum(x, out)
+        case (2); call pf_cumprod(x, out)
+        case (3); call pf_cummax(x, out)
+        case (4); call pf_cummin(x, out)
+        end select
+    end subroutine cum_r32
+
+    !> The four running folds through the `integer(int32)` generic.
+    subroutine cum_i32(c, x, out)
+        integer, intent(in) :: c                !! which fold, 1..4.
+        integer(int32), intent(in) :: x(:)      !! the population.
+        real(real64), intent(out) :: out(:)     !! the running value.
+        select case (c)
+        case (1); call pf_cumsum(x, out)
+        case (2); call pf_cumprod(x, out)
+        case (3); call pf_cummax(x, out)
+        case (4); call pf_cummin(x, out)
+        end select
+    end subroutine cum_i32
+
+    !> The four running folds through the `integer(int64)` generic.
+    subroutine cum_i64(c, x, out)
+        integer, intent(in) :: c                !! which fold, 1..4.
+        integer(int64), intent(in) :: x(:)      !! the population.
+        real(real64), intent(out) :: out(:)     !! the running value.
+        select case (c)
+        case (1); call pf_cumsum(x, out)
+        case (2); call pf_cumprod(x, out)
+        case (3); call pf_cummax(x, out)
+        case (4); call pf_cummin(x, out)
+        end select
+    end subroutine cum_i64
+
+    !> The four running folds through the scalar-numeric `parquet_column` generic.
+    subroutine cum_col(c, x, out)
+        integer, intent(in) :: c                    !! which fold, 1..4.
+        type(parquet_column), intent(in) :: x       !! the population.
+        real(real64), intent(out) :: out(:)         !! the running value.
+        select case (c)
+        case (1); call pf_cumsum(x, out)
+        case (2); call pf_cumprod(x, out)
+        case (3); call pf_cummax(x, out)
+        case (4); call pf_cummin(x, out)
+        end select
+    end subroutine cum_col
+
+    !> The running folds' names, for a failure message that says which one disagreed.
+    pure function cum_name(c) result(res)
+        integer, intent(in) :: c       !! which fold, 1..4.
+        character(len=12) :: res       !! its public name, blank-padded.
+        character(len=12), parameter :: NAMES(4) = [ &
+            "pf_cumsum   ", "pf_cumprod  ", "pf_cummax   ", "pf_cummin   "]
+        res = NAMES(c)
+    end function cum_name
+
+    !> The logical arm, against the 1/0 mapping written out as `real64`.
+    !!
+    !! A logical population cannot hold the sweep's own values, so its reference is built here
+    !! rather than shared -- which is the whole reason this kind needs a separate arm at all.
+    subroutine sweep_logical(error, w)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), intent(in) :: w(:)                    !! the weights, for the weighted arm.
+        integer, parameter :: N = 8
+        logical :: xb(N)
+        real(real64) :: ref(N), want, got, wv(N), gv(N), edges(4), wc(3), gc(3)
+        integer(int32) :: wk(N), gk(N)
+        real(real64) :: wm, wmd, wsd, gm, gmd, gsd
+        type(pf_stats) :: sw, sg
+        integer(int64) :: nw, ng
+        integer :: f, c, k
+
+        xb = [.true., .true., .false., .true., .false., .true., .true., .false.]
+        do k = 1, N
+            ref(k) = merge(1.0_real64, 0.0_real64, xb(k))
+        end do
+        edges = [-0.5_real64, 0.5_real64, 1.5_real64, 2.5_real64]
+
+        ! `pf_gmean` and `pf_hmean` are omitted: a population containing a zero makes both exactly
+        ! 0 by their documented domain rule, so they would agree for a reason that has nothing to
+        ! do with the forwarding under test. `test_every_kind_specific_is_reached` covers the
+        ! all-true case, where they are 1.
+        do f = 1, NSCALAR
+            if (f == 3 .or. f == 4) cycle
+            call scalar_f64(f, ref, ref, w, want)
+            call scalar_bool(f, xb, xb, w, got)
+            call check(error, got == want, "logical disagrees on " // trim(fam_name(f)))
+            if (allocated(error)) return
+        end do
+        call pf_count_valid(ref, nw)
+        call pf_count_valid(xb, ng); call check(error, ng == nw, "pf_count_valid over logical")
+        if (allocated(error)) return
+
+        call pf_zscore(ref, wv)
+        call pf_zscore(xb, gv); call check(error, all(gv == wv), "pf_zscore over logical")
+        if (allocated(error)) return
+        do c = 1, 4
+            call cum_f64(c, ref, wv)
+            call cum_bool(c, xb, gv)
+            call check(error, all(gv == wv), "logical disagrees on " // trim(cum_name(c)))
+            if (allocated(error)) return
+        end do
+        call pf_histogram(ref, edges, wc)
+        call pf_histogram(xb, edges, gc); call check(error, all(gc == wc), "pf_histogram logical")
+        if (allocated(error)) return
+        call pf_bucketize(ref, edges, wk)
+        call pf_bucketize(xb, edges, gk); call check(error, all(gk == wk), "pf_bucketize logical")
+        if (allocated(error)) return
+        call pf_bin_edges(ref, 2, wc)
+        call pf_bin_edges(xb, 2, gc); call check(error, all(gc == wc), "pf_bin_edges logical")
+        if (allocated(error)) return
+        call pf_sigma_clipped_stats(ref, wm, wmd, wsd)
+        call pf_sigma_clipped_stats(xb, gm, gmd, gsd)
+        call check(error, gm == wm .and. gmd == wmd .and. gsd == wsd, "sigma clip over logical")
+        if (allocated(error)) return
+        call pf_describe(ref, sw)
+        call pf_describe(xb, sg)
+        call check(error, sg%mean() == sw%mean() .and. sg%median() == sw%median(), &
+            "pf_describe over logical")
+        if (allocated(error)) return
+        call pf_quantiles(ref, [0.1_real64, 0.5_real64, 0.9_real64], wc)
+        call pf_quantiles(xb, [0.1_real64, 0.5_real64, 0.9_real64], gc)
+        call check(error, all(gc == wc), "pf_quantiles over logical")
+        if (allocated(error)) return
+        call pf_moments(ref, mean=wc(1), variance=wc(2), skewness=wc(3))
+        call pf_moments(xb, mean=gc(1), variance=gc(2), skewness=gc(3))
+        call check(error, all(gc == wc), "pf_moments over logical")
+        if (allocated(error)) return
+        call pf_cov(ref, ref, want)
+        call pf_cov(xb, xb, got); call check(error, got == want, "pf_cov over logical")
+        if (allocated(error)) return
+        call pf_corr(ref, ref, want)
+        call pf_corr(xb, xb, got); call check(error, got == want, "pf_corr over logical")
+    end subroutine sweep_logical
+
+    !> The scalar reductions through the `logical` generic.
+    subroutine scalar_bool(f, x, y, w, res)
+        integer, intent(in) :: f              !! which family, 1..NSCALAR.
+        logical, intent(in) :: x(:)           !! the population.
+        logical, intent(in) :: y(:)           !! the second sample.
+        real(real64), intent(in) :: w(:)      !! the weights.
+        real(real64), intent(out) :: res      !! the answer.
+        select case (f)
+        case (1);  call pf_sum(x, res)
+        case (2);  call pf_mean(x, res)
+        case (3);  call pf_gmean(x, res)
+        case (4);  call pf_hmean(x, res)
+        case (5);  call pf_variance(x, res)
+        case (6);  call pf_stddev(x, res)
+        case (7);  call pf_sem(x, res)
+        case (8);  call pf_skewness(x, res)
+        case (9);  call pf_kurtosis(x, res)
+        case (10); call pf_median(x, res)
+        case (11); call pf_quantile(x, 0.3_real64, res)
+        case (12); call pf_iqr(x, res)
+        case (13); call pf_trim_mean(x, 0.25_real64, res)
+        case (14); call pf_percentile_of_score(x, 4.0_real64, res)
+        case (15); call pf_mad(x, res)
+        case (16); call pf_mean(x, res, weights=w)
+        end select
+    end subroutine scalar_bool
+
+    !> The four running folds through the `logical` generic.
+    subroutine cum_bool(c, x, out)
+        integer, intent(in) :: c                !! which fold, 1..4.
+        logical, intent(in) :: x(:)             !! the population.
+        real(real64), intent(out) :: out(:)     !! the running value.
+        select case (c)
+        case (1); call pf_cumsum(x, out)
+        case (2); call pf_cumprod(x, out)
+        case (3); call pf_cummax(x, out)
+        case (4); call pf_cummin(x, out)
+        end select
+    end subroutine cum_bool
+
+    !> A non-finite value never aborts, and answers what numpy answers.
+    !!
+    !! **This is the gap the whole family had.** Weights are validated as finite and that abort is
+    !! tested; `pf_mad`'s `center=` and `pf_percentile_of_score`'s `score=` are validated and both
+    !! aborts are tested. The VALUES array was not, and no fixture in
+    !! `tools/generate_stats_vectors.py` contained an infinity -- which is why four separate
+    !! defects lived in this corner at once, all reachable from an ordinary data condition (an
+    !! upstream division by zero, a `log(0)`, an overflowed unit conversion).
+    !!
+    !! The contract asserted here, against numpy 2.5 and pandas 3.0 on the same inputs:
+    !!
+    !! * `+Inf` in the population makes the SUM and the MEAN `+Inf`, with `ok = .true.` -- an
+    !!   infinity is a value, not a failure, and `pf_sum` and `pf_mean` must not disagree about
+    !!   one population. This is what the two-pass mean refinement used to break: `Inf - Inf` in
+    !!   the correction term turned a correct `+Inf` into a NaN;
+    !! * every CENTRAL MOMENT is then NaN, which is numpy's answer too -- every deviation from an
+    !!   infinite mean is infinite, and the infinite element's own is `Inf - Inf`;
+    !! * both signs of infinity present makes even the mean NaN, again as numpy;
+    !! * `pf_sigma_clipped_stats` reports `ok = .false.` when ANY of its three outputs is a NaN.
+    !!   It is the family's only three-output procedure and they do not fail together: the clip
+    !!   keeps a finite median beside an infinite mean and a NaN standard deviation.
+    !!
+    !! Nothing here may abort: an infinity is a data condition, and this module aborts only on
+    !! misuse.
+    subroutine test_non_finite_values(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: x(7), s, m, v, sd, med, nan, inf, ninf
+        logical :: ok
+
+        nan = ieee_value(1.0_real64, ieee_quiet_nan)
+        inf = ieee_value(1.0_real64, ieee_positive_inf)
+        ninf = -inf
+        ! Built at run time rather than as a constant expression: a constant `Inf` is not
+        ! portable, and a compiler that folds it may fold the arithmetic under test with it.
+        call check(error, .not. ieee_is_nan(inf) .and. inf > huge(1.0_real64), &
+            "the fixture's +Inf is not an infinity -- the assertions below prove nothing")
+        if (allocated(error)) return
+
+        x = [1.0_real64, 2.0_real64, inf, 4.0_real64, 5.0_real64, 6.0_real64, 7.0_real64]
+        call pf_sum(x, s, ok=ok)
+        call check(error, s > huge(1.0_real64) .and. ok, "pf_sum over +Inf must be +Inf, ok=.true.")
+        if (allocated(error)) return
+        call pf_mean(x, m, ok=ok)
+        call check(error, m > huge(1.0_real64) .and. ok, &
+            "pf_mean over +Inf must be +Inf with ok=.true., as numpy and pandas answer")
+        if (allocated(error)) return
+        call pf_variance(x, v, ok=ok)
+        call check(error, ieee_is_nan(v) .and. .not. ok, &
+            "pf_variance over +Inf must be NaN with ok=.false., as numpy answers")
+        if (allocated(error)) return
+        call pf_median(x, med, ok=ok)
+        call check(error, med == 5.0_real64 .and. ok, &
+            "pf_median is an order statistic and is unmoved by an infinity")
+        if (allocated(error)) return
+
+        ! Only -Inf: the mirror, so the sign is not being lost somewhere.
+        x(3) = ninf
+        call pf_mean(x, m, ok=ok)
+        call check(error, m < -huge(1.0_real64) .and. ok, "pf_mean over -Inf must be -Inf")
+        if (allocated(error)) return
+
+        ! Both signs: Inf - Inf, so even the sum is undefined. numpy answers nan here too.
+        x(3) = inf
+        x(4) = ninf
+        call pf_sum(x, s, ok=ok)
+        call check(error, ieee_is_nan(s) .and. .not. ok, "both infinities make the sum NaN")
+        if (allocated(error)) return
+        call pf_mean(x, m, ok=ok)
+        call check(error, ieee_is_nan(m) .and. .not. ok, "both infinities make the mean NaN")
+        if (allocated(error)) return
+
+        ! The sigma clip's three outputs, which do NOT fail together.
+        x = [1.0_real64, 2.0_real64, inf, 4.0_real64, 5.0_real64, 6.0_real64, 7.0_real64]
+        call pf_sigma_clipped_stats(x, m, med, sd, ok=ok)
+        call check(error, .not. ok, &
+            "pf_sigma_clipped_stats must report ok=.false. when any of its three outputs is NaN")
+        if (allocated(error)) return
+        call check(error, ieee_is_nan(sd) .and. .not. ieee_is_nan(med), &
+            "the clip's stddev is the NaN and its median is not -- the case ok= has to catch")
+        if (allocated(error)) return
+
+        ! The negative control for that flag: an ordinary population must still report .true.
+        call pf_sigma_clipped_stats([1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64], &
+            m, med, sd, ok=ok)
+        call check(error, ok, "a clean population must still leave the sigma clip's ok .true.")
+        if (allocated(error)) return
+
+        ! A NaN kept under skipnan=.false. is the family's own poisoning rule and is unchanged.
+        x = [1.0_real64, 2.0_real64, nan, 4.0_real64, 5.0_real64, 6.0_real64, 7.0_real64]
+        call pf_mean(x, m, skipnan=.false., ok=ok)
+        call check(error, ieee_is_nan(m) .and. .not. ok, "a kept NaN still poisons the mean")
+    end subroutine test_non_finite_values
+
+    !> `pf_bin_edges` survives an infinity, and `pf_histogram` still accepts what it emits.
+    !!
+    !! **`test_bin_edges_are_always_usable` asserts exactly this property and did not cover this
+    !! input**, which is how the contract came to be violated by a single `+Inf`: the range scan
+    !! excluded nulls, NaNs and zero-weighted elements but not infinities, so `span` was infinite,
+    !! every interior edge came out `Infinity`, and the repair -- a one-ulp nudge -- cannot
+    !! separate two infinities. The result was edges `pf_histogram` ABORTED on, one call after the
+    !! call documented to produce them.
+    !!
+    !! Five fixtures, each of which used to break it or is the control for one that did. The
+    !! assertion is the same every time and is the contract itself: strictly increasing, and
+    !! accepted by `pf_histogram` without aborting.
+    subroutine test_bin_edges_survive_non_finite(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: x(6), be(5), counts(4), inf, nan
+        integer(int64) :: nout
+        logical :: ok
+        integer :: k, f
+
+        inf = ieee_value(1.0_real64, ieee_positive_inf)
+        nan = ieee_value(1.0_real64, ieee_quiet_nan)
+
+        do f = 1, 5
+            x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64, 6.0_real64]
+            select case (f)
+            case (1); x(3) = inf                       ! one +Inf
+            case (2); x(3) = -inf                      ! one -Inf
+            case (3); x(3) = inf;  x(4) = -inf         ! both signs: span would be NaN
+            case (4); x = inf                          ! nothing finite at all
+            case (5); x(3) = nan                       ! a NaN kept by skipnan=.false. below
+            end select
+            if (f == 5) then
+                call pf_bin_edges(x, 4, be, skipnan=.false., ok=ok)
+            else
+                call pf_bin_edges(x, 4, be, ok=ok)
+            end if
+            do k = 2, 5
+                call check(error, be(k) > be(k - 1), &
+                    "pf_bin_edges emitted a non-increasing pair on a non-finite fixture")
+                if (allocated(error)) return
+            end do
+            call check(error, .not. ok, &
+                "a non-finite population must report ok=.false. -- the edges do not span it")
+            if (allocated(error)) return
+            ! The whole point: the documented next call must not abort. It would, on edges that
+            ! are not strictly increasing, and that abort is what this test exists to prevent.
+            if (f == 5) then
+                call pf_histogram(x, be, counts, skipnan=.false., n_outside=nout)
+            else
+                call pf_histogram(x, be, counts, n_outside=nout)
+            end if
+            call check(error, sum(counts) >= 0.0_real64, &
+                "pf_histogram did not accept the edges pf_bin_edges produced")
+            if (allocated(error)) return
+        end do
+
+        ! The infinite element itself reaches no bin, which is the honest answer -- it is outside
+        ! every finite one -- and is reported rather than silently dropped.
+        x = [1.0_real64, 2.0_real64, inf, 4.0_real64, 5.0_real64, 6.0_real64]
+        call pf_bin_edges(x, 4, be)
+        call pf_histogram(x, be, counts, n_outside=nout)
+        call check(error, nout == 1_int64 .and. sum(counts) == 5.0_real64, &
+            "the infinity must be counted in n_outside, not into a bin")
+        if (allocated(error)) return
+
+        ! The negative control: an ordinary population still reports ok=.true., so the flag above
+        ! is not simply always .false.
+        call pf_bin_edges([1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64], 4, be, ok=ok)
+        call check(error, ok, "a finite population must still leave pf_bin_edges' ok .true.")
+    end subroutine test_bin_edges_survive_non_finite
+
+    !> `pf_histogram` IS `pf_bucketize` tallied, WITH weights too.
+    !!
+    !! `test_histogram_is_bucketize` asserts the identity on both edge conventions and exercises
+    !! the unweighted case only -- and the identity was FALSE with weights, because `pf_bucketize`
+    !! had no `weights` argument at all. It could therefore not apply the module's own "a zero
+    !! weight removes the element" rule, so it handed a zero-weighted element an ordinary bin code
+    !! while `pf_histogram` over the same arguments left it out.
+    !!
+    !! The tally is over WEIGHTS rather than occurrences, which is the identity's weighted form: a
+    !! weight cannot change a bin number, only membership.
+    subroutine test_weighted_bucketize_identity(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        integer, parameter :: N = 8
+        real(real64) :: x(N), w(N), edges(4), counts(3), tally(3), nan
+        integer(int32) :: codes(N)
+        integer(int64) :: i, nz
+        logical :: right
+
+        nan = ieee_value(1.0_real64, ieee_quiet_nan)
+        x = [0.5_real64, 1.5_real64, 2.5_real64, 3.5_real64, 4.5_real64, 5.5_real64, nan, 6.5_real64]
+        ! A zero weight in the middle, so the element it removes is one an unweighted tally would
+        ! have placed -- the case that used to disagree.
+        w = [1.0_real64, 0.0_real64, 1.0_real64, 1.0_real64, 3.0_real64, 1.0_real64, 1.0_real64, &
+             1.0_real64]
+        edges = [0.0_real64, 2.0_real64, 4.0_real64, 6.0_real64]
+
+        do i = 0_int64, 1_int64
+            right = (i == 1_int64)
+            call pf_histogram(x, edges, counts, right=right, weights=w)
+            call pf_bucketize(x, edges, codes, right=right, weights=w)
+            tally = 0.0_real64
+            do nz = 1_int64, int(N, int64)
+                if (codes(nz) > 0_int32) tally(codes(nz)) = tally(codes(nz)) + w(nz)
+            end do
+            call check(error, all(tally == counts), &
+                "the weighted histogram is not the weighted bucketize tally")
+            if (allocated(error)) return
+        end do
+
+        ! The zero-weighted element must carry code 0, exactly as a null or an out-of-range value
+        ! does -- it left the population, so it reached no bin.
+        call pf_bucketize(x, edges, codes, weights=w)
+        call check(error, codes(2) == 0_int32, &
+            "a zero-weighted element must bucketize to 0, as pf_histogram excludes it")
+        if (allocated(error)) return
+
+        ! The negative control: without weights that same element takes an ordinary code, so the
+        ! assertion above is about the weight and not about the value.
+        call pf_bucketize(x, edges, codes)
+        call check(error, codes(2) == 1_int32, &
+            "unweighted, that element must take its ordinary bin -- the control for the above")
+    end subroutine test_weighted_bucketize_identity
+
+    !> `pf_count_valid` reports why every element left.
+    !!
+    !! The three counts plus the survivors account for every element except the zero-weighted
+    !! ones, and that difference IS what a zero weight is -- which is the only way a caller can
+    !! recover it, since nothing reports it directly.
+    subroutine test_count_valid_why(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: x(8), w(8), nan
+        logical :: mask(8)
+        integer(int64) :: n, nn, nx
+
+        nan = ieee_value(1.0_real64, ieee_quiet_nan)
+        x = [1.0_real64, 2.0_real64, nan, 4.0_real64, nan, 6.0_real64, 7.0_real64, 8.0_real64]
+        mask = [.true., .false., .true., .true., .false., .true., .true., .true.]
+        w = [1.0_real64, 1.0_real64, 1.0_real64, 0.0_real64, 1.0_real64, 1.0_real64, 1.0_real64, &
+             0.0_real64]
+
+        ! Element 5 is BOTH null and NaN: the exclusion order is nullness first, so it counts as a
+        ! null and never as a NaN. Without that rule the two counts would sum to more than the
+        ! elements removed, and the accounting identity below would not hold.
+        call pf_count_valid(x, n, is_valid=mask, weights=w, n_null=nn, n_nan=nx)
+        call check(error, nn == 2_int64, "n_null must count both is_valid=.false. elements")
+        if (allocated(error)) return
+        call check(error, nx == 1_int64, &
+            "n_nan must count only the NaN that was not ALREADY null -- the exclusion order")
+        if (allocated(error)) return
+        call check(error, n == 3_int64, "three elements survive: 1, 6 and 7")
+        if (allocated(error)) return
+        call check(error, size(x, kind=int64) - nn - nx - n == 2_int64, &
+            "the accounting identity: what is left over is exactly the zero-weighted elements")
+        if (allocated(error)) return
+
+        ! Both outputs are optional and independent, so each is asked for on its own too.
+        call pf_count_valid(x, n, is_valid=mask, n_null=nn)
+        call check(error, nn == 2_int64, "n_null alone must still answer")
+        if (allocated(error)) return
+        call pf_count_valid(x, n, n_nan=nx)
+        call check(error, nx == 2_int64, "n_nan alone, with no mask, sees both NaNs")
+        if (allocated(error)) return
+
+        ! The integer kinds carry no `n_nan`, by construction -- there is no NaN to count -- so
+        ! this is the arm that proves `n_null` reaches them.
+        call pf_count_valid([1_int32, 2_int32, 3_int32], n, &
+            is_valid=[.true., .false., .true.], n_null=nn)
+        call check(error, n == 2_int64 .and. nn == 1_int64, "n_null over an int32 population")
+    end subroutine test_count_valid_why
+
+    !> `pf_moments` and `pf_describe` report `ok` over the outputs actually asked for.
+    !!
+    !! `pf_moments` has nine optional outputs, so "is the answer usable" has only one workable
+    !! reading: test the PRESENT ones. Testing all nine would report a failure to a caller who
+    !! asked for the sum of an empty population and got the correct `0`; testing none of them
+    !! would make the argument useless. `pf_describe` fills an object instead, so its `ok` is
+    !! about the population rather than about a selection.
+    subroutine test_aggregate_ok(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: x(5), m, v, s, nan
+        type(pf_stats) :: acc
+        logical :: ok
+
+        nan = ieee_value(1.0_real64, ieee_quiet_nan)
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64]
+
+        call pf_moments(x, mean=m, variance=v, ok=ok)
+        call check(error, ok, "a clean population must leave pf_moments' ok .true.")
+        if (allocated(error)) return
+
+        ! One element at the default ddof=1: the variance is NaN and the mean is not, so `ok`
+        ! must follow the variance -- and must NOT, when the variance was not asked for.
+        call pf_moments(x(1:1), mean=m, variance=v, ok=ok)
+        call check(error, .not. ok, "an undefined variance must make pf_moments' ok .false.")
+        if (allocated(error)) return
+        call pf_moments(x(1:1), mean=m, ok=ok)
+        call check(error, ok, &
+            "asking only for a defined mean must leave ok .true. -- only PRESENT outputs count")
+        if (allocated(error)) return
+
+        ! The empty sum is exactly 0 and is defined, so a caller asking only for it is not failing.
+        call pf_moments(x(1:0), vsum=s, ok=ok)
+        call check(error, ok .and. s == 0.0_real64, &
+            "an empty population's sum is a correct 0, so ok stays .true. for it alone")
+        if (allocated(error)) return
+        call pf_moments(x(1:0), vsum=s, mean=m, ok=ok)
+        call check(error, .not. ok, "... but its mean is NaN, so asking for both makes ok .false.")
+        if (allocated(error)) return
+
+        ! `%range` is the object's one extremes binding nothing else in this suite reached.
+        call acc%compute(x)
+        call check(error, acc%range() == acc%vmax() - acc%vmin(), "%range is vmax - vmin")
+        if (allocated(error)) return
+
+        call pf_describe(x, acc, ok=ok)
+        call check(error, ok, "a clean population must leave pf_describe's ok .true.")
+        if (allocated(error)) return
+        call pf_describe(x(1:0), acc, ok=ok)
+        call check(error, .not. ok, "an empty population must make pf_describe's ok .false.")
+        if (allocated(error)) return
+        call pf_describe([1.0_real64, nan, 3.0_real64], acc, skipnan=.false., ok=ok)
+        call check(error, .not. ok, "a kept NaN must make pf_describe's ok .false. too")
+    end subroutine test_aggregate_ok
+
+    !> `%gmean` and `%hmean` answer exactly what the one-shot forms do.
+    !!
+    !! They are the two queries that need the RETAINED values rather than the accumulator: a
+    !! log-sum is a fifth quantity the four central moments do not contain. That is why they abort
+    !! on a streaming accumulator (`stats_object_gmean_without_retain` in test/error_scenarios.f90)
+    !! and why they order nothing, unlike every other query that needs the buffer.
+    subroutine test_object_power_means(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: x(6), w(6), g, h
+        type(pf_stats) :: acc
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64, 6.0_real64]
+        w = [1.0_real64, 2.0_real64, 1.0_real64, 3.0_real64, 1.0_real64, 1.0_real64]
+
+        call acc%compute(x)
+        call pf_gmean(x, g)
+        call check(error, acc%gmean() == g, "%gmean must equal pf_gmean bit for bit")
+        if (allocated(error)) return
+        call pf_hmean(x, h)
+        call check(error, acc%hmean() == h, "%hmean must equal pf_hmean bit for bit")
+        if (allocated(error)) return
+
+        call acc%compute(x, weights=w)
+        call pf_gmean(x, g, weights=w)
+        call check(error, acc%gmean() == g, "%gmean must equal pf_gmean under weights")
+        if (allocated(error)) return
+        call pf_hmean(x, h, weights=w)
+        call check(error, acc%hmean() == h, "%hmean must equal pf_hmean under weights")
+        if (allocated(error)) return
+
+        ! **They must not order anything.** That is the property separating them from every other
+        ! query needing the retained buffer, and the only way to see it is the sort counter.
+        call acc%compute(x)
+        call check(error, .not. acc%is_ordered(), "a freshly computed object is not ordered")
+        if (allocated(error)) return
+        g = acc%gmean()
+        h = acc%hmean()
+        call check(error, .not. acc%is_ordered(), &
+            "%gmean/%hmean must not build tier B -- they need the values, not an order")
+        if (allocated(error)) return
+
+        ! The domain rules are the one-shot forms', reached through the shared worker.
+        call acc%compute([1.0_real64, 0.0_real64, 3.0_real64])
+        call check(error, acc%gmean() == 0.0_real64 .and. acc%hmean() == 0.0_real64, &
+            "a zero makes both power means exactly 0, as scipy returns")
+        if (allocated(error)) return
+        call acc%compute([1.0_real64, -2.0_real64, 3.0_real64])
+        call check(error, ieee_is_nan(acc%gmean()) .and. ieee_is_nan(acc%hmean()), &
+            "a negative value makes both power means NaN")
+        if (allocated(error)) return
+        call acc%init()
+        call check(error, ieee_is_nan(acc%gmean()) .and. ieee_is_nan(acc%hmean()), &
+            "an empty population's power means are NaN")
+        if (allocated(error)) return
+
+        ! `%trim_mean` is the object's one order binding nothing else in this suite reached, and
+        ! it belongs here rather than in a test of its own: it is the third way to take a mean off
+        ! a `pf_stats`, beside the two above.
+        call acc%compute(x)
+        call pf_trim_mean(x, 0.25_real64, g)
+        call check(error, acc%trim_mean(0.25_real64) == g, &
+            "%trim_mean must equal pf_trim_mean bit for bit")
+    end subroutine test_object_power_means
+
+    !> `modes=` returns every tied value, as pandas' `Series.mode()` does.
+    !!
+    !! `m` alone is `scipy.stats.mode` -- the smallest of a tie -- and the two must agree on their
+    !! first element by construction rather than by coincidence, which is why `best_run` derives
+    !! both from the same maximum.
+    !!
+    !! The character arm deliberately puts the SHORTEST tied value first. A deferred-length
+    !! allocatable character array has one length for all its elements, so sizing it from the
+    !! first -- which the ascending order makes systematically likely to be the short one -- would
+    !! truncate every longer mode beside it. That is this repository's standing
+    !! sized-from-the-first-element bug class, and this fixture is built to trigger it.
+    subroutine test_all_modes(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        integer(int32) :: vi(9), mi
+        character(len=6) :: vc(7)
+        character(len=:), allocatable :: mc, mcs(:)
+        integer(int32), allocatable :: mods(:)
+        real(real64) :: w(9)
+        integer(int64) :: n
+        logical :: ok
+
+        ! Four values tie at two occurrences each; 4 occurs once. pandas answers [1, 2, 3, 5].
+        vi = [1_int32, 1_int32, 2_int32, 2_int32, 3_int32, 3_int32, 4_int32, 5_int32, 5_int32]
+        call pf_mode(vi, mi, count=n, modes=mods, ok=ok)
+        call check(error, ok .and. n == 2_int64, "the modal count is 2")
+        if (allocated(error)) return
+        call check(error, size(mods) == 4, "four values tie for the mode")
+        if (allocated(error)) return
+        call check(error, all(mods == [1_int32, 2_int32, 3_int32, 5_int32]), &
+            "modes must be every tied value, ascending -- pandas' Series.mode()")
+        if (allocated(error)) return
+        call check(error, mods(1) == mi, "modes(1) is always m, since both take the smallest tie")
+        if (allocated(error)) return
+
+        ! One clear winner: a one-element array, not a scalar special case.
+        vi = [7_int32, 1_int32, 1_int32, 2_int32, 9_int32, 9_int32, 9_int32, 5_int32, 5_int32]
+        call pf_mode(vi, mi, count=n, modes=mods)
+        call check(error, size(mods) == 1 .and. mods(1) == 9_int32 .and. n == 3_int64, &
+            "one clear winner gives a one-element modes array")
+        if (allocated(error)) return
+
+        ! Empty: allocated to zero length, never left unallocated, so size() is always defined.
+        call pf_mode(vi(1:0), mi, count=n, modes=mods, ok=ok)
+        call check(error, .not. ok .and. n == 0_int64, "an empty population has no mode")
+        if (allocated(error)) return
+        call check(error, allocated(mods) .and. size(mods) == 0, &
+            "an empty population's modes must be a zero-length array, not unallocated")
+        if (allocated(error)) return
+
+        ! Weighted: 1 and 5 both carry 18, while 9 occurs more often and carries only 4.
+        vi = [1_int32, 1_int32, 2_int32, 9_int32, 9_int32, 9_int32, 5_int32, 5_int32, 5_int32]
+        w = [9.0_real64, 9.0_real64, 1.0_real64, 1.0_real64, 1.0_real64, 1.0_real64, &
+             6.0_real64, 6.0_real64, 6.0_real64]
+        call pf_mode(vi, mi, count=n, modes=mods, weights=w)
+        call check(error, size(mods) == 2, "two values tie on total weight")
+        if (allocated(error)) return
+        call check(error, all(mods == [1_int32, 5_int32]), &
+            "the weighted modes are the values carrying the greatest total weight")
+        if (allocated(error)) return
+
+        ! The character arm, with the SHORTEST tied value first on purpose.
+        vc = ["aa    ", "aa    ", "zzzzzz", "zzzzzz", "b     ", "b     ", "q     "]
+        call pf_mode(vc, mc, count=n, modes=mcs)
+        call check(error, size(mcs) == 3, "three character values tie for the mode")
+        if (allocated(error)) return
+        call check(error, len(mcs) == 6, &
+            "the shared length must come from the LONGEST tied value, not the first")
+        if (allocated(error)) return
+        call check(error, trim(mcs(1)) == "aa" .and. trim(mcs(2)) == "b" .and. &
+            trim(mcs(3)) == "zzzzzz", "the character modes, ascending and untruncated")
+        if (allocated(error)) return
+        call check(error, trim(mcs(1)) == mc, "modes(1) is m for the character forms too")
+        if (allocated(error)) return
+        call pf_mode(vc(1:0), mc, modes=mcs, ok=ok)
+        call check(error, .not. ok .and. allocated(mcs) .and. size(mcs) == 0, &
+            "an empty character population's modes is a zero-length array, not unallocated")
+        if (allocated(error)) return
+
+        call modes_other_kinds(error)
+    end subroutine test_all_modes
+
+    !> `modes=` over the three kinds `test_all_modes`' own fixtures do not reach.
+    !!
+    !! Each of the five `pf_mode` specifics gathers `modes` itself -- the element type differs, so
+    !! the gather cannot be shared -- which is exactly the shape where four arms are right and one
+    !! is not. Split out of `test_all_modes` only to keep either subroutine readable.
+    subroutine modes_other_kinds(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        integer(int64) :: vl(6), ml
+        logical :: vb(4), mb
+        type(parquet_string_column) :: col
+        integer(int64), allocatable :: modl(:)
+        logical, allocatable :: modb(:)
+        character(len=:), allocatable :: ms, mss(:)
+        integer(int64) :: n
+        logical :: ok
+
+        ! int64: 10 and 30 tie at two each.
+        vl = [10_int64, 30_int64, 10_int64, 20_int64, 30_int64, 40_int64]
+        call pf_mode(vl, ml, count=n, modes=modl, ok=ok)
+        call check(error, ok .and. size(modl) == 2 .and. all(modl == [10_int64, 30_int64]), &
+            "the int64 modes are every tied value, ascending")
+        if (allocated(error)) return
+        call pf_mode(vl(1:0), ml, modes=modl, ok=ok)
+        call check(error, .not. ok .and. allocated(modl) .and. size(modl) == 0, &
+            "an empty int64 population's modes is a zero-length array")
+        if (allocated(error)) return
+
+        ! logical: an even split, where BOTH values are modal. `.false.` sorts first.
+        vb = [.true., .false., .true., .false.]
+        call pf_mode(vb, mb, count=n, modes=modb, ok=ok)
+        call check(error, ok .and. size(modb) == 2, "an even split makes both logicals modal")
+        if (allocated(error)) return
+        call check(error, (.not. modb(1)) .and. modb(2) .and. (mb .eqv. modb(1)), &
+            "the logical modes are .false. then .true., and m is the first of them")
+        if (allocated(error)) return
+
+        ! parquet_string_column: the packed store, whose values are fetched one at a time, with
+        ! the SHORTEST tied value first again so the shared length cannot come from it.
+        call col%append_string("ab")
+        call col%append_string("ab")
+        call col%append_string("zzzz")
+        call col%append_null()
+        call col%append_string("zzzz")
+        call col%append_string("q")
+        call pf_mode(col, ms, count=n, modes=mss, ok=ok)
+        call check(error, ok .and. size(mss) == 2, "two string-column values tie for the mode")
+        if (allocated(error)) return
+        call check(error, len(mss) == 4, &
+            "the string column's shared length must come from the LONGEST tied value")
+        if (allocated(error)) return
+        call check(error, trim(mss(1)) == "ab" .and. trim(mss(2)) == "zzzz" .and. &
+            trim(mss(1)) == ms, "the string-column modes, ascending and untruncated")
+    end subroutine modes_other_kinds
+
+    !> `pf_cov(x, x)` is `pf_variance(x)` under BOTH weight conventions.
+    !!
+    !! The identity is the reason `pf_cov` accumulates through the same block tree the variance
+    !! does. It held only for the reliability convention until `pf_cov` gained `weight_type=`:
+    !! a caller asking `pf_variance` for frequency weights and `pf_cov` for the same population
+    !! got two different denominators from the same `ddof`, silently.
+    !!
+    !! `==` rather than a tolerance, deliberately -- the two reach the same arithmetic, so
+    !! anything short of equality is a defect rather than rounding.
+    subroutine test_cov_weight_type(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64) :: x(3), w(3), c, v
+        integer :: d
+
+        x = [10.0_real64, 12.0_real64, 14.0_real64]
+        w = [1.0_real64, 2.0_real64, 1.0_real64]
+
+        do d = 0, 1
+            call pf_cov(x, x, c, weights=w, ddof=d)
+            call pf_variance(x, v, weights=w, ddof=d)
+            call check(error, c == v, "pf_cov(x,x) must equal pf_variance(x), reliability")
+            if (allocated(error)) return
+            call pf_cov(x, x, c, weights=w, weight_type="frequency", ddof=d)
+            call pf_variance(x, v, weights=w, weight_type="frequency", ddof=d)
+            call check(error, c == v, "pf_cov(x,x) must equal pf_variance(x), frequency")
+            if (allocated(error)) return
+        end do
+
+        ! The two conventions must actually DIFFER on this fixture, or the four assertions above
+        ! would hold just as well against a pf_cov that ignored the token entirely.
+        call pf_cov(x, x, c, weights=w)
+        call pf_cov(x, x, v, weights=w, weight_type="frequency")
+        call check(error, c /= v, &
+            "the two weight conventions must differ here -- otherwise the identity proves nothing")
+        if (allocated(error)) return
+
+        ! A frequency weight of 2 must agree with writing the value out twice: that IS the token.
+        call pf_cov(x, x, c, weights=w, weight_type="frequency")
+        call pf_variance([10.0_real64, 12.0_real64, 12.0_real64, 14.0_real64], v)
+        call check(error, close_to(c, v), &
+            "a frequency-weighted covariance must equal the expanded population's variance")
+        if (allocated(error)) return
+
+        ! Unweighted, the token cannot be observed at all.
+        call pf_cov(x, x, c)
+        call pf_cov(x, x, v, weight_type="frequency")
+        call check(error, c == v, "without weights the two conventions are the same number")
+    end subroutine test_cov_weight_type
+
+    !> The streaming accuracy loss is bounded, and the two-pass route is exact.
+    !!
+    !! `pf_stats`' doc-comment says "in streaming mode there is no buffer to re-walk and the
+    !! formulas' own accuracy is what you get", which is true and unmeasured. This puts a number
+    !! on it, on the population shape that provokes it -- a large offset with a small scatter,
+    !! which is what an MJD or a magnitude looks like.
+    !!
+    !! Three routes over the same values, and the distinction between the last two is the one
+    !! worth pinning:
+    !!
+    !! * one-shot `pf_variance` -- the reference;
+    !! * `%compute(retain=.false.)` -- **exact**, because it still makes two passes over the
+    !!   resident array. Streaming is about MEMORY, not about a different algorithm, and a test
+    !!   that lumped these two together would let a regression turn `%compute` approximate
+    !!   without failing;
+    !! * a loop of `%update` on a streaming accumulator -- the Chan/Pebay path, which is where the
+    !!   loss actually is.
+    !!
+    !! The bound asserted is 1e-6 relative, against a measured ~1e-8 on this fixture. Loose on
+    !! purpose: the point is to catch a route that becomes ORDERS worse, not to pin a digit that
+    !! moves with the block decomposition. The exact arm is asserted with `==`, which is what
+    !! makes the pair informative -- a bound alone would pass with both routes approximate.
+    subroutine test_streaming_accuracy_bound(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        integer(int64), parameter :: N = 80000_int64, CHUNK = 10000_int64
+        real(real64), allocatable :: x(:)
+        real(real64) :: ref, two_pass, streamed, merged, rel
+        type(pf_stats) :: acc, part
+        integer(int64) :: i, lo
+
+        allocate(x(N))
+        do i = 1_int64, N
+            ! 1e9 with a millisecond-scale scatter: the shape on which a naive
+            ! sum(x**2) - sum(x)**2/n cancels away every significant digit.
+            x(i) = 1.0e9_real64 + real(mod(i * 7919_int64, 1000_int64), real64) * 1.0e-3_real64
+        end do
+
+        call pf_variance(x, ref)
+        call check(error, ref > 0.0_real64 .and. .not. ieee_is_nan(ref), &
+            "the reference variance is not a usable number -- nothing below means anything")
+        if (allocated(error)) return
+
+        ! Route two: streaming MODE over a resident array. Two passes, so exact.
+        call acc%compute(x, retain=.false.)
+        two_pass = acc%variance()
+        call check(error, two_pass == ref, &
+            "%compute(retain=.false.) must be EXACT -- it still makes two passes")
+        if (allocated(error)) return
+
+        ! Route three: a genuine %update loop, which has no buffer to re-walk.
+        call acc%clear()
+        call acc%init(retain=.false.)
+        lo = 1_int64
+        do while (lo <= N)
+            call acc%update(x(lo:min(lo + CHUNK - 1_int64, N)))
+            lo = lo + CHUNK
+        end do
+        streamed = acc%variance()
+        rel = abs(streamed - ref) / ref
+        call check(error, rel < 1.0e-6_real64, &
+            "the streamed variance is more than 1e-6 relative from the two-pass answer")
+        if (allocated(error)) return
+        ! The other half of the claim: it is NOT exact, so the bound above is measuring something.
+        call check(error, streamed /= ref, &
+            "the streamed variance is exact -- either the route changed or this test is vacuous")
+        if (allocated(error)) return
+
+        ! %merge inherits the same formulas, so it must land in the same place rather than worse.
+        call acc%clear()
+        call acc%init(retain=.false.)
+        lo = 1_int64
+        do while (lo <= N)
+            call part%clear()
+            call part%compute(x(lo:min(lo + CHUNK - 1_int64, N)), retain=.false.)
+            call acc%merge(part)
+            lo = lo + CHUNK
+        end do
+        merged = acc%variance()
+        call check(error, abs(merged - ref) / ref < 1.0e-6_real64, &
+            "the merged variance is more than 1e-6 relative from the two-pass answer")
+    end subroutine test_streaming_accuracy_bound
 
     !> Whether two reals agree to the golden tolerance.
     logical function close_to(got, want)

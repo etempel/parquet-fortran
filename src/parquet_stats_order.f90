@@ -853,6 +853,11 @@ contains
         call s%compute(values, is_valid=is_valid, weights=weights, weight_type=weight_type, &
             skipnan=skipnan, threads=threads)
         call ensure_ordered(s, "pf_describe")
+        ! The mean is the whole test, and deliberately: it is NaN in exactly the two cases that
+        ! leave every tier-A query on the object NaN -- an empty population, and a NaN kept under
+        ! `skipnan = .false.` An infinite mean is not one of them, so `ok` stays .true. there,
+        ! consistently with `pf_mean` over the same data.
+        if (present(ok)) ok = (s%mean() == s%mean())
     end procedure describe_f64
 
 
@@ -1110,7 +1115,13 @@ contains
         end if
         ! `ok` reports whether the ANSWER is usable, which is what a caller needs; `converged`
         ! reports how the iteration ended, and the two are deliberately independent.
-        if (present(ok)) ok = (mean == mean)
+        !
+        ! **All THREE outputs are tested, not just the mean.** This is the family's only procedure
+        ! answering more than one number, and they do not fail together: a population holding
+        ! `+Inf` clips to a finite median and an infinite mean, whose deviations are then all
+        ! infinite, so the standard deviation is a NaN while the mean is not. Testing the mean
+        ! alone would ship a NaN under `ok = .true.`, which is exactly what `ok` exists to prevent.
+        if (present(ok)) ok = (mean == mean) .and. (median == median) .and. (stddev == stddev)
     end procedure sigma_clipped_stats_f64
 
     ! ==================================================================================
@@ -1171,7 +1182,14 @@ contains
     !! the comparison is a strict `>`, so the FIRST run to reach the maximum keeps it -- which is
     !! the smallest tied value, matching `scipy.stats.mode`. A `>=` would silently hand ties to the
     !! largest value instead, and every count in every test would still be right.
-    subroutine best_run(starts, order, w, m, at, cnt)
+    !!
+    !! `tied` reports EVERY run that reaches the maximum, which is what pandas' `Series.mode()`
+    !! returns, and it is derived in a second pass rather than accumulated in the first: the
+    !! maximum is not known until the first pass ends, so a single pass would have to keep and
+    !! discard candidate lists. The second pass costs one more walk of the run structure only
+    !! when a caller asks for it, and it cannot disagree with `at` -- `tied(1)` IS `at`, because
+    !! both take the first run reaching the same `best_w`.
+    subroutine best_run(starts, order, w, m, at, cnt, tied)
         logical, intent(in) :: starts(:)
         !! `starts(i)`: sorted position `i` holds a different value from position `i-1`.
         integer(int64), intent(in) :: order(:)          !! the ascending permutation.
@@ -1179,7 +1197,10 @@ contains
         integer(int64), intent(in) :: m                 !! how many survivors there are.
         integer(int64), intent(out) :: at               !! sorted position of the winner's first element.
         integer(int64), intent(out) :: cnt              !! how many elements the winner holds.
-        integer(int64) :: i, run_lo, run_n
+        integer(int64), allocatable, intent(out), optional :: tied(:)
+        !! sorted position of the first element of EVERY run reaching the maximum, ascending.
+        !! Allocated to size 0 for an empty population, never left unallocated.
+        integer(int64) :: i, run_lo, run_n, ntied
         real(real64) :: run_w, best_w
 
         at = 1_int64
@@ -1213,6 +1234,64 @@ contains
             at = run_lo
             cnt = run_n
         end if
+        if (.not. present(tied)) return
+
+        ! Pass two: every run whose total equals the maximum. The equality is exact and has to be:
+        ! these are sums of the SAME weights in the same order, so two runs that tie produce
+        ! bit-identical totals, and a tolerance here would merge runs that are genuinely different.
+        ! An empty population leaves a zero-length array rather than an unallocated one, so a
+        ! caller's `size(modes)` is always defined.
+        ntied = 0_int64
+        run_n = 0_int64
+        run_w = 0.0_real64
+        do i = 1_int64, m
+            if (i > 1_int64) then
+                if (starts(i)) then
+                    if (run_w == best_w) ntied = ntied + 1_int64
+                    run_n = 0_int64
+                    run_w = 0.0_real64
+                end if
+            end if
+            run_n = run_n + 1_int64
+            if (allocated(w)) then
+                run_w = run_w + w(i)
+            else
+                run_w = run_w + 1.0_real64
+            end if
+        end do
+        if (m > 0_int64) then
+            if (run_w == best_w) ntied = ntied + 1_int64
+        end if
+        allocate(tied(ntied))
+        ntied = 0_int64
+        run_lo = 1_int64
+        run_n = 0_int64
+        run_w = 0.0_real64
+        do i = 1_int64, m
+            if (i > 1_int64) then
+                if (starts(i)) then
+                    if (run_w == best_w) then
+                        ntied = ntied + 1_int64
+                        tied(ntied) = run_lo
+                    end if
+                    run_lo = i
+                    run_n = 0_int64
+                    run_w = 0.0_real64
+                end if
+            end if
+            run_n = run_n + 1_int64
+            if (allocated(w)) then
+                run_w = run_w + w(i)
+            else
+                run_w = run_w + 1.0_real64
+            end if
+        end do
+        if (m > 0_int64) then
+            if (run_w == best_w) then
+                ntied = ntied + 1_int64
+                tied(ntied) = run_lo
+            end if
+        end if
     end subroutine best_run
 
     !> Reports `count`, `n_null` and `ok` for a `pf_mode` specific, so five bodies cannot disagree.
@@ -1233,11 +1312,13 @@ contains
         integer(int64), allocatable :: idx(:), perm(:)
         real(real64), allocatable :: w(:), sw(:)
         logical, allocatable :: starts(:)
+        integer(int64), allocatable :: tied(:)
         integer(int64) :: nv, nnull, i, at, cnt
 
         call mode_survivors(size(values, kind=int64), "pf_mode", is_valid, weights, idx, w, &
             nv, nnull)
         if (nv == 0_int64) then
+            if (present(modes)) allocate(modes(0))
             call mode_report(0_int64, nnull, count, n_null, ok)
             return
         end if
@@ -1261,7 +1342,18 @@ contains
                 sw(i) = w(perm(i))
             end do
         end if
-        call best_run(starts, perm, sw, nv, at, cnt)
+        ! `tied` is asked for only when the caller wants every mode, so the second walk of the
+        ! run structure is never paid by a caller who does not. `tied(1)` is `at` by construction,
+        ! which is what keeps `m` and `modes(1)` from ever disagreeing.
+        if (present(modes)) then
+            call best_run(starts, perm, sw, nv, at, cnt, tied)
+            allocate(modes(size(tied, kind=int64)))
+            do i = 1_int64, size(tied, kind=int64)
+                modes(i) = kept(perm(tied(i)))
+            end do
+        else
+            call best_run(starts, perm, sw, nv, at, cnt)
+        end if
         m = kept(perm(at))
         call mode_report(cnt, nnull, count, n_null, ok)
     end procedure mode_i32
@@ -1271,11 +1363,13 @@ contains
         integer(int64), allocatable :: idx(:), perm(:)
         real(real64), allocatable :: w(:), sw(:)
         logical, allocatable :: starts(:)
+        integer(int64), allocatable :: tied(:)
         integer(int64) :: nv, nnull, i, at, cnt
 
         call mode_survivors(size(values, kind=int64), "pf_mode", is_valid, weights, idx, w, &
             nv, nnull)
         if (nv == 0_int64) then
+            if (present(modes)) allocate(modes(0))
             call mode_report(0_int64, nnull, count, n_null, ok)
             return
         end if
@@ -1297,7 +1391,18 @@ contains
                 sw(i) = w(perm(i))
             end do
         end if
-        call best_run(starts, perm, sw, nv, at, cnt)
+        ! `tied` is asked for only when the caller wants every mode, so the second walk of the
+        ! run structure is never paid by a caller who does not. `tied(1)` is `at` by construction,
+        ! which is what keeps `m` and `modes(1)` from ever disagreeing.
+        if (present(modes)) then
+            call best_run(starts, perm, sw, nv, at, cnt, tied)
+            allocate(modes(size(tied, kind=int64)))
+            do i = 1_int64, size(tied, kind=int64)
+                modes(i) = kept(perm(tied(i)))
+            end do
+        else
+            call best_run(starts, perm, sw, nv, at, cnt)
+        end if
         m = kept(perm(at))
         call mode_report(cnt, nnull, count, n_null, ok)
     end procedure mode_i64
@@ -1307,11 +1412,13 @@ contains
         integer(int64), allocatable :: idx(:), perm(:)
         real(real64), allocatable :: w(:), sw(:)
         logical, allocatable :: starts(:)
+        integer(int64), allocatable :: tied(:)
         integer(int64) :: nv, nnull, i, at, cnt
 
         call mode_survivors(size(values, kind=int64), "pf_mode", is_valid, weights, idx, w, &
             nv, nnull)
         if (nv == 0_int64) then
+            if (present(modes)) allocate(modes(0))
             call mode_report(0_int64, nnull, count, n_null, ok)
             return
         end if
@@ -1334,21 +1441,35 @@ contains
                 sw(i) = w(perm(i))
             end do
         end if
-        call best_run(starts, perm, sw, nv, at, cnt)
+        ! `tied` is asked for only when the caller wants every mode, so the second walk of the
+        ! run structure is never paid by a caller who does not. `tied(1)` is `at` by construction,
+        ! which is what keeps `m` and `modes(1)` from ever disagreeing.
+        if (present(modes)) then
+            call best_run(starts, perm, sw, nv, at, cnt, tied)
+            allocate(modes(size(tied, kind=int64)))
+            do i = 1_int64, size(tied, kind=int64)
+                modes(i) = kept(perm(tied(i)))
+            end do
+        else
+            call best_run(starts, perm, sw, nv, at, cnt)
+        end if
         m = kept(perm(at))
         call mode_report(cnt, nnull, count, n_null, ok)
     end procedure mode_bool
 
     module procedure mode_chr
         character(len=len(values)), allocatable :: kept(:)
+        integer :: wid
         integer(int64), allocatable :: idx(:), perm(:)
         real(real64), allocatable :: w(:), sw(:)
         logical, allocatable :: starts(:)
+        integer(int64), allocatable :: tied(:)
         integer(int64) :: nv, nnull, i, at, cnt
 
         call mode_survivors(size(values, kind=int64), "pf_mode", is_valid, weights, idx, w, &
             nv, nnull)
         if (nv == 0_int64) then
+            if (present(modes)) allocate(character(len=0) :: modes(0))
             call mode_report(0_int64, nnull, count, n_null, ok)
             return
         end if
@@ -1373,7 +1494,30 @@ contains
                 sw(i) = w(perm(i))
             end do
         end if
-        call best_run(starts, perm, sw, nv, at, cnt)
+        ! `tied` is asked for only when the caller wants every mode, so the second walk of the
+        ! run structure is never paid by a caller who does not. `tied(1)` is `at` by construction,
+        ! which is what keeps `m` and `modes(1)` from ever disagreeing.
+        if (present(modes)) then
+            call best_run(starts, perm, sw, nv, at, cnt, tied)
+            ! **The length is the LONGEST tied value's, taken over every one of them before the
+            ! array is allocated.** A deferred-length allocatable character array has ONE length
+            ! for all its elements, so sizing it from `tied(1)` -- the natural spelling, and the
+            ! smallest tied value -- would truncate every longer mode beside it. That is the
+            ! sized-from-the-first-element bug this repository has a standing rule about, and the
+            ! ascending order makes the first element systematically likely to be the short one.
+            wid = 0
+            do i = 1_int64, size(tied, kind=int64)
+                wid = max(wid, len_trim(kept(perm(tied(i)))))
+            end do
+            allocate(character(len=wid) :: modes(size(tied, kind=int64)))
+            do i = 1_int64, size(tied, kind=int64)
+                ! Element by element: a whole-array assignment to a deferred-length allocatable
+                ! reallocates it to the RHS's length (CLAUDE.md), which would undo the sizing above.
+                modes(i) = trim(kept(perm(tied(i))))
+            end do
+        else
+            call best_run(starts, perm, sw, nv, at, cnt)
+        end if
         ! Trimmed, so the result is as long as the value rather than as long as whatever width the
         ! caller happened to declare -- the same rule a character array meets on its way into a
         ! `parquet_column`. Every element of `values` shares one declared length, so the padding
@@ -1387,6 +1531,8 @@ contains
         real(real64), allocatable :: w(:)
         logical, allocatable :: starts(:)
         character(len=:), allocatable :: a, b
+        integer :: wid
+        integer(int64), allocatable :: tied(:)
         integer(int64) :: n, nv, nnull, i, at, cnt
 
         if (present(is_valid)) &
@@ -1417,6 +1563,7 @@ contains
         ! depend on the order the survivors were visited in.
         nnull = parquet_string_column_null_count(values)
         if (nv == 0_int64) then
+            if (present(modes)) allocate(character(len=0) :: modes(0))
             call mode_report(0_int64, nnull, count, n_null, ok)
             return
         end if
@@ -1429,7 +1576,29 @@ contains
         end do
         ! `w` was filled in survivor order as the permutation was filtered, so it already lines up
         ! with `order` and needs none of the array kinds' reindexing.
-        call best_run(starts, order, w, nv, at, cnt)
+        ! `tied` is asked for only when the caller wants every mode, so the second walk of the
+        ! run structure is never paid by a caller who does not. `tied(1)` is `at` by construction,
+        ! which is what keeps `m` and `modes(1)` from ever disagreeing.
+        if (present(modes)) then
+            call best_run(starts, order, w, nv, at, cnt, tied)
+            ! Two passes over the tied values: one to find the longest, because a deferred-length
+            ! allocatable character array has ONE length for all its elements and sizing it from
+            ! the first -- the SMALLEST tied value -- would truncate every longer one beside it.
+            wid = 0
+            do i = 1_int64, size(tied, kind=int64)
+                call parquet_string_column_get(values, order(tied(i)), a)
+                wid = max(wid, len(a))
+            end do
+            allocate(character(len=wid) :: modes(size(tied, kind=int64)))
+            do i = 1_int64, size(tied, kind=int64)
+                call parquet_string_column_get(values, order(tied(i)), a)
+                ! Element by element: a whole-array assignment to a deferred-length allocatable
+                ! reallocates it to the RHS's length (CLAUDE.md), undoing the sizing above.
+                modes(i) = a
+            end do
+        else
+            call best_run(starts, order, w, nv, at, cnt)
+        end if
         call parquet_string_column_get(values, order(at), m)
         call mode_report(cnt, nnull, count, n_null, ok)
     end procedure mode_str

@@ -205,6 +205,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`parquet_stats` no longer copies the population when it has nothing to exclude.** Pass one
+  deferred its compaction, so an unmasked, unweighted, NaN-free call allocates, writes and frees
+  one array less. `pf_variance` over 10000000 elements is **2.3x faster serially**, and threading
+  the same call goes from a loss to a gain — measured 1.07x before and 1.91x after under
+  gfortran, 1.08x to 1.54x under ifx, on a 64-core mask. Results are unchanged, bit for bit.
+- **`STATS_MIN_PER_THREAD` lowered from 32768 to 8192 survivors per thread**, re-measured on the
+  shipped `pf_variance` rather than on a replica.
 - **`parquet_healpix` is faster, with no interface change.** `pf_query_disc` is 1.3-1.6x faster
   under gfortran; a disc returned in the NEST scheme is about 3x faster in either compiler;
   `pf_query_disc_alloc` is about 2x faster; and `pf_ang2pix_ring`/`pf_ang2pix_nest`/`pf_vec2pix_*`

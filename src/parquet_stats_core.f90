@@ -76,17 +76,49 @@ submodule (parquet_stats) parquet_stats_core
 
     !> Survivors each thread must get from pass two before a team is worth opening.
     !!
-    !! **Measured, on the machine and with the harness named below, not chosen.**
-    !! `bench/benchmark_stats.sh --mode=thread` times pass two over a resident buffer on a thread
-    !! ladder; on machine A (gfortran 15.2, 8 cores) the speedup at 8 threads runs
+    !! **Measured, on the machines and with the harness named below, not chosen** -- and measured
+    !! on `pf_variance` itself rather than on a replica, which is the part that had to change.
     !!
-    !!     n =    16384   32768   65536  131072  262144  524288    1e6    1e7    1e8
-    !!     8t   =  0.55x   0.66x   0.99x   1.23x   1.57x   1.84x  1.91x  2.22x  2.31x
+    !! **How to re-derive it, and why the obvious mode is the wrong one.** Run
+    !! `bench/benchmark_stats.sh --mode=teamsweep`. Neither of the two older modes can answer this
+    !! question. `--mode=thread` times a replica of pass two over a buffer allocated ONCE outside
+    !! the timed loop, so it reports a ceiling and never pays what a real call pays; `--mode=library`
+    !! runs the shipped rule, so this very constant censors its own measurement -- every size below
+    !! `2 * STATS_MIN_PER_THREAD` reports exactly 1.00x because the engine ran serially, which is
+    !! the floor working and not a datum about where it belongs. `--mode=teamsweep` lifts the floor
+    !! through `parquet_debug_set_stats_min_per_thread(0)` and drives the team directly, so what it
+    !! reports is the real crossover on the code that ships.
     !!
-    !! so a team opened below about 32768 survivors PER THREAD is a loss, and at 16384 elements
-    !! with eight threads it is a **1.8x loss** rather than a small one. The rule below therefore
-    !! caps the team at `n / STATS_MIN_PER_THREAD` and runs serially when that leaves fewer than
-    !! two, which admits no measured loss at any size on that ladder.
+    !! **Machine B (2 x EPYC 9654, 384 logical, 8 cores per L3), gfortran 15.2.1, 64-core mask,
+    !! best speedup over a whole `pf_variance` call against `threads=1`:**
+    !!
+    !!     n        =    10000   100000     1e6     1e7
+    !!     best     =    1.12x    1.45x   1.55x   1.56x
+    !!     at team  =       8t      32t     32t     32t
+    !!     per thd  =     1250     3125   31250  312500
+    !!
+    !! and the losing cells are only the ones with almost no work per thread: 312 per thread is
+    !! 0.90x and 156 per thread is worse. **Break-even is about 500-600 survivors per thread**, on
+    !! both compilers. The value below carries roughly an order of magnitude of margin over that,
+    !! deliberately: the crossover is shallow on one side and steep on the other, so paying a
+    !! little of the available gain to stay well clear of the cliff is the right trade.
+    !!
+    !! **Why it is no longer 32768.** That value came from machine A, from `--mode=thread`, and
+    !! from an engine in which pass one always materialised a compacted copy of the population.
+    !! Handing a team a buffer one thread had just written is what made a team expensive: on
+    !! machine B the same four-thread team measured **1.13x inside one L3 and 0.25x spread across
+    !! eight**, and the shipped call LOST up to 6.5x at every size the old floor admitted. That
+    !! copy is now deferred (see `stats_engine`), which removed the cliff the old value was
+    !! avoiding -- so the floor that was calibrated against it is both too high for the engine that
+    !! exists now and, as the campaign that found this showed, was never protecting what it looked
+    !! like it was protecting.
+    !!
+    !! **Machine A and machine C have NOT been re-measured since that change**, and their old
+    !! numbers do not carry over, for exactly the reason above. The value below is a machine-B
+    !! measurement with margin, chosen to sit at or below machine A's own last-known break-even
+    !! (~8192 per thread at 8 threads, from the superseded ladder) so that lowering it cannot cost
+    !! machine A anything it was previously getting. Re-run `--mode=teamsweep` on A and C and
+    !! tighten it if they agree.
     !!
     !! **It is deliberately NOT `tail_team`'s floor**, though the shape is the same: that one is
     !! for a memcpy-shaped pass and its own comment says one number cannot be right for both
@@ -97,7 +129,7 @@ submodule (parquet_stats) parquet_stats_core
     !! it changes how fast the module runs and not what it answers, so it would pass the admission
     !! test, but no user has a reason to tune it and its only job is to let a test reach both sides
     !! of a size-dependent branch (CLAUDE.md's size-threshold rule).
-    integer(int64), parameter :: STATS_MIN_PER_THREAD = 32768_int64
+    integer(int64), parameter :: STATS_MIN_PER_THREAD = 8192_int64
 
     !> Test-only override for `STATS_MIN_PER_THREAD`; negative means the measured value applies.
     integer(int64), save :: dbg_stats_min_per_thread = -1_int64
@@ -257,8 +289,8 @@ contains
 
         real(real64), allocatable :: xb(:), wb(:), pw(:), px(:), q1(:), q2(:), q3(:), q4(:)
         real(real64) :: x, w, sw, sx, mu, delta
-        integer(int64) :: nv, m, nb, i, c, j, team
-        logical :: skip, weighted, masked, threaded, want_moments
+        integer(int64) :: nv, m, nb, i, c, team, istart
+        logical :: skip, weighted, masked, want_moments, deferrable, compacting
 
         nv = size(values, kind=int64)
         call stats_check_sizes(nv, what, is_valid, weights)
@@ -270,7 +302,20 @@ contains
         weighted = present(weights)
         masked = present(is_valid)
 
-        allocate(xb(nv))
+        ! **The compaction buffer is not allocated on the fast path until something needs it.**
+        ! When nothing is masked, weighted or NaN, pass one's "compaction" copies `values` to
+        ! itself: `xb(i) == values(i)` for every element, and pass two can read the caller's array
+        ! and return the identical bits. Materialising that copy anyway cost an allocation, a write
+        ! and a free of a whole population per call, and -- because the copy was written by ONE
+        ! thread immediately before a team read it -- it was also what made threading pass two lose
+        ! on a machine whose cores do not share a cache. See `stats_pass_two` for the measurement.
+        !
+        ! `is_contiguous` is part of the test because the no-copy path hands pass two whatever
+        ! stride the caller's array has, where the copy always produced a contiguous buffer. A
+        ! discontiguous actual argument is rare and the compaction is worth keeping for it.
+        deferrable = (.not. masked) .and. (.not. weighted) .and. skip .and. is_contiguous(values)
+        compacting = .not. deferrable
+        if (compacting) allocate(xb(nv))
         if (weighted) allocate(wb(nv))
         allocate(px(nv / STATS_BLOCK + 1_int64))
         if (weighted) allocate(pw(nv / STATS_BLOCK + 1_int64))
@@ -282,7 +327,54 @@ contains
         sw = 0.0_real64
         sx = 0.0_real64
         if (.not. masked .and. .not. weighted .and. skip) then
-            do i = 1_int64, nv
+            ! **Two loops, not one loop with a flag in it.** The deferred scan below differs from
+            ! the compacting loop after it by a single store, so the obvious shape is one loop with
+            ! `if (compacting) xb(m) = x` in the body. That was written first and measured 5%
+            ! slower at every size that fits in cache: the flag is loop-invariant but neither
+            ! compiler hoisted it out of a body that also carries a `cycle`. Splitting costs a
+            ! duplicated block-close and buys that 5% back.
+            !
+            ! `i` survives the loop it left: after a normal completion it is `nv + 1`, and after
+            ! the `exit` it is the index of the first excluded element, which is exactly where the
+            ! compacting loop has to resume. Nothing before that point has been written to `xb`,
+            ! and nothing after it can be skipped.
+            istart = nv + 1_int64
+            if (deferrable) then
+                do i = 1_int64, nv
+                    x = values(i)
+                    if (x /= x) exit
+                    m = m + 1_int64
+                    sx = sx + x
+                    if (m == 1_int64) then
+                        acc%vmin = x
+                        acc%vmax = x
+                    else
+                        if (x < acc%vmin) acc%vmin = x
+                        if (x > acc%vmax) acc%vmax = x
+                    end if
+                    c = c + 1_int64
+                    if (c == STATS_BLOCK) then
+                        nb = nb + 1_int64
+                        px(nb) = sx
+                        sx = 0.0_real64
+                        c = 0_int64
+                    end if
+                end do
+                istart = i
+                if (istart <= nv) then
+                    ! The first exclusion is where a deferred compaction becomes a real one: from
+                    ! here on the survivors no longer sit at their own indices in `values`, so the
+                    ! prefix that has matched so far is copied across in one move and the loop
+                    ! below starts writing. `m` is the survivor count, which before any exclusion
+                    ! is exactly `istart - 1`, so `values(1:m)` is precisely that prefix.
+                    allocate(xb(nv))
+                    if (m > 0_int64) xb(1:m) = values(1:m)
+                    compacting = .true.
+                end if
+            else
+                istart = 1_int64
+            end if
+            do i = istart, nv
                 x = values(i)
                 if (x /= x) then
                     acc%n_nan = acc%n_nan + 1_int64
@@ -363,6 +455,17 @@ contains
             if (weighted) pw(nb) = sw
         end if
 
+        ! A caller that asked to keep the survivors gets the buffer whether or not pass one needed
+        ! one for itself. Deferring the copy is an internal saving and must not change what
+        ! `keep_x` receives, so it is paid here instead -- once, as a contiguous move, rather than
+        ! element by element inside the loop above.
+        if (present(keep_x)) then
+            if (.not. allocated(xb)) then
+                allocate(xb(nv))
+                if (m > 0_int64) xb(1:m) = values(1:m)
+            end if
+        end if
+
         acc%n_valid = m
         acc%empty = (m == 0_int64)
         if (acc%empty) then
@@ -425,27 +528,13 @@ contains
         ! call and the restructure is not free; see feature_pandas_S4.md's P5 section.
         allocate(q1(nb), q2(nb), q3(nb), q4(nb))
         team = stats_pass_two_team(threads, m)
-        stats_team_used = 1_int64
-        threaded = .false.
-#ifdef _OPENMP
-        if (team > 1_int64) then
-            threaded = .true.
-            !$omp parallel default(shared) private(j) num_threads(int(team))
-            !$omp single
-            stats_team_used = int(omp_get_num_threads(), int64)
-            !$omp end single nowait
-            !$omp do schedule(static)
-            do j = 1_int64, nb
-                call stats_block_moments(xb, wb, mu, j, m, q1(j), q2(j), q3(j), q4(j))
-            end do
-            !$omp end do
-            !$omp end parallel
-        end if
-#endif
-        if (.not. threaded) then
-            do j = 1_int64, nb
-                call stats_block_moments(xb, wb, mu, j, m, q1(j), q2(j), q3(j), q4(j))
-            end do
+        ! `xb` is unallocated exactly when pass one found nothing to exclude and no caller asked to
+        ! keep the survivors -- in which case the survivors ARE `values(1:m)`, element for element,
+        ! and reading them there returns the identical bits at a whole population less traffic.
+        if (allocated(xb)) then
+            call stats_pass_two(xb, wb, mu, m, nb, team, q1, q2, q3, q4)
+        else
+            call stats_pass_two(values, wb, mu, m, nb, team, q1, q2, q3, q4)
         end if
         call pair_reduce(q1, nb)
         call pair_reduce(q2, nb)
@@ -525,6 +614,72 @@ contains
         o3 = s3
         o4 = s4
     end subroutine stats_block_moments
+
+    !> Pass two over one population: the four central-moment block sums, serial or on a team.
+    !!
+    !! Extracted so that the two arrays pass two can legitimately be given -- pass one's compacted
+    !! buffer, or the caller's own `values` when nothing needed compacting -- reach **one** copy of
+    !! the region rather than two that could drift apart. The array is a dummy here precisely so
+    !! that which one it is cannot be observed in the answer.
+    !!
+    !! **Threaded over blocks, and that cannot move a bit.** Each block writes only its own
+    !! `q1(j)..q4(j)` from values only it reads, and the four `pair_reduce` calls the caller makes
+    !! afterwards walk a tree fixed by `nb` alone -- so who computed which block is not observable
+    !! in the result. `bench/benchmark_stats.sh --mode=thread` asserts exactly that before
+    !! reporting any timing, and `test_threading_changes_no_bit` asserts it in the suite.
+    !!
+    !! **What a team is worth here is set by where the data already is, not by the block count.**
+    !! Pass one is serial, so on entry every survivor is hot in whichever cache the calling thread
+    !! owns. A team drawn from cores that share that cache reads them there; a team spread wider
+    !! has to drag the whole population across the machine before it can start, and it pays that on
+    !! every call. Measured on a 2-socket EPYC 9654 (8 cores per L3) at 1000000 elements, the same
+    !! four-thread team returned **1.13x inside one L3 and 0.25x spread across eight** -- a 4.5x
+    !! swing with nothing changed but which cores the team was allowed to use. That is the
+    !! measurement behind `STATS_MIN_PER_THREAD`'s floor and behind the caution in it; run
+    !! `bench/benchmark_stats.sh --mode=teamsweep` to re-derive both on a new machine.
+    subroutine stats_pass_two(xv, wb, mu, m, nb, team, q1, q2, q3, q4)
+        real(real64), intent(in) :: xv(:)
+        !! the survivors; `xv(1:m)` are live. **Assumed-shape and deliberately NOT `contiguous`.**
+        !! Marking it contiguous looks free -- both call sites do pass a contiguous actual -- and
+        !! measured 2.7x WORSE at 10000000 elements: `values` reaches `stats_engine` as an
+        !! assumed-shape dummy whose contiguity no compiler can prove at that point, so a
+        !! `contiguous` dummy here makes it copy the whole population into a temporary on every
+        !! call, which is the copy this deferral exists to remove.
+        real(real64), intent(in), optional :: wb(:)  !! their weights, absent when unweighted.
+        real(real64), intent(in) :: mu               !! the mean pass one produced.
+        integer(int64), intent(in) :: m              !! how many survivors there are.
+        integer(int64), intent(in) :: nb             !! blocks pass one closed.
+        integer(int64), intent(in) :: team           !! threads to open; 1 runs serially.
+        real(real64), intent(out) :: q1(:)           !! per block, `sum(w*d)`.
+        real(real64), intent(out) :: q2(:)           !! per block, `sum(w*d**2)`.
+        real(real64), intent(out) :: q3(:)           !! per block, `sum(w*d**3)`.
+        real(real64), intent(out) :: q4(:)           !! per block, `sum(w*d**4)`.
+        integer(int64) :: j
+        logical :: threaded
+
+        stats_team_used = 1_int64
+        threaded = .false.
+#ifdef _OPENMP
+        if (team > 1_int64) then
+            threaded = .true.
+            !$omp parallel default(shared) private(j) num_threads(int(team))
+            !$omp single
+            stats_team_used = int(omp_get_num_threads(), int64)
+            !$omp end single nowait
+            !$omp do schedule(static)
+            do j = 1_int64, nb
+                call stats_block_moments(xv, wb, mu, j, m, q1(j), q2(j), q3(j), q4(j))
+            end do
+            !$omp end do
+            !$omp end parallel
+        end if
+#endif
+        if (.not. threaded) then
+            do j = 1_int64, nb
+                call stats_block_moments(xv, wb, mu, j, m, q1(j), q2(j), q3(j), q4(j))
+            end do
+        end if
+    end subroutine stats_pass_two
 
     !> How many threads pass two may open, given the caller's request and the work available.
     !!

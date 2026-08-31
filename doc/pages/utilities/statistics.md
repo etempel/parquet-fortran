@@ -196,19 +196,28 @@ There is deliberately no separate statistics thread setting; one question has on
 Three things worth knowing before reaching for `threads=`:
 
 - **A small population is reduced serially whatever you ask for.** Opening a team costs more than
-  it returns below a measured work floor of tens of thousands of elements per thread — at a few
-  thousand elements a team of eight is a *loss*, not a small gain — so the library declines one.
-  `threads=8` on a short array is not an error and not ignored; it is capped by the work available.
-- **Only the central-moment pass is threaded.** The first pass applies the exclusion rules and
-  compacts the survivors, which is inherently sequential (where an element lands depends on how
-  many earlier ones were removed), so it stays serial. That bounds what threading can return on a
-  whole call to well under the thread count.
+  it returns below a measured work floor of a few thousand elements per thread — at a few hundred
+  per thread a team is a *loss*, not a small gain — so the library declines one. `threads=8` on a
+  short array is not an error and not ignored; it is capped by the work available.
+- **Only the central-moment pass is threaded.** The first pass applies the exclusion rules,
+  which is inherently sequential where anything is actually excluded (where a survivor lands
+  depends on how many earlier ones were removed), so it stays serial. That bounds what threading
+  can return on a whole call to well under the thread count.
+- **Where the survivors live decides what a team is worth**, and on a large machine it decides it
+  more than the thread count does. Pass one is serial, so on entry the population is hot in
+  whichever cache the calling thread owns; a team drawn from cores that share that cache reads it
+  there, and a team spread wider drags the whole population across the machine first. Measured on
+  a 2-socket EPYC (8 cores per L3), the same four-thread team returned 1.13x inside one L3 and
+  0.25x spread across eight. If you are pinning threads for other reasons, keeping a team inside
+  one cache domain is worth more here than making it bigger.
 - **The shape of the call matters more than the thread count**, for anything but a plain array.
   Passing `weights=` roughly doubles the cost of a reduction, and `is_valid=` adds about half
   again, because both leave the fast path. Threading does not recover that.
 
 `bench/benchmark_stats.sh` measures all of this, and its `--mode=thread` refuses to report a
-timing until it has confirmed the bit-exactness above on the machine it is running on.
+timing until it has confirmed the bit-exactness above on the machine it is running on. Its
+`--mode=teamsweep` is the one that answers "where does a team start paying *here*", on the shipped
+call rather than on a replica, and it is what the work floor is derived from.
 
 ## Order statistics: medians, quantiles and the rest
 

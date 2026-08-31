@@ -38,7 +38,7 @@ module test_stats
     use test_stats_golden
     use iso_fortran_env, only : int32, int64, real32, real64
     use ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_get_flag, ieee_set_flag, &
-        ieee_support_flag, ieee_divide_by_zero
+        ieee_support_flag, ieee_divide_by_zero, ieee_is_nan
     use testdrive, only : new_unittest, unittest_type, error_type, check, skip_test
     implicit none
     private
@@ -208,9 +208,116 @@ contains
             new_unittest("pf_bin_edges always emits edges pf_histogram will accept", &
                 test_bin_edges_are_always_usable), &
             new_unittest("every generated per-kind specific is reached at least once", &
-                test_every_kind_specific_is_reached) &
+                test_every_kind_specific_is_reached), &
+            new_unittest("deferring pass one's compaction changes no answer, wherever the first " // &
+                "exclusion falls", test_deferred_compaction_is_invisible) &
             ]
     end subroutine collect_tests_parquet_stats
+
+    !> Deferring pass one's compaction changes no answer, wherever the first exclusion falls.
+    !!
+    !! Pass one no longer materialises a compacted copy of the population when it has nothing to
+    !! exclude: the survivors are then `values(1:m)` element for element, and pass two reads them
+    !! there. The saving is real -- a whole population's allocation, write and free per call -- but
+    !! it introduces a **transition**: at the first excluded element the survivors stop sitting at
+    !! their own indices, so the prefix matched so far has to be copied across and the loop has to
+    !! start writing from exactly the right place.
+    !!
+    !! That transition is the only new way this engine can be wrong, and it is an off-by-one on a
+    !! prefix length, so this test drives the first NaN to **every position that can be special**:
+    !! the very first element (an empty prefix, which is the `m > 0` guard), the second, the middle,
+    !! the last, and none at all. Each is checked against a reference computed from the survivors
+    !! directly. Per CLAUDE.md's rule about fixtures whose first element is the extreme case, the
+    !! leading-NaN arm is deliberately first in the list rather than an afterthought at the end.
+    !!
+    !! `pf_stats` with `%compute` is included because it is the caller that asks for the survivors
+    !! back: the buffer it receives must be the same whether or not pass one needed one for itself,
+    !! and it is the one path that forces the deferred case to materialise after the fact.
+    subroutine test_deferred_compaction_is_invisible(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: x(:), clean(:), strided(:)
+        real(real64) :: nan, v_ref, m_ref, v_got, m_got, med_ref, med_got
+        integer(int64) :: n, i, k, pos(5), nvalid
+        character(len=32) :: where_
+        type(pf_stats) :: st
+
+        nan = ieee_value(0.0_real64, ieee_quiet_nan)
+        n = 4000_int64
+        ! Positions for the FIRST NaN: leading (empty prefix), second, middle, last, and none.
+        ! `n + 1` means "no NaN at all", which is the arm the deferral is actually written for.
+        pos = [1_int64, 2_int64, n / 2_int64, n, n + 1_int64]
+
+        do k = 1, 5
+            allocate(x(n))
+            do i = 1_int64, n
+                x(i) = sin(real(i, real64) * 0.037_real64) * 600.0_real64
+            end do
+            if (pos(k) <= n) x(pos(k)) = nan
+            write (where_, "(a,i0)") "first NaN at ", pos(k)
+
+            ! The reference: the survivors, gathered by hand, reduced by the same library on a
+            ! population that has nothing to exclude. Both arms therefore walk the same values in
+            ! the same order, so the comparison is an exact one and not a tolerance.
+            nvalid = 0_int64
+            allocate(clean(n))
+            do i = 1_int64, n
+                if (.not. ieee_is_nan(x(i))) then
+                    nvalid = nvalid + 1_int64
+                    clean(nvalid) = x(i)
+                end if
+            end do
+            call pf_variance(clean(1:nvalid), v_ref)
+            call pf_mean(clean(1:nvalid), m_ref)
+            call pf_median(clean(1:nvalid), med_ref)
+
+            call pf_variance(x, v_got)
+            call pf_mean(x, m_got)
+            call pf_median(x, med_got)
+
+            call check(error, v_got == v_ref, "variance must not depend on whether pass one " // &
+                "compacted; " // trim(where_))
+            if (allocated(error)) return
+            call check(error, m_got == m_ref, "mean must not depend on whether pass one " // &
+                "compacted; " // trim(where_))
+            if (allocated(error)) return
+            call check(error, med_got == med_ref, "median must not depend on whether pass one " // &
+                "compacted; " // trim(where_))
+            if (allocated(error)) return
+
+            ! The retaining path: `%compute` keeps pass one's survivors, so the deferred case has
+            ! to materialise the buffer it skipped. If the prefix copy were wrong, this is where a
+            ! wrong survivor would show up rather than in a reduction that never reads one twice.
+            call st%compute(x)
+            call check(error, st%n_valid() == nvalid, "pf_stats must find the same survivor " // &
+                "count as a hand gather; " // trim(where_))
+            if (allocated(error)) return
+            call check(error, st%variance() == v_ref, "a retaining pf_stats must return the " // &
+                "reference variance; " // trim(where_))
+            if (allocated(error)) return
+            call check(error, st%median() == med_ref, "a retaining pf_stats orders the buffer it " // &
+                "kept, so a wrong prefix copy surfaces here; " // trim(where_))
+            if (allocated(error)) return
+
+            deallocate(x, clean)
+        end do
+
+        ! A DISCONTIGUOUS actual argument takes the compacting path by construction -- the deferral
+        ! is guarded by `is_contiguous`, because reading the caller's stride in pass two is not the
+        ! same trade as reading a packed buffer. The guard is only correct if the answer survives
+        ! it, which is what this arm checks.
+        allocate(strided(2_int64 * n))
+        do i = 1_int64, 2_int64 * n
+            strided(i) = cos(real(i, real64) * 0.019_real64) * 400.0_real64
+        end do
+        allocate(clean(n))
+        do i = 1_int64, n
+            clean(i) = strided(2_int64 * i)
+        end do
+        call pf_variance(clean, v_ref)
+        call pf_variance(strided(2::2), v_got)
+        call check(error, v_got == v_ref, "a discontiguous population must return exactly what " // &
+            "the same values return packed; the is_contiguous guard decides which path it takes")
+    end subroutine test_deferred_compaction_is_invisible
 
     !> With no optional argument, every element is in the population.
     subroutine test_plain_count(error)
@@ -1819,8 +1926,9 @@ contains
 
         call check(error, team_default == 1_int64, &
             "the SHIPPED floor must decline a team for a population of 5000; if this fails, the " // &
-            "measured constant has been lowered and bench/benchmark_stats.sh --mode=thread should " // &
-            "be re-run before trusting the new value")
+            "measured constant has been lowered and bench/benchmark_stats.sh --mode=teamsweep " // &
+            "should be re-run before trusting the new value -- NOT --mode=thread, which measures " // &
+            "a replica over a resident buffer and reports a ceiling this constant cannot use")
         if (allocated(error)) return
         call check(error, team_high == 1_int64, &
             "a floor above the population size must refuse the team")

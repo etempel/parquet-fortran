@@ -45,6 +45,17 @@
 #           DEVIATIONS once per clipping round on top of the single ordering of the values, so a
 #           `sorts mad` that grows with the round count is the O(k n log n) shape the interval
 #           property was chosen to avoid, and `ratio` is what it costs.
+#   teamsweep
+#           The `best` and `per-thread` columns, which are what STATS_MIN_PER_THREAD is derived
+#           from. Neither of the two modes above can derive it: `thread` measures a replica over a
+#           buffer allocated once outside the timed loop, so it reports a CEILING and never pays
+#           what a real call pays, and `library` runs the shipped rule, so the very constant under
+#           test censors the measurement -- every size below twice the floor reports exactly 1.00x
+#           because the engine ran serially. This mode lifts the floor through the debug hook and
+#           drives the team directly, so its crossover is the real one, on the code that ships.
+#           Read the first row whose `best` exceeds 1.0: its `per-thread` value is what the floor
+#           has to exceed. Asserts that a team actually opened, so a serial build cannot report a
+#           table of 1.00x as though it had measured something.
 #   library The same question asked of the SHIPPED procedure through its public `threads=`
 #           argument, so this is what a caller actually sees. It is well below --mode=thread's
 #           ceiling by construction: that one times pass two alone over an already-compacted
@@ -67,12 +78,12 @@ NROWS="${NROWS:-10000000}"
 ROUNDS="${ROUNDS:-5}"
 THREADS="${THREADS:-}"
 
-MODES=(floor phases shapes thread library iqr clip)
+MODES=(floor phases shapes thread library teamsweep iqr clip)
 for arg in "$@"; do
     case "$arg" in
         --mode=*) MODES=("${arg#--mode=}") ;;
         -h|--help)
-            sed -n '2,45p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+            sed -n '2,70p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)

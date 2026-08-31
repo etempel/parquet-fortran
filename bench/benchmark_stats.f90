@@ -51,7 +51,8 @@ program benchmark_stats
 
     use parquet, only : pf_sum, pf_mean, pf_variance, pf_moments, pf_count_valid, &
         pf_iqr, pf_median, pf_sigma_clipped_stats, parquet_debug_stats_sorts, &
-        parquet_debug_set_stats_quantile_sort_min
+        parquet_debug_set_stats_quantile_sort_min, parquet_debug_stats_team, &
+        parquet_debug_set_stats_min_per_thread
     use iso_fortran_env, only : int32, int64, real64, error_unit, output_unit
 #ifdef _OPENMP
     use omp_lib, only : omp_get_wtime, omp_get_max_threads, omp_get_num_procs, omp_set_num_threads
@@ -101,11 +102,12 @@ program benchmark_stats
     case ("shapes"); call mode_shapes(nrows, rounds, sink)
     case ("thread"); call mode_thread(nrows, rounds, nthreads, sink)
     case ("library"); call mode_library(nrows, rounds, sink)
+    case ("teamsweep"); call mode_teamsweep(nrows, rounds, sink)
     case ("iqr");    call mode_iqr(nrows, rounds, sink)
     case ("clip");   call mode_clip(nrows, rounds, sink)
     case default
         write (error_unit, "(a,a)") "benchmark_stats: unknown --mode=", trim(mode)
-        write (error_unit, "(a)") "  known modes: floor, phases, shapes, thread, library"
+        write (error_unit, "(a)") "  known modes: floor, phases, shapes, thread, library, teamsweep"
         stop 2
     end select
 
@@ -658,6 +660,126 @@ contains
             stop 1
         end if
     end subroutine mode_library
+
+    ! ==========================================================================================
+    ! Mode 6 -- teamsweep: where a team starts paying ON THE SHIPPED PATH
+    ! ==========================================================================================
+
+    !> What `STATS_MIN_PER_THREAD` should be, measured on `pf_variance` rather than on a replica.
+    !!
+    !! **This is the mode that answers "what should the constant be"; `--mode=thread` cannot.**
+    !! That one times a replica of pass two over a buffer allocated ONCE outside the timed loop, so
+    !! it reports a ceiling and, by construction, never pays the per-call cost of pass one handing
+    !! pass two a buffer it has just written. `--mode=library` cannot answer it either, for the
+    !! opposite reason: it runs the shipped rule, so the floor under test censors its own
+    !! measurement -- every size below `2 * STATS_MIN_PER_THREAD` reports exactly 1.00x because the
+    !! engine ran serially, which is the floor working and not a datum about where it belongs.
+    !!
+    !! So this mode lifts the floor with `parquet_debug_set_stats_min_per_thread(0)` and drives the
+    !! team directly through `threads=`, over a sweep of sizes. The crossover it reports is the
+    !! real one: the smallest population at which opening a team makes a whole `pf_variance` call
+    !! faster than `threads=1`, on the code that ships.
+    !!
+    !! Three assertions, and each exists because its absence makes the table lie:
+    !!
+    !!   1. **the team actually opened**, read back from `parquet_debug_stats_team()` -- an
+    !!      equality test cannot see threading, and neither can a timing that silently ran serially;
+    !!   2. **every arm is bit-identical** to the serial answer, the module's central contract;
+    !!   3. **the floor is restored** before returning, so a later mode in the same process is not
+    !!      measured against a debug override.
+    subroutine mode_teamsweep(n, rounds, sink)
+        integer(int64), intent(in) :: n      !! largest population; the sweep steps down by tens.
+        integer, intent(in) :: rounds        !! rounds per arm.
+        real(real64), intent(inout) :: sink  !! keep-it-live accumulator.
+        real(real64), allocatable :: x(:)
+        real(real64) :: v1, vt, t1, tt, t0
+        real(real64) :: sp(8)
+        integer(int64) :: sizes(5), m, team_used
+        integer :: ladder(8), nl, k, s, r, t, best_k
+        logical :: all_ok, exact, saw_team
+
+        sizes = [n / 10000_int64, n / 1000_int64, n / 100_int64, n / 10_int64, n]
+        call thread_ladder(0, ladder, nl)
+        all_ok = .true.
+        saw_team = .false.
+
+        write (output_unit, "(a)") "Where a team first pays on the SHIPPED pf_variance, floor lifted."
+        write (output_unit, "(a)") "  parquet_debug_set_stats_min_per_thread(0) is in force: the engine"
+        write (output_unit, "(a)") "  opens exactly the team asked for, so the shipped floor censors nothing."
+        write (output_unit, "(a)") ""
+        write (output_unit, "(a)", advance="no") "         n   serial"
+        do k = 1, nl
+            write (output_unit, "(i7,a)", advance="no") ladder(k), "t"
+        end do
+        write (output_unit, "(a)") "    best  at  per-thread"
+        write (output_unit, "(a)", advance="no") "  ---------------"
+        do k = 1, nl
+            write (output_unit, "(a)", advance="no") "--------"
+        end do
+        write (output_unit, "(a)") "-----------------------"
+
+        call parquet_debug_set_stats_min_per_thread(0_int64)
+        do s = 1, 5
+            m = sizes(s)
+            if (m < BLOCK) cycle
+            call make_values(x, m)
+            call pf_variance(x, v1, threads=1)
+            t1 = huge(0.0_real64)
+            do r = 1, rounds
+                t0 = now()
+                call pf_variance(x, v1, threads=1)
+                t1 = min(t1, now() - t0)
+                sink = sink + v1
+            end do
+
+            best_k = 1
+            do k = 1, nl
+                t = ladder(k)
+                tt = huge(0.0_real64)
+                do r = 1, rounds
+                    t0 = now()
+                    call pf_variance(x, vt, threads=t)
+                    tt = min(tt, now() - t0)
+                    sink = sink + vt
+                end do
+                team_used = parquet_debug_stats_team()
+                if (team_used > 1_int64) saw_team = .true.
+                exact = (vt == v1)
+                all_ok = all_ok .and. exact
+                sp(k) = t1 / tt
+                if (sp(k) > sp(best_k)) best_k = k
+                ! The team the engine REPORTS, not the one asked for: a request the runtime
+                ! clamped would otherwise be written down as a datum about the floor.
+                if (team_used /= int(min(int(t, int64), m), int64) .and. team_used /= int(t, int64)) then
+                    write (output_unit, "(a,i0,a,i0,a,i0)") "  note: n=", m, " asked ", t, &
+                        " threads, engine opened ", team_used
+                end if
+            end do
+
+            write (output_unit, "(2x,i9,f9.4)", advance="no") m, ns(t1, m)
+            do k = 1, nl
+                write (output_unit, "(f8.2)", advance="no") sp(k)
+            end do
+            write (output_unit, "(f8.2,i4,a,i11)") sp(best_k), ladder(best_k), "t", m / int(ladder(best_k), int64)
+        end do
+        call parquet_debug_set_stats_min_per_thread(-1_int64)
+
+        write (output_unit, "(a)") ""
+        write (output_unit, "(a)") "  Read the FIRST row whose best speedup exceeds 1.0: its per-thread column is"
+        write (output_unit, "(a)") "  what STATS_MIN_PER_THREAD has to exceed for the floor to admit only teams"
+        write (output_unit, "(a)") "  that pay. A row whose best is 1.00 at 1t means no team paid at that size."
+        if (.not. saw_team) then
+            write (error_unit, "(a)") "benchmark_stats: no arm ever opened a team of more than one."
+            write (error_unit, "(a)") "  Every speedup above is serial-against-serial and the table is vacuous;"
+            write (error_unit, "(a)") "  the usual cause is a build without OpenMP."
+            stop 1
+        end if
+        if (.not. all_ok) then
+            write (error_unit, "(a)") "benchmark_stats: a threaded pf_variance did not return the serial bits."
+            write (error_unit, "(a)") "  That is the module's central contract; the speedups above are moot."
+            stop 1
+        end if
+    end subroutine mode_teamsweep
 
     !> P6-1: does `pf_iqr` do better by SELECTING its two order statistics or by SORTING once?
     !!

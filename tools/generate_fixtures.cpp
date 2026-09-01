@@ -74,6 +74,8 @@
 //     (#features-considered-but-not-implemented)) -- kept as groundwork for if that support is
 //     ever added.
 #include <arrow/api.h>
+#include <arrow/compute/api.h>
+#include <arrow/extension/fixed_shape_tensor.h>
 #include <arrow/array/builder_decimal.h>
 #include <arrow/io/api.h>
 #include <arrow/util/decimal.h>
@@ -1859,6 +1861,84 @@ static bool generate_screen_declined_nulls_fixture()
     return status.ok();
 }
 
+// test/fixtures/encoded_types.parquet: columns wearing Arrow ENCODING WRAPPERS -- an extension
+// type, a dictionary type -- over storage of differing shapes.
+//
+// The point is the SHAPE queries, not the values. Arrow gives an extension/dictionary/run-end
+// type its own Type::type, so a query that switches on the leaf type id without peeling the
+// wrapper classifies the WRAPPER. That is not academic: an `arrow.fixed_shape_tensor` column has
+// fixed_size_list storage, so its rows hold four values each, and it was reported as a "scalar"
+// with col_size 1 -- telling a caller to allocate a 1-D array for a column needing a 2-D one.
+// See unwrap_encoding_layers in src/parquet_wrapper.cpp.
+//
+// store_schema() is REQUIRED: the wrappers live in the Arrow schema, and without it every column
+// here round-trips as its bare storage type and the fixture tests nothing.
+//
+//   plain       int32                                        -> ("int32",   "scalar") control
+//   tensor_col  extension<arrow.fixed_shape_tensor>          -> ("unknown", "vector"), col_size 4
+//               over fixed_size_list<int32>[4]
+//   dict_col    dictionary<values=string, indices=int32>     -> ("unknown", "scalar")
+//   vec_col     fixed_size_list<int32>[4], unwrapped         -> ("int32",   "vector"), col_size 4
+//               the negative control: the same shape WITHOUT a wrapper, so a test can tell
+//               "peeled correctly" from "happened to say vector anyway"
+//
+// Used by test/test_reading.f90's encoding-wrapper shape test.
+static bool generate_encoded_types_fixture()
+{
+    arrow::Status st;
+    const int kRows = 3;
+
+    // The tensor column's storage, and an identical unwrapped twin as the control.
+    auto make_fsl = [&](std::shared_ptr<arrow::Array> &out) {
+        auto values = std::make_shared<arrow::Int32Builder>();
+        arrow::FixedSizeListBuilder builder(arrow::default_memory_pool(), values, 4);
+        for (int row = 0; row < kRows; ++row)
+        {
+            st = builder.Append();
+            for (int k = 0; k < 4; ++k)
+            {
+                st = values->Append(row * 4 + k);
+            }
+        }
+        return builder.Finish(&out).ok();
+    };
+    std::shared_ptr<arrow::Array> tensor_storage, vec_arr;
+    if (!make_fsl(tensor_storage) || !make_fsl(vec_arr)) return false;
+
+    auto tensor_type = arrow::extension::fixed_shape_tensor(arrow::int32(), {2, 2});
+    if (!tensor_type) return false;
+    auto tensor_arr = arrow::ExtensionType::WrapArray(tensor_type, tensor_storage);
+
+    arrow::Int32Builder id_builder;
+    for (int row = 0; row < kRows; ++row) st = id_builder.Append(row);
+    std::shared_ptr<arrow::Array> id_arr;
+    st = id_builder.Finish(&id_arr);
+
+    arrow::StringBuilder dict_values;
+    for (int row = 0; row < kRows; ++row) st = dict_values.Append(row == 1 ? "b" : "a");
+    std::shared_ptr<arrow::Array> dict_plain;
+    st = dict_values.Finish(&dict_plain);
+    auto maybe_dict = arrow::compute::DictionaryEncode(dict_plain);
+    if (!maybe_dict.ok()) return false;
+    auto dict_arr = maybe_dict->make_array();
+
+    auto schema = arrow::schema({
+        arrow::field("plain", arrow::int32()),
+        arrow::field("tensor_col", tensor_type),
+        arrow::field("dict_col", dict_arr->type()),
+        arrow::field("vec_col", vec_arr->type()),
+    });
+    auto table = arrow::Table::Make(schema, {id_arr, tensor_arr, dict_arr, vec_arr});
+
+    auto maybe_outfile = arrow::io::FileOutputStream::Open("test/fixtures/encoded_types.parquet");
+    if (!maybe_outfile.ok()) return false;
+    auto outfile = *maybe_outfile;
+    auto arrow_props = parquet::ArrowWriterProperties::Builder().store_schema()->build();
+    auto status = parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), outfile, kRows,
+        parquet::default_writer_properties(), arrow_props);
+    return status.ok();
+}
+
 int main()
 {
     struct Fixture
@@ -1881,6 +1961,7 @@ int main()
         {"test/fixtures/map_list_types.parquet", generate_map_list_types_fixture},
         {"test/fixtures/element_nulls.parquet", generate_element_nulls_fixture},
         {"test/fixtures/screen_declined_nulls.parquet", generate_screen_declined_nulls_fixture},
+        {"test/fixtures/encoded_types.parquet", generate_encoded_types_fixture},
     };
 
     int failures = 0;

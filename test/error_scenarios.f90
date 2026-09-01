@@ -727,6 +727,8 @@ program error_scenarios
         call scenario_filter_all_row_groups_bounded()
     case ("filter_row_range_out_of_range")
         call scenario_filter_row_range_out_of_range()
+    case ("shape_queries_avoid_whole_column_read")
+        call scenario_shape_queries_avoid_whole_column_read()
     case ("filter_row_element_mode_no_whole_column_read")
         call scenario_filter_row_element_mode_no_whole_column_read()
     case ("filter_scoped_reads_no_whole_column")
@@ -4660,6 +4662,56 @@ contains
         print '(a)', "parquet_get_col_size/parquet_get_column_total_elements/" // &
             "parquet_read_array_row_mode/parquet_read_array_element_mode all avoided a whole-column read, as expected"
     end subroutine scenario_col_size_and_row_mode_avoid_whole_column_read
+
+    !> The two SCHEMA-ONLY container queries must read no column data, whatever they answer.
+    !>
+    !! `parquet_get_column_shape` and `parquet_get_map_value_type` both document themselves as
+    !! schema-only, and for the shape query that is load-bearing rather than a nicety: it is what
+    !! lets parquet_open_table classify every column of a file without decoding any of it. A
+    !! regression would be silent -- the answers stay correct, the data is discarded again
+    !! immediately, and only the timing on a large file would ever show it.
+    !!
+    !! Same mechanism as scenario_col_size_and_row_mode_avoid_whole_column_read: the forced error
+    !! is armed BEFORE the calls, so this scenario finishing without aborting IS the assertion.
+    !! Its negative control is the shared scenario_whole_column_read_forced_error_control, which
+    !! proves the hook fires at all.
+    !!
+    !! Deliberately does NOT call parquet_get_col_size on the list column: that query legitimately
+    !! reads a plain LIST one row group at a time, so including it would arm a trap for correct
+    !! behaviour. The columns covered are chosen to reach every arm of the shape switch that a
+    !! Parquet file can produce -- scalar, list, map, and a struct-nested leaf.
+    subroutine scenario_shape_queries_avoid_whole_column_read()
+        interface
+            subroutine parquet_debug_set_force_whole_column_read_error(enable) &
+                bind(C, name="parquet_debug_set_force_whole_column_read_error")
+                use iso_c_binding, only : c_int
+                integer(c_int), value :: enable !! nonzero forces the next whole-column read to abort; 0 restores it.
+            end subroutine parquet_debug_set_force_whole_column_read_error
+        end interface
+        type(parquet_reader) :: reader
+        character(len=:), allocatable :: shape, value_type
+
+        call parquet_open_reader(reader, "test/fixtures/map_list_types.parquet")
+        call parquet_debug_set_force_whole_column_read_error(1)
+
+        call parquet_get_column_shape(reader, "list_col", shape)
+        if (shape /= "list") error stop "shape query: list_col should be a list"
+        call parquet_get_column_shape(reader, "map_col", shape)
+        if (shape /= "map") error stop "shape query: map_col should be a map"
+        call parquet_get_column_shape(reader, "struct_of_struct.label", shape)
+        if (shape /= "scalar") error stop "shape query: a struct-nested string leaf should be a scalar"
+        call parquet_get_column_shape(reader, "struct_of_list.values", shape)
+        if (shape /= "list") error stop "shape query: a struct-nested list leaf should be a list"
+
+        call parquet_get_map_value_type(reader, "map_col", value_type)
+        if (value_type /= "int32") error stop "map value type query: map_col values are int32"
+        call parquet_get_map_value_type(reader, "list_col", value_type)
+        if (value_type /= "unknown") error stop "map value type query: a non-map answers unknown"
+
+        call parquet_debug_set_force_whole_column_read_error(0)
+        call parquet_close_reader(reader)
+        print '(a)', "parquet_get_column_shape/parquet_get_map_value_type avoided a whole-column read, as expected"
+    end subroutine scenario_shape_queries_avoid_whole_column_read
 
     !> The same guarantee as scenario_col_size_and_row_mode_avoid_whole_column_read, but with a
     !> ROW FILTER active -- which used to be the one case where both modes deliberately gave it up

@@ -751,6 +751,7 @@ scenarios=(
     "chunk_read_bool_type_mismatch:1"
     "filter_row_range_outside_row_groups:1"
     "filter_all_row_groups_bounded:0"
+    "shape_queries_avoid_whole_column_read:0"
     "filter_row_element_mode_no_whole_column_read:0"
     "filter_scoped_reads_no_whole_column:0"
     "sorting_nth_out_of_range:1"

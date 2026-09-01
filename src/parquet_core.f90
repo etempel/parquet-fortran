@@ -3178,12 +3178,21 @@ module parquet_core
             character(len=:), allocatable, intent(out) :: type_name !! resolved canonical type token.
         end subroutine parquet_get_column_type
         !> Reports existing column `name`'s CONTAINER SHAPE in `shape`, as one of the tokens
-        !> `"scalar"`, `"vector"`, `"list"`, `"map"` or `"struct"`. A schema-only query: it reads
-        !> no column data at all.
+        !> `"scalar"`, `"vector"`, `"list"`, `"map"`, `"struct"` or `"unknown"`. A schema-only
+        !> query: it reads no column data at all.
         !>
-        !> There is no "unrecognized" answer: anything that is not one of the four container
-        !> shapes is a `"scalar"`, including a leaf whose ELEMENT type this library cannot read.
-        !> That is the other query's business -- a decimal column is `("unknown", "scalar")`.
+        !> The question is "is this a container?", not "can I read this?", so a leaf whose ELEMENT
+        !> type this library cannot read is still a `"scalar"` when it holds one value per row --
+        !> that is the other query's business, and a decimal column is `("unknown", "scalar")`.
+        !>
+        !> An Arrow ENCODING WRAPPER -- an extension, dictionary or run-end-encoded type -- is
+        !> read through, since none of them changes how many values a row holds: an
+        !> `arrow.fixed_shape_tensor` over a four-wide fixed-size list answers `"vector"`, and
+        !> parquet_get_col_size answers 4 for it.
+        !>
+        !> `"unknown"` is the answer for a shape that is neither, such as an Arrow union or a
+        !> list-view. No Parquet file is currently known to produce one; it exists so an
+        !> unrecognised shape is reported rather than called a `"scalar"`.
         !>
         !> Orthogonal to parquet_get_column_type, which reports the ELEMENT type and deliberately
         !> unwraps a list to it -- so a `list<double>` column answers `"float64"` there and

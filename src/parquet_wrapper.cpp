@@ -3203,6 +3203,51 @@ extern "C"
 		run_qc_checks(reader_handle, name, name, array);
 	}
 
+	// Peels the pure-ENCODING layers off a type, leaving the type whose SHAPE a caller sees.
+	//
+	// An extension type, a run-end-encoded type and a dictionary type all wrap another type
+	// without changing how many values a row holds -- they change how those values are stored, or
+	// what they mean, and a shape query is about neither. Arrow gives each of them its own
+	// Type::type, so a switch that does not peel them classifies the WRAPPER, and every one of
+	// them then falls to whatever the default arm says.
+	//
+	// That is not hypothetical, and it is why this exists. A canonical Arrow extension type whose
+	// storage is a container round-trips through Parquet whenever the writer stores the Arrow
+	// schema: an `arrow.fixed_shape_tensor` column has fixed_size_list storage, so its rows hold
+	// four values each, and without this peeling the shape query called it a "scalar" -- telling a
+	// caller to allocate a 1-D array for a column that needs a 2-D one. Measured with pyarrow 25
+	// and Arrow C++ 25.
+	//
+	// An UNREGISTERED extension type never reaches here: Arrow C++ falls back to the storage type
+	// when the name is not in its registry, so those already answered correctly. It is the
+	// registered canonical ones (arrow.fixed_shape_tensor, arrow.json, arrow.uuid, ...) that
+	// arrive wrapped.
+	//
+	// Loops rather than recursing once, because the layers compose (a dictionary of an extension
+	// type, say), and is bounded so that a cyclic or pathological type cannot hang the reader --
+	// no legitimate Arrow type nests these more than a step or two deep.
+	static std::shared_ptr<arrow::DataType> unwrap_encoding_layers(std::shared_ptr<arrow::DataType> type)
+	{
+		for (int depth = 0; type && depth < 8; ++depth)
+		{
+			switch (type->id())
+			{
+			case arrow::Type::EXTENSION:
+				type = std::static_pointer_cast<arrow::ExtensionType>(type)->storage_type();
+				break;
+			case arrow::Type::RUN_END_ENCODED: // GCOVR_EXCL_LINE -- see below.
+				type = std::static_pointer_cast<arrow::RunEndEncodedType>(type)->value_type(); // GCOVR_EXCL_LINE
+				break; // GCOVR_EXCL_LINE
+			case arrow::Type::DICTIONARY:
+				type = std::static_pointer_cast<arrow::DictionaryType>(type)->value_type();
+				break;
+			default:
+				return type;
+			}
+		}
+		return type; // GCOVR_EXCL_LINE -- only reachable past the depth bound, i.e. never in practice.
+	}
+
 	// The schema-only half of parquet_reader_get_column_col_size, factored out so the sibling entry
 	// points below can reuse it. Deliberately NOT the exported function: calling that would
 	// re-enter as_reader_handle while the caller's own guard is still held. That is merely wasteful
@@ -3212,9 +3257,14 @@ extern "C"
 	static int64_t parquet_reader_get_column_col_size_impl(ParquetReaderHandle *reader_handle, const char *name)
 	{
 		auto resolved = resolve_struct_path(reader_handle->schema, name);
-		if (resolved.leaf_field->type()->id() == arrow::Type::FIXED_SIZE_LIST)
+		// Peeled for the same reason parquet_reader_get_column_shape_name peels: an extension,
+		// run-end-encoded or dictionary wrapper does not change how many values a row holds, and
+		// leaving it on would make this query contradict the shape query on the same column --
+		// "vector" with a width of 1. See unwrap_encoding_layers.
+		auto leaf_type = unwrap_encoding_layers(resolved.leaf_field->type());
+		if (leaf_type->id() == arrow::Type::FIXED_SIZE_LIST)
 		{
-			return static_cast<int64_t>(std::static_pointer_cast<arrow::FixedSizeListType>(resolved.leaf_field->type())->list_size());
+			return static_cast<int64_t>(std::static_pointer_cast<arrow::FixedSizeListType>(leaf_type)->list_size());
 		}
 		return 1;
 	}
@@ -3307,7 +3357,9 @@ extern "C"
 	// table_classify, which returns before asking for col_size.
 	static bool needs_data_to_measure_col_size(const std::shared_ptr<arrow::DataType> &type)
 	{
-		return type->id() == arrow::Type::LIST || type->id() == arrow::Type::LARGE_LIST;
+		// Peeled, so that a list wearing an encoding wrapper is still recognised as needing data.
+		auto inner = unwrap_encoding_layers(type);
+		return inner->id() == arrow::Type::LIST || inner->id() == arrow::Type::LARGE_LIST;
 	}
 
 	// The word for a container column's shape, as used in the messages that REFUSE one -- the
@@ -8711,7 +8763,7 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto resolved = resolve_struct_path(reader_handle->schema, name);
-		auto type = resolved.leaf_field->type();
+		auto type = unwrap_encoding_layers(resolved.leaf_field->type());
 		const char *token = "unknown";
 		switch (type->id())
 		{
@@ -8725,10 +8777,22 @@ extern "C"
 		// keeps this query's contract identical to parquet_get_column_type's: a shape this
 		// library cannot read is an ANSWER.
 		case arrow::Type::STRUCT: token = "struct"; break; // GCOVR_EXCL_LINE
+		// Genuinely NEITHER container nor scalar, so neither answer would be true. A union's rows
+		// hold one value of one of several types, and a list-view is a list whose elements this
+		// library has no reader for -- calling either a "scalar" would tell a caller to size a
+		// 1-D array for something that is not one value per row, which is exactly the mistake
+		// the `default` arm below used to make for an extension type. Arrow's Parquet reader is
+		// not known to produce any of these today (Parquet has no union type, and a list-view
+		// round-trips as a LIST), so these arms are defensive: they exist so that a type this
+		// query does not understand gets an honest "unknown" rather than a confident wrong word.
+		case arrow::Type::SPARSE_UNION:                       // GCOVR_EXCL_LINE
+		case arrow::Type::DENSE_UNION:                        // GCOVR_EXCL_LINE
+		case arrow::Type::LIST_VIEW:                          // GCOVR_EXCL_LINE
+		case arrow::Type::LARGE_LIST_VIEW: token = "unknown"; break; // GCOVR_EXCL_LINE
 		default:
-			// Every leaf this library can read one value at a time -- and equally every leaf it
-			// cannot -- is a "scalar" in the only sense this query is about: it is not a
-			// container. An unreadable ELEMENT type is the other query's business, not this one's.
+			// Everything left really is one value per row -- readable or not. An unreadable
+			// ELEMENT type is the other query's business, not this one's, so a decimal column is
+			// ("unknown", "scalar"): a plain value, of a type you cannot have.
 			token = "scalar";
 			break;
 		}
@@ -8784,11 +8848,14 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto resolved = resolve_struct_path(reader_handle->schema, name);
-		if (resolved.leaf_field->type()->id() == arrow::Type::FIXED_SIZE_LIST)
+		// Peeled, as in parquet_reader_get_column_shape_name and the two size queries beside it:
+		// an encoding wrapper does not change a row's width. See unwrap_encoding_layers.
+		auto leaf_type = unwrap_encoding_layers(resolved.leaf_field->type());
+		if (leaf_type->id() == arrow::Type::FIXED_SIZE_LIST)
 		{
-			return static_cast<int64_t>(std::static_pointer_cast<arrow::FixedSizeListType>(resolved.leaf_field->type())->list_size());
+			return static_cast<int64_t>(std::static_pointer_cast<arrow::FixedSizeListType>(leaf_type)->list_size());
 		}
-		if (!needs_data_to_measure_col_size(resolved.leaf_field->type()))
+		if (!needs_data_to_measure_col_size(leaf_type))
 		{
 			return 1;
 		}
@@ -8866,9 +8933,12 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto resolved = resolve_struct_path(reader_handle->schema, name);
-		if (resolved.leaf_field->type()->id() == arrow::Type::FIXED_SIZE_LIST)
+		// Peeled, as in parquet_reader_get_column_col_size_impl -- these three size/shape queries
+		// must agree about the same column.
+		auto leaf_type = unwrap_encoding_layers(resolved.leaf_field->type());
+		if (leaf_type->id() == arrow::Type::FIXED_SIZE_LIST)
 		{
-			auto col_size = static_cast<int64_t>(std::static_pointer_cast<arrow::FixedSizeListType>(resolved.leaf_field->type())->list_size());
+			auto col_size = static_cast<int64_t>(std::static_pointer_cast<arrow::FixedSizeListType>(leaf_type)->list_size());
 			return reader_handle->nrows * col_size;
 		}
 		auto nrows = reader_handle->nrows;

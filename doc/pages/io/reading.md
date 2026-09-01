@@ -420,7 +420,7 @@ the query for it. A type it cannot read is an answer (`"unknown"`), not an error
 ### Which kind of container a column is: `parquet_get_column_shape`
 
 `parquet_get_column_shape(reader, name, shape)` answers the orthogonal question — *is this a plain
-value, a fixed-width vector, or a variable-length list?* — as one of five tokens:
+value, a fixed-width vector, or a variable-length list?* — as one of six tokens:
 
 ```fortran
 character(len=:), allocatable :: shape
@@ -434,12 +434,25 @@ call parquet_get_column_shape(reader, "flux", shape)   ! e.g. "list"
 | `"list"` | a variable-length `LIST`/`LARGE_LIST` |
 | `"map"` | a `MAP` — not readable |
 | `"struct"` | a `STRUCT` reached as a whole — not readable; address its leaves by dotted path |
+| `"unknown"` | a shape this query does not recognize — see below |
 
-There is no "unrecognized" answer, and that is deliberate: the question is *is this a container?*,
-so **anything that is not one of the four container shapes is a `"scalar"`** — including a column
-whose element type this library cannot read at all. A `decimal128` column answers `"scalar"` here
-while `parquet_get_column_type` answers `"unknown"`, and the pair is the useful reading: a plain
-value, of a type you cannot have.
+**The question is "is this a container?", not "can I read this?"** — so a column whose element type
+this library cannot read at all is still a `"scalar"` if it holds one value per row. A `decimal128`
+column answers `"scalar"` here while `parquet_get_column_type` answers `"unknown"`, and the pair is
+the useful reading: a plain value, of a type you cannot have.
+
+**An encoding wrapper does not change the answer.** Arrow can present a column as an *extension*
+type, a *dictionary* type or a *run-end-encoded* type — wrappers that change how values are stored,
+or what they mean, without changing how many of them a row holds. The shape is read through them,
+so an `arrow.fixed_shape_tensor` column, whose storage is a four-wide fixed-size list, answers
+`"vector"` with a `col_size` of `4` like any other vector column. You will see these only in files
+written by another tool with the Arrow schema stored alongside the data.
+
+`"unknown"` is a safety valve rather than something you should expect: it is the answer for a
+column that is neither a container this library knows nor one value per row — an Arrow union, or a
+list-view. No Parquet file is currently known to produce one, since Parquet has no union type and a
+list-view round-trips as an ordinary `LIST`. It exists so that a shape this query does not
+understand is reported honestly instead of being called a `"scalar"`.
 
 It is schema-only: no column data is read, whatever the answer. Together with
 `parquet_get_column_type` it gives a complete description of a column — `("float64", "list")` — and

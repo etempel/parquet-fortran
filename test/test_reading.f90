@@ -116,6 +116,8 @@ contains
                 test_column_exists_and_get_column_type), &
             new_unittest("parquet_get_column_type reports the narrowest lossless Fortran kind", &
                 test_column_type_narrowest_lossless_mapping), &
+            new_unittest("an encoding wrapper does not hide a column's shape", &
+                test_encoding_wrapper_shape), &
             new_unittest("parquet_column_exists(types=) asks 'can I read it as this?'", &
                 test_column_exists_types_alias_asymmetry), &
             new_unittest("parquet_get_column_names lists every column, expanding nested structs " // &
@@ -3346,6 +3348,80 @@ contains
 
         call parquet_close_reader(reader)
     end subroutine test_column_exists_and_get_column_type
+
+    !> An Arrow ENCODING WRAPPER must not hide the shape of what it wraps.
+    !>
+    !! An extension type, a dictionary type and a run-end-encoded type each get their own
+    !! Type::type in Arrow, so a query that switches on the leaf type id without peeling the
+    !! wrapper classifies the WRAPPER. `arrow.fixed_shape_tensor` is the case that makes this
+    !! matter: its storage is a `fixed_size_list<int32>[4]`, so its rows hold four values each,
+    !! and it was answering `"scalar"` with `col_size` 1 -- which tells a caller to allocate a
+    !! 1-D array for a column that needs a 2-D one. Nothing aborted; the answer was simply wrong.
+    !!
+    !! `vec_col` is the NEGATIVE CONTROL and is the whole reason this test can conclude anything:
+    !! it is the same `fixed_size_list<int32>[4]` shape with no wrapper on it. Without it, a
+    !! reader could not tell "the wrapper was peeled correctly" from "this query says vector for
+    !! everything". `dict_col` is the second control, in the other direction: a wrapper over
+    !! SCALAR storage must still answer `"scalar"`, so peeling must not be mistaken for
+    !! "a wrapped column is a container".
+    !!
+    !! The type query is deliberately NOT expected to change: it reports what the column can be
+    !! READ as, and this library cannot read a tensor or a dictionary column, so `"unknown"` is
+    !! the right answer there. The pair ("unknown", "vector") is the useful one -- a four-wide
+    !! vector of a type you cannot have.
+    subroutine test_encoding_wrapper_shape(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        character(len=:), allocatable :: shape, type_name
+        integer(int32) :: col_size
+        integer(int64) :: total_elements
+
+        call parquet_open_reader(reader, "test/fixtures/encoded_types.parquet")
+
+        ! The wrapped container: shape, width and element count must all describe the STORAGE.
+        call parquet_get_column_shape(reader, "tensor_col", shape)
+        call check(error, shape == "vector", &
+            "a fixed_shape_tensor column wraps a fixed_size_list, so its shape is 'vector', got " // shape)
+        if (allocated(error)) return
+        call parquet_get_col_size(reader, "tensor_col", col_size)
+        call check(error, col_size == 4, "its col_size is the storage list's width, 4")
+        if (allocated(error)) return
+        call parquet_get_column_total_elements(reader, "tensor_col", total_elements)
+        call check(error, total_elements == 12_int64, "3 rows of 4 elements is 12 in total")
+        if (allocated(error)) return
+        ! ... while the TYPE query still says it cannot be read, which is a different question.
+        call parquet_get_column_type(reader, "tensor_col", type_name)
+        call check(error, type_name == "unknown", &
+            "an extension element type is still unreadable, so the type query says unknown, got " // type_name)
+        if (allocated(error)) return
+
+        ! Control 1: the same storage shape with NO wrapper must answer identically.
+        call parquet_get_column_shape(reader, "vec_col", shape)
+        call check(error, shape == "vector", "an unwrapped fixed_size_list column is a vector, got " // shape)
+        if (allocated(error)) return
+        call parquet_get_col_size(reader, "vec_col", col_size)
+        call check(error, col_size == 4, "and reports the same width as the wrapped one")
+        if (allocated(error)) return
+
+        ! Control 2: a wrapper over SCALAR storage must stay a scalar -- peeling is not
+        ! "everything wrapped is a container".
+        call parquet_get_column_shape(reader, "dict_col", shape)
+        call check(error, shape == "scalar", &
+            "a dictionary column wraps a string, which is one value per row, got " // shape)
+        if (allocated(error)) return
+        call parquet_get_col_size(reader, "dict_col", col_size)
+        call check(error, col_size == 1, "so its col_size is 1")
+        if (allocated(error)) return
+
+        ! Control 3: an ordinary column in the same file, unaffected by any of this.
+        call parquet_get_column_shape(reader, "plain", shape)
+        call check(error, shape == "scalar", "a plain int32 column is a scalar, got " // shape)
+        if (allocated(error)) return
+        call parquet_get_column_type(reader, "plain", type_name)
+        call check(error, type_name == "int32", "and reads as int32, got " // type_name)
+
+        call parquet_close_reader(reader)
+    end subroutine test_encoding_wrapper_shape
 
     !> Every row of parquet_get_column_type's narrowest-lossless mapping, including the two
     !> deliberately LOSSY rows (uint64 and the decimals) and the "unknown" fallthrough.

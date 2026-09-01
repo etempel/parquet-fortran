@@ -422,6 +422,51 @@ survivors, so a sort permutation is sized to the post-filter row count. Giving b
 calling `parquet_reader_set_filter` on a reader that is already sorted is refused rather than
 silently composing the two the wrong way round.
 
+## What cannot be filtered or sorted: container columns and descent paths
+
+Filtering, sorting and `qc:` all evaluate **one value per row**. Two kinds of column name have no
+such value, and both are refused up front — at `parquet_open_reader`, from the schema, before any
+data is read.
+
+**A container column cannot be a filter or sort target.** A vector, a variable-length `list`, a
+`map` and a `struct` taken as a whole all fail with `error stop`. The vector and list cases name
+the shape:
+
+```
+filter column 'flux' is a variable-length list column; filtering only supports scalar columns
+sort key 'flux' is a variable-length list column; sorting only supports scalar columns
+```
+
+A `map` or a `struct` is refused a little further along, by the type check rather than the shape
+check, so its message names the type instead (`column 'attrs' has a type that filtering does not
+support`). The distinction is not something you need to act on — both are refusals of the same
+thing — but it explains why the wording differs.
+
+To filter or sort on data inside a container, address a **scalar leaf** of it. A struct's fields
+are reachable by [dotted path](../types/supported-data-types.html#reading-a-nested-struct-field)
+and behave like any other column: `filt%add("pos.ra > 10")` is fine, and so is a sort key naming
+one.
+
+**A [descent path](../types/supported-data-types.html#descent-paths-addressing-a-containers-child)
+is refused too, and permanently.** `events[].id`, `attrs{value}` and `attrs{key}` each resolve to a
+perfectly good column — but one with **one entry per element**, not one per row, so there is no row
+for its values to belong to. All three of `qc:`, `parquet_filter` and `sort_by=` reject one:
+
+| where | message |
+|---|---|
+| `filter=` | `a descent path is not filterable: events[].id (qc: and parquet_filter apply to scalar leaves only)` |
+| `sort_by=` | `a descent path cannot be a sort key: events[].id (it has one entry per element, not per row)` |
+| `qc:` in a MAML | `a descent path is not a qc target: events[].id (qc: and parquet_filter apply to scalar leaves only)` |
+
+This is a **settled restriction, not a limitation waiting to be lifted**: a per-element predicate
+and a per-row result are different shapes of answer, and silently producing one where the other was
+asked for would misalign that column against every other one in the same read. The `qc:` case is a
+hard error rather than a skipped rule for the same reason it is elsewhere — an ignored qc rule is a
+check you believe is running.
+
+If what you want is to select rows by something inside a container, read the container column and
+do it in your own code; there is no read-time equivalent.
+
 ## Renaming the columns a filter or sort refers to
 
 `filt%remap_column_names(from, to)` and `srt%remap_column_names(from, to)` rewrite, in place, the

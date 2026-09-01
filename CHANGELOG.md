@@ -135,8 +135,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Fortran files), with `spatial_threads` and `spatial_rebuild_warning` joining the process-global
   settings.
 - **`parquet_get_column_shape(reader, name, shape)`** reports whether a column is a `"scalar"`,
-  `"vector"`, `"list"`, `"map"` or `"struct"`, from the file schema alone. Orthogonal to
-  `parquet_get_column_type`, which reports the element type and is unchanged.
+  `"vector"`, `"list"`, `"map"`, `"struct"` or `"unknown"`, from the file schema alone. Orthogonal
+  to `parquet_get_column_type`, which reports the element type and is unchanged. An Arrow encoding
+  wrapper — an extension, dictionary or run-end-encoded type — is read through, so the shape
+  reported is that of the wrapped storage.
 - **`parquet_list`: `parquet_list_column`, a variable-length list column, plus `parquet_list_row`,
   a lightweight handle to one of its rows.** Rows may hold different numbers of values, including
   none, and a row may be a null (absent) list distinct from a present but empty one; element nulls
@@ -250,6 +252,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`parquet_get_column_total_elements` reports a variable-length `list` column's element count** —
   the sum of its rows' own lengths — rather than its row count.
+- **`parquet_get_col_size` and `parquet_get_column_total_elements` see through an Arrow encoding
+  wrapper.** A column stored as an extension, dictionary or run-end-encoded type over a fixed-size
+  list now reports that list's width rather than `1`.
 - Many other minor fixes and improvements.
 
 ## [2.0.0] - 2026-08-24

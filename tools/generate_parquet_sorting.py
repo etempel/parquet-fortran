@@ -445,10 +445,12 @@ PARTIAL_THREADS_DOC = THREADS_DOC + [
     "            !! not in proportion to the sort.",
 ]
 
-# The same argument on the three SELECTION procedures (P15). Each names what a team does not
-# reach, because on all three the thing the caller thinks they are parallelising -- the selection --
-# is serial. Writing one shared block for all three was rejected: the unreached work differs per
-# procedure, and a doc-comment that says "some of this is serial" without saying which part is
+# The same argument on the three SELECTION procedures (P15). Each names what a team does and does
+# not reach, because on none of them does `threads=` mean what it means on `pf_argsort`.
+# `pf_partial_sort`'s selection and gather are serial at every size; `pf_nth_element`'s and
+# `pf_nth_quantile`'s selection is serial only BELOW `SORT_NTH_ORDER_MIN`, above which they order
+# and so thread. Writing one shared block for all three was rejected: the unreached work differs
+# per procedure, and a doc-comment that says "some of this is serial" without saying which part is
 # exactly the promise `threads=` should not make.
 PARTIAL_SORT_THREADS_DOC = THREADS_DOC + [
     "            !!",
@@ -461,19 +463,22 @@ PARTIAL_SORT_THREADS_DOC = THREADS_DOC + [
 
 NTH_THREADS_DOC = THREADS_DOC + [
     "            !!",
-    "            !! **The selection itself is SERIAL.** A team reaches only the key extraction,",
-    "            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no",
-    "            !! threaded form. `threads=` is worth passing here when the extraction dominates --",
-    "            !! a string or column key -- and worth nothing on a plain integer array.",
+    "            !! **What a team reaches depends on the array size.** The key extraction always,",
+    "            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is",
+    "            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`",
+    "            !! reaches nearly the whole call; below it the quickselect is serial and has no",
+    "            !! threaded form, and there the whole call is microseconds either way.",
 ]
 
 QUANTILE_THREADS_DOC = THREADS_DOC + [
     "            !!",
-    "            !! **The selection is SERIAL, and so is the null count.** A team reaches only the",
-    "            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which",
-    "            !! sizes the non-null population this quantile is taken over, and the selection",
-    "            !! itself. Threading the count is possible and was deliberately not done here --",
-    "            !! it is a separate change needing its own measurement.",
+    "            !! **What a team reaches depends on the array size, and the null count never.** The",
+    "            !! key extraction is always threaded; above `SORT_NTH_ORDER_MIN` the rank is",
+    "            !! answered by ORDERING (`sort_nth_index`), which is threaded too, and below it by a",
+    "            !! serial quickselect. `key_valid_count`, the O(n) pass that sizes the non-null",
+    "            !! population this quantile is taken over, stays serial at every size -- threading",
+    "            !! it is possible and was deliberately not done here, being a separate change",
+    "            !! needing its own measurement.",
 ]
 
 #: `group_nkeys`, on the two `pf_sort_keys` specifics only -- the per-type ones hold a single key,
@@ -1435,14 +1440,14 @@ module parquet_sorting
     w("            character(len=*), intent(in) :: proc                !! calling procedure, for messages.")
     w("            integer(int64), allocatable, intent(out) :: perm(:) !! the first `count` 1-based indices.")
     w("        end subroutine drive_engine_partial")
-    w("        !> The 1-based index a full stable sort would place at rank `nth`, without sorting.")
+    w("        !> The 1-based index a full stable sort would place at rank `nth`.")
     w("        module subroutine engine_nth_index(keys, nrows, nth, proc, idx, threads)")
     w("            type(sort_key_buf), intent(in), target :: keys(:)   !! the keys, primary first.")
     w("            integer(int64), intent(in) :: nrows                 !! rows each key describes.")
     w("            integer(int64), intent(in) :: nth                   !! 1-based rank wanted.")
     w("            character(len=*), intent(in) :: proc                !! calling procedure, for messages.")
     w("            integer(int64), intent(out) :: idx                  !! 1-based row index at that rank.")
-    w("            integer, intent(in), optional :: threads !! thread request; absent = serial.")
+    w("            integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.")
     w("        end subroutine engine_nth_index")
     w("        !> Clamps a requested count to the array size, aborting only on a negative one.")
     w("        module subroutine resolve_count(n, nrows, proc, count)")

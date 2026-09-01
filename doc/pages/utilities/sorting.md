@@ -407,7 +407,7 @@ and full cost the same there.)
 **`pf_nth_element` is the exception, and its asymptotics are deliberately not what it does.** An
 `O(n)` selection scan exists and is used on a small array, but above a few hundred elements the
 procedure orders the array instead and reads off the rank — which is `O(n log n)` on paper and
-*faster* in practice at every size measured, by two to four times on a million elements. Two
+*faster* in practice at every size above that floor, by two to four times on a large array. Two
 reasons compound: the ordering engine's radix path never calls the comparator at all, while a
 selection scan compares through an index permutation and takes a cache miss for nearly every
 comparison; and the ordering engine threads, where a selection scan has no threaded form. So
@@ -701,7 +701,7 @@ answer. `threads=` is a performance control and nothing else.
 
 | situation | threads used |
 |---|---|
-| ordinary serial code | `omp_get_max_threads()` |
+| ordinary serial code | `omp_get_max_threads()`, capped by `parquet_set_sort_threads` |
 | inside any `!$omp parallel` region | **1** — serial |
 | explicit `threads=n`, inside a region running on 2+ threads | `n` — honoured |
 | explicit `threads=n`, inside a region running on 1 thread | **1** — see below |
@@ -722,8 +722,15 @@ runtime, intermittently and with no diagnostic, and refusing is the only reliabl
 A region running on two or more threads is unaffected and honours `threads=` exactly as it does in
 ordinary serial code.
 
-`pf_sort_threads()` reports what auto would do right now, if you want to log it or size something
-against it.
+**Two bounds apply to every row of that table, including an explicit `threads=`.**
+`parquet_set_sort_threads(n)` caps what auto resolves to, and every count is then lowered to the
+number of processors this process's CPU affinity actually allows — which under `OMP_PROC_BIND` with
+`OMP_PLACES=cores` can be far fewer than `omp_get_max_threads()` reports. The clamp says so once per
+process; see [Tuning the sort](../operating/settings.html#tuning-the-sort) and
+[Thread placement](../operating/performance.html#thread-placement-omp_places-and-omp_proc_bind).
+
+`pf_sort_threads()` reports what auto would do right now, both bounds included, if you want to log
+it or size something against it.
 
 ### Two reasons a sort may decline to thread
 
@@ -833,7 +840,7 @@ and get more from `threads=` than the first two: what they leave serial applies 
 hundred elements, where the whole call is microseconds.
 
 **One consequence of the last two rows is worth stating outright: `pf_nth_element` and
-`pf_nth_quantile` now cost what a full sort costs, in time and in peak memory alike.** Asking for one
+`pf_nth_quantile` cost what a full sort costs, in time and in peak memory alike.** Asking for one
 order statistic is not cheaper than asking for all of them, and it allocates the same scratch the
 radix path allocates. `pf_partial_sort`/`pf_partial_argsort` are the ones that stay genuinely cheap
 for a small `n`, so reach for those when the array is large and you want a handful of extremes;
@@ -846,7 +853,8 @@ behaves uniformly rather than rejecting an argument its int32 sibling takes.
 
 ## What is not here yet
 
-`pf_partial_sort` and `pf_partial_argsort` are not defined for `parquet_string_column` or
-`parquet_column`, for the same reason `pf_sort` is not. `pf_nth_element` and `pf_nth_quantile` are
-not defined for `parquet_column`: its element type is a runtime discriminator, so there is no
-compile-time type for the value they return.
+`pf_partial_sort` is not defined for `parquet_string_column` or `parquet_column`, for the same
+reason `pf_sort` is not: it hands back a copy of the values, which needs a compile-time element
+type. `pf_partial_argsort` *is* defined for both, because its answer is a permutation.
+`pf_nth_element` and `pf_nth_quantile` are not defined for `parquet_column`: its element type is a
+runtime discriminator, so there is no compile-time type for the value they return.

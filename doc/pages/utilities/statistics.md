@@ -1040,11 +1040,11 @@ none of these needs a second import:
 
 | you want | reach for | notes |
 |---|---|---|
-| the smallest and largest value | `pf_minmax` | one pass, every element type; also `pf_argminmax` for their positions |
-| the rank of every element | `pf_rank` | ties by `"min"`, `"max"`, `"average"`, `"dense"` or `"ordinal"`; this is what `pf_corr(method="spearman")` uses internally |
-| the distinct values | `pf_unique` | with `counts=` for a value-count table |
+| the smallest and largest value | `pf_minmax` | one pass, every element type but `logical` and `parquet_column`; also `pf_argminmax` for their positions |
+| the rank of every element | `pf_rank` | ties by `"competition"` (the default), `"dense"` or `"ordinal"` |
+| the distinct values | `pf_unique` | with `pf_unique_count` for how many there are |
 | an ELEMENT at a given quantile | `pf_nth_quantile` | returns a member of the input, with `index=` saying which — see [`pf_median` is not `pf_nth_quantile`](#pf_median-is-not-pf_nth_quantile) |
-| the k-th smallest element | `pf_nth_element` | O(n) selection, no full sort |
+| the k-th smallest element | `pf_nth_element` | an O(n) selection on a small array; a full ordering, which is faster, above a couple of hundred elements |
 | a sorted copy, or the permutation | `pf_sort` / `pf_argsort` | the ordering every quantile here is built on |
 
 They are documented on [Sorting, ranking and selection](sorting.html). **Their `ok` argument means

@@ -948,14 +948,14 @@ module parquet_sorting
             character(len=*), intent(in) :: proc                !! calling procedure, for messages.
             integer(int64), allocatable, intent(out) :: perm(:) !! the first `count` 1-based indices.
         end subroutine drive_engine_partial
-        !> The 1-based index a full stable sort would place at rank `nth`, without sorting.
+        !> The 1-based index a full stable sort would place at rank `nth`.
         module subroutine engine_nth_index(keys, nrows, nth, proc, idx, threads)
             type(sort_key_buf), intent(in), target :: keys(:)   !! the keys, primary first.
             integer(int64), intent(in) :: nrows                 !! rows each key describes.
             integer(int64), intent(in) :: nth                   !! 1-based rank wanted.
             character(len=*), intent(in) :: proc                !! calling procedure, for messages.
             integer(int64), intent(out) :: idx                  !! 1-based row index at that rank.
-            integer, intent(in), optional :: threads !! thread request; absent = serial.
+            integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
         end subroutine engine_nth_index
         !> Clamps a requested count to the array size, aborting only on a negative one.
         module subroutine resolve_count(n, nrows, proc, count)
@@ -2343,10 +2343,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_i32_i32
         !> pf_nth_element over a 32-bit integer array, with an int32 rank and an int32 index.
         module subroutine nth_i32_i32_i32(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
@@ -2364,10 +2365,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_i32_i32_i32
         !> pf_nth_element over a 32-bit integer array, with an int32 rank and an int64 index.
         module subroutine nth_i32_i32_i64(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
@@ -2385,10 +2387,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_i32_i32_i64
         !> pf_nth_element over a 32-bit integer array, with an int64 rank and no index out-argument.
         module subroutine nth_i32_i64(values, nth, p_value, descending, nulls_first, is_valid, threads)
@@ -2405,10 +2408,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_i32_i64
         !> pf_nth_element over a 32-bit integer array, with an int64 rank and an int32 index.
         module subroutine nth_i32_i64_i32(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
@@ -2426,10 +2430,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_i32_i64_i32
         !> pf_nth_element over a 32-bit integer array, with an int64 rank and an int64 index.
         module subroutine nth_i32_i64_i64(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
@@ -2447,10 +2452,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_i32_i64_i64
         !> pf_nth_element over a 64-bit integer array, with an int32 rank and no index out-argument.
         module subroutine nth_i64_i32(values, nth, p_value, descending, nulls_first, is_valid, threads)
@@ -2467,10 +2473,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_i64_i32
         !> pf_nth_element over a 64-bit integer array, with an int32 rank and an int32 index.
         module subroutine nth_i64_i32_i32(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
@@ -2488,10 +2495,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_i64_i32_i32
         !> pf_nth_element over a 64-bit integer array, with an int32 rank and an int64 index.
         module subroutine nth_i64_i32_i64(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
@@ -2509,10 +2517,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_i64_i32_i64
         !> pf_nth_element over a 64-bit integer array, with an int64 rank and no index out-argument.
         module subroutine nth_i64_i64(values, nth, p_value, descending, nulls_first, is_valid, threads)
@@ -2529,10 +2538,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_i64_i64
         !> pf_nth_element over a 64-bit integer array, with an int64 rank and an int32 index.
         module subroutine nth_i64_i64_i32(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
@@ -2550,10 +2560,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_i64_i64_i32
         !> pf_nth_element over a 64-bit integer array, with an int64 rank and an int64 index.
         module subroutine nth_i64_i64_i64(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
@@ -2571,10 +2582,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_i64_i64_i64
         !> pf_nth_element over a 32-bit real array, with an int32 rank and no index out-argument.
         module subroutine nth_f32_i32(values, nth, p_value, descending, nulls_first, is_valid, threads)
@@ -2591,10 +2603,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_f32_i32
         !> pf_nth_element over a 32-bit real array, with an int32 rank and an int32 index.
         module subroutine nth_f32_i32_i32(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
@@ -2612,10 +2625,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_f32_i32_i32
         !> pf_nth_element over a 32-bit real array, with an int32 rank and an int64 index.
         module subroutine nth_f32_i32_i64(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
@@ -2633,10 +2647,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_f32_i32_i64
         !> pf_nth_element over a 32-bit real array, with an int64 rank and no index out-argument.
         module subroutine nth_f32_i64(values, nth, p_value, descending, nulls_first, is_valid, threads)
@@ -2653,10 +2668,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_f32_i64
         !> pf_nth_element over a 32-bit real array, with an int64 rank and an int32 index.
         module subroutine nth_f32_i64_i32(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
@@ -2674,10 +2690,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_f32_i64_i32
         !> pf_nth_element over a 32-bit real array, with an int64 rank and an int64 index.
         module subroutine nth_f32_i64_i64(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
@@ -2695,10 +2712,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_f32_i64_i64
         !> pf_nth_element over a 64-bit real array, with an int32 rank and no index out-argument.
         module subroutine nth_f64_i32(values, nth, p_value, descending, nulls_first, is_valid, threads)
@@ -2715,10 +2733,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_f64_i32
         !> pf_nth_element over a 64-bit real array, with an int32 rank and an int32 index.
         module subroutine nth_f64_i32_i32(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
@@ -2736,10 +2755,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_f64_i32_i32
         !> pf_nth_element over a 64-bit real array, with an int32 rank and an int64 index.
         module subroutine nth_f64_i32_i64(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
@@ -2757,10 +2777,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_f64_i32_i64
         !> pf_nth_element over a 64-bit real array, with an int64 rank and no index out-argument.
         module subroutine nth_f64_i64(values, nth, p_value, descending, nulls_first, is_valid, threads)
@@ -2777,10 +2798,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_f64_i64
         !> pf_nth_element over a 64-bit real array, with an int64 rank and an int32 index.
         module subroutine nth_f64_i64_i32(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
@@ -2798,10 +2820,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_f64_i64_i32
         !> pf_nth_element over a 64-bit real array, with an int64 rank and an int64 index.
         module subroutine nth_f64_i64_i64(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
@@ -2819,10 +2842,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_f64_i64_i64
         !> pf_nth_element over a logical array, with an int32 rank and no index out-argument.
         module subroutine nth_bool_i32(values, nth, p_value, descending, nulls_first, is_valid, threads)
@@ -2839,10 +2863,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_bool_i32
         !> pf_nth_element over a logical array, with an int32 rank and an int32 index.
         module subroutine nth_bool_i32_i32(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
@@ -2860,10 +2885,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_bool_i32_i32
         !> pf_nth_element over a logical array, with an int32 rank and an int64 index.
         module subroutine nth_bool_i32_i64(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
@@ -2881,10 +2907,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_bool_i32_i64
         !> pf_nth_element over a logical array, with an int64 rank and no index out-argument.
         module subroutine nth_bool_i64(values, nth, p_value, descending, nulls_first, is_valid, threads)
@@ -2901,10 +2928,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_bool_i64
         !> pf_nth_element over a logical array, with an int64 rank and an int32 index.
         module subroutine nth_bool_i64_i32(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
@@ -2922,10 +2950,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_bool_i64_i32
         !> pf_nth_element over a logical array, with an int64 rank and an int64 index.
         module subroutine nth_bool_i64_i64(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
@@ -2943,10 +2972,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_bool_i64_i64
         !> pf_nth_element over a string array, with an int32 rank and no index out-argument.
         module subroutine nth_chr_i32(values, nth, p_value, descending, nulls_first, is_valid, threads)
@@ -2963,10 +2993,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_chr_i32
         !> pf_nth_element over a string array, with an int32 rank and an int32 index.
         module subroutine nth_chr_i32_i32(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
@@ -2984,10 +3015,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_chr_i32_i32
         !> pf_nth_element over a string array, with an int32 rank and an int64 index.
         module subroutine nth_chr_i32_i64(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
@@ -3005,10 +3037,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_chr_i32_i64
         !> pf_nth_element over a string array, with an int64 rank and no index out-argument.
         module subroutine nth_chr_i64(values, nth, p_value, descending, nulls_first, is_valid, threads)
@@ -3025,10 +3058,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_chr_i64
         !> pf_nth_element over a string array, with an int64 rank and an int32 index.
         module subroutine nth_chr_i64_i32(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
@@ -3046,10 +3080,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_chr_i64_i32
         !> pf_nth_element over a string array, with an int64 rank and an int64 index.
         module subroutine nth_chr_i64_i64(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
@@ -3067,10 +3102,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_chr_i64_i64
         !> pf_nth_element over a date array, with an int32 rank and no index out-argument.
         module subroutine nth_date_i32(values, nth, p_value, descending, nulls_first, threads)
@@ -3086,10 +3122,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_date_i32
         !> pf_nth_element over a date array, with an int32 rank and an int32 index.
         module subroutine nth_date_i32_i32(values, nth, p_value, index, descending, nulls_first, threads)
@@ -3106,10 +3143,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_date_i32_i32
         !> pf_nth_element over a date array, with an int32 rank and an int64 index.
         module subroutine nth_date_i32_i64(values, nth, p_value, index, descending, nulls_first, threads)
@@ -3126,10 +3164,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_date_i32_i64
         !> pf_nth_element over a date array, with an int64 rank and no index out-argument.
         module subroutine nth_date_i64(values, nth, p_value, descending, nulls_first, threads)
@@ -3145,10 +3184,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_date_i64
         !> pf_nth_element over a date array, with an int64 rank and an int32 index.
         module subroutine nth_date_i64_i32(values, nth, p_value, index, descending, nulls_first, threads)
@@ -3165,10 +3205,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_date_i64_i32
         !> pf_nth_element over a date array, with an int64 rank and an int64 index.
         module subroutine nth_date_i64_i64(values, nth, p_value, index, descending, nulls_first, threads)
@@ -3185,10 +3226,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_date_i64_i64
         !> pf_nth_element over a time array, with an int32 rank and no index out-argument.
         module subroutine nth_time_i32(values, nth, p_value, descending, nulls_first, threads)
@@ -3204,10 +3246,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_time_i32
         !> pf_nth_element over a time array, with an int32 rank and an int32 index.
         module subroutine nth_time_i32_i32(values, nth, p_value, index, descending, nulls_first, threads)
@@ -3224,10 +3267,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_time_i32_i32
         !> pf_nth_element over a time array, with an int32 rank and an int64 index.
         module subroutine nth_time_i32_i64(values, nth, p_value, index, descending, nulls_first, threads)
@@ -3244,10 +3288,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_time_i32_i64
         !> pf_nth_element over a time array, with an int64 rank and no index out-argument.
         module subroutine nth_time_i64(values, nth, p_value, descending, nulls_first, threads)
@@ -3263,10 +3308,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_time_i64
         !> pf_nth_element over a time array, with an int64 rank and an int32 index.
         module subroutine nth_time_i64_i32(values, nth, p_value, index, descending, nulls_first, threads)
@@ -3283,10 +3329,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_time_i64_i32
         !> pf_nth_element over a time array, with an int64 rank and an int64 index.
         module subroutine nth_time_i64_i64(values, nth, p_value, index, descending, nulls_first, threads)
@@ -3303,10 +3350,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_time_i64_i64
         !> pf_nth_element over a timestamp array, with an int32 rank and no index out-argument.
         module subroutine nth_ts_i32(values, nth, p_value, descending, nulls_first, threads)
@@ -3322,10 +3370,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_ts_i32
         !> pf_nth_element over a timestamp array, with an int32 rank and an int32 index.
         module subroutine nth_ts_i32_i32(values, nth, p_value, index, descending, nulls_first, threads)
@@ -3342,10 +3391,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_ts_i32_i32
         !> pf_nth_element over a timestamp array, with an int32 rank and an int64 index.
         module subroutine nth_ts_i32_i64(values, nth, p_value, index, descending, nulls_first, threads)
@@ -3362,10 +3412,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_ts_i32_i64
         !> pf_nth_element over a timestamp array, with an int64 rank and no index out-argument.
         module subroutine nth_ts_i64(values, nth, p_value, descending, nulls_first, threads)
@@ -3381,10 +3432,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_ts_i64
         !> pf_nth_element over a timestamp array, with an int64 rank and an int32 index.
         module subroutine nth_ts_i64_i32(values, nth, p_value, index, descending, nulls_first, threads)
@@ -3401,10 +3453,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_ts_i64_i32
         !> pf_nth_element over a timestamp array, with an int64 rank and an int64 index.
         module subroutine nth_ts_i64_i64(values, nth, p_value, index, descending, nulls_first, threads)
@@ -3421,10 +3474,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_ts_i64_i64
         !> pf_nth_element over a packed string column array, with an int32 rank and no index out-argument.
         module subroutine nth_strcol_i32(values, nth, p_value, descending, nulls_first, threads)
@@ -3440,10 +3494,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_strcol_i32
         !> pf_nth_element over a packed string column array, with an int32 rank and an int32 index.
         module subroutine nth_strcol_i32_i32(values, nth, p_value, index, descending, nulls_first, threads)
@@ -3460,10 +3515,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_strcol_i32_i32
         !> pf_nth_element over a packed string column array, with an int32 rank and an int64 index.
         module subroutine nth_strcol_i32_i64(values, nth, p_value, index, descending, nulls_first, threads)
@@ -3480,10 +3536,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_strcol_i32_i64
         !> pf_nth_element over a packed string column array, with an int64 rank and no index out-argument.
         module subroutine nth_strcol_i64(values, nth, p_value, descending, nulls_first, threads)
@@ -3499,10 +3556,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_strcol_i64
         !> pf_nth_element over a packed string column array, with an int64 rank and an int32 index.
         module subroutine nth_strcol_i64_i32(values, nth, p_value, index, descending, nulls_first, threads)
@@ -3519,10 +3577,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_strcol_i64_i32
         !> pf_nth_element over a packed string column array, with an int64 rank and an int64 index.
         module subroutine nth_strcol_i64_i64(values, nth, p_value, index, descending, nulls_first, threads)
@@ -3539,10 +3598,11 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
-            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
-            !! threaded form. `threads=` is worth passing here when the extraction dominates --
-            !! a string or column key -- and worth nothing on a plain integer array.
+            !! **What a team reaches depends on the array size.** The key extraction always,
+            !! which walks all `size(values)` elements. Above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, so `threads=`
+            !! reaches nearly the whole call; below it the quickselect is serial and has no
+            !! threaded form, and there the whole call is microseconds either way.
         end subroutine nth_strcol_i64_i64
         !> pf_nth_quantile over a 32-bit integer array, with no index out-argument.
         module subroutine quantile_i32(values, quantile, p_value, rounding, is_valid, n_null, threads, ok)
@@ -3563,11 +3623,13 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
-            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
-            !! sizes the non-null population this quantile is taken over, and the selection
-            !! itself. Threading the count is possible and was deliberately not done here --
-            !! it is a separate change needing its own measurement.
+            !! **What a team reaches depends on the array size, and the null count never.** The
+            !! key extraction is always threaded; above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, and below it by a
+            !! serial quickselect. `key_valid_count`, the O(n) pass that sizes the non-null
+            !! population this quantile is taken over, stays serial at every size -- threading
+            !! it is possible and was deliberately not done here, being a separate change
+            !! needing its own measurement.
             logical, intent(out), optional :: ok
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
@@ -3595,11 +3657,13 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
-            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
-            !! sizes the non-null population this quantile is taken over, and the selection
-            !! itself. Threading the count is possible and was deliberately not done here --
-            !! it is a separate change needing its own measurement.
+            !! **What a team reaches depends on the array size, and the null count never.** The
+            !! key extraction is always threaded; above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, and below it by a
+            !! serial quickselect. `key_valid_count`, the O(n) pass that sizes the non-null
+            !! population this quantile is taken over, stays serial at every size -- threading
+            !! it is possible and was deliberately not done here, being a separate change
+            !! needing its own measurement.
             logical, intent(out), optional :: ok
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
@@ -3627,11 +3691,13 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
-            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
-            !! sizes the non-null population this quantile is taken over, and the selection
-            !! itself. Threading the count is possible and was deliberately not done here --
-            !! it is a separate change needing its own measurement.
+            !! **What a team reaches depends on the array size, and the null count never.** The
+            !! key extraction is always threaded; above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, and below it by a
+            !! serial quickselect. `key_valid_count`, the O(n) pass that sizes the non-null
+            !! population this quantile is taken over, stays serial at every size -- threading
+            !! it is possible and was deliberately not done here, being a separate change
+            !! needing its own measurement.
             logical, intent(out), optional :: ok
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
@@ -3658,11 +3724,13 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
-            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
-            !! sizes the non-null population this quantile is taken over, and the selection
-            !! itself. Threading the count is possible and was deliberately not done here --
-            !! it is a separate change needing its own measurement.
+            !! **What a team reaches depends on the array size, and the null count never.** The
+            !! key extraction is always threaded; above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, and below it by a
+            !! serial quickselect. `key_valid_count`, the O(n) pass that sizes the non-null
+            !! population this quantile is taken over, stays serial at every size -- threading
+            !! it is possible and was deliberately not done here, being a separate change
+            !! needing its own measurement.
             logical, intent(out), optional :: ok
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
@@ -3690,11 +3758,13 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
-            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
-            !! sizes the non-null population this quantile is taken over, and the selection
-            !! itself. Threading the count is possible and was deliberately not done here --
-            !! it is a separate change needing its own measurement.
+            !! **What a team reaches depends on the array size, and the null count never.** The
+            !! key extraction is always threaded; above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, and below it by a
+            !! serial quickselect. `key_valid_count`, the O(n) pass that sizes the non-null
+            !! population this quantile is taken over, stays serial at every size -- threading
+            !! it is possible and was deliberately not done here, being a separate change
+            !! needing its own measurement.
             logical, intent(out), optional :: ok
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
@@ -3722,11 +3792,13 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
-            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
-            !! sizes the non-null population this quantile is taken over, and the selection
-            !! itself. Threading the count is possible and was deliberately not done here --
-            !! it is a separate change needing its own measurement.
+            !! **What a team reaches depends on the array size, and the null count never.** The
+            !! key extraction is always threaded; above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, and below it by a
+            !! serial quickselect. `key_valid_count`, the O(n) pass that sizes the non-null
+            !! population this quantile is taken over, stays serial at every size -- threading
+            !! it is possible and was deliberately not done here, being a separate change
+            !! needing its own measurement.
             logical, intent(out), optional :: ok
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
@@ -3753,11 +3825,13 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
-            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
-            !! sizes the non-null population this quantile is taken over, and the selection
-            !! itself. Threading the count is possible and was deliberately not done here --
-            !! it is a separate change needing its own measurement.
+            !! **What a team reaches depends on the array size, and the null count never.** The
+            !! key extraction is always threaded; above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, and below it by a
+            !! serial quickselect. `key_valid_count`, the O(n) pass that sizes the non-null
+            !! population this quantile is taken over, stays serial at every size -- threading
+            !! it is possible and was deliberately not done here, being a separate change
+            !! needing its own measurement.
             logical, intent(out), optional :: ok
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
@@ -3785,11 +3859,13 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
-            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
-            !! sizes the non-null population this quantile is taken over, and the selection
-            !! itself. Threading the count is possible and was deliberately not done here --
-            !! it is a separate change needing its own measurement.
+            !! **What a team reaches depends on the array size, and the null count never.** The
+            !! key extraction is always threaded; above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, and below it by a
+            !! serial quickselect. `key_valid_count`, the O(n) pass that sizes the non-null
+            !! population this quantile is taken over, stays serial at every size -- threading
+            !! it is possible and was deliberately not done here, being a separate change
+            !! needing its own measurement.
             logical, intent(out), optional :: ok
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
@@ -3817,11 +3893,13 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
-            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
-            !! sizes the non-null population this quantile is taken over, and the selection
-            !! itself. Threading the count is possible and was deliberately not done here --
-            !! it is a separate change needing its own measurement.
+            !! **What a team reaches depends on the array size, and the null count never.** The
+            !! key extraction is always threaded; above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, and below it by a
+            !! serial quickselect. `key_valid_count`, the O(n) pass that sizes the non-null
+            !! population this quantile is taken over, stays serial at every size -- threading
+            !! it is possible and was deliberately not done here, being a separate change
+            !! needing its own measurement.
             logical, intent(out), optional :: ok
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
@@ -3848,11 +3926,13 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
-            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
-            !! sizes the non-null population this quantile is taken over, and the selection
-            !! itself. Threading the count is possible and was deliberately not done here --
-            !! it is a separate change needing its own measurement.
+            !! **What a team reaches depends on the array size, and the null count never.** The
+            !! key extraction is always threaded; above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, and below it by a
+            !! serial quickselect. `key_valid_count`, the O(n) pass that sizes the non-null
+            !! population this quantile is taken over, stays serial at every size -- threading
+            !! it is possible and was deliberately not done here, being a separate change
+            !! needing its own measurement.
             logical, intent(out), optional :: ok
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
@@ -3880,11 +3960,13 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
-            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
-            !! sizes the non-null population this quantile is taken over, and the selection
-            !! itself. Threading the count is possible and was deliberately not done here --
-            !! it is a separate change needing its own measurement.
+            !! **What a team reaches depends on the array size, and the null count never.** The
+            !! key extraction is always threaded; above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, and below it by a
+            !! serial quickselect. `key_valid_count`, the O(n) pass that sizes the non-null
+            !! population this quantile is taken over, stays serial at every size -- threading
+            !! it is possible and was deliberately not done here, being a separate change
+            !! needing its own measurement.
             logical, intent(out), optional :: ok
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
@@ -3912,11 +3994,13 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
-            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
-            !! sizes the non-null population this quantile is taken over, and the selection
-            !! itself. Threading the count is possible and was deliberately not done here --
-            !! it is a separate change needing its own measurement.
+            !! **What a team reaches depends on the array size, and the null count never.** The
+            !! key extraction is always threaded; above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, and below it by a
+            !! serial quickselect. `key_valid_count`, the O(n) pass that sizes the non-null
+            !! population this quantile is taken over, stays serial at every size -- threading
+            !! it is possible and was deliberately not done here, being a separate change
+            !! needing its own measurement.
             logical, intent(out), optional :: ok
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
@@ -3943,11 +4027,13 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
-            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
-            !! sizes the non-null population this quantile is taken over, and the selection
-            !! itself. Threading the count is possible and was deliberately not done here --
-            !! it is a separate change needing its own measurement.
+            !! **What a team reaches depends on the array size, and the null count never.** The
+            !! key extraction is always threaded; above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, and below it by a
+            !! serial quickselect. `key_valid_count`, the O(n) pass that sizes the non-null
+            !! population this quantile is taken over, stays serial at every size -- threading
+            !! it is possible and was deliberately not done here, being a separate change
+            !! needing its own measurement.
             logical, intent(out), optional :: ok
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
@@ -3975,11 +4061,13 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
-            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
-            !! sizes the non-null population this quantile is taken over, and the selection
-            !! itself. Threading the count is possible and was deliberately not done here --
-            !! it is a separate change needing its own measurement.
+            !! **What a team reaches depends on the array size, and the null count never.** The
+            !! key extraction is always threaded; above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, and below it by a
+            !! serial quickselect. `key_valid_count`, the O(n) pass that sizes the non-null
+            !! population this quantile is taken over, stays serial at every size -- threading
+            !! it is possible and was deliberately not done here, being a separate change
+            !! needing its own measurement.
             logical, intent(out), optional :: ok
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
@@ -4007,11 +4095,13 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
-            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
-            !! sizes the non-null population this quantile is taken over, and the selection
-            !! itself. Threading the count is possible and was deliberately not done here --
-            !! it is a separate change needing its own measurement.
+            !! **What a team reaches depends on the array size, and the null count never.** The
+            !! key extraction is always threaded; above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, and below it by a
+            !! serial quickselect. `key_valid_count`, the O(n) pass that sizes the non-null
+            !! population this quantile is taken over, stays serial at every size -- threading
+            !! it is possible and was deliberately not done here, being a separate change
+            !! needing its own measurement.
             logical, intent(out), optional :: ok
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
@@ -4038,11 +4128,13 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
-            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
-            !! sizes the non-null population this quantile is taken over, and the selection
-            !! itself. Threading the count is possible and was deliberately not done here --
-            !! it is a separate change needing its own measurement.
+            !! **What a team reaches depends on the array size, and the null count never.** The
+            !! key extraction is always threaded; above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, and below it by a
+            !! serial quickselect. `key_valid_count`, the O(n) pass that sizes the non-null
+            !! population this quantile is taken over, stays serial at every size -- threading
+            !! it is possible and was deliberately not done here, being a separate change
+            !! needing its own measurement.
             logical, intent(out), optional :: ok
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
@@ -4070,11 +4162,13 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
-            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
-            !! sizes the non-null population this quantile is taken over, and the selection
-            !! itself. Threading the count is possible and was deliberately not done here --
-            !! it is a separate change needing its own measurement.
+            !! **What a team reaches depends on the array size, and the null count never.** The
+            !! key extraction is always threaded; above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, and below it by a
+            !! serial quickselect. `key_valid_count`, the O(n) pass that sizes the non-null
+            !! population this quantile is taken over, stays serial at every size -- threading
+            !! it is possible and was deliberately not done here, being a separate change
+            !! needing its own measurement.
             logical, intent(out), optional :: ok
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
@@ -4102,11 +4196,13 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
-            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
-            !! sizes the non-null population this quantile is taken over, and the selection
-            !! itself. Threading the count is possible and was deliberately not done here --
-            !! it is a separate change needing its own measurement.
+            !! **What a team reaches depends on the array size, and the null count never.** The
+            !! key extraction is always threaded; above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, and below it by a
+            !! serial quickselect. `key_valid_count`, the O(n) pass that sizes the non-null
+            !! population this quantile is taken over, stays serial at every size -- threading
+            !! it is possible and was deliberately not done here, being a separate change
+            !! needing its own measurement.
             logical, intent(out), optional :: ok
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
@@ -4132,11 +4228,13 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
-            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
-            !! sizes the non-null population this quantile is taken over, and the selection
-            !! itself. Threading the count is possible and was deliberately not done here --
-            !! it is a separate change needing its own measurement.
+            !! **What a team reaches depends on the array size, and the null count never.** The
+            !! key extraction is always threaded; above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, and below it by a
+            !! serial quickselect. `key_valid_count`, the O(n) pass that sizes the non-null
+            !! population this quantile is taken over, stays serial at every size -- threading
+            !! it is possible and was deliberately not done here, being a separate change
+            !! needing its own measurement.
             logical, intent(out), optional :: ok
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
@@ -4163,11 +4261,13 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
-            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
-            !! sizes the non-null population this quantile is taken over, and the selection
-            !! itself. Threading the count is possible and was deliberately not done here --
-            !! it is a separate change needing its own measurement.
+            !! **What a team reaches depends on the array size, and the null count never.** The
+            !! key extraction is always threaded; above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, and below it by a
+            !! serial quickselect. `key_valid_count`, the O(n) pass that sizes the non-null
+            !! population this quantile is taken over, stays serial at every size -- threading
+            !! it is possible and was deliberately not done here, being a separate change
+            !! needing its own measurement.
             logical, intent(out), optional :: ok
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
@@ -4194,11 +4294,13 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
-            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
-            !! sizes the non-null population this quantile is taken over, and the selection
-            !! itself. Threading the count is possible and was deliberately not done here --
-            !! it is a separate change needing its own measurement.
+            !! **What a team reaches depends on the array size, and the null count never.** The
+            !! key extraction is always threaded; above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, and below it by a
+            !! serial quickselect. `key_valid_count`, the O(n) pass that sizes the non-null
+            !! population this quantile is taken over, stays serial at every size -- threading
+            !! it is possible and was deliberately not done here, being a separate change
+            !! needing its own measurement.
             logical, intent(out), optional :: ok
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
@@ -4224,11 +4326,13 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
-            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
-            !! sizes the non-null population this quantile is taken over, and the selection
-            !! itself. Threading the count is possible and was deliberately not done here --
-            !! it is a separate change needing its own measurement.
+            !! **What a team reaches depends on the array size, and the null count never.** The
+            !! key extraction is always threaded; above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, and below it by a
+            !! serial quickselect. `key_valid_count`, the O(n) pass that sizes the non-null
+            !! population this quantile is taken over, stays serial at every size -- threading
+            !! it is possible and was deliberately not done here, being a separate change
+            !! needing its own measurement.
             logical, intent(out), optional :: ok
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
@@ -4255,11 +4359,13 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
-            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
-            !! sizes the non-null population this quantile is taken over, and the selection
-            !! itself. Threading the count is possible and was deliberately not done here --
-            !! it is a separate change needing its own measurement.
+            !! **What a team reaches depends on the array size, and the null count never.** The
+            !! key extraction is always threaded; above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, and below it by a
+            !! serial quickselect. `key_valid_count`, the O(n) pass that sizes the non-null
+            !! population this quantile is taken over, stays serial at every size -- threading
+            !! it is possible and was deliberately not done here, being a separate change
+            !! needing its own measurement.
             logical, intent(out), optional :: ok
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
@@ -4286,11 +4392,13 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
-            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
-            !! sizes the non-null population this quantile is taken over, and the selection
-            !! itself. Threading the count is possible and was deliberately not done here --
-            !! it is a separate change needing its own measurement.
+            !! **What a team reaches depends on the array size, and the null count never.** The
+            !! key extraction is always threaded; above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, and below it by a
+            !! serial quickselect. `key_valid_count`, the O(n) pass that sizes the non-null
+            !! population this quantile is taken over, stays serial at every size -- threading
+            !! it is possible and was deliberately not done here, being a separate change
+            !! needing its own measurement.
             logical, intent(out), optional :: ok
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
@@ -4316,11 +4424,13 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
-            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
-            !! sizes the non-null population this quantile is taken over, and the selection
-            !! itself. Threading the count is possible and was deliberately not done here --
-            !! it is a separate change needing its own measurement.
+            !! **What a team reaches depends on the array size, and the null count never.** The
+            !! key extraction is always threaded; above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, and below it by a
+            !! serial quickselect. `key_valid_count`, the O(n) pass that sizes the non-null
+            !! population this quantile is taken over, stays serial at every size -- threading
+            !! it is possible and was deliberately not done here, being a separate change
+            !! needing its own measurement.
             logical, intent(out), optional :: ok
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
@@ -4347,11 +4457,13 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
-            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
-            !! sizes the non-null population this quantile is taken over, and the selection
-            !! itself. Threading the count is possible and was deliberately not done here --
-            !! it is a separate change needing its own measurement.
+            !! **What a team reaches depends on the array size, and the null count never.** The
+            !! key extraction is always threaded; above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, and below it by a
+            !! serial quickselect. `key_valid_count`, the O(n) pass that sizes the non-null
+            !! population this quantile is taken over, stays serial at every size -- threading
+            !! it is possible and was deliberately not done here, being a separate change
+            !! needing its own measurement.
             logical, intent(out), optional :: ok
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
@@ -4378,11 +4490,13 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
-            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
-            !! sizes the non-null population this quantile is taken over, and the selection
-            !! itself. Threading the count is possible and was deliberately not done here --
-            !! it is a separate change needing its own measurement.
+            !! **What a team reaches depends on the array size, and the null count never.** The
+            !! key extraction is always threaded; above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, and below it by a
+            !! serial quickselect. `key_valid_count`, the O(n) pass that sizes the non-null
+            !! population this quantile is taken over, stays serial at every size -- threading
+            !! it is possible and was deliberately not done here, being a separate change
+            !! needing its own measurement.
             logical, intent(out), optional :: ok
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
@@ -4408,11 +4522,13 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
-            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
-            !! sizes the non-null population this quantile is taken over, and the selection
-            !! itself. Threading the count is possible and was deliberately not done here --
-            !! it is a separate change needing its own measurement.
+            !! **What a team reaches depends on the array size, and the null count never.** The
+            !! key extraction is always threaded; above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, and below it by a
+            !! serial quickselect. `key_valid_count`, the O(n) pass that sizes the non-null
+            !! population this quantile is taken over, stays serial at every size -- threading
+            !! it is possible and was deliberately not done here, being a separate change
+            !! needing its own measurement.
             logical, intent(out), optional :: ok
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
@@ -4439,11 +4555,13 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
-            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
-            !! sizes the non-null population this quantile is taken over, and the selection
-            !! itself. Threading the count is possible and was deliberately not done here --
-            !! it is a separate change needing its own measurement.
+            !! **What a team reaches depends on the array size, and the null count never.** The
+            !! key extraction is always threaded; above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, and below it by a
+            !! serial quickselect. `key_valid_count`, the O(n) pass that sizes the non-null
+            !! population this quantile is taken over, stays serial at every size -- threading
+            !! it is possible and was deliberately not done here, being a separate change
+            !! needing its own measurement.
             logical, intent(out), optional :: ok
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
@@ -4470,11 +4588,13 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
             !!
-            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
-            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
-            !! sizes the non-null population this quantile is taken over, and the selection
-            !! itself. Threading the count is possible and was deliberately not done here --
-            !! it is a separate change needing its own measurement.
+            !! **What a team reaches depends on the array size, and the null count never.** The
+            !! key extraction is always threaded; above `SORT_NTH_ORDER_MIN` the rank is
+            !! answered by ORDERING (`sort_nth_index`), which is threaded too, and below it by a
+            !! serial quickselect. `key_valid_count`, the O(n) pass that sizes the non-null
+            !! population this quantile is taken over, stays serial at every size -- threading
+            !! it is possible and was deliberately not done here, being a separate change
+            !! needing its own measurement.
             logical, intent(out), optional :: ok
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not

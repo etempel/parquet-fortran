@@ -146,6 +146,8 @@ contains
             new_unittest("set_threads moves every thread count", test_set_threads), &
             new_unittest("file_date pins the creation timestamp, making two writes byte-identical", &
                 test_file_date_pins_output), &
+            new_unittest("a pinned file_date survives concurrent opens", &
+                test_file_date_survives_concurrent_opens), &
             new_unittest("PARQUET_FORTRAN_THREADS is overridden by the specific variables", &
                 test_env_threads_then_specific) &
             ]
@@ -468,8 +470,82 @@ contains
             "an unpinned write must stamp a real clock reading of the same width, not the pinned text")
     end subroutine test_file_date_pins_output
 
+    !> Opening many readers at once while a file date is pinned must not corrupt the heap.
+    !!
+    !! **This is a memory-safety test, not a value test**, and it is here rather than in the
+    !! "openmp" suite because pinning a file date writes a process-global setting, which only this
+    !! (serially dispatched) suite may do. Its assertions are almost incidental: what it really
+    !! checks is that the process is still alive afterwards.
+    !!
+    !! `parquet_push_settings_to_cpp` runs at the top of EVERY `parquet_open_reader`, and mirroring
+    !! the pinned date used to assign a process-global `std::string` unguarded -- so two threads
+    !! opening their own readers at the same moment freed the same buffer twice. What that produced
+    !! was not a crash at the assignment: it was glibc aborting with `malloc(): unaligned tcache
+    !! chunk detected` somewhere else entirely, in a fraction of runs. See
+    !! `parquet_push_file_metadata_settings` in parquet_wrapper.cpp.
+    !!
+    !! **Three details make this test able to fail**, and none of them is optional:
+    !!
+    !!  * the date must be LONGER THAN 15 CHARACTERS, because libstdc++ keeps a shorter string
+    !!    inside the string object and never touches the heap for it. The 19-character ISO
+    !!    timestamp below is what a caller pinning a real date actually writes;
+    !!  * the loop must OPEN A READER PER ITERATION, since the push happens per open, not per read;
+    !!  * there must be enough iterations for two of them to overlap. Against the unfixed library
+    !!    4000 opens aborted **10 runs out of 10** on the development machine's default team.
+    !!
+    !! **How reliably it fires depends on the team size**, so treat a pass on a two-core runner as
+    !! weaker evidence than a pass here -- the failure is probabilistic, and a low overlap count
+    !! reads as a pass. Verify a change to this test by breaking the fix on purpose
+    !! (`parquet_push_file_metadata_settings` in parquet_wrapper.cpp) and confirming the abort
+    !! returns; and rebuild with `fpm clean --skip` first, because a stale binary produced 0/10 --
+    !! a clean "the control broke nothing" that was really a control that never ran.
+    subroutine test_file_date_survives_concurrent_opens(error)
+        type(error_type), allocatable, intent(out) :: error
+        !> 19 characters, deliberately past libstdc++'s 15-character small-string threshold -- see
+        !! the doc-comment above; a shorter date cannot reproduce the defect this guards.
+        character(len=*), parameter :: pinned = "2026-01-02T03:04:05"
+        character(len=*), parameter :: fname = "test_run/settings_concurrent_date.parquet"
+        integer, parameter :: nopen = 4000 !! opens, hence pushes; see the doc-comment.
+        integer :: nrows(nopen) !! per-open row count, so the loop cannot be optimised away.
+        character(len=:), allocatable :: got
+        integer :: i
+
+        call parquet_set_file_date(pinned)
+        call write_dated_fixture(fname)
+        nrows = -1
+
+        !$omp parallel do default(shared) private(i) schedule(static, 1)
+        do i = 1, nopen
+            call open_and_close_once(fname, nrows(i))
+        end do
+        !$omp end parallel do
+
+        call parquet_set_file_date("")
+        call read_file_date(fname, got)
+
+        call check(error, all(nrows == 64), &
+            "every concurrent open must report the fixture's 64 rows")
+        if (allocated(error)) return
+        call check(error, got == pinned, &
+            "the pinned date must still reach the file after a parallel open storm")
+    end subroutine test_file_date_survives_concurrent_opens
+
+    !> One open/close on its own reader, called from the loop above. A subroutine rather than an
+    !! inline `block`, so the reader is an ordinary local of a called procedure -- the shape this
+    !! project's other concurrency tests use, and the one with no OpenMP `private` initialisation
+    !! question hanging over it.
+    subroutine open_and_close_once(fname, nrows)
+        character(len=*), intent(in) :: fname !! fixture to open.
+        integer, intent(out) :: nrows !! rows the reader reported.
+        type(parquet_reader) :: reader
+
+        call parquet_open_reader(reader, fname, nrows=nrows)
+        call parquet_close_reader(reader)
+    end subroutine open_and_close_once
+
     !> Writes one small schema-enforced file, identical every time apart from whatever the settings
-    !> put in it. Its own helper so the four arms above cannot differ by accident.
+    !> put in it. Its own helper so the arms of the two file_date tests above cannot differ by
+    !> accident.
     subroutine write_dated_fixture(fname)
         character(len=*), intent(in) :: fname !! file to write; one per arm.
         type(parquet_schema) :: schema

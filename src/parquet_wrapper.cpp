@@ -1008,8 +1008,17 @@ extern "C"
 	//
 	// There is deliberately no C++-side setter beyond this one entry point, so Fortran is the single
 	// writer and this copy is derived rather than independent.
-	static int g_verbosity = 0;      // 0 = normal, 1 = silent, 2 = errors_only
-	static int g_message_stream = 0; // 0 = stdout, 1 = stderr
+	//
+	// **Every mirrored global below is atomic, or guarded by a mutex, because the push that writes
+	// them runs CONCURRENTLY.** parquet_push_settings_to_cpp is called at the top of every
+	// parquet_open_reader/parquet_open_writer, and opening a reader per thread is the library's
+	// documented, supported usage -- so several threads write these same globals at the same
+	// moment, on every open, in an ordinary correct program. The values are identical each time
+	// (settings are configured before any thread exists), which is what made this look harmless:
+	// a same-value store races benignly on x86 for a plain int. It does NOT for a std::string --
+	// see g_file_date below, where it was corrupting the heap.
+	static std::atomic<int> g_verbosity{0};      // 0 = normal, 1 = silent, 2 = errors_only
+	static std::atomic<int> g_message_stream{0}; // 0 = stdout, 1 = stderr
 
 	void parquet_push_output_settings(int verbosity, int message_stream)
 	{
@@ -1027,13 +1036,51 @@ extern "C"
 	//
 	// Initialisers equal parquet_settings' own defaults (blank, i.e. read the clock), since they are
 	// what applies in the window before the first push -- feature_risks.md Risk-42.
+	//
+	// **This is the one mirrored setting with a heap buffer behind it, and it must never be
+	// assigned unguarded.** `g_file_date = std::string(date)` frees whatever the global was
+	// holding and takes the temporary's buffer; two threads reaching that at the same moment read
+	// the same old pointer and both free it. Confirmed with AddressSanitizer as
+	// `attempting double-free`, both stacks parquet_push_file_metadata_settings <-
+	// parquet_push_settings_to_cpp <- parquet_open_reader_base, from two OpenMP threads each
+	// opening its own reader. What the user sees is not that: it is glibc aborting with
+	// `malloc(): unaligned tcache chunk detected` in whatever allocates next, arbitrarily far
+	// away, in about a third of runs -- see CLAUDE.md's "A same-value store to a mirrored setting
+	// is still a double free if the setting owns heap".
+	//
+	// The date is only long enough to matter when a caller pins one: libstdc++ keeps up to 15
+	// characters inside the string object itself, so a blank or short date never allocates and
+	// never corrupts anything. A pinned ISO timestamp ("2026-01-01T00:00:00", 19 characters) does.
+	// That is why this went unseen -- the library's own concurrency tests do not pin the date, and
+	// a reproducer that does not pin one is clean however many threads it runs.
+	//
+	// The mutex, not an atomic: a std::string cannot be one. It costs nothing -- this pair is
+	// written once per open and read once per file written, never on a hot path.
+	static std::mutex g_file_metadata_mutex;
 	static int g_file_date_fixed = 0;
 	static std::string g_file_date;
 
 	void parquet_push_file_metadata_settings(int use_fixed, const char *date)
 	{
+		const char *incoming = (use_fixed && date != nullptr) ? date : "";
+		std::lock_guard<std::mutex> lock(g_file_metadata_mutex);
 		g_file_date_fixed = use_fixed;
-		g_file_date = (use_fixed && date != nullptr) ? std::string(date) : std::string();
+		// Compared before assigning, so the repeat push every open makes -- the same value every
+		// time, since settings are fixed before any thread is created -- does no allocation at all
+		// rather than a free-and-reallocate per open. The lock is what makes this correct; this is
+		// what makes it cheap.
+		if (g_file_date != incoming) g_file_date = incoming;
+	}
+
+	// The pinned creation timestamp, or false when the clock is to be read instead. The ONLY
+	// reader of the pair above: it takes a copy under the lock rather than handing back a
+	// reference into a string a concurrent push may reassign underneath it.
+	static bool pinned_file_date(std::string &out)
+	{
+		std::lock_guard<std::mutex> lock(g_file_metadata_mutex);
+		if (!g_file_date_fixed) return false;
+		out = g_file_date;
+		return true;
 	}
 
 	// True when output the caller explicitly asked for should be skipped -- the C++ counterpart of
@@ -1106,10 +1153,15 @@ extern "C"
 	// shape, and Risk-49's unreachable-threshold shape at the same time. Negative = use the
 	// real constant.
 	static int64_t g_debug_sort_parallel_min_rows = -1;
-	static bool g_sort_counting_path = true;
-	static int64_t g_sort_counting_bucket_limit = kSortCountingBucketLimit;
-	static int64_t g_target_row_group_bytes = kTargetRowGroupBytes;
-	static bool g_statistics_prescreen = true;
+	// Atomic for the same reason as the output mirror above: parquet_push_settings_to_cpp writes
+	// all four on every open, from every thread that opens a reader or writer. A relaxed same-value
+	// store would race benignly on x86, but it is still a data race the standard does not define
+	// and a sanitizer does report; an atomic scalar costs nothing on either the store or the
+	// hot-path loads below.
+	static std::atomic<bool> g_sort_counting_path{true};
+	static std::atomic<int64_t> g_sort_counting_bucket_limit{kSortCountingBucketLimit};
+	static std::atomic<int64_t> g_target_row_group_bytes{kTargetRowGroupBytes};
+	static std::atomic<bool> g_statistics_prescreen{true};
 
 	void parquet_push_performance_settings(int sort_counting_path,
 		int64_t sort_counting_bucket_limit, int64_t target_row_group_bytes, int statistics_prescreen)
@@ -4121,7 +4173,8 @@ extern "C"
 		// VOTable sidecar's own DATE PARAM, and Arrow's store_schema() then duplicates both into
 		// the base64 ARROW:schema blob -- four appearances of one value. Reading the clock twice
 		// here would let a file disagree with itself across a second boundary.
-		auto date = g_file_date_fixed ? g_file_date : current_utc_timestamp();
+		std::string date;
+		if (!pinned_file_date(date)) date = current_utc_timestamp();
 
 		std::string table_name = "table";
 		for (const auto &kv : table_metadata)
@@ -4265,7 +4318,12 @@ extern "C"
 	// given. parquet_set_default_use_threads' effect is otherwise unobservable -- the value
 	// disappears into a handle with no getter -- so without this the setting could be stored and
 	// never acted on while passing every set/get test (feature_risks.md Risk-41).
-	static int g_debug_last_use_threads = -1;
+	//
+	// Atomic because both create_parquet_reader and create_parquet_writer store to it on every
+	// open, and opening one per thread is supported usage -- the same reason the mirrored settings
+	// near the top of this file are atomic. Diagnostic only, so the value a racing pair leaves
+	// behind does not matter; being a defined operation does.
+	static std::atomic<int> g_debug_last_use_threads{-1};
 
 	int parquet_debug_get_last_use_threads(void)
 	{

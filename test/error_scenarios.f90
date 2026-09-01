@@ -127,6 +127,10 @@ program error_scenarios
         call scenario_struct_write_type_mismatch()
     case ("struct_col_size_rejected")
         call scenario_struct_col_size_rejected()
+    case ("struct_col_size_auto_rejected")
+        call scenario_struct_col_size_auto_rejected()
+    case ("struct_set_col_size_rejected")
+        call scenario_struct_set_col_size_rejected()
     case ("struct_qc_rejected")
         call scenario_struct_qc_rejected()
     case ("struct_protected_row_null")
@@ -213,6 +217,8 @@ program error_scenarios
         call scenario_map_write_type_mismatch()
     case ("map_col_size_rejected")
         call scenario_map_col_size_rejected()
+    case ("map_col_size_auto_rejected")
+        call scenario_map_col_size_auto_rejected()
     case ("map_qc_rejected")
         call scenario_map_qc_rejected()
     case ("map_protected_row_null")
@@ -239,6 +245,10 @@ program error_scenarios
         call scenario_list_write_uninitialized()
     case ("list_write_col_size_rejected")
         call scenario_list_write_col_size_rejected()
+    case ("list_col_size_auto_rejected")
+        call scenario_list_col_size_auto_rejected()
+    case ("list_set_col_size_forced_rejected")
+        call scenario_list_set_col_size_forced_rejected()
     case ("list_write_qc_rejected")
         call scenario_list_write_qc_rejected()
     case ("list_write_bad_token")
@@ -18567,6 +18577,30 @@ contains
         call parquet_parse_maml(schema)
     end subroutine scenario_struct_col_size_rejected
 
+    !> `col_size: auto` on a struct column -- the OTHER arm of the same rule, with its own message.
+    !!
+    !! Separate from scenario_struct_col_size_rejected (which passes col_size=3) because the two
+    !! arms emit different text and the shared tail is all either test used to assert, so one
+    !! scenario could not tell them apart. Breaking this arm is SILENT rather than loud: every
+    !! container write passes asize = 1 to parquet_resolve_or_check_col_size, so an unrefused
+    !! `auto` would be RESOLVED to 1 instead of aborting, and the column would acquire a width it
+    !! does not have.
+    subroutine scenario_struct_col_size_auto_rejected()
+        type(parquet_schema) :: schema
+        call schema%init(table="struct_colsize_auto")
+        call schema%add_field("s", "struct", col_size=parquet_size_auto)
+        call parquet_parse_maml(schema)
+    end subroutine scenario_struct_col_size_auto_rejected
+
+    !> schema%set_col_size on a struct column. The setter writes %cinfo directly and reaches no
+    !! validator, so it is the one route into a container width that %add_field cannot guard.
+    subroutine scenario_struct_set_col_size_rejected()
+        type(parquet_schema) :: schema
+        call schema%init(table="struct_setcolsize")
+        call schema%add_field("s", "struct")
+        call schema%set_col_size("s", 4)
+    end subroutine scenario_struct_set_col_size_rejected
+
     !> `qc: min:`/`max:` on a struct column. qc stays scalar-leaf-only by design; refusing the
     !> declaration is what keeps the read and write sides agreeing, since with no such declaration
     !> possible a reader can never be handed one. `qc: miss:` IS supported and applies to ROW
@@ -19122,6 +19156,15 @@ contains
         call parquet_parse_maml(schema)
     end subroutine scenario_map_col_size_rejected
 
+    !> `col_size: auto` on a map column; the map arm of the pair described on
+    !! scenario_struct_col_size_auto_rejected.
+    subroutine scenario_map_col_size_auto_rejected()
+        type(parquet_schema) :: schema
+        call schema%init(table="map_colsize_auto")
+        call schema%add_field("m", "map[int32]", col_size=parquet_size_auto)
+        call parquet_parse_maml(schema)
+    end subroutine scenario_map_col_size_auto_rejected
+
     !> `qc: min:`/`max:` on a map column. qc stays scalar-leaf-only by design; `qc: miss:` IS
     !> supported and applies to ROW nullness, which is the same concept at the same granularity.
     subroutine scenario_map_qc_rejected()
@@ -19360,6 +19403,27 @@ contains
         call schema%add_field("lst", "list[int32]", col_size=3)
         call parquet_parse_maml(schema)
     end subroutine scenario_list_write_col_size_rejected
+
+    !> `col_size: auto` on a list column; the list arm of the pair described on
+    !! scenario_struct_col_size_auto_rejected.
+    subroutine scenario_list_col_size_auto_rejected()
+        type(parquet_schema) :: schema
+        call schema%init(table="list_colsize_auto")
+        call schema%add_field("lst", "list[int32]", col_size=parquet_size_auto)
+        call parquet_parse_maml(schema)
+    end subroutine scenario_list_col_size_auto_rejected
+
+    !> schema%set_col_size(..., force=.true.) on a list column -- the back door that force= used to
+    !! open. Before the refusal, this produced a schema parquet_validate_maml would have rejected,
+    !! and parquet_write_column then failed with `array size mismatch`, a message naming the
+    !! caller's data rather than the declaration. force=.true. is the point: without it the
+    !! "already resolved" guard fires first and this would test that instead.
+    subroutine scenario_list_set_col_size_forced_rejected()
+        type(parquet_schema) :: schema
+        call schema%init(table="list_setcolsize")
+        call schema%add_field("lst", "list[int32]")
+        call schema%set_col_size("lst", 5, force=.true.)
+    end subroutine scenario_list_set_col_size_forced_rejected
 
     !> `qc: min:`/`max:` on a list column, refused on the same terms a temporal column's is: qc
     !> stays scalar-leaf-only by design, and refusing here is what keeps the read and write sides

@@ -682,6 +682,13 @@ contains
     !! entirely in code, with no explicit parse anywhere. Asserts the round trip AND that
     !! %add_metadata's entry reaches the file -- the call order used to matter here, and the entry
     !! surviving is what shows it no longer does.
+    !!
+    !! **There is deliberately no parquet_parse_maml call**, and that absence is the test. The page
+    !! opens with "There is no separate parse step, and no required order"; this program is the
+    !! page's own, and until it dropped an added `call parquet_parse_maml(schema)` it exercised the
+    !! ORDERED path instead -- so the claim was guarded by nothing and the mirror had silently
+    !! stopped mirroring. Do not reintroduce the call: `tile == 42_int32` below is what fails if
+    !! %add_metadata ever again needs one.
     subroutine test_build_schema_example(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_schema) :: schema
@@ -698,8 +705,7 @@ contains
         call schema%add_field("ra", "float64", unit="deg", ucd="pos.eq.ra", info="Right ascension", &
             qc_min=">= 0", qc_max="<= 360")
 
-        call parquet_parse_maml(schema)                   ! turns the text above into %cinfo/%metadata
-        call schema%add_metadata("SURVEY_TILE", 42_int32) ! only legal AFTER the parse
+        call schema%add_metadata("SURVEY_TILE", 42_int32)
 
         call parquet_open_writer(writer, out_file, schema)
         call parquet_write_column(writer, "id", id)

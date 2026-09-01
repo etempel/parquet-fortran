@@ -91,6 +91,10 @@ contains
                 test_get_field_by_index), &
             new_unittest("schema%add_field_from copies a field's full definition, incl. qc", &
                 test_add_field_from_copies_field), &
+            new_unittest("get_field/add_field_from carry a temporal column's unit and UTC flag", &
+                test_get_field_carries_temporal_unit), &
+            new_unittest("col_size: 1 and a positive array_size: are accepted on a list and a map", &
+                test_list_map_col_size_one_accepted), &
             new_unittest("schema%add_field accepts date/time[unit]/timestamp[unit,utc] tokens", &
                 test_schema_add_field_temporal_tokens_ok), &
             new_unittest("schema%is_init reflects state before/after schema%init", test_schema_is_init_reflects_state), &
@@ -1311,6 +1315,102 @@ contains
         call check(error, qc_miss == "Null", &
             "the source field's own qc_miss should read back as ""Null"" for an undeclared miss:")
     end subroutine test_add_field_from_copies_field
+
+    !> %get_field returns a temporal column's unit and UTC flag, and %add_field_from therefore
+    !! reproduces the column rather than a coarser one.
+    !!
+    !! **This pins a round trip that used to LOSE data silently.** The parse stores a temporal
+    !! data_type in its canonical base form -- `timestamp[ns,utc]` becomes `data_type =
+    !! "timestamp"` plus `time_unit`/`is_utc` -- and %get_field used to hand that base form back.
+    !! A bare `timestamp` re-resolves to MICROSECONDS and non-UTC, so `%add_field_from` produced a
+    !! column of different precision and different timezone semantics, which still validated and
+    !! still wrote. The page's own motivation for the procedure is sharing identity columns
+    !! "without risking drift between the copies", so this was the one way it could drift.
+    !!
+    !! The container case is checked too, because a `list[timestamp[ms,utc]]` carries its element's
+    !! unit in those same two fields and would have been lost the same way.
+    !!
+    !! **The float64 arm is the negative control**: it round-trips correctly whether or not the
+    !! temporal reconstruction exists, so without it a green run could not distinguish "the copy is
+    !! faithful" from "the comparison is vacuous".
+    subroutine test_get_field_carries_temporal_unit(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: source, target
+        character(len=:), allocatable :: data_type
+
+        call source%init(table="events")
+        call source%add_field("ts", "timestamp[ns,utc]")
+        call source%add_field("tl", "list[timestamp[ms,utc]]")
+        call source%add_field("plain", "float64")
+
+        ! %get_field must hand back the token a caller could re-declare, not the stored base form.
+        call source%get_field("ts", data_type=data_type)
+        call check(error, data_type == "timestamp[ns,utc]", &
+            "get_field should return 'timestamp[ns,utc]', got '" // data_type // "'")
+        if (allocated(error)) return
+        call source%get_field("tl", data_type=data_type)
+        call check(error, data_type == "list[timestamp[ms,utc]]", &
+            "get_field should return 'list[timestamp[ms,utc]]', got '" // data_type // "'")
+        if (allocated(error)) return
+        call source%get_field("plain", data_type=data_type)
+        call check(error, data_type == "float64", &
+            "the non-temporal control should still return 'float64', got '" // data_type // "'")
+        if (allocated(error)) return
+
+        call target%init(table="derived")
+        call target%add_field_from(source, "ts")
+        call target%add_field_from(source, "tl")
+        call target%add_field_from(source, "plain")
+
+        ! The parsed state is what the writer acts on, so assert that rather than only the text.
+        call check(error, target%cinfo%col(1)%time_unit == source%cinfo%col(1)%time_unit .and. &
+            (target%cinfo%col(1)%is_utc .eqv. source%cinfo%col(1)%is_utc), &
+            "add_field_from should copy a timestamp column's unit and UTC flag")
+        if (allocated(error)) return
+        call check(error, target%cinfo%col(2)%time_unit == source%cinfo%col(2)%time_unit .and. &
+            (target%cinfo%col(2)%is_utc .eqv. source%cinfo%col(2)%is_utc), &
+            "add_field_from should copy a list[timestamp] column's element unit and UTC flag")
+        if (allocated(error)) return
+        call check(error, trim(target%cinfo%col(3)%data_type) == "float64", &
+            "the non-temporal control should copy as float64")
+    end subroutine test_get_field_carries_temporal_unit
+
+    !> The ACCEPTANCE side of the list and map columns' col_size:/array_size: rules, mirroring
+    !! test_struct_col_size_one_accepted for the two kinds that had no such test.
+    !!
+    !! The refusals are covered by the list_write_col_size_rejected and map_col_size_rejected
+    !! scenarios, and neither pins the boundary those refusals sit on -- both would pass just as
+    !! happily against a validator that rejected EVERY col_size: on a container. `col_size: 1` is
+    !! the default, so declaring it must be a no-op rather than an error, and a positive
+    !! `array_size:` is accepted and simply never consulted. Each is parsed in its own schema so a
+    !! failure names which one broke.
+    subroutine test_list_map_col_size_one_accepted(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: l_col, l_arr, m_col, m_arr
+
+        call l_col%init(table="list_colsize_one")
+        call l_col%add_field("l", "list[int32]", col_size=1)
+        call parquet_parse_maml(l_col)
+        call check(error, l_col%is_parsed(), "col_size: 1 on a list column should parse")
+        if (allocated(error)) return
+
+        call l_arr%init(table="list_arraysize")
+        call l_arr%add_field("l", "list[string]", array_size=8)
+        call parquet_parse_maml(l_arr)
+        call check(error, l_arr%is_parsed(), "a positive array_size: on a list column should parse")
+        if (allocated(error)) return
+
+        call m_col%init(table="map_colsize_one")
+        call m_col%add_field("m", "map[int32]", col_size=1)
+        call parquet_parse_maml(m_col)
+        call check(error, m_col%is_parsed(), "col_size: 1 on a map column should parse")
+        if (allocated(error)) return
+
+        call m_arr%init(table="map_arraysize")
+        call m_arr%add_field("m", "map[string]", array_size=8)
+        call parquet_parse_maml(m_arr)
+        call check(error, m_arr%is_parsed(), "a positive array_size: on a map column should parse")
+    end subroutine test_list_map_col_size_one_accepted
 
 
     !

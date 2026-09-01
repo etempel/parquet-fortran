@@ -323,10 +323,14 @@ The other schema keys apply as follows, and the refusals are narrower than "not 
 
 - **`col_size:`** — `auto` and any value **above 1** are rejected, since a struct row is one
   instance and has no width. `col_size: 1` is the default and is accepted, meaning nothing.
+  `schema%set_col_size` refuses a struct column outright, on the same terms.
 - **`array_size:`** — `auto` is rejected, as it is for every non-`string` column. A positive value
   is accepted and never consulted.
 - **`qc: min:`/`max:`** — rejected; quality-control ranges apply to scalar leaves only.
 - **`qc: miss:`** — supported, and applies to row nullness (an absent struct instance).
+
+A `write_maml=.true.` sidecar carries **neither** size key for a struct column, even where the
+source MAML declared one: what says the width is per-row is the `data_type:` token.
 
 A **protected** column (`extra: protected_cols:`) may contain no Null at either level — neither a
 null row nor a null field value. That is the only way to declare a *streamed* struct column

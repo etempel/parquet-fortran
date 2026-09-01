@@ -124,8 +124,9 @@ Notes on the `fields:` entries:
   `timestamp[unit,utc]`) and is **required**: a bare `list` is rejected, because a declared column
   that is never written has to be written with zero rows at close and that cannot invent an element
   type. `col_size:` does not apply to such a column — `auto` and any value above 1 are rejected,
-  since a list row's length comes from the data — and neither does `array_size:`, which is not
-  consulted for a `list[string]`.
+  since a list row's length comes from the data — and neither does `array_size:`: `auto` is
+  rejected, as it is for every non-`string` column (a `list[string]` is not one), and a positive
+  value is accepted and never consulted.
   > That makes the naming trap below wider than two-way: `col_size` is how many elements a
   > **vector** row holds, `array_size` is how many characters a **string** value holds, and no
   > **container** column — `list[...]`, `map[...]` or `struct` — has either, because a container's
@@ -136,7 +137,8 @@ Notes on the `fields:` entries:
   names, kinds and order come from the `parquet_struct_column` object passed to
   `parquet_write_column`, which is data the caller already holds. `col_size:` does not apply —
   `auto` and any value above 1 are rejected, since a struct row is one instance rather than a row
-  of values — and neither does `array_size:`, which is not consulted for a struct column. So is
+  of values — and neither does `array_size:`, on the same terms as a list's: `auto` rejected, a
+  positive value accepted and never consulted. So is
   `qc: min:`/`max:` rejected — quality-control ranges are scalar-leaf only. `qc: miss:` **is**
   supported and applies to row nullness (an absent struct instance).
 - `map[<valuetype>]` declares a **map** column, whose every row holds its own set of
@@ -152,8 +154,8 @@ Notes on the `fields:` entries:
   A container value type cannot be declared either: `map[list[int32]]` is rejected as an unknown
   `data_type`, and a map whose values are containers can be read from a file but not written.
   `col_size:` does not apply — `auto` and any value above 1 are rejected, since a map row's entry
-  count comes from the data — and neither does `array_size:`, which is not consulted for a map
-  column. `qc: min:`/`max:` is rejected on the same scalar-leaf-only terms as above; `qc: miss:`
+  count comes from the data — and neither does `array_size:`, on the same terms as a list's:
+  `auto` rejected, a positive value accepted and never consulted. `qc: min:`/`max:` is rejected on the same scalar-leaf-only terms as above; `qc: miss:`
   **is** supported and applies to row nullness (an absent map).
 - `array_size` sets the maximum string length for `string` columns; it is ignored for other types.
   Writing a longer value through an ordinary `character` array is an error. A
@@ -167,9 +169,11 @@ Notes on the `fields:` entries:
   > unrelated: `col_size` is how many elements a vector column's row holds, `array_size` is how many
   > characters a `string` column's values can hold. And a **container** column (`list[...]`,
   > `map[...]`, `struct`) declares NEITHER: both fix a width that is the same in every row, which
-  > is exactly the property a container does not have — its rows carry their own lengths. A
-  > schema-less `parquet_write_table` therefore emits a container column with no `col_size:` and no
-  > `array_size:` key at all, which is what tells a reader of the sidecar that the width is per-row.
+  > is exactly the property a container does not have — its rows carry their own lengths. **What
+  > tells a reader of a sidecar that a column's width is per-row is its `data_type:` token**, which
+  > is always there. Neither size key ever is: a `write_maml=.true.` sidecar drops both from a
+  > container's block even where the source MAML declared `col_size: 1`, and a schema-less
+  > `parquet_write_table` never writes either one — so the two routes agree.
 - Either can be declared `auto` instead of a number (`col_size: auto` / `array_size: auto`) when the
   value is only known to the calling Fortran code, not in advance in the MAML file itself — see
   [Deferring col_size/array_size until write time with

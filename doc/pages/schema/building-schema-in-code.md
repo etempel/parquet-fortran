@@ -76,8 +76,10 @@ instance — still have something useful to print.
 Appends one `fields:` entry. `name` and `data_type` are required; `data_type` is one of the
 [supported types](../types/supported-data-types.html), including `date`/`time[unit]`/
 `timestamp[unit,utc]` (see [Date, time and timestamp
-columns](../types/date-time.html#units-and-schema-declared-columns)). The rest are optional and
-mirror the MAML `fields:` attributes.
+columns](../types/date-time.html#units-and-schema-declared-columns)) and the three container
+tokens `list[<elemtype>]`, `map[<valuetype>]` and `struct` (see [Declaring a container
+column](#declaring-a-container-column) below). The rest are optional and mirror the MAML `fields:`
+attributes.
 
 Everything is validated immediately — an empty or duplicate `name`, an invalid `data_type`, a
 reversed qc operator, a bad `qc_miss` value — each failing with `error stop`. Calling it before
@@ -102,6 +104,36 @@ When checking is on, the two sides behave differently by design: `parquet_write_
 `WARNING` and carries on, while a read through `parquet_open_reader(..., schema=)` **aborts** —
 pass `qc_soft=.true.` for a `WARNING` there instead. See [Quality control](quality-control.html) for
 the full min/max/miss enforcement picture on both sides. `qc_miss` may be set on any `data_type`.
+
+### Declaring a container column
+
+`data_type` accepts the three container tokens as readily as a scalar one:
+
+```fortran
+call schema%add_field("tags",   "list[string]")   ! a parquet_list_column
+call schema%add_field("props",  "map[float64]")   ! a parquet_map_column; keys are always strings
+call schema%add_field("origin", "struct")         ! a parquet_struct_column
+```
+
+The element or value type is **required** for `list` and `map`, and `struct` is deliberately bare —
+a struct's field names, kinds and order come from the `parquet_struct_column` you pass at write
+time, and cannot be expressed in a schema at all. [The MAML metadata
+format](maml-format.html#the-fields-section) has the reasoning; the tokens mean exactly the same
+thing here.
+
+**What changes is which of `%add_field`'s own optional arguments you may pass.** A container has no
+width that is the same in every row — its rows carry their own lengths — so:
+
+- **`col_size`** — `parquet_size_auto` and any value **above 1** fail with `error stop`. `col_size=1`
+  is the default and is accepted, meaning nothing. `schema%set_col_size` refuses a container column
+  outright, on the same terms and with the same wording.
+- **`array_size`** — `parquet_size_auto` fails, as it does for every non-`string` column, and that
+  includes a `list[string]`. A positive value is accepted and never consulted.
+- **`qc_min`/`qc_max`** — rejected; quality-control ranges apply to scalar leaves only.
+- **`qc_miss`** — supported, and applies to **row** nullness: a null list, or an absent map or
+  struct instance.
+
+Each refusal names the column and the kind, so a `list` column's message differs from a `map`'s.
 
 ### Checking, resetting and reading back a schema
 
@@ -141,7 +173,9 @@ the full min/max/miss enforcement picture on both sides. `qc_miss` may be set on
   a null `date`/`time`/`timestamp` element, and on an `%append_null()` in a `parquet_string_column`
   — and the column's Arrow field is written non-nullable, which is also the only way to declare a
   *streamed* temporal or `parquet_string_column` column null-free (see [Null
-  values](../types/supported-data-types.html#null-values)). Call it before `parquet_open_writer`,
+  values](../types/supported-data-types.html#null-values)). **On a container column the rule has
+  two levels**: neither a null row nor a null element, map value or struct field may be written,
+  and the abort says which level failed. Call it before `parquet_open_writer`,
   since the writer takes its own copy of the schema at open time. Unprotecting a column that is
   currently protected is allowed but prints a `WARNING` naming the column — never an abort — since it
   overrides a declaration someone made deliberately. Where the protection came from makes no
@@ -353,7 +387,9 @@ if `%add_metadata` has not been called.
 [allow_uninitialized])`** — writes a fixed-width
 listing of this schema's *enabled* (`is_set`) columns, one per line, in the order `name unit type
 len ucd info` (`type`/`len` are the header labels for `data_type`/`col_size`; `info` is left
-unpadded so no line carries trailing whitespace). Column widths are computed from the longest value
+unpadded so no line carries trailing whitespace). `len` is the **declared** `col_size`, so a
+container column shows `1` — the default it is required to keep — rather than a width it does not
+have; its real per-row length lives in the data. Column widths are computed from the longest value
 actually present (and the header label, if printed), so each call produces its own self-contained,
 internally-aligned block — two calls for different schemas are not aligned with each other. Works
 for any parsed schema (`schema%cinfo` populated), whether built in code (`%init` plus at least one

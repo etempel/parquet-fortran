@@ -159,7 +159,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   structs, of maps or of lists — **on read**; the payload is reached with `parquet_list_row%nested`,
   and a nested leaf is addressable directly by a descent path (`"list_of_struct[].x"`). **Not yet**:
   writing a nested container, which is refused with a message naming the column and the payload
-  kind.
+  kind. A container column declares neither `col_size:` nor `array_size:` — both fix a width that is
+  the same in every row — so a `write_maml=.true.` sidecar carries neither key for one, whatever the
+  source MAML declared.
 - **`parquet_struct`: `parquet_struct_column`, a `STRUCT` column, plus `parquet_struct_row`, a
   lightweight handle to one of its rows.** Every row holds one value per declared field and the
   fields may have different types; the field set is fixed by `%init(names, kinds)` and covers the
@@ -255,6 +257,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`parquet_get_col_size` and `parquet_get_column_total_elements` see through an Arrow encoding
   wrapper.** A column stored as an extension, dictionary or run-end-encoded type over a fixed-size
   list now reports that list's width rather than `1`.
+- **`schema%get_field` and `schema%add_field_from` keep a temporal column's unit and UTC flag.**
+  They returned the stored base token, so a `timestamp[ns,utc]` column copied with `%add_field_from`
+  became a bare `timestamp` — microseconds, not UTC-adjusted — while still validating and still
+  writing.
+- **`schema%set_col_size` refuses a container column** instead of accepting a width that
+  `parquet_write_column` then rejected as an "array size mismatch", a message naming the caller's
+  data rather than the declaration.
 - **Concurrent `parquet_open_reader`/`parquet_open_writer` calls no longer corrupt the heap while a
   file date is pinned.** Mirroring `parquet_set_file_date` to the C++ side reassigned a
   process-global `std::string` on every open, so two threads freed the same buffer; the process

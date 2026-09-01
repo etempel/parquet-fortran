@@ -373,12 +373,22 @@ The element type is **required** — a bare `list` is rejected — and it must m
 payload kind **exactly**: there is no widening between list element kinds the way there is between
 scalar numeric kinds, so a `PK_INT32` column cannot be written into a `list[int64]` declaration.
 
-`col_size:` does not apply: a list row's length comes from the data, so `col_size: auto` and any
-value above 1 are rejected. `qc: min:`/`max:` is rejected too, on the same terms as for a
-`date`/`time`/`timestamp` column; `qc: miss:`
-does apply, and counts **null rows**. `extra: protected_cols:` applies and means the column holds
-no Null at *either* level — neither a null row nor a null element — which is also what makes a
-streamed list column's fields non-nullable.
+The other schema keys apply as follows, and the refusals are narrower than "not supported":
+
+- **`col_size:`** — `auto` and any value **above 1** are rejected, since a list row's length comes
+  from the data. `col_size: 1` is the default and is accepted, meaning nothing. `schema%set_col_size`
+  refuses a list column outright, on the same terms.
+- **`array_size:`** — `auto` is rejected, as it is for every non-`string` column, and a
+  `list[string]` is not one. A positive value is accepted and never consulted.
+- **`qc: min:`/`max:`** — rejected; quality-control ranges apply to scalar leaves only.
+- **`qc: miss:`** — supported, and counts **null rows**.
+
+`extra: protected_cols:` applies and means the column holds no Null at *either* level — neither a
+null row nor a null element — which is also what makes a streamed list column's fields
+non-nullable.
+
+A `write_maml=.true.` sidecar carries **neither** size key for a list column, even where the source
+MAML declared one: what says the width is per-row is the `data_type:` token.
 
 A declared list column that is never written is written with zero rows when the writer closes, like
 any other declared column.

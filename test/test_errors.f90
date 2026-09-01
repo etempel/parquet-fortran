@@ -1601,6 +1601,9 @@ contains
                 test_list_write_type_mismatch_aborts), &
             new_unittest("writing an uninitialized list column aborts", test_list_write_uninitialized_aborts), &
             new_unittest("col_size on a list column is rejected", test_list_write_col_size_rejected_aborts), &
+            new_unittest("col_size: auto on a list column is rejected", test_list_col_size_auto_rejected), &
+            new_unittest("set_col_size(force) on a list column is rejected", &
+                test_list_set_col_size_forced_rejected), &
             new_unittest("qc: min:/max: on a list column is rejected", test_list_write_qc_rejected_aborts), &
             new_unittest("a list token with no element type is rejected", test_list_write_bad_token_aborts), &
             new_unittest("a list token with an unknown element type is rejected", &
@@ -1648,6 +1651,7 @@ contains
             new_unittest("writing a map column into a differently-typed slot aborts", &
                 test_map_write_type_mismatch_aborts), &
             new_unittest("col_size on a map column is rejected", test_map_col_size_rejected), &
+            new_unittest("col_size: auto on a map column is rejected", test_map_col_size_auto_rejected), &
             new_unittest("qc min/max on a map column is rejected", test_map_qc_rejected), &
             new_unittest("a protected map column with a null row aborts", test_map_protected_row_null_aborts), &
             new_unittest("a protected map column with a null value aborts", test_map_protected_value_null_aborts), &
@@ -1673,6 +1677,8 @@ contains
             new_unittest("writing a struct column into a non-struct slot aborts", &
                 test_struct_write_type_mismatch_aborts), &
             new_unittest("col_size on a struct column is rejected", test_struct_col_size_rejected), &
+            new_unittest("col_size: auto on a struct column is rejected", test_struct_col_size_auto_rejected), &
+            new_unittest("set_col_size on a struct column is rejected", test_struct_set_col_size_rejected), &
             new_unittest("qc min/max on a struct column is rejected", test_struct_qc_rejected), &
             new_unittest("a protected struct column with a null row aborts", &
                 test_struct_protected_row_null_aborts), &
@@ -1951,10 +1957,32 @@ contains
     !> col_size: declares a fixed per-row width, which a list column does not have.
     subroutine test_list_write_col_size_rejected_aborts(error)
         type(error_type), allocatable, intent(out) :: error
+        ! "declares col_size > 1" pins THIS arm. The tail alone appears in the auto arm too, so
+        ! asserting only that made this test and test_list_col_size_auto_rejected indistinguishable.
         call check_scenario_exit_status_and_stderr(error, "list_write_col_size_rejected", expect_abort=.true., &
             failure_message="col_size on a list column was expected to be rejected", &
-            required_stderr="does not apply to a list column")
+            required_stderr="declares col_size > 1, which does not apply to a list column")
     end subroutine test_list_write_col_size_rejected_aborts
+
+    !> `col_size: auto` on a list column: the OTHER arm of the same rule, with its own message.
+    !! Paired with test_list_write_col_size_rejected_aborts above, which now pins "col_size > 1" --
+    !! between them the two arms are distinguishable, which neither was on its own.
+    subroutine test_list_col_size_auto_rejected(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_col_size_auto_rejected", expect_abort=.true., &
+            failure_message="col_size: auto on a list column was expected to be rejected", &
+            required_stderr="declares col_size: auto, which does not apply to a list column")
+    end subroutine test_list_col_size_auto_rejected
+
+    !> schema%set_col_size(..., force=.true.) on a list column. The setter reaches no validator, so
+    !! force= used to let a width through and the writer failed later with "array size mismatch",
+    !! naming the caller's data instead of the declaration.
+    subroutine test_list_set_col_size_forced_rejected(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "list_set_col_size_forced_rejected", expect_abort=.true., &
+            failure_message="set_col_size(force=.true.) on a list column was expected to be rejected", &
+            required_stderr="col_size does not apply to list column")
+    end subroutine test_list_set_col_size_forced_rejected
 
     !> qc: min:/max: stays scalar-leaf-only by design; the message says qc: miss: still applies.
     subroutine test_list_write_qc_rejected_aborts(error)
@@ -2274,8 +2302,16 @@ contains
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "map_col_size_rejected", expect_abort=.true., &
             failure_message="col_size on a map column was expected to be rejected", &
-            required_stderr="a map row's entry count comes from the data")
+            required_stderr="declares col_size > 1, which does not apply to a map column")
     end subroutine test_map_col_size_rejected
+
+    !> The map arm of the col_size: auto pair; see test_list_col_size_auto_rejected.
+    subroutine test_map_col_size_auto_rejected(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "map_col_size_auto_rejected", expect_abort=.true., &
+            failure_message="col_size: auto on a map column was expected to be rejected", &
+            required_stderr="declares col_size: auto, which does not apply to a map column")
+    end subroutine test_map_col_size_auto_rejected
 
     subroutine test_map_qc_rejected(error)
         type(error_type), allocatable, intent(out) :: error
@@ -2442,8 +2478,25 @@ contains
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "struct_col_size_rejected", expect_abort=.true., &
             failure_message="col_size: on a struct column was expected to be rejected", &
-            required_stderr="a struct row is one instance and has no width")
+            required_stderr="declares col_size > 1, which does not apply to a struct column")
     end subroutine test_struct_col_size_rejected
+
+    !> The struct arm of the col_size: auto pair; see test_list_col_size_auto_rejected.
+    subroutine test_struct_col_size_auto_rejected(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_col_size_auto_rejected", expect_abort=.true., &
+            failure_message="col_size: auto on a struct column was expected to be rejected", &
+            required_stderr="declares col_size: auto, which does not apply to a struct column")
+    end subroutine test_struct_col_size_auto_rejected
+
+    !> schema%set_col_size on a struct column, without force=: the container refusal runs before
+    !! the "already resolved" guard, so it is this message and not that one that comes back.
+    subroutine test_struct_set_col_size_rejected(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "struct_set_col_size_rejected", expect_abort=.true., &
+            failure_message="set_col_size on a struct column was expected to be rejected", &
+            required_stderr="col_size does not apply to struct column")
+    end subroutine test_struct_set_col_size_rejected
 
     subroutine test_struct_qc_rejected(error)
         type(error_type), allocatable, intent(out) :: error

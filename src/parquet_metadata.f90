@@ -297,6 +297,8 @@ contains
         character(len=:), allocatable, intent(inout) :: errors !! accumulating "...; "-joined message.
         character(len=:), allocatable :: cur_name
         character(len=:), allocatable :: qc_miss_lower !! scratch (lower-cased qc: miss: text).
+        character(len=:), allocatable :: kind_word, size_reason !! scratch (container kind + why col_size cannot apply).
+        logical :: is_container !! whether this field's data_type names a list, map or struct column.
         real(real64) :: qc_bound_value
 
         cur_name = trim(col%name)
@@ -329,60 +331,32 @@ contains
             end if
         end select
 
-        ! A list column's own three rules, all refusals, and all for the same reason: a
-        ! `list[<elemtype>]` column's per-row length comes from the DATA, so there is nothing for
-        ! col_size to declare and nothing for it to be resolved from. qc: min:/max: is refused on
-        ! the same terms as a temporal column's above -- qc stays scalar-leaf-only by design (see
+        ! A CONTAINER column's own three rules, all refusals, and all for the same reason: a
+        ! container's per-row extent comes from the DATA, so there is nothing for col_size to
+        ! declare and nothing for it to be resolved from. qc: min:/max: is refused on the same
+        ! terms as a temporal column's above -- qc stays scalar-leaf-only by design (see
         ! feature_map_list_struct.md), and refusing is what keeps the read and write sides
         ! agreeing, since with no such declaration possible a reader can never be handed one.
-        ! qc: miss: IS supported and applies to ROW nullness (a null list), which is the same
-        ! concept at the same granularity.
-        if (parquet_is_list_data_type(col%data_type)) then
+        ! qc: miss: IS supported and applies to ROW nullness (a null list, an absent map or
+        ! struct instance), which is the same concept at the same granularity.
+        !
+        ! One block for all three kinds rather than three near-identical ones, because
+        ! parquet_container_col_size_rule is also what schema%set_col_size consults: that setter
+        ! writes %cinfo directly and so bypasses this validator entirely, and before it shared
+        ! these words a forced col_size on a container produced a schema this function would have
+        ! rejected and the writer then failed with "array size mismatch", blaming the data.
+        call parquet_container_col_size_rule(col%data_type, is_container, kind_word, size_reason)
+        if (is_container) then
             if (col%col_size == parquet_size_auto) then
                 errors = errors // "field '" // cur_name // "' declares col_size: auto, which does not " // &
-                    "apply to a list column (a list row's length comes from the data); "
+                    "apply to a " // kind_word // " column (" // size_reason // "); "
             else if (col%col_size > 1) then
                 errors = errors // "field '" // cur_name // "' declares col_size > 1, which does not " // &
-                    "apply to a list column (a list row's length comes from the data); "
+                    "apply to a " // kind_word // " column (" // size_reason // "); "
             end if
             if (col%has_qc_min .or. col%has_qc_max) then
                 errors = errors // "field '" // cur_name // "' declares qc: min:/max:, which is not " // &
-                    "supported for a list column (qc: miss: is); "
-            end if
-        end if
-        ! A `map[<valuetype>]` column is subject to exactly the same two rules and for exactly the
-        ! same reasons: a map row's entry count comes from the data, and qc: min:/max: is
-        ! scalar-leaf-only. qc: miss: applies to ROW nullness (a null map), as it does for a list.
-        if (parquet_is_map_data_type(col%data_type)) then
-            if (col%col_size == parquet_size_auto) then
-                errors = errors // "field '" // cur_name // "' declares col_size: auto, which does not " // &
-                    "apply to a map column (a map row's entry count comes from the data); "
-            else if (col%col_size > 1) then
-                errors = errors // "field '" // cur_name // "' declares col_size > 1, which does not " // &
-                    "apply to a map column (a map row's entry count comes from the data); "
-            end if
-            if (col%has_qc_min .or. col%has_qc_max) then
-                errors = errors // "field '" // cur_name // "' declares qc: min:/max:, which is not " // &
-                    "supported for a map column (qc: miss: is); "
-            end if
-        end if
-
-        ! A struct column's own three rules, all refusals, and all for the same reasons the list
-        ! column's are: a struct row is ONE struct instance, so there is no width for col_size or
-        ! array_size to declare, and qc: min:/max: stays scalar-leaf-only by design (see
-        ! feature_map_list_struct.md). qc: miss: IS supported and applies to ROW nullness (an
-        ! absent struct instance), which is the same concept at the same granularity.
-        if (trim(col%data_type) == "struct") then
-            if (col%col_size == parquet_size_auto) then
-                errors = errors // "field '" // cur_name // "' declares col_size: auto, which does not " // &
-                    "apply to a struct column (a struct row is one instance and has no width); "
-            else if (col%col_size > 1) then
-                errors = errors // "field '" // cur_name // "' declares col_size > 1, which does not " // &
-                    "apply to a struct column (a struct row is one instance and has no width); "
-            end if
-            if (col%has_qc_min .or. col%has_qc_max) then
-                errors = errors // "field '" // cur_name // "' declares qc: min:/max:, which is not " // &
-                    "supported for a struct column (qc: miss: is); "
+                    "supported for a " // kind_word // " column (qc: miss: is); "
             end if
         end if
 
@@ -1083,6 +1057,52 @@ contains
         end select
     end procedure parquet_parse_temporal_type
 
+    !> Classifies a data_type token as a container and, when it is one, names the kind and says in
+    !! one clause why `col_size:` cannot apply to it.
+    !!
+    !! **The single source of truth for that refusal**, shared by the two routes into a schema that
+    !! can set a width: parquet_validate_field_rules, which every MAML parse and every %add_field
+    !! call reaches, and parquet_column_info%set_col_size, which writes %cinfo directly and reaches
+    !! no validator at all. Before they shared this, `%set_col_size(name, 5, force=.true.)` on a
+    !! `list[int32]` column was accepted, and the failure surfaced two calls later as
+    !! `parquet_write_column: array size mismatch` -- naming the caller's data, which was correct.
+    !!
+    !! `kind_word` and `reason` are only assigned when `is_container` is .true.; a caller that just
+    !! wants the classification may ignore them.
+    !> Thin forwarder onto parquet_container_col_size_rule for the descendants of this submodule.
+    !!
+    !! **Not redundant.** Calling that module procedure directly from parquet_metadata_base -- two
+    !! levels of submodule nesting below parquet_core, where its interface is declared -- is a
+    !! gfortran 15.2.0 internal compiler error (`Segmentation fault: 11`, no source line), the same
+    !! shape CLAUDE.md records for parquet_parse_protected_cols: a deferred-length allocatable
+    !! character result reached from 2+ levels of nesting. Calling it from THIS level works, so the
+    !! descendants go through here. Remove this only after checking the compiler again.
+    subroutine container_col_size_rule_relay(token, is_container, kind_word, reason)
+        character(len=*), intent(in) :: token !! a field's declared data_type.
+        logical, intent(out) :: is_container !! .true. for a list, map or struct token.
+        character(len=:), allocatable, intent(out) :: kind_word !! "list", "map" or "struct"; "" otherwise.
+        character(len=:), allocatable, intent(out) :: reason !! why a per-row width cannot be declared; "" otherwise.
+        call parquet_container_col_size_rule(token, is_container, kind_word, reason)
+    end subroutine container_col_size_rule_relay
+    !
+    module procedure parquet_container_col_size_rule
+        is_container = .true.
+        if (parquet_is_list_data_type(token)) then
+            kind_word = "list"
+            reason = "a list row's length comes from the data"
+        else if (parquet_is_map_data_type(token)) then
+            kind_word = "map"
+            reason = "a map row's entry count comes from the data"
+        else if (trim(token) == "struct") then
+            kind_word = "struct"
+            reason = "a struct row is one instance and has no width"
+        else
+            is_container = .false.
+            kind_word = ""
+            reason = ""
+        end if
+    end procedure parquet_container_col_size_rule
+    !
     !> Whether `token` is a list data_type token at all -- a cheap test for the callers that only
     !! need to know that much, so they do not have to declare five out-arguments they discard.
     logical function parquet_is_list_data_type(token) result(res)

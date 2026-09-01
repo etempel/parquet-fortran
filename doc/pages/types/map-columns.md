@@ -300,8 +300,21 @@ between map value kinds, exactly as there is none between list element kinds.
 which is valid because a struct's field layout genuinely cannot be expressed in MAML while a map's
 value type is a single token the schema can perfectly well carry.
 
+The other schema keys apply as follows, and the refusals are narrower than "not supported":
+
+- **`col_size:`** — `auto` and any value **above 1** are rejected, since a map row's entry count
+  comes from the data. `col_size: 1` is the default and is accepted, meaning nothing.
+  `schema%set_col_size` refuses a map column outright, on the same terms.
+- **`array_size:`** — `auto` is rejected, as it is for every non-`string` column, and a
+  `map[string]` is not one. A positive value is accepted and never consulted.
+- **`qc: min:`/`max:`** — rejected; quality-control ranges apply to scalar leaves only.
+- **`qc: miss:`** — supported, and applies to row nullness (an absent map).
+
 `parquet_write_column_chunk` writes one row group at a time. A protected column (`protected_cols:`)
 may hold neither a null row nor a null value, and the abort names which level failed.
+
+A `write_maml=.true.` sidecar carries **neither** size key for a map column, even where the source
+MAML declared one: what says the width is per-row is the `data_type:` token.
 
 ## The entry-count ceiling
 

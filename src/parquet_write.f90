@@ -866,7 +866,10 @@ contains
         type(parquet_column_type), intent(in) :: all_columns(:) !! writer's final, fully-resolved column state.
         character(len=:), allocatable :: tline, key, cvalue, field_name, scratch_str, new_text
         character(len=:), allocatable :: new_lines(:)
-        integer :: i, j, k, n, idx_fields, block_start, block_end, col_idx, newlen
+        character(len=:), allocatable :: kind_word, size_reason
+        logical, allocatable :: drop(:)
+        logical :: is_container
+        integer :: i, j, k, n, idx_fields, block_start, block_end, col_idx, newlen, keep
         character(len=32) :: numbuf
 
         if (size(all_columns) == 0) return
@@ -880,6 +883,8 @@ contains
             end if
         end do
         if (idx_fields == 0) return
+
+        allocate(drop(n), source=.false.)
 
         ! Room for the longest possible "  array_size: <10-digit int>" replacement text, so no
         ! rewritten line below is ever truncated by a too-short fixed element length.
@@ -942,6 +947,18 @@ contains
                 end if
 
                 if (col_idx > 0) then
+                    ! A CONTAINER column's two size keys are DROPPED rather than rewritten. Both
+                    ! declare a width that is the same in every row, which is exactly the property
+                    ! a container does not have -- its rows carry their own lengths -- so neither
+                    ! key means anything for one, and a `col_size: 1` a hand-written MAML happens
+                    ! to carry would otherwise be copied into the sidecar and read as a real
+                    ! declaration. Dropping them makes every sidecar this library writes agree
+                    ! with the schema-less parquet_write_table path, which has never emitted
+                    ! either key for a container (parquet_tables_write.f90), so "no col_size: key"
+                    ! is a sound signal to a sidecar reader on both routes rather than only one.
+                    ! See doc/pages/schema/maml-format.md's col_size/array_size callout.
+                    call parquet_container_col_size_rule(all_columns(col_idx)%data_type, &
+                        is_container, kind_word, size_reason)
                     do k = block_start, block_end
                         tline = trim(adjustl(lines(k)))
                         if (k == block_start) then
@@ -952,13 +969,21 @@ contains
                         if (len_trim(key) == 0) cycle
                         call parquet_to_lower(trim(key), scratch_str)
                         if (scratch_str == "col_size") then
-                            write(numbuf, '(I0)') all_columns(col_idx)%col_size
-                            new_text = "  col_size: " // trim(numbuf)
-                            lines(k) = new_text
+                            if (is_container) then
+                                drop(k) = .true.
+                            else
+                                write(numbuf, '(I0)') all_columns(col_idx)%col_size
+                                new_text = "  col_size: " // trim(numbuf)
+                                lines(k) = new_text
+                            end if
                         else if (scratch_str == "array_size") then
-                            write(numbuf, '(I0)') all_columns(col_idx)%array_size
-                            new_text = "  array_size: " // trim(numbuf)
-                            lines(k) = new_text
+                            if (is_container) then
+                                drop(k) = .true.
+                            else
+                                write(numbuf, '(I0)') all_columns(col_idx)%array_size
+                                new_text = "  array_size: " // trim(numbuf)
+                                lines(k) = new_text
+                            end if
                         end if
                     end do
                 end if
@@ -969,6 +994,21 @@ contains
 
             i = i + 1
         end do
+
+        ! Compact out whatever the container rule marked. Done in one pass at the end rather than
+        ! by deleting as we go, because the walk above indexes `lines` by absolute position and
+        ! removing an element underneath it would renumber every block boundary still to come.
+        if (any(drop)) then
+            keep = count(.not. drop)
+            allocate(character(len=len(lines)) :: new_lines(keep))
+            keep = 0
+            do i = 1, n
+                if (drop(i)) cycle
+                keep = keep + 1
+                new_lines(keep) = lines(i)
+            end do
+            call move_alloc(new_lines, lines)
+        end if
     end subroutine parquet_rewrite_resolved_sizes
     !> Writes `lines` to a sidecar .maml file next to `parquet_filename`: the same
     !> path with a trailing ".parquet" replaced by ".maml", or ".maml" appended if

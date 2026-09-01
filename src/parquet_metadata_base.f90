@@ -335,7 +335,7 @@ contains
         ! GCOVR_EXCL_LINE tags below reflect that these are confirmed-dead, not a coverage gap.
         if (present(data_type)) then
             if (allocated(col%data_type)) then
-                data_type = col%data_type
+                call rebuild_declared_data_type(col, data_type)
             else
                 data_type = "" ! GCOVR_EXCL_LINE
             end if
@@ -387,6 +387,88 @@ contains
         end if
     end subroutine fill_field_definition_outputs
 
+    !> Rebuilds the data_type token a caller could feed straight back into %add_field, putting a
+    !! temporal column's unit and UTC flag back into the token they were parsed out of.
+    !!
+    !! **This exists because the stored `data_type` is the canonical BASE form.**
+    !! parquet_parse_maml_lines deliberately splits `timestamp[ns,utc]` into `data_type =
+    !! "timestamp"` plus `time_unit`/`is_utc`, so that nothing downstream needs a second place to
+    !! look for a unit -- see parquet_column_type's own comment. Returning that base form from
+    !! %get_field was therefore a silent LOSS: `%add_field_from` re-declared a bare `timestamp`,
+    !! which resolves to microseconds and non-UTC (parse_temporal_suffix's default), so a copied
+    !! column changed precision and timezone semantics while still validating and still writing.
+    !! The whole point of %get_field is that its output is re-feedable, and this is what makes
+    !! that true for the one type family where it was not.
+    !!
+    !! The unit is always spelled out, even where the original declaration left it implicit --
+    !! exactly as a qc bound always comes back operator-prefixed. Semantically identical, not
+    !! necessarily byte-identical, which is the round-trip contract %get_field already documents.
+    !!
+    !! A container token (`list[timestamp]`, `map[timestamp]`) carries its element's unit in the
+    !! very same two fields a scalar temporal column uses, so the suffix goes INSIDE the brackets
+    !! and one code path serves both.
+    subroutine rebuild_declared_data_type(col, token)
+        type(parquet_column_type), intent(in) :: col       !! source field definition.
+        character(len=:), allocatable, intent(out) :: token !! the re-declarable data_type token.
+        character(len=:), allocatable :: stored, prefix, inner
+        integer :: lb, rb
+
+        stored = col%data_type
+        lb = index(stored, "[")
+        rb = index(stored, "]", back=.true.)
+        if (lb > 1 .and. rb == len(stored) .and. rb > lb + 1) then
+            prefix = stored(1:lb-1)   ! "list" or "map"
+            inner = stored(lb+1:rb-1) ! the element/value base token
+        else
+            prefix = ""
+            inner = stored
+        end if
+
+        ! `date` takes no unit or UTC suffix at all, and every other base token is non-temporal,
+        ! so only these two ever gain one.
+        select case (inner)
+        case ("time")
+            inner = inner // unit_suffix(col%time_unit, .false., col%is_utc)
+        case ("timestamp")
+            inner = inner // unit_suffix(col%time_unit, .true., col%is_utc)
+        end select
+
+        if (len(prefix) > 0) then
+            token = prefix // "[" // inner // "]"
+        else
+            token = inner
+        end if
+    end subroutine rebuild_declared_data_type
+
+    !> The `[unit]`/`[unit,utc]` suffix for one time/timestamp field, or "" when no unit was
+    !! recorded. The inverse of apply_temporal_unit_token (parquet_metadata.f90); keep the two
+    !! spellings in step.
+    !!
+    !! `parquet_unit_seconds` and 0 both fall to the empty default deliberately: no parquet file
+    !! can store a seconds-resolution TIME/TIMESTAMP, so a MAML `time[s]` token is rejected at
+    !! parse time and neither value can reach a parsed column. Emitting nothing leaves the token
+    !! exactly as re-declarable as it was before -- never a token that would be refused.
+    function unit_suffix(time_unit, allow_utc, is_utc) result(sfx)
+        integer, intent(in) :: time_unit  !! the field's parquet_unit_* selector.
+        logical, intent(in) :: allow_utc  !! .true. for timestamp; time carries no timezone.
+        logical, intent(in) :: is_utc     !! the field's UTC-adjusted flag.
+        character(len=:), allocatable :: sfx !! "[us]", "[ns,utc]", or "".
+
+        select case (time_unit)
+        case (parquet_unit_millis)
+            sfx = "[ms"
+        case (parquet_unit_micros)
+            sfx = "[us"
+        case (parquet_unit_nanos)
+            sfx = "[ns"
+        case default
+            sfx = "" ! GCOVR_EXCL_LINE -- unreachable: a parsed time/timestamp field always
+            return   ! GCOVR_EXCL_LINE    carries one of the three units above.
+        end select
+        if (allow_utc .and. is_utc) sfx = sfx // ",utc"
+        sfx = sfx // "]"
+    end function unit_suffix
+
     module procedure set_unavailable
         integer :: idx, i
 
@@ -421,7 +503,8 @@ contains
 
     module procedure set_col_size
         integer :: idx
-        logical :: do_force
+        logical :: do_force, is_container
+        character(len=:), allocatable :: kind_word, size_reason
 
         do_force = .false.
         if (present(force)) do_force = force
@@ -431,6 +514,22 @@ contains
         end if
 
         idx = this%get_column_index(name)
+
+        ! A container column has no width to set, and this is the ONLY place that rule has to be
+        ! restated: %add_field and every MAML parse reach parquet_validate_field_rules, while this
+        ! setter writes %cinfo directly and reaches no validator at all. force=.true. used to lift
+        ! the "already resolved" guard below and let a col_size through, producing a schema
+        ! parquet_validate_maml would have rejected -- which the writer then caught as
+        ! `array size mismatch`, a message naming the caller's data rather than the declaration.
+        ! Both routes take their wording from parquet_container_col_size_rule so they cannot drift.
+        !
+        ! set_array_size needs no such guard: its own string-only check already refuses every
+        ! container, `list[string]` included, since that token is not "string".
+        call container_col_size_rule_relay(this%col(idx)%data_type, is_container, kind_word, size_reason)
+        if (is_container) then
+            error stop "parquet_column_info%set_col_size: col_size does not apply to " // kind_word // &
+                " column '" // trim(name) // "' (" // size_reason // ")"
+        end if
 
         if (this%col(idx)%col_size /= parquet_size_auto .and. .not. do_force) then
             error stop "parquet_column_info%set_col_size: col_size for column '" // trim(name) // &

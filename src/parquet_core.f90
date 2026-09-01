@@ -1615,6 +1615,24 @@ module parquet_core
             logical, intent(out) :: is_map !! .true. if the token names a map column at all.
             logical, intent(out) :: valid !! .true. if it is a well-formed map token.
         end subroutine parquet_parse_map_type
+        !> Classifies a data_type token as a container and, when it is one, names the kind and says
+        !> in one clause why `col_size:` cannot apply to it.
+        !>
+        !> **The single source of truth for that refusal.** Three unrelated places need it and none
+        !> can see the others' copy: parquet_validate_field_rules (every MAML parse and every
+        !> %add_field call), parquet_column_info%set_col_size (which writes %cinfo directly and
+        !> reaches no validator), and parquet_rewrite_resolved_sizes in parquet_write, which drops
+        !> both size keys from a container's sidecar block rather than rewriting them. Declared
+        !> here because the last of those is in a sibling subtree and cannot reach it by host
+        !> association.
+        !>
+        !> `kind_word` and `reason` are assigned "" when the token is not a container.
+        module subroutine parquet_container_col_size_rule(token, is_container, kind_word, reason)
+            character(len=*), intent(in) :: token !! a field's declared data_type.
+            logical, intent(out) :: is_container !! .true. for a list, map or struct token.
+            character(len=:), allocatable, intent(out) :: kind_word !! "list", "map" or "struct"; "" otherwise.
+            character(len=:), allocatable, intent(out) :: reason !! why a per-row width cannot be declared; "" otherwise.
+        end subroutine parquet_container_col_size_rule
         module subroutine parquet_parse_temporal_type(token, base, unit_sel, is_utc, is_temporal, valid)
             character(len=*), intent(in) :: token !! lowercased data_type token.
             character(len=:), allocatable, intent(out) :: base !! base type, or the token itself if non-temporal.

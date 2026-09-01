@@ -51,6 +51,8 @@ contains
             new_unittest("write extensive parquet file", test_write_parquet_file), &
             new_unittest("write simple parquet file", test_write_simple_parquet), &
             new_unittest("write_maml=.true. saves a sidecar .maml file", test_write_maml_sidecar), &
+            new_unittest("a sidecar drops col_size:/array_size: for a container column only", &
+                test_sidecar_drops_container_size_keys), &
             new_unittest("write_maml=.true. does not prune when every column is enabled", &
                 test_write_maml_sidecar_no_pruning_when_all_enabled), &
             new_unittest("write_maml=.true. prunes correctly across blank/comment lines and reordered keys", &
@@ -328,6 +330,79 @@ contains
         call check(error, size(sidecar_schema%metadata%items) == size(schema%metadata%items), &
             "pruning disabled fields should not affect table-level metadata items")
     end subroutine test_write_maml_sidecar
+
+    !> A `write_maml=.true.` sidecar carries neither `col_size:` nor `array_size:` for a CONTAINER
+    !! column, even where the source schema declared them, and keeps both for every other kind.
+    !!
+    !! **The source deliberately declares both keys on the list column**, which is legal --
+    !! `col_size: 1` is the default and a positive `array_size:` is accepted and never consulted --
+    !! because that is the only case where dropping them is observable. A container declared without
+    !! them would produce the same sidecar whether or not the drop exists.
+    !!
+    !! **The vector and string columns are the negative control**, and without them this test would
+    !! pass just as happily against a writer that dropped the two keys from EVERY column, which is
+    !! the failure mode that would matter to a user.
+    !!
+    !! The sidecar's raw lines are what is asserted, not a re-parse: parsing turns an absent
+    !! `col_size:` into the default of 1, so a parsed sidecar cannot tell "no key" from "col_size: 1"
+    !! -- which is the entire distinction under test.
+    subroutine test_sidecar_drops_container_size_keys(error)
+        implicit none
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_schema) :: schema
+        type(parquet_maml_file) :: sidecar
+        type(parquet_list_column) :: lst
+        integer(int32) :: payload(5) = [1_int32, 2_int32, 3_int32, 4_int32, 5_int32]
+        integer(int32) :: vec(4) = [7_int32, 8_int32, 9_int32, 10_int32]
+        character(len=6) :: names(2) = ["alpha ", "beta  "]
+        logical :: in_list_block, saw_vec_col_size, saw_name_array_size, container_key_leaked
+        character(len=:), allocatable :: tline
+        integer :: i
+        character(len=*), parameter :: out_file = "test_run/test_sidecar_container_sizes.parquet"
+        character(len=*), parameter :: sidecar_file = "test_run/test_sidecar_container_sizes.maml"
+
+        call schema%init(table="sidecar_container_sizes")
+        call schema%add_field("lst", "list[int32]", col_size=1, array_size=4)
+        call schema%add_field("vec", "int32", col_size=2)
+        call schema%add_field("nm", "string", array_size=6)
+
+        call lst%init(PK_INT32)
+        call lst%append_row(payload(1:2))
+        call lst%append_row(payload(3:5))
+
+        call parquet_open_writer(writer, out_file, schema, write_maml=.true.)
+        call parquet_write_column(writer, "lst", lst)
+        call parquet_write_column(writer, "vec", reshape(vec, [2, 2]))
+        call parquet_write_column(writer, "nm", names)
+        call parquet_close_writer(writer)
+
+        sidecar = parquet_load_maml_file(sidecar_file)
+
+        in_list_block = .false.
+        container_key_leaked = .false.
+        saw_vec_col_size = .false.
+        saw_name_array_size = .false.
+        do i = 1, size(sidecar%lines)
+            tline = trim(adjustl(sidecar%lines(i)))
+            if (index(tline, "- name:") == 1) in_list_block = index(tline, "lst") > 0
+            if (in_list_block) then
+                if (index(tline, "col_size") > 0 .or. index(tline, "array_size") > 0) &
+                    container_key_leaked = .true.
+            end if
+            if (tline == "col_size: 2") saw_vec_col_size = .true.
+            if (tline == "array_size: 6") saw_name_array_size = .true.
+        end do
+
+        call check(error, .not. container_key_leaked, &
+            "the sidecar should carry no col_size:/array_size: line for the list column")
+        if (allocated(error)) return
+        call check(error, saw_vec_col_size, &
+            "the sidecar should keep 'col_size: 2' for the ordinary vector column")
+        if (allocated(error)) return
+        call check(error, saw_name_array_size, &
+            "the sidecar should keep 'array_size: 6' for the string column")
+    end subroutine test_sidecar_drops_container_size_keys
 
     !> When every column in cinfo stays enabled, nothing should be pruned:
     !> the sidecar should still match the source MAML line-for-line.

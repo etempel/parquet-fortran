@@ -497,8 +497,6 @@ scenarios=(
     "table_cast_exact_i64_to_f64:1"
     "table_cast_f32_fractional:1"
     "table_cast_unsupported_column:1"
-    "container_is_null_element:1"
-    "container_valid_mask_rank2:1"
     "container_sort_key:1"
     "container_bad_list_columns:1"
     "container_print_stat_lengths:0"

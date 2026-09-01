@@ -165,6 +165,38 @@ To write only some rows without changing the table, pass a mask:
 call parquet_write_table(t, "subset.parquet", s, row_mask=keep)
 ```
 
+### Writing a container column
+
+A table column can be a list, a map or a struct — see
+[Container columns in a table](table.html#container-columns-in-a-table) for how one gets there.
+Writing one needs nothing special: `parquet_write_table` emits it like any other column, and the
+only thing to know is which schema token it corresponds to.
+
+| the column holds | the schema field's `data_type` |
+|---|---|
+| `parquet_list_column` | `list[<element>]` — e.g. `list[float64]` |
+| `parquet_map_column` | `map[<value>]` — e.g. `map[int32]`; a map's keys are always strings |
+| `parquet_struct_column` | bare `struct` |
+
+See [the MAML format](../schema/maml-format.html) for the tokens themselves. Four things follow:
+
+- **A schema-less write needs no token from you.** It derives each one from the column, so
+  `parquet_write_table(t, "out.parquet")` on a table holding a list and a map writes them without
+  a schema being written first.
+- **The sidecar does the same.** With `write_maml=.true.` the emitted `.maml` carries
+  `data_type: list[float64]` and its siblings, and carries **no** `col_size:` or `array_size:` key
+  for such a column — neither applies to a container, whose row length is data rather than a
+  declared width.
+- **A payload's temporal resolution is carried across**, so a `list[timestamp[ms]]` column
+  round-trips as milliseconds rather than being coerced to the writer's microsecond default. The
+  table records each container column's payload unit when it opens the file, for the same reason
+  it records a scalar timestamp column's.
+- **A nested container cannot be written.** A table can hold one — `parquet_read_column` reads a
+  `list<struct>` into a `parquet_list_column`, and `%add_column` accepts it — but there is no
+  `data_type` token for it, so the write is refused with a message naming the field and the
+  token it could not accept (`invalid data_type 'list[struct]'`). Such a column can be inspected
+  and not written back.
+
 ## Writing without a schema
 
 For a small or temporary table, the schema is optional:
@@ -274,7 +306,9 @@ Six rules:
   Passing `copy_metadata=.false.` alongside `metadata_keys=` is fine, and carries the listed keys —
   the two are only in conflict when both are asking for something.
 - **A key the schema declares itself wins.** The schema is your explicit statement about the
-  output, so a carried key of the same name is skipped rather than overwriting it.
+  output, so a carried key of the same name is skipped rather than overwriting it. A carried
+  `<name>.datatype` companion is skipped too when the schema declared `<name>` itself, so the
+  output never ends up with two companions describing one key.
 - **A key `metadata_keys=` names but the source file does not have is an error**, checked before
   the output file is opened. Naming a key is a claim that it is there.
 - **A key the writer generates itself is never carried, and naming one is an error.** Those are

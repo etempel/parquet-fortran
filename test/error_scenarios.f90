@@ -2051,10 +2051,6 @@ program error_scenarios
         call scenario_table_cast_exact_precision()
     case ("table_cast_unsupported_column")
         call scenario_table_cast_unsupported_column()
-    case ("container_is_null_element")
-        call scenario_container_is_null_element()
-    case ("container_valid_mask_rank2")
-        call scenario_container_valid_mask_rank2()
     case ("container_sort_key")
         call scenario_container_sort_key()
     case ("container_bad_list_columns")
@@ -16522,32 +16518,6 @@ contains
         call t%cast("m_intkey", PK_FLOAT64)   ! -> aborts
         print '(a,i0)', "unexpectedly cast an unsupported column, ncols=", t%ncols()
     end subroutine scenario_table_cast_unsupported_column
-
-    !> Element-granular nullness has no meaning on a container column: a row is a variable-length
-    !! object, not a fixed row of elements. The ROW form answers, and is asserted by
-    !! test/test_table_container.f90's test_container_row_validity -- which is this scenario's
-    !! negative control, and without it a guard that refused BOTH forms would pass here while
-    !! making a container column's nullness unaskable.
-    subroutine scenario_container_is_null_element()
-        type(parquet_table) :: t
-        logical :: v
-        call parquet_open_table(t, "test/fixtures/list_widths.parquet", list_columns="container")
-        call t%materialize_all()
-        v = t%is_null("ragged", 1_int64, 1_int64)   ! the ELEMENT form -> aborts
-        print '(a,l1)', "unexpectedly asked a container column about one element, v=", v
-    end subroutine scenario_container_is_null_element
-
-    !> The rank-2 `%get_valid_mask` is `(width, nrows)`, and a container column has no fixed width
-    !! for the first axis to have. The rank-1 form answers per ROW, which is the granularity a
-    !! container's nullness actually has; test_container_row_validity is the negative control.
-    subroutine scenario_container_valid_mask_rank2()
-        type(parquet_table) :: t
-        logical, allocatable :: mask(:,:)
-        call parquet_open_table(t, "test/fixtures/list_widths.parquet", list_columns="container")
-        call t%materialize_all()
-        call t%get_valid_mask("ragged", mask)   ! the rank-2 form -> aborts
-        print '(a,i0)', "unexpectedly built a rank-2 mask for a container column, size=", size(mask)
-    end subroutine scenario_container_valid_mask_rank2
 
     !> There is no total order on a list, a map or a struct that this library could have chosen --
     !! and the sort must keep reproducing arrow::compute::SortIndices, which has none for them

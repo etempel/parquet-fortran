@@ -106,8 +106,18 @@ demand, the **first** null written to a null-free column allocates — which is 
 a race on several, so a shared table refuses it. Calling `%ensure_validity` first makes the
 allocation happen up front and lets the concurrent nulling proceed; with no `name` it prepares every
 resident column. A temporal column never needs it, since its null state lives inside each element
-and nulling one allocates nothing. See [Thread
+and nulling one allocates nothing. A [container column](table.html#container-columns-in-a-table)
+**does** need it — its nullness lives inside the container, but the container allocates lazily like
+everything else — so do not read the temporal exception as covering it. See [Thread
 safety](../operating/thread-safety.html) for where this matters.
+
+**On a container column every one of these acts on the whole ROW**, because a list, map or struct
+row is a variable-length object and the table's own descriptor gives it a width of 1. So
+`%is_null(name, i)`, `%set_null(name, i)`, `%clear_null(name, i)` and the rank-1 mask form all mean
+what they say; the element spellings — `%is_null(name, i, e)`, `%set_null(name, i, e)`,
+`%clear_null(name, i, e)`, the rank-2 `(width, nrows)` mask and both column-handle forms — are
+accepted and mean exactly the same thing, since `e` can only be 1. To ask about one element *inside*
+a row, reach the container itself through `%col`.
 
 ## Changing a table
 
@@ -131,6 +141,12 @@ Two of the five are explained on the neighbouring page rather than here, because
 about a column's *type* rather than about mutating a table: `%cast` converts a column to another
 numeric kind in place, and `%copy_column` adds a converted (or plain) copy beside the original —
 see [Changing a column's type](table.html#changing-a-columns-type). The other three are here.
+
+**A [container column](table.html#container-columns-in-a-table) goes through all of this like any
+other**, with two exceptions: it may not be a sort key (see [Sorting](#sorting) below), and `%cast`
+refuses it, since there is no conversion between a list, a map or a struct and anything else.
+`%copy_column` with no target kind copies one, `%clone` carries one, and every row-changing
+operation carries it alongside every other column so the rows stay aligned.
 
 The two simplest of those are worth a sentence each, because both are cheaper than they look:
 
@@ -414,6 +430,10 @@ do i = 1, 1000000
 end do
 call t%compact()             ! give the slack back
 ```
+
+A row-structural mutation rewrites every column, and may do so on several threads;
+[`parquet_set_table_threads(n)`](../operating/settings.html#threads-for-mutating-a-table) caps how
+many it uses.
 
 **Both invalidate every `%col` pointer and row handle into the table**, because both reallocate
 storage without changing the row set — as do `%cast`, `%evict_column` and `%reload`, which replace

@@ -15,9 +15,15 @@
 !! reindex from a row-count-only pass.
 !!
 !! **Every refusal has a negative control beside it.** A guard that fires unconditionally passes
-!! every abort test ever written for it while breaking the case it was meant to allow, so each
-!! refused element-granular query is asserted alongside the ROW-granular form that must still
-!! answer on the same column.
+!! every abort test ever written for it while breaking the case it was meant to allow, so the one
+!! refusal a container column still carries -- it may not be a sort key -- is asserted alongside
+!! the sort by a scalar key that must still work and must still carry the container along.
+!!
+!! **The element-granular forms DELEGATE rather than refuse**, because a container column's
+!! `width` is 1: `%is_null(name, i, e)`, `%clear_null`, `%set_null` (scalar and rank-2 mask forms)
+!! and the two column-handle spellings all mean the row form. Two of those used to abort and two
+!! used to succeed while changing nothing; `test_container_element_forms_delegate` pins all five,
+!! asserting the state before each call as well as after.
 module test_table_container
     use testdrive, only : new_unittest, unittest_type, error_type, check
     use parquet
@@ -37,6 +43,10 @@ module test_table_container
     !! which this library therefore cannot read at all.
     character(len=*), parameter :: MAP_FIXTURE = "test/fixtures/map_payloads.parquet"
 
+    !> The NESTED fixture: a container inside a container, in every combination. Used only by
+    !! `test_nested_list_is_not_a_table_column`, which pins which of those a table can hold.
+    character(len=*), parameter :: NESTED_FIXTURE = "test/fixtures/map_list_types.parquet"
+
 contains
 
     !> Registers every test in this suite.
@@ -44,7 +54,7 @@ contains
         type(unittest_type), allocatable, intent(out) :: testsuite(:) !! the suite's tests.
 
         testsuite = [ &
-            new_unittest("list_columns=container classifies every LIST column as PK_LIST", &
+            new_unittest("list_columns=container classifies a LIST column of an element type as PK_LIST", &
                 test_list_columns_container), &
             new_unittest("list_columns=auto is unchanged, and is the default", test_list_columns_auto), &
             new_unittest("list_columns= leaves a FIXED_SIZE_LIST column alone", test_list_columns_ignores_vectors), &
@@ -68,7 +78,15 @@ contains
             new_unittest("a table round-trips its container columns through a file", &
                 test_container_write_round_trip), &
             new_unittest("a container payload's temporal resolution survives a table write", &
-                test_container_write_keeps_unit) &
+                test_container_write_keeps_unit), &
+            new_unittest("%append_null_rows grows a container column with null rows", &
+                test_container_append_null_rows), &
+            new_unittest("a LIST of containers is not a table column under either token", &
+                test_nested_list_is_not_a_table_column), &
+            new_unittest("%copy_column and %clone carry a container column, independently", &
+                test_container_copy_and_clone), &
+            new_unittest("the element-granular forms delegate to the row form on a container", &
+                test_container_element_forms_delegate) &
             ]
     end subroutine collect_tests_table_container
 
@@ -480,10 +498,11 @@ contains
         if (allocated(error)) return
         call check(error, count(.not. mask) == 1, "with_null holds exactly one null row")
         if (allocated(error)) return
-        ! THE OTHER HALF OF THE NEGATIVE CONTROL, and the one that has teeth for the refusal
-        ! itself: the element forms must still answer on an ORDINARY column in the same table. The
-        ! assertions above only show the refusal does not eat the container's ROW forms; without
-        ! these, a guard rewritten to fire for every column would pass every one of them.
+        ! The element forms must still answer on an ORDINARY column in the same table, shaped by
+        ! that column's real width. This half was written when the container's element forms were
+        ! refused, as the control showing the guard did not fire for every column; it is kept now
+        ! that they delegate, because it is what distinguishes a genuine (width, nrows) mask from
+        ! the degenerate (1, nrows) one a container gets.
         call check(error, .not. t%is_null("scalar", 1_int64, 1_int64), &
             "the ELEMENT form of %is_null still answers on a scalar column")
         if (allocated(error)) return
@@ -668,5 +687,218 @@ contains
         call parquet_open_table(back, out_f, list_columns="container")
         call check(error, back%kind("stamp") == PK_LIST, "and it is still a list column")
     end subroutine test_container_write_keeps_unit
+
+    !> **D1.** `%append_null_rows` is the seventh row-structural mutation and the one
+    !! `test_container_row_alignment` does not reach: that test covers `%sort_by`, `%filter_rows`,
+    !! `%delete_rows`, `%truncate` and `%top_n`, and `test_container_append` covers `%append`.
+    !! `append_nulls` (`src/parquet_columns_structural.f90`) has an explicit container arm, and
+    !! without this nothing asserted that it works.
+    !!
+    !! **Negative control**: the row count and the existing rows are asserted BEFORE the call as
+    !! well as after, so this cannot pass against an implementation that nulled the whole column
+    !! or that grew the scalar column and left the container behind -- the failure a row-count-only
+    !! assertion cannot see.
+    subroutine test_container_append_null_rows(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        type(parquet_table) :: t
+        type(parquet_list_column) :: lc
+        type(parquet_list_column), pointer :: lp
+        integer(int64) :: ids(3)
+        !
+        call lc%init(PK_FLOAT64)
+        call lc%append_row([1.0_real64, 2.0_real64])
+        call lc%append_row([4.0_real64])
+        call lc%append_row([7.0_real64, 8.0_real64, 9.0_real64])
+        ids = [1_int64, 2_int64, 3_int64]
+        call parquet_new_table(t)
+        call t%add_column("id", ids)
+        call t%add_column("spec", lc)
+        ! The control: the state this call must ADD to rather than replace.
+        call check(error, t%nrows() == 3_int64, "the table holds 3 rows before the append")
+        if (allocated(error)) return
+        call check(error, .not. t%is_null("spec", 3_int64), "and row 3 is present before it")
+        if (allocated(error)) return
+        !
+        call t%append_null_rows(2_int64)
+        call check(error, t%nrows() == 5_int64, "%append_null_rows(2) takes the table to 5 rows")
+        if (allocated(error)) return
+        call t%col("spec", lp)
+        call check(error, lp%nrows() == 5_int64, &
+            "and the CONTAINER itself grew too, rather than the scalar column growing alone")
+        if (allocated(error)) return
+        call check(error, t%is_null("spec", 4_int64) .and. t%is_null("spec", 5_int64), &
+            "the two appended rows are null")
+        if (allocated(error)) return
+        call check(error, .not. t%is_null("spec", 3_int64), &
+            "and the rows that were already there are untouched")
+        if (allocated(error)) return
+        call check(error, lp%length(3_int64) == 3_int64, &
+            "row 3 still holds its own three elements")
+        if (allocated(error)) return
+        call check(error, .not. t%is_detached(), &
+            "a table built in memory has no file to detach from")
+    end subroutine test_container_append_null_rows
+
+    !> **D2.** `list_columns="container"` decides from the schema, but NOT for every `LIST`:
+    !! `table_classify` screens the element type with `parquet_column_exists(types=...)`, and
+    !! `parquet_get_column_type` unwraps a list one level -- so `list<struct>` answers `"unknown"`
+    !! there and never reaches the container branch. A `MAP` of the same shape DOES reach it,
+    !! because the map arm uses `parquet_get_map_value_type` instead.
+    !!
+    !! This pins a documented restriction rather than a desirable behaviour
+    !! (`doc/pages/tables/table-open.md`'s `list_columns=` section says so), so that widening it is
+    !! a deliberate act with a failing test to change rather than a silent one.
+    !!
+    !! **Negative control**: `list_col` in the same open is `PK_LIST`, so the token demonstrably
+    !! took effect and this is not passing against an open that ignored it.
+    subroutine test_nested_list_is_not_a_table_column(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        type(parquet_table) :: t
+        !
+        call parquet_open_table(t, NESTED_FIXTURE, list_columns="container")
+        ! The control first: the token took effect on a list this library can classify.
+        call check(error, t%kind("list_col") == PK_LIST, &
+            "list_columns=container did take effect on an ordinary LIST column")
+        if (allocated(error)) return
+        call check(error, t%is_supported("list_col"), "which is therefore supported")
+        if (allocated(error)) return
+        !
+        call check(error, t%kind("list_of_struct") == PK_NONE, &
+            "a LIST whose elements are structs is not classified as a container")
+        if (allocated(error)) return
+        call check(error, .not. t%is_supported("list_of_struct"), "and reports unsupported")
+        if (allocated(error)) return
+        call check(error, t%kind("list_of_list") == PK_NONE .and. t%kind("list_of_map") == PK_NONE, &
+            "nor is a LIST of lists or a LIST of maps")
+        if (allocated(error)) return
+        ! The asymmetry this test exists to record: the MAP arm classifies the same shape.
+        call check(error, t%kind("map_of_struct") == PK_MAP, &
+            "while a MAP whose values are structs IS a container column")
+        if (allocated(error)) return
+        call check(error, t%is_supported("map_of_struct"), "and is supported")
+        if (allocated(error)) return
+        call check(error, t%has_column("list_of_struct"), &
+            "an unreadable container column still gets a slot rather than blocking the open")
+    end subroutine test_nested_list_is_not_a_table_column
+
+    !> **D3.** `%copy_column` with no `to_kind` and `%clone` both claim to carry any column;
+    !! nothing asserted either for a container. Both go through the container's own `clone_into`,
+    !! so a component added to a container type later is carried without this file knowing.
+    !!
+    !! **Negative control**: independence. The copy and the clone are mutated after they are made
+    !! and the source is re-checked, so this cannot pass against a shallow copy that shares the
+    !! container's storage -- which would be the interesting way to get this wrong.
+    subroutine test_container_copy_and_clone(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        type(parquet_table) :: t, c
+        type(parquet_list_column) :: lc
+        type(parquet_list_column), pointer :: lp
+        !
+        call lc%init(PK_FLOAT64)
+        call lc%append_row([1.0_real64, 2.0_real64])
+        call lc%append_null_row()
+        call lc%append_row([7.0_real64])
+        call parquet_new_table(t)
+        call t%add_column("spec", lc)
+        !
+        call t%copy_column("spec", "spec2")
+        call check(error, t%kind("spec2") == PK_LIST, "%copy_column copies a container column")
+        if (allocated(error)) return
+        call check(error, t%ncols() == 2, "leaving the original in place")
+        if (allocated(error)) return
+        call t%col("spec2", lp)
+        call check(error, lp%nrows() == 3_int64 .and. lp%length(1_int64) == 2_int64, &
+            "and the copy holds the same rows")
+        if (allocated(error)) return
+        call check(error, t%is_null("spec2", 2_int64), "including the null one")
+        if (allocated(error)) return
+        !
+        call t%clone(c)
+        call check(error, c%kind("spec") == PK_LIST .and. c%nrows() == 3_int64, &
+            "%clone carries a container column too")
+        if (allocated(error)) return
+        call check(error, c%is_null("spec", 2_int64), "with its nulls")
+        if (allocated(error)) return
+        ! Independence: mutate the clone, then re-check the source.
+        call c%set_null("spec", 1_int64)
+        call check(error, c%is_null("spec", 1_int64), "the clone can be mutated")
+        if (allocated(error)) return
+        call check(error, .not. t%is_null("spec", 1_int64), &
+            "and the source is unaffected -- the two do not share the container's storage")
+        if (allocated(error)) return
+        call t%set_null("spec2", 3_int64)
+        call check(error, .not. t%is_null("spec", 3_int64), &
+            "%copy_column's copy is independent of its source in the same way")
+    end subroutine test_container_copy_and_clone
+
+    !> **D4.** The element-granular forms DELEGATE to the row form on a container column, rather
+    !! than refusing (which two of them used to) or silently doing nothing (which the two mutators
+    !! used to -- they wrote into a bitmap nothing reads for a container kind, so the call reported
+    !! success and changed nothing).
+    !!
+    !! A container column's `width` is 1, so `e` can only ever be 1 and the element axis is
+    !! degenerate rather than absent. The contract this pins is that all five spellings mean the
+    !! same thing as the row form.
+    !!
+    !! **Negative control**: every assertion is made against the state BEFORE the call as well as
+    !! after, so a mutator that changed nothing -- the exact defect this replaced -- fails here.
+    subroutine test_container_element_forms_delegate(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        type(parquet_table) :: t
+        type(parquet_table_col) :: c
+        type(parquet_list_column) :: lc
+        logical, allocatable :: m2(:,:)
+        !
+        call lc%init(PK_FLOAT64)
+        call lc%append_row([1.0_real64, 2.0_real64])
+        call lc%append_row([3.0_real64])
+        call lc%append_row([7.0_real64])
+        call parquet_new_table(t)
+        call t%add_column("spec", lc)
+        !
+        call check(error, .not. t%is_null("spec", 1_int64), "row 1 is present to begin with")
+        if (allocated(error)) return
+        call check(error, .not. t%is_null("spec", 1_int64, 1_int64), &
+            "and the ELEMENT form agrees with the row form rather than aborting")
+        if (allocated(error)) return
+        !
+        call t%set_null("spec", 1_int64, 1_int64)
+        call check(error, t%is_null("spec", 1_int64), &
+            "the element form of %set_null nulls the row -- it used to change nothing at all")
+        if (allocated(error)) return
+        call check(error, t%is_null("spec", 1_int64, 1_int64), &
+            "and the element form of %is_null reports it")
+        if (allocated(error)) return
+        call t%clear_null("spec", 1_int64, 1_int64)
+        call check(error, .not. t%is_null("spec", 1_int64), &
+            "the element form of %clear_null clears it again")
+        if (allocated(error)) return
+        !
+        ! The column handle must agree with the name form; the two disagreed while the name form
+        ! refused and the handle delegated.
+        call t%column("spec", c)
+        call check(error, c%is_null(1_int64, 1_int64) .eqv. t%is_null("spec", 1_int64, 1_int64), &
+            "a column handle's element form agrees with the table's")
+        if (allocated(error)) return
+        call c%set_null(2_int64, 1_int64)
+        call check(error, t%is_null("spec", 2_int64), "a handle's element %set_null nulls the row")
+        if (allocated(error)) return
+        call c%clear_null(2_int64, 1_int64)
+        call check(error, .not. t%is_null("spec", 2_int64), "and its %clear_null clears it")
+        if (allocated(error)) return
+        !
+        ! The rank-2 mask forms, on both halves: the setter used to be a no-op and the getter used
+        ! to abort. width is 1, so the mask is (1, nrows).
+        call t%set_null("spec", reshape([.true., .true., .false.], [1, 3]))
+        call check(error, t%is_null("spec", 3_int64), &
+            "a rank-2 (width, nrows) mask nulls the row it marks invalid")
+        if (allocated(error)) return
+        call t%get_valid_mask("spec", m2)
+        call check(error, size(m2, 1) == 1 .and. size(m2, 2, kind=int64) == t%nrows(), &
+            "and the rank-2 %get_valid_mask answers, shaped (1, nrows)")
+        if (allocated(error)) return
+        call check(error, m2(1, 1) .and. m2(1, 2) .and. .not. m2(1, 3), &
+            "reporting exactly the row that is null")
+    end subroutine test_container_element_forms_delegate
 
 end module test_table_container

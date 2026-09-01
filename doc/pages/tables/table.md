@@ -277,10 +277,12 @@ report or recover for itself. Both take `names` as an array or as one separated 
 neither needs it, since reporting absence is what both are for.
 
 **`%is_supported` answers about the column's TYPE, and for one type that is not the same as "the
-read will succeed".** It reads no data. For everything except a plain `LIST`/`LARGE_LIST` the
-schema settles the question, so the answer does predict the read. A plain `LIST` carries **no
-width in the schema**, though — unlike the `fixed_size_list` this library's own writer emits — so
-whether the column is a usable vector column depends on the *data*:
+read will succeed".** It reads no data. Under the default `list_columns="auto"`, the schema settles
+the question for everything except a plain `LIST`/`LARGE_LIST`, so the answer does predict the read.
+(Opening with [`list_columns="container"`](table-open.html#list_columns-keep-a-list-column-as-a-list)
+settles it from the schema for that type too, and this whole caveat lapses.) A plain `LIST` carries
+**no width in the schema**, though — unlike the `fixed_size_list` this library's own writer emits —
+so whether the column is a usable vector column depends on the *data*:
 
 - a `list<int32>` whose every row holds 3 elements **is** an ordinary vector column of width 3,
   and reads normally;
@@ -311,9 +313,9 @@ changes renumber the slots, so re-derive positions after one rather than holding
 An out-of-range position is an error, and reports through `found=` exactly as a missing name does.
 
 These are metadata queries — they do **not** read a column's values, with the one documented
-exception `%kind`/`%width` already carry (a plain `LIST` column from a non-Arrow writer, whose
-width is a property of the data). Positions address the table's own columns, so they are
-unrelated to the element index within a vector column.
+exception `%kind`/`%width` already carry under the default `list_columns="auto"` (a plain `LIST`
+column from a non-Arrow writer, whose width is a property of the data). Positions address the
+table's own columns, so they are unrelated to the element index within a vector column.
 
 **`found=` is available on the calls that look a column up by name**, and it turns a missing
 column from a hard error into a quiet report: `%kind`, `%width`, `%unit`, `%residency`,
@@ -494,6 +496,11 @@ to discard them**, exactly as for `%evict_column` above. That is deliberate: dis
 is what `%reload` is *for*, but it is a strong enough action to be worth saying rather than
 assuming, and it keeps the two calls under one rule instead of two. On a column you have not
 written into, `%reload` needs no keyword at all.
+
+`%prefetch`'s array form may read the named columns on several threads.
+[`parquet_set_prefetch_threads(n)`](../operating/settings.html#threads-for-reading-a-table) caps
+how many it uses; the gate that decides whether it threads at all is described under
+[Thread safety](../operating/thread-safety.html#what-a-parquet_table-allows-concurrently).
 
 > `t%prefetch` and the reader-level `parquet_prefetch_columns` are different things. The table's
 > reads a column into the table's own store; the reader's warms Arrow's side of the read.
@@ -793,6 +800,10 @@ variable-length object. A string column keeps those forms because a `character` 
 spelling for one cell of it; a list, map or struct row has no such spelling. Reach the container
 through `%col` and ask it about one row directly.
 
+**`%width` answers 1 for a container column**, whatever its rows hold. A row's element count is
+data rather than a declared width, so there is nothing for `%width` to report; ask the container
+itself through `%col`, or read the row-length extremes `%print_stat` prints (below).
+
 Four rules follow from a container carrying its own per-row nullness:
 
 - **No `is_valid=` argument anywhere.** A list's, map's or struct's null rows live inside the
@@ -865,10 +876,10 @@ call t%copy_column("mass", "mass_f32", PK_FLOAT32)   ! adds a column, leaves "ma
 call t%copy_column("mass", "mass_backup")           ! no target kind: a plain copy
 ```
 
-`%copy_column` with no `to_kind` copies **any** column — string, temporal and vector columns
-included — and with one, converts by `%cast`'s rules. It differs in one deliberate way: `exact`
-defaults to `.true.` here, because a copy is usually taken in order to keep something, so a value
-that would not survive the round trip is refused rather than truncated.
+`%copy_column` with no `to_kind` copies **any** column — string, temporal, vector and container
+columns included — and with one, converts by `%cast`'s rules. It differs in one deliberate way:
+`exact` defaults to `.true.` here, because a copy is usually taken in order to keep something, so a
+value that would not survive the round trip is refused rather than truncated.
 
 ## Seeing what a table holds
 

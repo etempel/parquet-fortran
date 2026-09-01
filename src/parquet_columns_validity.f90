@@ -215,10 +215,12 @@ contains
             ! width-1 kind. Falling through to the default arm instead read an unallocated bitmap
             ! and answered .false. for a genuinely null row.
             !
-            ! The TABLE layer refuses %is_null(i, e) on a container column rather than forwarding
-            ! here, and the asymmetry is deliberate: there `e` is the caller asking about the e-th
-            ! element INSIDE the list, which is a question about the container's contents that the
-            ! table cannot answer and must not guess at. See feature_container_phase6.md, Q3.
+            ! The TABLE layer used to refuse %is_null(i, e) on a container column rather than
+            ! forwarding here, on the grounds that `e` was the caller asking about the e-th element
+            ! INSIDE the list. It no longer does: `width` is 1, so `e` can only be 1 and there is
+            ! nothing to guess at, and the refusal disagreed with the column HANDLE's own
+            ! `c%is_null(i, e)`, which always forwarded here. All five element spellings now mean
+            ! the row form. See feature_doc_tables.md's S1/S2.
             res = col%container%is_null_row(i)
         case (PK_NONE)
             ! Unreachable through the public API, exactly as in is_null_row above.
@@ -695,6 +697,19 @@ contains
         case (PK_TIMESTAMP_VEC)
             call col%tsv(e, i)%set_null()
             col%nulls_dirty = .true.
+        case (PK_LIST, PK_MAP, PK_STRUCT)
+            ! Delegated, exactly as `is_null_elem` and `element_validity` already delegate: a
+            ! container column's `width` is 1 (adopt_container fixes it there and says why), so
+            ! check_element above has already restricted `e` to 1 and there is exactly one element
+            ! per row -- which makes this the same operation the row form performs.
+            !
+            ! Falling through to `case default` instead was a SILENT NO-OP: it allocated this
+            ! column's own bitmap and set a bit nothing ever reads for a container kind, because
+            ! is_null_row, is_null_elem and parquet_column_any_null all answer from
+            ! `col%container` instead. The call reported success and changed nothing. That is the
+            ! failure `set_null_row`'s own container arm was added to prevent, and this procedure
+            ! was left behind; see feature_doc_tables.md's S1.
+            call col%container%set_null_row(i)
         case (PK_NONE)
             ! Unreachable through the public API, exactly as in set_null_row above.
             error stop EP//"set_null: column has no kind assigned" ! GCOVR_EXCL_LINE
@@ -771,6 +786,12 @@ contains
             call parquet_string_column_set(col%str, flat, "")
         case (PK_DATE, PK_TIME, PK_TIMESTAMP, PK_DATE_VEC, PK_TIME_VEC, PK_TIMESTAMP_VEC)
             error stop EP//"clear_null: a temporal element becomes valid by writing a value to it"
+        case (PK_LIST, PK_MAP, PK_STRUCT)
+            ! Delegated for the reason `set_null_elem` above gives, and permitted for the reason
+            ! `clear_null_row` gives: a container row can be made present again without writing a
+            ! value, unlike a temporal element. `width` is 1, so `e` can only be 1 and this is the
+            ! row operation. Falling through to `case default` cleared a bit nothing reads.
+            call col%container%clear_null_row(i)
         case (PK_NONE)
             ! Unreachable through the public API, exactly as in clear_null_row above.
             error stop EP//"clear_null: column has no kind assigned" ! GCOVR_EXCL_LINE

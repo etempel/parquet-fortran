@@ -1214,10 +1214,6 @@ contains
                 test_table_cast_f32_fractional_aborts), &
             new_unittest("cast of an unsupported column aborts", &
                 test_table_cast_unsupported_column_aborts), &
-            new_unittest("%is_null's ELEMENT form on a container column aborts", &
-                test_container_is_null_element_aborts), &
-            new_unittest("the rank-2 %get_valid_mask on a container column aborts", &
-                test_container_valid_mask_rank2_aborts), &
             new_unittest("sorting by a container column aborts", &
                 test_container_sort_key_aborts), &
             new_unittest("an unrecognized list_columns= token aborts naming both values", &
@@ -11334,25 +11330,17 @@ contains
             required_stderr="cast: this column's type is not supported by parquet_table")
     end subroutine test_table_cast_unsupported_column_aborts
 
-    !> **The three container refusals (feature_container_phase6.md's D7).** Each has a negative
-    !! control in `test/test_table_container.f90` rather than here, because what has to be shown is
-    !! that the guard did NOT fire on the neighbouring permitted case -- which is an assertion, not
-    !! an abort.
-    subroutine test_container_is_null_element_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-        call check_scenario_exit_status_and_stderr(error, "container_is_null_element", expect_abort=.true., &
-            failure_message="the element form of %is_null on a container column was expected to abort", &
-            required_stderr="PK_LIST is a container kind and this is the element form")
-    end subroutine test_container_is_null_element_aborts
-
-    subroutine test_container_valid_mask_rank2_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-        call check_scenario_exit_status_and_stderr(error, "container_valid_mask_rank2", expect_abort=.true., &
-            failure_message="the rank-2 %get_valid_mask on a container column was expected to abort", &
-            required_stderr="no fixed per-row width for a (width, nrows) mask to have")
-    end subroutine test_container_valid_mask_rank2_aborts
-
-    !> The message must name the KIND, which is what tells this refusal apart from the *_VEC one
+    !> **The one container refusal left.** feature_container_phase6.md's D7 had three; the other
+    !! two -- the element form of `%is_null` and the rank-2 `%get_valid_mask` -- now DELEGATE to
+    !! the row form instead of aborting, because a container column's `width` is 1 and the element
+    !! axis is degenerate rather than absent (feature_doc_tables.md's S1/S2). Their negative
+    !! controls became ordinary assertions in `test/test_table_container.f90`.
+    !!
+    !! This one keeps its negative control there too, for the reason that applies to every
+    !! refusal: what has to be shown is that the guard did NOT fire on the neighbouring permitted
+    !! case, which is an assertion rather than an abort.
+    !!
+    !! The message must name the KIND, which is what tells this refusal apart from the *_VEC one
     !! that shares the guard -- the two have different reasons and different remedies.
     subroutine test_container_sort_key_aborts(error)
         type(error_type), allocatable, intent(out) :: error

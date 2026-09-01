@@ -250,6 +250,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`parquet_get_column_total_elements` reports a variable-length `list` column's element count** —
   the sum of its rows' own lengths — rather than its row count.
+- **Concurrent `parquet_open_reader`/`parquet_open_writer` calls no longer corrupt the heap while a
+  file date is pinned.** Mirroring `parquet_set_file_date` to the C++ side reassigned a
+  process-global `std::string` on every open, so two threads freed the same buffer; the process
+  then aborted elsewhere with glibc's `malloc(): unaligned tcache chunk detected`. Every mirrored
+  setting is now atomic or mutex-guarded.
 - Many other minor fixes and improvements.
 
 ## [2.0.0] - 2026-08-24

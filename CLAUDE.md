@@ -86,6 +86,7 @@ working rules).
     - [C++ side (`src/parquet_wrapper.cpp`) gotchas](#c-side-srcparquet_wrappercpp-gotchas)
   - [NAG's "explicitly imported but not used" warnings: most are FALSE POSITIVES](#nags-explicitly-imported-but-not-used-warnings-most-are-false-positives)
   - [Arrow's own type singletons have thread-unsafe lazy state on first concurrent use](#arrows-own-type-singletons-have-thread-unsafe-lazy-state-on-first-concurrent-use)
+  - [A same-value store to a mirrored setting is still a double free if the setting owns heap](#a-same-value-store-to-a-mirrored-setting-is-still-a-double-free-if-the-setting-owns-heap)
   - [gcovr <7.1 cannot parse gcov output for a 10,000+ line file](#gcovr-71-cannot-parse-gcov-output-for-a-10000-line-file)
   - [gcovr 8.4+ drops coverage for module-contained Fortran subroutines](#gcovr-84-drops-coverage-for-module-contained-fortran-subroutines)
   - [`-fPIC` blocks inlining on ELF](#-fpic-blocks-inlining-on-elf-so-the-same-fortran-can-be-twice-as-slow-on-linux-as-on-macos)
@@ -4015,6 +4016,48 @@ supported type, single-threaded, in the same `std::call_once` block) instead of 
 enumerate individual private caches by name. See
 [Thread safety](doc/pages/operating/thread-safety.md#a-note-on-arrows-own-type-singleton-construction) for
 the user-facing writeup.
+
+### A same-value store to a mirrored setting is still a double free if the setting owns heap
+
+`parquet_push_settings_to_cpp` runs at the top of **every** `parquet_open_reader` and
+`parquet_open_writer`, and one reader per thread is the usage this library documents as supported.
+So every mirrored global in `parquet_wrapper.cpp` is written concurrently, on every open, by an
+ordinary correct program — and it is written with the *same value* each time, because settings are
+configured before any thread exists. That last part is what makes the hazard easy to wave away: a
+same-value store to an `int` races benignly on x86 and nothing ever goes wrong.
+
+**It is not benign for a `std::string`.** `g_file_date = std::string(date)` frees whatever the
+global was holding and adopts the temporary's buffer, so two threads reaching it together read the
+same old pointer and both free it. AddressSanitizer names it exactly — `attempting double-free`,
+with both stacks reading `parquet_push_file_metadata_settings` ← `parquet_push_settings_to_cpp` ←
+`parquet_open_reader_base` from two OpenMP threads. What a *user* sees is nothing like that: glibc
+aborting with `malloc(): unaligned tcache chunk detected` in whatever allocates next, arbitrarily
+far away, in a fraction of runs. Measured in `4most-long-term-scheduler`, which opens one reader
+per HEALPix pixel from an `!$omp parallel do`: **20 of 25 runs aborted at 16 threads, 0 of 25 after
+the fix**, same binary otherwise.
+
+Three things about it are worth carrying forward:
+
+- **It only reproduces when the caller pins a file date longer than 15 characters.** libstdc++
+  keeps a shorter string inside the string object, so a blank or short date never touches the heap.
+  The date a real caller pins is an ISO timestamp (`"2026-01-01T00:00:00"`, 19 characters), which
+  does. This is why the library's own long-standing concurrency tests (`test_openmp`'s
+  `test_read_parallel`, `test_shared_file_read_parallel`, `test_stress_parallel`) never caught it,
+  and why a standalone reproducer that does not pin a date is clean however many threads it runs —
+  a whole investigation was spent concluding "the trigger needs the surrounding process state"
+  when the trigger was one configuration line.
+- **`-fsanitize=address` is the tool, not valgrind and not `-check all`.** memcheck serialises
+  threads, so it does not reproduce this at all; `-check all` changes the layout and the abort rate
+  barely moves. ASan names the defect itself rather than a downstream symptom, and found it on the
+  second run. On ifx, add `-mllvm -asan-globals=0`: ifx's inlined `index()` reads one byte of a
+  zero-length string literal, which is a genuine (harmless) global-buffer-overflow report that
+  fires at startup and hides everything after it.
+- **The fix is per-kind, not one mechanism.** Scalars (`g_verbosity`, `g_message_stream`, the four
+  performance knobs, `g_debug_last_use_threads`) became `std::atomic`, which costs nothing on the
+  hot-path loads. The string pair became mutex-guarded, with the push comparing before assigning so
+  the repeat push every open makes does no allocation at all. **Any future mirrored setting that
+  owns heap needs the same treatment** — and the general rule is that "the value never changes" is
+  not an argument that a store is safe, only that its *result* is.
 
 ### gcovr <7.1 cannot parse gcov output for a 10,000+ line file
 

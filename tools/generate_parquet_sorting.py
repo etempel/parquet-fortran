@@ -1856,8 +1856,8 @@ OK_DOC = ("            logical, intent(out), optional :: ok\n"
           "            !! `.false.` when the population was empty -- every value null (and, for\n"
           "            !! `pf_minmax`, NaN) -- in which case the value arguments were not\n"
           "            !! written and must not be read. `.true.` whenever a value was produced;\n"
-          "            !! partial nullness is not a failure. **Omitting this argument restores\n"
-          "            !! the abort**, so existing callers are unaffected.")
+          "            !! partial nullness is not a failure. **Omitting this argument makes an empty\n"
+          "            !! population abort instead**, which is the other of the two behaviours.")
 SORTED_DOC = ("            logical, intent(in), optional :: assume_sorted\n"
               "            !! .true. skips the O(n) sortedness check. Only pass it for an order you have\n"
               "            !! already established -- searching unsorted input answers with a plausible\n"

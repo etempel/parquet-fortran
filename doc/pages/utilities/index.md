@@ -17,10 +17,11 @@ loop — with the distributions and sampling built on them — spatial neighbour
 coordinate arrays, the HEALPix sphere pixelisation, small text and path helpers, and the two
 generators meant to be copied into your own project.
 
-- [Sorting arrays and columns](sorting.html) — `pf_sort` and `pf_argsort` over eleven element
+- [Sorting, ranking and selection](sorting.html) — `pf_sort` and `pf_argsort` over eleven element
   types, from plain arrays to a `parquet_column`, with multi-key sorts and group boundaries; then
-  selecting without sorting (`pf_partial_sort`, `pf_nth_element`, quantiles), searching a sorted
-  array, distinct values and ranks, extremes, merging, and what threading does and does not change.
+  selecting a few elements without ordering the rest (`pf_partial_sort`, quantiles), searching a
+  sorted array, distinct values and ranks, extremes, merging, and what threading does and does not
+  change.
   Also `parquet_argsort`, the smaller import for `pf_argsort` over the intrinsic types alone.
 - [Array statistics with the `pf_` reduction family](statistics.html) — reductions over plain
   Fortran arrays: what counts as the population (a null, a NaN and a zero weight all leave it, in

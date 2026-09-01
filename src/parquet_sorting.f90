@@ -3634,8 +3634,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine quantile_i32
         !> pf_nth_quantile over a 32-bit integer array, with an int32 index.
         module subroutine quantile_i32_i32(values, quantile, p_value, index, rounding, is_valid, n_null, threads, ok)
@@ -3668,8 +3668,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine quantile_i32_i32
         !> pf_nth_quantile over a 32-bit integer array, with an int64 index.
         module subroutine quantile_i32_i64(values, quantile, p_value, index, rounding, is_valid, n_null, threads, ok)
@@ -3702,8 +3702,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine quantile_i32_i64
         !> pf_nth_quantile over a 64-bit integer array, with no index out-argument.
         module subroutine quantile_i64(values, quantile, p_value, rounding, is_valid, n_null, threads, ok)
@@ -3735,8 +3735,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine quantile_i64
         !> pf_nth_quantile over a 64-bit integer array, with an int32 index.
         module subroutine quantile_i64_i32(values, quantile, p_value, index, rounding, is_valid, n_null, threads, ok)
@@ -3769,8 +3769,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine quantile_i64_i32
         !> pf_nth_quantile over a 64-bit integer array, with an int64 index.
         module subroutine quantile_i64_i64(values, quantile, p_value, index, rounding, is_valid, n_null, threads, ok)
@@ -3803,8 +3803,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine quantile_i64_i64
         !> pf_nth_quantile over a 32-bit real array, with no index out-argument.
         module subroutine quantile_f32(values, quantile, p_value, rounding, is_valid, n_null, threads, ok)
@@ -3836,8 +3836,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine quantile_f32
         !> pf_nth_quantile over a 32-bit real array, with an int32 index.
         module subroutine quantile_f32_i32(values, quantile, p_value, index, rounding, is_valid, n_null, threads, ok)
@@ -3870,8 +3870,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine quantile_f32_i32
         !> pf_nth_quantile over a 32-bit real array, with an int64 index.
         module subroutine quantile_f32_i64(values, quantile, p_value, index, rounding, is_valid, n_null, threads, ok)
@@ -3904,8 +3904,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine quantile_f32_i64
         !> pf_nth_quantile over a 64-bit real array, with no index out-argument.
         module subroutine quantile_f64(values, quantile, p_value, rounding, is_valid, n_null, threads, ok)
@@ -3937,8 +3937,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine quantile_f64
         !> pf_nth_quantile over a 64-bit real array, with an int32 index.
         module subroutine quantile_f64_i32(values, quantile, p_value, index, rounding, is_valid, n_null, threads, ok)
@@ -3971,8 +3971,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine quantile_f64_i32
         !> pf_nth_quantile over a 64-bit real array, with an int64 index.
         module subroutine quantile_f64_i64(values, quantile, p_value, index, rounding, is_valid, n_null, threads, ok)
@@ -4005,8 +4005,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine quantile_f64_i64
         !> pf_nth_quantile over a logical array, with no index out-argument.
         module subroutine quantile_bool(values, quantile, p_value, rounding, is_valid, n_null, threads, ok)
@@ -4038,8 +4038,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine quantile_bool
         !> pf_nth_quantile over a logical array, with an int32 index.
         module subroutine quantile_bool_i32(values, quantile, p_value, index, rounding, is_valid, n_null, threads, ok)
@@ -4072,8 +4072,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine quantile_bool_i32
         !> pf_nth_quantile over a logical array, with an int64 index.
         module subroutine quantile_bool_i64(values, quantile, p_value, index, rounding, is_valid, n_null, threads, ok)
@@ -4106,8 +4106,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine quantile_bool_i64
         !> pf_nth_quantile over a string array, with no index out-argument.
         module subroutine quantile_chr(values, quantile, p_value, rounding, is_valid, n_null, threads, ok)
@@ -4139,8 +4139,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine quantile_chr
         !> pf_nth_quantile over a string array, with an int32 index.
         module subroutine quantile_chr_i32(values, quantile, p_value, index, rounding, is_valid, n_null, threads, ok)
@@ -4173,8 +4173,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine quantile_chr_i32
         !> pf_nth_quantile over a string array, with an int64 index.
         module subroutine quantile_chr_i64(values, quantile, p_value, index, rounding, is_valid, n_null, threads, ok)
@@ -4207,8 +4207,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine quantile_chr_i64
         !> pf_nth_quantile over a date array, with no index out-argument.
         module subroutine quantile_date(values, quantile, p_value, rounding, n_null, threads, ok)
@@ -4239,8 +4239,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine quantile_date
         !> pf_nth_quantile over a date array, with an int32 index.
         module subroutine quantile_date_i32(values, quantile, p_value, index, rounding, n_null, threads, ok)
@@ -4272,8 +4272,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine quantile_date_i32
         !> pf_nth_quantile over a date array, with an int64 index.
         module subroutine quantile_date_i64(values, quantile, p_value, index, rounding, n_null, threads, ok)
@@ -4305,8 +4305,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine quantile_date_i64
         !> pf_nth_quantile over a time array, with no index out-argument.
         module subroutine quantile_time(values, quantile, p_value, rounding, n_null, threads, ok)
@@ -4337,8 +4337,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine quantile_time
         !> pf_nth_quantile over a time array, with an int32 index.
         module subroutine quantile_time_i32(values, quantile, p_value, index, rounding, n_null, threads, ok)
@@ -4370,8 +4370,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine quantile_time_i32
         !> pf_nth_quantile over a time array, with an int64 index.
         module subroutine quantile_time_i64(values, quantile, p_value, index, rounding, n_null, threads, ok)
@@ -4403,8 +4403,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine quantile_time_i64
         !> pf_nth_quantile over a timestamp array, with no index out-argument.
         module subroutine quantile_ts(values, quantile, p_value, rounding, n_null, threads, ok)
@@ -4435,8 +4435,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine quantile_ts
         !> pf_nth_quantile over a timestamp array, with an int32 index.
         module subroutine quantile_ts_i32(values, quantile, p_value, index, rounding, n_null, threads, ok)
@@ -4468,8 +4468,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine quantile_ts_i32
         !> pf_nth_quantile over a timestamp array, with an int64 index.
         module subroutine quantile_ts_i64(values, quantile, p_value, index, rounding, n_null, threads, ok)
@@ -4501,8 +4501,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine quantile_ts_i64
         !> pf_nth_quantile over a packed string column array, with no index out-argument.
         module subroutine quantile_strcol(values, quantile, p_value, rounding, n_null, threads, ok)
@@ -4533,8 +4533,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine quantile_strcol
         !> pf_nth_quantile over a packed string column array, with an int32 index.
         module subroutine quantile_strcol_i32(values, quantile, p_value, index, rounding, n_null, threads, ok)
@@ -4566,8 +4566,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine quantile_strcol_i32
         !> pf_nth_quantile over a packed string column array, with an int64 index.
         module subroutine quantile_strcol_i64(values, quantile, p_value, index, rounding, n_null, threads, ok)
@@ -4599,8 +4599,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine quantile_strcol_i64
     end interface
     !
@@ -6426,8 +6426,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine minmax_i32
         !> pf_minmax over a 64-bit integer array: its smallest and largest value.
         module subroutine minmax_i64(values, vmin, vmax, is_valid, ok)
@@ -6439,8 +6439,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine minmax_i64
         !> pf_minmax over a 32-bit real array: its smallest and largest value.
         module subroutine minmax_f32(values, vmin, vmax, is_valid, ok)
@@ -6452,8 +6452,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine minmax_f32
         !> pf_minmax over a 64-bit real array: its smallest and largest value.
         module subroutine minmax_f64(values, vmin, vmax, is_valid, ok)
@@ -6465,8 +6465,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine minmax_f64
         !> pf_minmax over a string array: its smallest and largest value.
         module subroutine minmax_chr(values, vmin, vmax, is_valid, ok)
@@ -6478,8 +6478,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine minmax_chr
         !> pf_minmax over a date array: its smallest and largest value.
         module subroutine minmax_date(values, vmin, vmax, ok)
@@ -6490,8 +6490,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine minmax_date
         !> pf_minmax over a time array: its smallest and largest value.
         module subroutine minmax_time(values, vmin, vmax, ok)
@@ -6502,8 +6502,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine minmax_time
         !> pf_minmax over a timestamp array: its smallest and largest value.
         module subroutine minmax_ts(values, vmin, vmax, ok)
@@ -6514,8 +6514,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine minmax_ts
         !> pf_minmax over a packed string column array: its smallest and largest value.
         module subroutine minmax_strcol(values, vmin, vmax, ok)
@@ -6526,8 +6526,8 @@ module parquet_sorting
             !! `.false.` when the population was empty -- every value null (and, for
             !! `pf_minmax`, NaN) -- in which case the value arguments were not
             !! written and must not be read. `.true.` whenever a value was produced;
-            !! partial nullness is not a failure. **Omitting this argument restores
-            !! the abort**, so existing callers are unaffected.
+            !! partial nullness is not a failure. **Omitting this argument makes an empty
+            !! population abort instead**, which is the other of the two behaviours.
         end subroutine minmax_strcol
         !> pf_argminmax over a 32-bit integer array, with int32 indices.
         module subroutine argminmax_i32_i32(values, imin, imax, is_valid)

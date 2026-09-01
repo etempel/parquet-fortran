@@ -96,7 +96,7 @@ All 32 pages, in reading order. (This list, each group's own page list and the
 
 **Utilities and code generation**
 
-- [Sorting arrays and columns with `pf_sort`/`pf_argsort`](utilities/sorting.html)
+- [Sorting, ranking and selection](utilities/sorting.html)
 - [Array statistics with the `pf_` reduction family](utilities/statistics.html)
 - [Random numbers and sampling with `pf_random_at`](utilities/random.html)
 - [Spatial neighbour search with `pf_spatial_index`](utilities/spatial.html)

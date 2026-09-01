@@ -223,6 +223,8 @@ contains
                 test_selection_threads_answer), &
             new_unittest("a selection's two routes agree, and both are reachable", &
                 test_selection_routes_agree), &
+            new_unittest("a selection's ordering route really opens a team", &
+                test_selection_ordering_threads), &
             new_unittest("a threaded sort equals the serial one", test_threads_identical), &
             new_unittest("no team is opened one level down, on either arm", test_nested_team_guard), &
             new_unittest("unique and rank take threads too", test_threads_on_derived), &
@@ -5016,12 +5018,20 @@ contains
     !
     ! ---- C++-engine pins ------------------------------------------------------------------
     !
-    ! Every test wrapped below observes a C++-SIDE counter (`engine_comparisons`,
-    ! `parquet_debug_sort_threads_used`, `parquet_debug_sort_merge_threads_used`), which the
-    ! Fortran engine does not populate. Stage 6 made the Fortran engine the default, so each of
-    ! these went from testing something to testing nothing -- and every one of them FAILED loudly
-    ! rather than passing vacuously, because each carries the "this arm must really reach the
-    ! path" control this project requires. That is the controls working exactly as intended.
+    ! Every test wrapped below observes a counter the C++ engine populates and the Fortran one
+    ! does not -- `engine_comparisons` and `parquet_debug_sort_merge_threads_used`. Stage 6 made
+    ! the Fortran engine the default, so each of these went from testing something to testing
+    ! nothing -- and every one of them FAILED loudly rather than passing vacuously, because each
+    ! carries the "this arm must really reach the path" control this project requires. That is the
+    ! controls working exactly as intended.
+    !
+    ! **`parquet_debug_sort_threads_used` is NOT in that class and must not be added to it.**
+    ! `sort_build_permutation_impl` (src/parquet_argsort_engine.f90) sets `dbg_sort_threads_used`
+    ! on every build, so the Fortran engine populates it too -- and its own doc-comment
+    ! (src/parquet_argsort.f90) calls it "the only way a test can see either" of the engine's two
+    ! team decisions. Listing it here once read as though no Fortran-side threading assertion were
+    ! possible, which is the opposite of the truth: `test_selection_ordering_threads` below relies
+    ! on exactly that. See feature_doc_sorting.md's S1.
     !
     ! Pinning is the right fix rather than re-pointing them at Fortran observables, because the
     ! C++ engine still ships and is still user-reachable: `parquet_open_reader(..., sort_by=)`
@@ -5071,6 +5081,103 @@ contains
         call check(error, q_auto == q_one .and. q_auto == q_many, &
             "pf_nth_quantile must give the same value whatever threads= is set to")
     end subroutine test_selection_threads_answer
+    !
+    !
+    !> **A selection's ORDERING route really opens a thread team.** That is what `threads=` means on
+    !! `pf_nth_element` and `pf_nth_quantile` once the array is past `SORT_NTH_ORDER_MIN` and is
+    !! answered by ordering rather than by quickselect -- the claim
+    !! doc/pages/utilities/sorting.md makes under "What threads= reaches in a selection".
+    !!
+    !! **Nothing else covers it, and the obvious candidate cannot.** `test_selection_threads_answer`
+    !! asserts only that the answer is the same at `threads=1`, `4` and auto -- which
+    !! `sort_row_less`'s row-index tiebreaker guarantees whatever the team size, so it would pass
+    !! just as happily against a selection that had stopped threading altogether.
+    !! `test_selection_routes_agree` proves the ordering ROUTE is taken, via the radix pass count,
+    !! and says nothing about a TEAM. `parquet_debug_sort_threads_used` is the only observable that
+    !! can: `sort_build_permutation_impl` (src/parquet_argsort_engine.f90) sets it on every build,
+    !! the Fortran engine included -- see the "C++-engine pins" banner further down, which must not
+    !! be read as saying otherwise.
+    !!
+    !! **The engine team floor has to be forced, and this is the Risk-49 trap.** A team is declined
+    !! below `max(32768, 1024*nt)` rows, which no fixture here reaches, so without
+    !! `parquet_debug_set_sort_engine_min_rows` every arm below runs the same serial code and every
+    !! assertion holds for the wrong reason. Measured while writing this: at 4096 elements
+    !! `threads=4` resolves to **1** until that floor is lowered. `SORT_NTH_ORDER_MIN` is 256, well
+    !! below this fixture, so the ordering route is taken without forcing anything.
+    !!
+    !! **Two controls, and the second deliberately reads a DIFFERENT counter.** `threads=1` on the
+    !! same array must report 1, so the observable tracks the request rather than being a constant.
+    !! The route control asserts the quickselect arm opens no team -- and `dbg_sort_threads_used` is
+    !! NOT zeroed per call, so on that arm it still reports whatever the previous ordering left
+    !! (measured 8). Only the radix pass count has a reset, so that is what the route control reads,
+    !! exactly as `test_selection_routes_agree` does.
+    subroutine test_selection_ordering_threads(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer, parameter :: n = 4096 !! above SORT_NTH_ORDER_MIN, so the ordering route is taken.
+        real(real64) :: v(n)
+        real(real64) :: val                        !! the rank's value; not what this test is about.
+        integer(int64) :: seen_four, seen_one, seen_q !! teams resolved on the three ordering arms.
+        integer(int64) :: npass                    !! radix passes the quickselect arm reached.
+        integer :: i
+        !
+        ! Preconditions, declared rather than assumed: with the team preprocessed out, or on a
+        ! machine where an explicit threads= clamps back to 1, every arm below is the same serial
+        ! code and each assertion passes without testing anything.
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: sort_build_permutation_threaded opens its team " // &
+            "inside #ifdef _OPENMP, so every arm below would resolve to one thread and the " // &
+            "assertions would hold for the wrong reason")
+        return
+#else
+        if (omp_get_num_procs() < 2) then
+            call skip_test(error, "needs at least two processors: resolve_thread_count clamps " // &
+                "an explicit threads= to omp_get_num_procs(), so threads=4 resolves to 1 here")
+            return
+        end if
+#endif
+        do i = 1, n
+            v(i) = real(mod(i * 7919, 5003), real64) * 0.25_real64
+        end do
+        !
+        ! Lowered and restored around the three calls, BEFORE the first assertion: every `check`
+        ! can return early, and a leaked floor would silently rethread every later test here.
+        call parquet_debug_set_sort_engine_min_rows(1_int64)
+        call pf_nth_element(v, 37, val, threads=4)
+        seen_four = parquet_debug_sort_threads_used()
+        call pf_nth_element(v, 37, val, threads=1)
+        seen_one = parquet_debug_sort_threads_used()
+        call pf_nth_quantile(v, 0.5_real64, val, threads=4)
+        seen_q = parquet_debug_sort_threads_used()
+        call parquet_debug_set_sort_engine_min_rows(-1_int64)
+        !
+        call check(error, seen_four == 4_int64, &
+            "pf_nth_element's ordering route must open the team threads= asked for")
+        if (allocated(error)) return
+        ! The control: without it a policy that ignored threads= entirely would pass the line above
+        ! on any machine with four processors.
+        call check(error, seen_one == 1_int64, &
+            "pf_nth_element with threads=1 must report one thread, not whatever the machine has")
+        if (allocated(error)) return
+        call check(error, seen_q == 4_int64, &
+            "pf_nth_quantile's ordering route must open the team threads= asked for")
+        if (allocated(error)) return
+        !
+        ! Route control: forced BELOW the ordering floor the quickselect arm runs, which drives no
+        ! engine build and so no team. It cannot be observed through the thread counter -- that one
+        ! is not zeroed per call and would still read 4 from the arms above -- so the radix pass
+        ! count, which does have a reset, is what says the arm was really reached.
+        call parquet_debug_set_sort_nth_order_min(huge(0_int64))
+        call parquet_debug_set_sort_engine_min_rows(1_int64)
+        call parquet_debug_set_sort_radix_min_rows(2_int64)
+        call parquet_debug_reset_sort_radix_passes()
+        call pf_nth_element(v, 37, val, threads=4)
+        npass = parquet_debug_sort_radix_passes()
+        call parquet_debug_set_sort_radix_min_rows(-1_int64)
+        call parquet_debug_set_sort_engine_min_rows(-1_int64)
+        call parquet_debug_set_sort_nth_order_min(-1_int64)
+        call check(error, npass == 0_int64, &
+            "below the ordering floor a selection must quickselect, reaching no radix pass at all")
+    end subroutine test_selection_ordering_threads
     !
     !
     !> The refinement floor must scale with the team, and must decline a task too small to thread.

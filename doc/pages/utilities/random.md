@@ -1014,5 +1014,5 @@ reproduces the frozen transform, and aborts naming the cause if it does not.
 ## See also
 
 - [Thread safety](../operating/thread-safety.html) — why this module needs no locking at all.
-- [Sorting arrays and columns](sorting.html) — `pf_sort` and friends, the other `pf_`-prefixed
+- [Sorting, ranking and selection](sorting.html) — `pf_sort` and friends, the other `pf_`-prefixed
   utility API.

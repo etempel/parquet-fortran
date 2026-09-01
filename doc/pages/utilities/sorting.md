@@ -1,5 +1,5 @@
 ---
-title: Sorting arrays and columns with pf_sort/pf_argsort
+title: Sorting, ranking and selection
 ---
 
 `parquet_sorting` sorts plain Fortran arrays and this library's own column types. It is also the
@@ -405,7 +405,7 @@ integer key takes a counting-sort path that is already `O(n)` and already fully 
 and full cost the same there.)
 
 **`pf_nth_element` is the exception, and its asymptotics are deliberately not what it does.** An
-`O(n)` selection scan exists and is used on a small array, but above a few hundred elements the
+`O(n)` selection scan exists and is used on a small array, but above a couple of hundred elements the
 procedure orders the array instead and reads off the rank — which is `O(n log n)` on paper and
 *faster* in practice at every size above that floor, by two to four times on a large array. Two
 reasons compound: the ordering engine's radix path never calls the comparator at all, while a
@@ -632,10 +632,13 @@ call pf_minmax(v, vmin, vmax, ok=have_it)  ! returns, with ok = .false.
 `.false.`, `vmin` and `vmax` were not written and must not be read — there is no sentinel that works
 across all nine types, which is why this is a separate argument rather than a magic value.
 
-**`pf_argminmax` takes no `ok` and still aborts**, which is deliberate rather than an omission: `ok`
-exists because no *value* sentinel spans the element types, and an index has one available. Reporting
-rather than aborting there would need its own contract for what `imin`/`imax` come back as, and that
-decision has not been taken. Guard with `count(is_valid)` where an all-null input can reach it.
+**`pf_argminmax` takes no `ok` and aborts instead**, and that asymmetry is settled rather than
+pending. `ok` exists on `pf_minmax` because no *value* sentinel spans the nine element types it
+accepts: there is nothing to put in `vmin` that a caller could tell apart from data. An **index**
+has such a sentinel available — 0, which is not a valid 1-based position, and which this module
+already uses for exactly this purpose in `pf_rank`, where a null ranks 0. So the two halves of the
+pair face different problems, and only one of them needs an extra argument to solve it. Guard with
+`count(is_valid)` where an all-null input can reach it.
 
 ## Merging two sorted arrays
 
@@ -813,6 +816,13 @@ to an unthreaded selection scan on a small one, where the whole call is microsec
 That is not a compromise: ordering is *faster* than selecting here at every size worth threading,
 because the engine's radix path never calls the comparator at all while a selection scan compares
 through an index permutation and takes a cache miss for nearly every comparison.
+
+**"Large" means two different sizes here, and they are far apart.** The switch from selecting to
+ordering happens at a couple of hundred elements; the ordering then opens a *team* only past the
+same minimum-work threshold every sort has — the row in
+[What "auto" means](#what-auto-means) above. So an array of a few thousand is
+ordered rather than selected, and ordered **serially**, however large a `threads=` you pass. That is
+the threshold behaving correctly: below it a team costs more than the work it would share.
 
 So `threads=` helps here in proportion to the *array*, not in proportion to how much you asked for:
 

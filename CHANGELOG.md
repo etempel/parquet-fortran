@@ -234,7 +234,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pf_query_disc_alloc` is about 2x faster; and `pf_ang2pix_ring`/`pf_ang2pix_nest`/`pf_vec2pix_*`
   are 1.1-1.3x faster. Results are unchanged.
 - **`pf_nth_element` and `pf_nth_quantile` are 2.5-3.9x faster on a large array**, and
-  `pf_minmax`/`pf_argminmax` are faster too. A selection above a few hundred elements is now
+  `pf_minmax`/`pf_argminmax` are faster too. A selection above a couple of hundred elements is now
   answered by ordering rather than by quickselecting, which reaches the radix path and the thread
   team. Answers are unchanged. `pf_quantiles`, `pf_median` and `pf_iqr` follow suit and now always
   order.

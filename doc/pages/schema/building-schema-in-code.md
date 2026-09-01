@@ -46,8 +46,8 @@ at all. Calling it anyway is harmless but does nothing.
 
 ### schema%init — starting a schema
 
-**`call schema%init(table [, survey, dataset, version, date, author, description, license,
-maml_version, force])`**
+**`call schema%init(table, [survey], [dataset], [version], [date], [author], [description], [license],
+[maml_version], [force])`**
 
 Starts a fresh schema and sets its top-level metadata. Only `table` is required, and it must be
 non-empty; every other argument is an optional scalar top-level MAML key.
@@ -70,8 +70,8 @@ instance — still have something useful to print.
 
 ### schema%add_field — declaring one column
 
-**`call schema%add_field(name, data_type [, unit, info, ucd, array_size, col_size, qc_min, qc_max,
-qc_miss])`**
+**`call schema%add_field(name, data_type, [unit], [info], [ucd], [array_size], [col_size], [qc_min],
+[qc_max], [qc_miss])`**
 
 Appends one `fields:` entry. `name` and `data_type` are required; `data_type` is one of the
 [supported types](../types/supported-data-types.html), including `date`/`time[unit]`/
@@ -128,12 +128,13 @@ the full min/max/miss enforcement picture on both sides. `qc_miss` may be set on
   — call `%init` again afterward to reuse the variable. Always succeeds, even on an already-blank
   schema (a no-op in that case); in fact `%init(..., force=.true.)` is implemented as `%clear`
   followed by a normal `%init`.
-- **`schema = parquet_schema(table [, survey, dataset, version, date, author, description, license,
-  maml_version])`** — the structure-constructor form of `schema%init`: the same header-key arguments
-  and the same validation, building and returning an initialized schema in one expression instead of
+- **`schema = parquet_schema(table, [survey], [dataset], [version], [date], [author], [description],
+  [license], [maml_version])`** — the structure-constructor form of `schema%init`: the same
+  header-key arguments and the same validation, building and returning an initialized schema in one
+  expression instead of
   declaring the variable and calling `%init` separately. There is no `force=` and no "already
   initialized" abort — the result is always a fresh schema, so there is never anything to reset.
-- **`call schema%set_protected(name [, protected])`** — marks a column Null-protected, the
+- **`call schema%set_protected(name, [protected])`** — marks a column Null-protected, the
   code-level equivalent of listing it under a MAML's `extra: protected_cols:`; `protected` defaults
   to `.true.`, and `.false.` lifts protection. A protected column may hold no Null at all:
   `parquet_write_column` fails with `error stop` on an `is_valid` mask with any `.false.` entry, on
@@ -146,9 +147,10 @@ the full min/max/miss enforcement picture on both sides. `qc_miss` may be set on
   overrides a declaration someone made deliberately. Where the protection came from makes no
   difference: a MAML's `extra: protected_cols:` and an earlier `%set_protected` call in code both
   warn on the way back out. `error stop`s if `name` isn't a declared field.
-- **`call schema%get_field(name [, data_type, unit, info, ucd, array_size, col_size, qc_min, qc_max,
-  qc_miss])`** / **`call schema%get_field(index, name [, ...])`** — reads back an already-parsed
-  field's full definition, the same shape of values `%add_field` accepts; every output beyond the
+- **`call schema%get_field(name, [data_type], [unit], [info], [ucd], [array_size], [col_size], [qc_min],
+  [qc_max], [qc_miss])`** / **`call schema%get_field(index, name, [...])`** — reads back an
+  already-parsed field's full definition, the same shape of values `%add_field` accepts; every
+  output beyond the
   lookup key is optional, so a caller can request only what it needs. The by-`index` form (1-based
   MAML source order, same order `get_num_fields`/`get_field_name` count) additionally returns the
   field's own `name`, since the caller doesn't already know it. `qc_min`/`qc_max` come back as a
@@ -261,7 +263,7 @@ header keys (`table:`, `survey:`, `dataset:`, `version:`, `date:`, `author:`, `d
 `license:`, `MAML_version:` — whichever a real `keyarray:` entry declares, `table:` included) parsed
 by `parquet_parse_maml` (see [How table-level keys become metadata
 entries](maml-format.html#how-table-level-keys-become-metadata-entries) for which MAML key produces
-which entry), and any `schema%add_metadata(key, value [, description] [, warn])` call made
+which entry), and any `schema%add_metadata(key, value, [description], [warn])` call made
 afterward. `add_metadata` is a `generic` over every scalar/array
 `int32`/`int64`/`float32`/`float64`/`logical`/`string` type/kind (`float32`/`float64` also accept an
 optional `fmt` edit descriptor); duplicate keys are never rejected or overwritten — a later
@@ -346,8 +348,9 @@ if `%add_metadata` has not been called.
 
 ## Printing column info with schema%print_schema_info
 
-**`call schema%print_schema_info([unit, filename, prefix, header, table_name, dash_before_header,
-dash_after_header, dash_after_fields, dash_char, allow_uninitialized])`** — writes a fixed-width
+**`call schema%print_schema_info([unit], [filename], [prefix], [header], [table_name],
+[dash_before_header], [dash_after_header], [dash_after_fields], [dash_char],
+[allow_uninitialized])`** — writes a fixed-width
 listing of this schema's *enabled* (`is_set`) columns, one per line, in the order `name unit type
 len ucd info` (`type`/`len` are the header labels for `data_type`/`col_size`; `info` is left
 unpadded so no line carries trailing whitespace). Column widths are computed from the longest value

@@ -132,11 +132,6 @@ Seven traps, all of which have cost a campaign:
   calls for: it dies on `PKG_CONFIG_PATH: unbound variable` at line 11, and oneAPI's own
   `setvars.sh` dies on `OCL_ICD_FILENAMES` even if that were fixed. The diagnostic goes to stderr,
   which `>/dev/null 2>&1` swallows. `set -o pipefail` alone is safe;
-- **`ld.lld` is not on the `PATH` the ifx activation sets, and `-ipo` cannot link this library
-  without it** — it lives in the `compiler/` subdirectory of the oneAPI `bin` the activation adds.
-  Without it the link dies with thousands of undefined `<module>_mp_<proc>_` references. Resolve it
-  relative to the compiler (`"$(dirname "$(command -v ifx)")/compiler/ld.lld"`), and note that a
-  tool gated on `command -v ld.lld` silently declines here;
 - **threads beyond 64 give no meaningful gain**; 64 is the sweet spot.
 
 **B is the only machine that can run UBSan** (`tools/check_random_ubsan.sh`): its gcc-toolset-15

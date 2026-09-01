@@ -1952,9 +1952,9 @@ module parquet_core
         !> necessarily byte-identical to the original input. qc_miss comes back as "Null" or ""
         !> (never "NA", even if that's what was originally declared -- both are equivalent
         !> aliases and the distinction isn't preserved in storage). Error stops if `name` is not
-        !> found. Assumes this column_info reflects the schema's current fields: parquet_parse_maml
-        !> (or, for a from-scratch schema, %init/%add_field followed by parquet_parse_maml) must
-        !> already have run; any %add_field call since the last parse is not yet visible here.
+        !> found. Requires this column_info to be populated: parquet_parse_maml for a schema loaded
+        !> from a file, or -- for a from-scratch schema -- at least one %add_field, which parses
+        !> what it appends and so needs no separate parse step (see schema_sync_appended_lines).
         module subroutine get_field_by_name(this, name, data_type, unit, info, ucd, array_size, col_size, &
                 qc_min, qc_max, qc_miss)
             class(parquet_column_info), intent(in) :: this !! column_info to query.

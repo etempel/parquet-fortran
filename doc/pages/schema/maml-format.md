@@ -32,9 +32,11 @@ description, ...) is given as top-level keys, and column definitions are given a
 unknown section.
 
 **Every MAML key is case-insensitive**, at every level: `Extra:`, `FIELDS:` and `Data_Type:` mean
-exactly what their lowercase spellings mean. Values are not — a column name in `col_map:`, `remap:`
-or `protected_cols:` is data and must match the column exactly. The two fixed-vocabulary values that
-are also matched case-insensitively say so where they are described (`auto`, and `unit: unitless`).
+exactly what their lowercase spellings mean. **A value drawn from a fixed vocabulary is
+case-insensitive too** — a `data_type:` token (`INT32`, `List[Int32]` and `STRUCT` all parse), the
+`auto` width placeholder, `unit: unitless`, `qc: miss:`'s `Null`/`NA`, and `sort:`'s
+`asc`/`desc`/`nulls_first`/`nulls_last`. **A value that is *data* is not**: a column name in
+`col_map:`, `remap:` or `protected_cols:` must match the column exactly.
 
 To attach your own custom metadata not covered by that list, nest it under `extra:` instead, which
 accepts arbitrary structure unvalidated (see [Renaming columns for output with
@@ -141,11 +143,12 @@ Notes on the `fields:` entries:
   `key -> value` entries — read and written through a
   [`parquet_map_column`](../types/map-columns.html). `<valuetype>` is one of the same nine kinds
   `list[...]` accepts (`map[timestamp[ms,utc]]` is a valid declaration) and is **required**: a bare
-  `map` is rejected as an unknown `data_type`. That is a different reason from the bare `list`'s —
-  a map's value type *is* expressible in MAML, so omitting it would be an omission rather than a
-  statement, which is exactly what makes bare `struct` the deliberate exception rather than the
-  pattern. **The token carries no key type**, because map keys are always strings: `map[int32]`
-  means `map<string,int32>`.
+  `map` is rejected as an unknown `data_type`, for the same reason a bare `list` is — a
+  declared-but-unwritten column has to be written with zero rows at close, and that cannot invent a
+  value kind. **Bare `struct` is the exception, and the difference is real**: a struct's field
+  layout cannot be expressed in MAML at all, so there is nothing to leave out, whereas a map's value
+  type is a single token the schema can perfectly well carry. **The token carries no key type**,
+  because map keys are always strings: `map[int32]` means `map<string,int32>`.
   A container value type cannot be declared either: `map[list[int32]]` is rejected as an unknown
   `data_type`, and a map whose values are containers can be read from a file but not written.
   `col_size:` does not apply — `auto` and any value above 1 are rejected, since a map row's entry
@@ -189,7 +192,8 @@ Notes on the `fields:` entries:
 - Run `parquet_validate_maml` on a MAML file to catch structural mistakes before using it to open a
   writer: a missing or empty `table:`, no `fields:` entries at all, a duplicate or empty field name,
   an unrecognized `data_type`, a `col_size:`/`array_size:` that is neither a positive integer nor
-  `auto`, `array_size: auto` on a column that is not `string`, a `qc:` block on a
+  `auto`, `array_size: auto` on a column that is not `string`, a `col_size:` of `auto` or above 1 on
+  a container column, a `qc: min:`/`max:` on a container column, a `qc:` block on a
   `date`/`time`/`timestamp` column, a reversed qc operator (`min:` with `<`, or `max:` with `>`), a
   qc bound that will not convert to the column's own numeric type, an `extra: protected_cols:` name
   that is not a declared column, and any unknown top-level section or field sub-key. It accepts

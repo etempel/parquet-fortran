@@ -774,7 +774,7 @@ answering `PK_LIST`, `PK_MAP` or `PK_STRUCT`. Where they come from is covered in
 does when you ask with `list_columns="container"`, and a struct column is built in memory rather
 than read.
 
-They get **the same five accessors a `parquet_string_column` does, and no others**:
+They get **exactly five accessors, and no others**:
 
 ```fortran
 type(parquet_list_column), pointer :: p
@@ -788,8 +788,9 @@ call h%ref(p)                  ! the same pointer, from a column handle
 ```
 
 `%get_slice`/`%set_slice`, `%get_element`/`%set_element` and a row handle's `%get`/`%set` are
-deliberately **not** offered, for the same reason the packed string store declines them: all three
-address a fixed-width cell, and a container row is a variable-length object. Reach the container
+deliberately **not** offered: all three address a fixed-width cell, and a container row is a
+variable-length object. A string column keeps those forms because a `character` scalar is a
+spelling for one cell of it; a list, map or struct row has no such spelling. Reach the container
 through `%col` and ask it about one row directly.
 
 Four rules follow from a container carrying its own per-row nullness:
@@ -804,9 +805,9 @@ Four rules follow from a container carrying its own per-row nullness:
 - **`%ensure_validity` works**, and is the way to make a container column safe for concurrent
   nulling, exactly as for any other kind.
 - **Row-structural mutations carry a container along.** `%sort_by`, `%filter_rows`, `%delete_rows`,
-  `%truncate`, `%top_n` and `%append` all rebuild it with every other column, so the rows stay
-  aligned. A container column may not be a **sort key**, though — there is no defined order on a
-  list, a map or a struct — so sort by a scalar column and the container follows.
+  `%truncate`, `%top_n`, `%append` and `%append_null_rows` all carry it with every other column, so
+  the rows stay aligned. A container column may not be a **sort key**, though — there is no defined
+  order on a list, a map or a struct — so sort by a scalar column and the container follows.
 
 `%print_stat` has nothing to report as a minimum or maximum VALUE for such a column, so its `min`
 and `max` columns show the **shortest and longest row** instead, counting only rows that are

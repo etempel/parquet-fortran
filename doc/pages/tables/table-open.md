@@ -407,13 +407,14 @@ than its schema, and how a struct's fields are addressed.
 
 A table holds the same column types the rest of the library reads — `int32`, `int64`, `float32`,
 `float64`, `logical`, `string`, `date`, `time` and `timestamp`, each as a scalar column or as a
-fixed-width vector one (18 kinds in all, the `PK_*` constants `%kind` reports) — see
+fixed-width vector one (18 kinds, to which the container kinds below add `PK_LIST`, `PK_MAP` and
+`PK_STRUCT` — together, the `PK_*` constants `%kind` reports) — see
 [Supported data types](../types/supported-data-types.html).
 
-A parquet file may contain a column whose physical type this library cannot read at all — a
-`MAP`, an `INTERVAL`/duration, or a binary column. **Such a column does not stop the file from
-opening.** It gets a slot, so it still appears in `%column_names` and `%has_column`, but it holds
-no values: `%is_supported` reports `.false.`, `%kind` reports `PK_NONE`, and any attempt to read
+A parquet file may contain a column whose physical type this library cannot read at all — an
+`INTERVAL`/duration or a binary column, or a `LIST` whose own elements are a list, a map or a
+struct. **Such a column does not stop the file from opening.** It gets a slot, so it still appears
+in `%column_names` and `%has_column`, but it holds no values: `%is_supported` reports `.false.`, `%kind` reports `PK_NONE`, and any attempt to read
 its values is an error naming the column.
 
 That way one exotic column never makes an otherwise-usable file unopenable.
@@ -484,13 +485,14 @@ existing accessor works on it. When that is not what you want, `list_columns=` s
 call parquet_open_table(t, "from_another_tool.parquet", list_columns="container")
 ```
 
-- **`"auto"`** — the default, and what every earlier release did. A `LIST` column whose rows all
-  hold the same number of elements becomes a vector column of that width; a ragged one is read one
-  row at a time. The width is measured, so it depends on the data and on which rows the table
-  covers.
-- **`"container"`** — every `LIST` column becomes a
+- **`"auto"`** — the default. A `LIST` column whose rows all hold the same number of elements
+  becomes a vector column of that width; a ragged one is read one row at a time. The width is
+  measured, so it depends on the data and on which rows the table covers.
+- **`"container"`** — a `LIST` column whose elements are one of the nine element types becomes a
   [`parquet_list_column`](../types/list-columns.html), decided from the schema alone. Nothing is
-  measured, nothing is data-dependent, and no `%kind` or `%width` call reads anything.
+  measured, nothing is data-dependent, and no `%kind` or `%width` call reads anything. A `LIST` of
+  lists, maps or structs is not a table column under either token — see
+  [Columns this library cannot read](#columns-this-library-cannot-read).
 
 **Choose `"container"` when the column is genuinely a list to your program**, or when you need two
 tables over one file to agree: under `"auto"` a slice covering a uniform stretch of a ragged file
@@ -522,7 +524,7 @@ A `STRUCT` column is different again, and the difference is in the file's own ad
 than here: a table lists a struct's LEAVES under their dotted paths
 (`nested.vals`, and see below), never the struct itself, so a table opened from a file never holds
 a `parquet_struct_column`. Build one with
-[`%add_column`](table-mutate.html) when you want a struct column in a table.
+[`%add_column`](table.html#container-columns-in-a-table) when you want a struct column in a table.
 
 ### Nested struct columns
 

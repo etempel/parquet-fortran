@@ -6,7 +6,7 @@
 ! Regenerate with:  tools/generate_parquet_columns.py
 ! The kind table lives in that script; edit it there, not here.
 !
-!> Type-erased, whole-column value storage shared by `parquet_table` and (later) the
+!> Type-erased, whole-column value storage shared by `parquet_table` and the
 !! list/map/struct container column types.
 !!
 !! `parquet_column` holds the values of ONE column of ONE table: a `PK_*` kind discriminator
@@ -149,9 +149,9 @@ module parquet_columns
     integer, parameter :: PK_DATE_VEC = 17 !! date vector column
     integer, parameter :: PK_TIME_VEC = 18 !! time vector column
     integer, parameter :: PK_TIMESTAMP_VEC = 19 !! timestamp vector column
-    integer, parameter :: PK_LIST = 21 !! reserved for a variable-length list column (feature_map_list_struct.md)
-    integer, parameter :: PK_MAP = 22 !! reserved for a map column (feature_map_list_struct.md)
-    integer, parameter :: PK_STRUCT = 23 !! reserved for a struct column (feature_map_list_struct.md)
+    integer, parameter :: PK_LIST = 21 !! variable-length list column, held as a `parquet_list_column`
+    integer, parameter :: PK_MAP = 22 !! map column, held as a `parquet_map_column`
+    integer, parameter :: PK_STRUCT = 23 !! struct column, held as a `parquet_struct_column`
     !
     !> The abstract face of a CONTAINER column -- `PK_LIST`, `PK_MAP` or `PK_STRUCT`.
     !!

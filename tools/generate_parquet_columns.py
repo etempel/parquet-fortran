@@ -216,9 +216,9 @@ PK_VALUES = [
     ("PK_DATE_VEC", 17, "date vector column"),
     ("PK_TIME_VEC", 18, "time vector column"),
     ("PK_TIMESTAMP_VEC", 19, "timestamp vector column"),
-    ("PK_LIST", 21, "reserved for a variable-length list column (feature_map_list_struct.md)"),
-    ("PK_MAP", 22, "reserved for a map column (feature_map_list_struct.md)"),
-    ("PK_STRUCT", 23, "reserved for a struct column (feature_map_list_struct.md)"),
+    ("PK_LIST", 21, "variable-length list column, held as a `parquet_list_column`"),
+    ("PK_MAP", 22, "map column, held as a `parquet_map_column`"),
+    ("PK_STRUCT", 23, "struct column, held as a `parquet_struct_column`"),
 ]
 
 BANNER = """!===========================================
@@ -466,7 +466,7 @@ def gen_spec():
     o = []
     w = o.append
     w(BANNER)
-    w("""!> Type-erased, whole-column value storage shared by `parquet_table` and (later) the
+    w("""!> Type-erased, whole-column value storage shared by `parquet_table` and the
 !! list/map/struct container column types.
 !!
 !! `parquet_column` holds the values of ONE column of ONE table: a `PK_*` kind discriminator

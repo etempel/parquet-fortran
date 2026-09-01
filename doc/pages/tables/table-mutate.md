@@ -235,6 +235,8 @@ existing order.
 **Any scalar column can be a key** — numeric, logical, string, date, time or timestamp. A vector
 column cannot: there is no defined order on a whole vector row, so naming one is an error, as are
 an empty key list and a `descending=`/`nulls_first=` array whose length does not match the keys.
+A [container column](table.html#container-columns-in-a-table) cannot either, and for the same
+reason — sort by a scalar column and the list, map or struct is carried along with it.
 Every key is validated before a single column is touched, so a rejected `%sort_by` leaves the
 table exactly as it was — and a sort that finds the rows already in the order asked for moves
 nothing and leaves the table attached (see [What "detaching" means](#what-detaching-means)).

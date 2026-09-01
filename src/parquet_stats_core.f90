@@ -891,7 +891,7 @@ contains
     !!
     !!   * **the thread count comes from `resolve_thread_count`** (`parquet_argsort`), which is the
     !!     one place that honours an explicit `threads=`, refuses a nested team where libgomp would
-    !!     deadlock (`feature_risks.md` Risk-104), reads `parquet_sort_threads` for the automatic
+    !!     deadlock (`feature_risks.md` Risk-104), reads `sort_threads` for the automatic
     !!     case and clamps to `omp_get_num_procs()`. The design's settings analysis is explicit that
     !!     this module adds no thread knob of its own: a `parquet_set_stats_threads` would be a
     !!     second answer to a question that already has one.

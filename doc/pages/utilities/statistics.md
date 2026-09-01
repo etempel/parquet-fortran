@@ -35,8 +35,30 @@ call pf_count_valid(mag, n, is_valid=ok, n_null=nn, n_nan=nx)   ! ... and WHY th
 Square brackets in a signature below mark an optional argument.
 
 **`pf_count_valid(values, n, [is_valid], [weights], [skipnan], [n_null], [n_nan])`** answers
-pandas' `Series.count()`: how many elements of `values` are in the population. `n`, `n_null` and
-`n_nan` are all `integer(int64)`.
+pandas' `Series.count()`: how many elements of `values` are in the population.
+
+**`n`, `n_null` and `n_nan` may be `integer(int32)` or `integer(int64)`, and they must all be the
+same.** `n` is required, so its kind selects the form and the two optional counters follow it:
+
+```fortran
+integer(int64) :: n64, null64
+integer(int32) :: n32, null32
+
+call pf_count_valid(mag, n64, n_null=null64)    ! int64 throughout
+call pf_count_valid(mag, n32, n_null=null32)    ! int32 throughout
+```
+
+A **mixed** call — an `int32` `n` beside an `int64` `n_null` — matches neither form and is a
+compile error (*"There is no specific subroutine for the generic"*), not something to discover at
+run time. A count that does not fit an `int32` aborts rather than wrapping to a plausible wrong
+number, so the narrow form is safe on any input it accepts.
+
+**This is the only procedure here with both forms, and the reason is a language rule rather than a
+choice.** A generic's specific procedures must be distinguishable, and two that differ only in the
+kind of an *optional* argument are not — the module is rejected where it is declared. `n` being
+required is what makes the pair possible; every other reduction on this page reports its counts
+through optional arguments alone, so they are `integer(int64)` and a caller wanting a plain
+`INTEGER` converts with `int(...)`.
 
 `n_null` and `n_nan` report *why* elements left, which is the reason to reach for this procedure
 rather than `size(values)`. The three numbers together account for every element except the
@@ -58,7 +80,7 @@ Every reduction on this page — `pf_count_valid`, the moment family, and `pf_st
 | `real(real64)` array | the engine's own type; nothing is copied |
 | `real(real32)` array | widened exactly; a NaN stays a NaN |
 | `integer(int32)` array | widened exactly; no `skipnan`, no `n_nan` |
-| `integer(int64)` array | **exact only below 2**53**; no `skipnan`, no `n_nan` |
+| `integer(int64)` array | **exact only below `2**53`**; no `skipnan`, no `n_nan` |
 | `logical` array | `.true.` is 1 and `.false.` is 0, so the mean is the fraction true |
 | `type(parquet_column)` | scalar numeric kinds only; see below |
 
@@ -109,8 +131,21 @@ call pf_moments(mag, n_valid=nv, mean=m, stddev=sd, skewness=g)   ! all of it, i
 what asking for the most expensive one costs: the population is traversed at most twice however
 many outputs are requested — once to apply the exclusions and close the block sums, once for the
 central moments about the mean — and nothing is computed that was not asked for. Its outputs come
-before the common argument block and are, in order, `n_valid`, `mean`, `variance`, `stddev`, `sem`,
-`skewness`, `kurtosis`, `vsum`, `vmin`, `vmax`.
+before the common argument block and are, in order:
+
+| output | what it is |
+|---|---|
+| `n_valid` | how many elements were in the population — the same number `pf_count_valid` returns |
+| `mean` | the (weighted) mean |
+| `variance` / `stddev` | the variance and its square root, both honouring `ddof` |
+| `sem` | the **standard error of the mean**, `stddev / sqrt(n_eff)` — how precisely the mean itself is determined, not how spread the values are |
+| `skewness` / `kurtosis` | the standardised third and fourth moments |
+| `vsum` | the (weighted) **sum of the values**, `sum(w*x)` |
+| `vmin` / `vmax` | the smallest and largest value in the population |
+
+The last three carry a `v` prefix because `sum`, `min` and `max` are Fortran intrinsics, and an
+argument keyword spelled like one reads badly at a call site. Every formula behind them is under
+[The formulas](#the-formulas) below.
 
 **"At most twice" is exact rather than a hedge, and it is worth knowing which side of it you are
 on.** The second traversal exists only to compute the central moments about the mean, so a call
@@ -118,10 +153,9 @@ that needs none of them does not make it: `pf_sum`, `pf_count_valid` and the ord
 compaction each cost **one** pass, and `pf_moments` asking only for `n_valid`, `vsum`, `vmin` or
 `vmax` costs one too. Everything from `pf_mean` upward costs two, because even the mean is refined
 against the first pass's estimate — see [Accuracy is a documented
-property](#accuracy-is-a-documented-property-not-an-implementation-detail). Measured on a
-2-socket EPYC 9654 at ten million `real64`, one thread, `--profile release`: `pf_sum` 1.37
-ns/element against `pf_mean`'s 2.19, where a bare `s = s + x(i)` loop over the same array is 0.82
-and `pf_count_valid` is 0.76. So if the sum is all you want, ask for the sum.
+property](#accuracy-is-a-documented-property-not-an-implementation-detail). A one-pass call costs
+about what a bare `s = s + x(i)` loop over the same array costs; a two-pass one costs appreciably
+more. So if the sum is all you want, ask for the sum.
 
 Its `ok=` reports whether every output the caller **asked for** came back defined — only the present
 ones are tested, which is the only reading that works here: `vsum` over an empty population is a
@@ -167,10 +201,13 @@ Where the weights are unequal the variance has a genuine ambiguity, because the 
 can be charged against two different counts, so `weight_type` names which you mean:
 
 - **`"reliability"`** (the default) — a weight says the value is that much more precise, as an
-  inverse-variance weight or a membership probability does. `ddof` is charged against Kish's
-  effective size `sum(w)**2 / sum(w**2)`.
-- **`"frequency"`** — a weight of 3 says the value occurred three times. `ddof` is charged against
-  `sum(w)`, and the answer is exactly what you would get by writing the value out three times.
+  inverse-variance weight or a membership probability does. The effective sample size is then
+  Kish's `sum(w)**2 / sum(w**2)`, and the variance divisor is `sum(w) - ddof*sum(w**2)/sum(w)`.
+- **`"frequency"`** — a weight of 3 says the value occurred three times. The effective sample size
+  is `sum(w)`, the variance divisor is `sum(w) - ddof`, and the answer is exactly what you would
+  get by writing the value out three times.
+
+Both are written out, with the higher moments, under [The formulas](#the-formulas) below.
 
 With every weight equal the two agree with each other and with the unweighted answer, which is why
 this only has to be decided once, for data that is actually weighted. An unrecognised token aborts.
@@ -183,13 +220,13 @@ real(real64) :: w(3) = [1.0_real64,  2.0_real64,  1.0_real64]
 real(real64) :: v
 
 call pf_variance(x, v, weights=w)                          ! reliability -- the default
-! -> 3.2   The weighted mean is 12 and sum(w*(x-12)**2) is 8. Kish's effective size
-!          is sum(w)**2/sum(w**2) = 16/6 = 2.667, so ddof=1 leaves 4 - 1*6/4 = 2.5
-!          to divide by: a weight of 2 says "more precise", not "seen twice", and
-!          buys less than one extra independent observation.
+! -> 3.2   The weighted mean is 12 and sum(w*(x-12)**2) is 8. The divisor is
+!          sum(w) - ddof*sum(w**2)/sum(w) = 4 - 1*6/4 = 2.5, and 8/2.5 is 3.2.
+!          A weight of 2 says "more precise", not "seen twice", so it buys less
+!          than one extra independent observation.
 
 call pf_variance(x, v, weights=w, weight_type="frequency")
-! -> 2.6667  ddof=1 charged against sum(w) = 4, so the divisor is 3.
+! -> 2.6667  the divisor is sum(w) - ddof = 4 - 1 = 3, and 8/3 is 2.6667.
 
 call pf_variance([10.0_real64, 12.0_real64, 12.0_real64, 14.0_real64], v)
 ! -> 2.6667  the same number, which is the property that DEFINES the token: a
@@ -227,6 +264,71 @@ rather than something to discover at run time:
 `pf_bucketize` takes `weights` for one reason only: a zero weight has to remove an element there
 too, or the documented `pf_histogram` = `pf_bucketize`-tallied identity would be false whenever the
 histogram is weighted. A weight never changes a bin number.
+
+### The formulas
+
+Every moment on this page is one of these, so a number can be checked by hand rather than guessed
+at. Sums run over the surviving population — after the nulls, the NaNs and the zero weights have
+left it — and `w` is the weight of each element, all `1` when `weights` is absent.
+
+```
+W  = sum(w)                     total weight;  W = n_valid unweighted
+W2 = sum(w**2)                                W2 = n_valid unweighted
+
+mu = sum(w*x) / W                             the weighted mean
+Mk = sum(w*(x - mu)**k)                       the weighted central sums, k = 2, 3, 4
+mk = Mk / W                                   the population central moments
+```
+
+The **effective sample size** is what the degrees of freedom and the higher-moment corrections are
+charged against, and it is the one quantity the two `weight_type` conventions define differently:
+
+```
+n_eff = W                       weight_type="frequency"
+n_eff = W**2 / W2               weight_type="reliability"  (the default; Kish's)
+```
+
+With every weight equal both are exactly `n_valid`, which is why the choice only has to be made for
+data that is actually weighted. The **variance divisor is not `n_eff - ddof`** — it is `W` reduced by
+`ddof` scaled to the convention:
+
+```
+variance = M2 / (W - ddof)                    weight_type="frequency"
+variance = M2 / (W - ddof*W2/W)               weight_type="reliability"
+stddev   = sqrt(variance)
+sem      = stddev / sqrt(n_eff)
+```
+
+Unweighted, both divisors are `n_valid - ddof`, and with `ddof = 1` that is the sample variance.
+A non-positive divisor gives NaN rather than an abort.
+
+The **skewness and kurtosis** are the standardised third and fourth moments, optionally corrected
+for bias. `bias = .false.` is the default and gives the corrected forms:
+
+```
+g1 = m3 / m2**1.5                             skewness, bias=.true.   (scipy's g1)
+G1 = g1 * sqrt(n_eff*(n_eff - 1)) / (n_eff - 2)       bias=.false.    (pandas' G1)
+
+g2 = m4 / m2**2 - 3                           kurtosis, bias=.true.
+G2 = ((n_eff + 1)*g2 + 6) * (n_eff - 1)
+     / ((n_eff - 2)*(n_eff - 3))                      bias=.false.
+```
+
+`excess = .false.` adds `3` back to whichever of the two was computed, so a normal population gives
+`3` instead of `0`. `G1` needs `n_eff > 2` and `G2` needs `n_eff > 3`; below that they are NaN,
+which is the fourth row of the undefined table below.
+
+**`pf_cov` is the same expression over a pair**, with the same two divisors — which is what makes
+`pf_cov(x, x)` equal `pf_variance(x)` bit for bit rather than merely to a tolerance:
+
+```
+Mxy      = sum(w*(x - mux)*(y - muy))
+cov      = Mxy / (W - ddof)          or  Mxy / (W - ddof*W2/W)
+corr     = cov / (sd_x * sd_y)
+```
+
+and in `corr` every `ddof` and both weight conventions cancel, which is why `pf_corr` takes neither
+argument.
 
 ### Accuracy is a documented property, not an implementation detail
 
@@ -285,8 +387,8 @@ reduced by the same serial code and the blocks are combined in index order, so w
 block is not observable in the result.
 
 With no `threads=`, the count comes from the same rule the sorting family uses — the
-`parquet_sort_threads` setting, capped by the processors actually available, and **1 inside a
-caller's own parallel region**, so a per-group loop that is already parallel does not nest teams.
+`sort_threads` setting (`parquet_set_sort_threads`), capped by the processors actually available,
+and **1 inside a caller's own parallel region**, so a per-group loop that is already parallel does not nest teams.
 There is deliberately no separate statistics thread setting; one question has one answer.
 
 Three things worth knowing before reaching for `threads=`:
@@ -302,17 +404,15 @@ Three things worth knowing before reaching for `threads=`:
 - **Where the survivors live decides what a team is worth**, and on a large machine it decides it
   more than the thread count does. Pass one is serial, so on entry the population is hot in
   whichever cache the calling thread owns; a team drawn from cores that share that cache reads it
-  there, and a team spread wider drags the whole population across the machine first. Measured on
-  a 2-socket EPYC (8 cores per L3), the same four-thread team returned 1.13x inside one L3 and
-  0.25x spread across eight. If you are pinning threads for other reasons, keeping a team inside
-  one cache domain is worth more here than making it bigger.
+  there, and a team spread wider drags the whole population across the machine first. The same
+  team of a few threads can be a small gain inside one cache domain and a substantial **loss**
+  spread across several. If you are pinning threads for other reasons, keeping a team inside one
+  cache domain is worth more here than making it bigger.
 - **The shape of the call matters more than the thread count**, for anything but a plain array,
   and by a wide margin. Both `weights=` and `is_valid=` leave the fast path, which forces the
-  population to be compacted into a buffer instead of being read where it lies. Measured on the
-  same machine at ten million elements, one thread, against a plain `pf_variance` at 2.21
-  ns/element: `is_valid=` costs 6.25, `skipnan=.false.` 6.19 and `weights=` 10.41 — roughly three
-  to five times the plain call, where threading the second pass returns well under two. Threading
-  does not
+  population to be compacted into a buffer instead of being read where it lies. Each of
+  `is_valid=`, `skipnan=.false.` and `weights=` costs several times what the plain call costs,
+  where threading the second pass returns well under two. Threading does not
   recover that, and on the compacting shapes a wide team can make it worse rather than better,
   for the cache reason above. If a mask is mostly true and you are calling in a loop, compacting
   once yourself and reducing the plain array is worth measuring.
@@ -355,12 +455,16 @@ spreadsheet, numpy or pandas would give, use `pf_median`.
 
 `method=` takes numpy's own spellings, so a cross-check is name for name:
 
+With the survivors sorted ascending as `x(1..m)`, every token resolves the same **position** and
+differs only in what it does with the fraction. Hyndman–Fan type 7 puts the answer at zero-based
+rank `g = p*(m - 1)`, so `lo = floor(g) + 1`, `hi = min(lo + 1, m)` and `t = g - (lo - 1)`:
+
 | token | rule |
 |---|---|
-| `"linear"` (default) | linear interpolation between the bracketing order statistics — Hyndman–Fan type 7, numpy's and pandas' default |
-| `"lower"` / `"higher"` | the order statistic below / above |
-| `"nearest"` | the nearer one; an exact tie goes to the even lower index, as numpy does |
-| `"midpoint"` | the mean of the two |
+| `"linear"` (default) | `x(lo) + t*(x(hi) - x(lo))` — linear interpolation between the bracketing order statistics, Hyndman–Fan type 7, numpy's and pandas' default |
+| `"lower"` / `"higher"` | `x(lo)` / `x(hi)` — the order statistic below / above |
+| `"nearest"` | `x(lo)` when `t < 0.5` and `x(hi)` when `t > 0.5`; an exact tie goes to the even zero-based index, as numpy does |
+| `"midpoint"` | `(x(lo) + x(hi))/2` |
 | `"inverted_cdf"` | the smallest value whose cumulative share reaches `p` — a step function, and the only token numpy itself accepts weights with |
 
 Every unweighted method is checked against `np.quantile` at seven probabilities by
@@ -425,9 +529,20 @@ not continuously. `prop` must satisfy `0 <= prop < 0.5`; anything else aborts.
 
 `pf_percentile_of_score(values, score, p)` is the loose inverse of `pf_quantile`: it answers where a
 value sits rather than what value sits somewhere, on a 0–1 scale. `kind=` picks how a value exactly
-equal to `score` counts — `"rank"` (the default, scipy's too), `"weak"`, `"strict"` or `"mean"`. A
-NaN or infinite `score` **aborts**: unlike a NaN in the population, which is an ordinary data
-condition, a NaN score can only come from the caller's own arithmetic.
+equal to `score` counts. Writing `b` for the total weight strictly below `score`, `e` for the total
+weight exactly equal to it and `W` for the whole population's:
+
+| `kind=` | share returned |
+|---|---|
+| `"rank"` (the default, scipy's too) | `(b + e/2 + W/(2m)) / W` when anything ties, and `b/W` when nothing does |
+| `"weak"` | `(b + e) / W` |
+| `"strict"` | `b / W` |
+| `"mean"` | `(b + e/2) / W` — the mean of `"weak"` and `"strict"` |
+
+`m` there is the number of surviving elements. With no ties `"rank"`, `"weak"` and `"strict"` all
+give `b/W` and the choice does not arise. A NaN or infinite `score` **aborts**: unlike a NaN in the
+population, which is an ordinary data condition, a NaN score can only come from the caller's own
+arithmetic.
 
 ## `pf_mad` — the median absolute deviation
 
@@ -441,11 +556,12 @@ call pf_mad(mag, spread, scale="raw")       ! the unscaled median deviation
 call pf_mad(mag, spread, center=0.0_real64) ! deviations about a centre you supply
 ```
 
-`scale="normal"` (the default) divides by `Phi^-1(3/4)`, which is scipy's
+`scale="normal"` (the default) multiplies by `1/Phi^-1(3/4)`, which is scipy's
 `median_abs_deviation(scale='normal')` and what an astronomy script means by "the MAD". Note the
-constant: it is a division by `0.6744897501960817`, and **not** a multiplication by the rounded
-`1.4826` most textbooks quote — those differ by about 1.5e-06 relative, which is far above the
-double-precision noise floor and is enough to fail a comparison against scipy.
+constant: it is a multiplication by `1.482602218505602`, and **not** by the rounded `1.4826` most
+textbooks quote — those differ by about 1.5e-06 relative, which is far above the double-precision
+noise floor and is enough to fail a comparison against scipy. The same multiplier scales
+`stdfunc="mad_std"` inside `pf_sigma_clipped_stats`, so the two agree bit for bit.
 
 Three rules to know:
 
@@ -922,8 +1038,10 @@ population is a no-op — which is what lets a threaded fold run over slots a sh
 
 ### The queries
 
-`%n`, `%n_valid`, `%n_null` and `%n_nan` return `integer(int64)`; everything else returns
-`real(real64)`. `%is_computed` and `%retains` return a `logical`.
+`%n`, `%n_valid`, `%n_null` and `%n_nan` return `integer(int64)`, and every other *value* query
+returns `real(real64)`. The four state predicates — `%is_computed`, `%retains`, `%is_ordered` and
+`%has_deviation` — return a `logical`, and `%quantiles`, `%print`, `%prepare_order`,
+`%release_order` and `%clear` are subroutines rather than functions.
 
 | group | bindings |
 |---|---|
@@ -953,8 +1071,10 @@ per element to every population that never asks for one. Both answer exactly wha
 `pf_gmean`/`pf_hmean` would over the same population, including the domain rules: NaN for a
 negative value anywhere, and exactly `0` when any value is `0`.
 
-A query may complete a deferred recomputation, so each takes the object as `intent(inout)`: a
-`pf_stats` passed as `intent(in)` cannot be queried. **Reading a statistic off an object that was
+A query may complete a deferred recomputation, so every query but two takes the object as
+`intent(inout)`: a `pf_stats` passed as `intent(in)` cannot be asked for a statistic. The two
+exceptions are `%is_ordered()` and `%has_deviation()`, which report what the object already holds
+and therefore compute nothing. **Reading a statistic off an object that was
 never `%compute`d or `%init`ed aborts** — that is a forgotten call, not a data condition, and
 answering NaN would hide it.
 
@@ -965,10 +1085,10 @@ Every reduction in this module removes the same three classes of element, in the
 per procedure.
 
 - **A null is excluded.** `is_valid(i)` being `.false.` marks element `i` as null, and an absent
-  `is_valid` means there are no nulls. This matches pandas, and it matches `pf_nth_quantile`, which
-  has always excluded nulls from the population it works over.
-- **A NaN is excluded too**, by default, on the kinds that can hold one. This is the same choice
-  `pf_minmax` has always made, so two reductions in one program agree about what the population is.
+  `is_valid` means there are no nulls. This matches pandas, and it matches `pf_nth_quantile`,
+  which excludes nulls from the population it works over.
+- **A NaN is excluded too**, by default, on the kinds that can hold one. `pf_minmax` makes the same
+  choice, so two reductions in one program agree about what the population is.
   It is *not* what plain `numpy.mean` does — numpy propagates a NaN and offers `nanmean` separately
   — so `skipnan=.false.` is there for a caller who wants that behaviour.
 - **A zero weight removes the element.** `weights` is a `real(real64)` array, one per element, and
@@ -996,15 +1116,18 @@ What does abort is a call that cannot be honoured:
 - `is_valid` or `weights` whose size does not match `values`;
 - a weight that is negative, NaN or infinite — a weight can be zero, but none of those three can be
   meant, and failing at the weight is far more useful than a NaN appearing three steps downstream;
-- an unrecognised token: a `method=`, a `kind=` or a `scale=` this module does not know, each
-  aborting with the accepted set named;
+- an unrecognised token in any of the six token arguments — `method=`, `kind=`, `scale=`,
+  `weight_type=`, `cenfunc=` or `stdfunc=` — each aborting with the accepted set named;
 - a probability outside `[0, 1]`, a `prop` outside `[0, 0.5)`, or a `probs`/`out` size mismatch;
 - a NaN or infinite `score` or `center` — the two arguments a caller computes rather than measures;
 - an order statistic asked of a `retain = .false.` accumulator, which kept no values to order;
 - `is_valid=` passed beside a `parquet_column` or a `parquet_string_column`, both of which carry
   their own validity: two sources of truth that can disagree is not something to resolve silently;
-- an `out`, `out_valid`, `codes` or `counts` array of the wrong size — note `counts` holds one
-  entry per **bin**, so one fewer than the number of edges;
+- an `out`, `z`, `out_valid`, `codes`, `counts` or `keep` array of the wrong size — note `counts`
+  holds one entry per **bin**, so one fewer than the number of edges;
+- two samples of different lengths on `pf_cov` or `pf_corr`, which have no pairs to correlate;
+- a `sigma`, `sigma_lower` or `sigma_upper` that is negative or a NaN — a clip width a caller can
+  only have got wrong, unlike the data conditions above it;
 - an `edges` array holding fewer than two entries, a NaN, or a pair that is not strictly
   increasing. A value *outside* the edges is a data condition and is reported, not an abort;
 - an `nbins` below 1, or an `edges` array that is not exactly `nbins + 1` long, on `pf_bin_edges`.
@@ -1019,11 +1142,13 @@ is_valid, weights, weight_type, ddof, bias, excess, skipnan,
 method, kind, scale, center, out_valid, n_null, n_nan, n_outside, ok, threads
 ```
 
-Three short blocks sit either side of it and are part of the same sequence: an *output* prefix,
-which `pf_moments` and `pf_mode` declare before the inputs (`pf_mode`'s `count` is one of these);
-the rule block `sigma, sigma_lower, sigma_upper, maxiters, cenfunc, stdfunc, n_clipped, keep,
-converged, right, density`, whose entries say what the operation IS and are taken by
-`pf_sigma_clipped_stats` and the binning pair; and the `unit`/`name` pair, which only `%print`
+Four short blocks sit either side of it and are part of the same sequence: an *output* prefix
+`n_valid, mean, variance, stddev, sem, skewness, kurtosis, vsum, vmin, vmax, count, modes`, which
+`pf_moments` and `pf_mode` declare before the inputs (`pf_mode`'s `count` and `modes` are its two);
+the object-lifecycle pair `retain, consume`, which only `pf_stats`' own `%compute`, `%init` and
+`%merge` take; the rule block `sigma, sigma_lower, sigma_upper, maxiters, cenfunc, stdfunc,
+n_clipped, keep, converged, right, density`, whose entries say what the operation IS and are taken
+by `pf_sigma_clipped_stats` and the binning pair; and the `unit`/`name` pair, which only `%print`
 takes. A block used by one procedure is not a contradiction — every other procedure omits
 it, and omission is exactly what a subsequence permits.
 
@@ -1055,7 +1180,10 @@ with — but it is the one thing to check when moving a call between the two.
 
 ## What it costs to import
 
-`use parquet_stats` compiles this module plus `parquet_sorting`'s files, and reaches no C++ at all.
+`use parquet_stats` compiles this module plus `parquet_sorting`'s files — 27 of this library's
+Fortran files — and its Fortran graph never reaches the Parquet C++ bindings. That is narrower than
+"no C++": `link` is a package-level key in `fpm.toml`, so the C++ wrapper is still compiled and
+Arrow still linked whichever module you import. No `use` statement makes the *package* Arrow-free.
 The statistics that need an order take it from `pf_argsort` and `pf_nth_element` rather than
 carrying a second sorting implementation. See [Choosing a module](../operating/choosing-a-module.html)
 for the measured figure and for what every other import costs.

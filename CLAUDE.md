@@ -983,7 +983,16 @@ declared), and `src/parquet_tables.f90`, `src/parquet_tables_access.f90`,
 imports the nine SCALAR rows of that same kind table
 and adds the three types that are not `parquet_column` storage kinds at all), and
 `src/parquet_ziggurat.f90` (from `tools/generate_parquet_ziggurat.py`, whose 771 constants are the
-unique solution of one equation rather than a table anyone chose — see its `--self-test`). `src/parquet_table_example.f90` is emitted by
+unique solution of one equation rather than a table anyone chose — see its `--self-test`), and
+`src/parquet_stats.f90` and `src/parquet_stats_kernel.f90` (from `tools/generate_parquet_stats.py`,
+which imports that same kind table). **`src/parquet_stats.f90` is by some way the largest generated
+file here**, and the stats family sets a trap the others do not: only those TWO of its six files are
+generated. `parquet_stats_bin.f90`, `_core.f90` and `_order.f90` are hand-written *bodies* against
+that generated *spec* and each says so on line 5 ("NOT a generated file"), while
+`parquet_stats_relate.f90` carries no such line at all — so a signature change is a generator edit,
+a body change is not, and which file you are in does not tell you which. Read the banner every
+time; this list is exactly the thing that goes stale.
+`src/parquet_table_example.f90` is emitted by
 `tools/generate_user_table_code.py` from `table_types/maml_example4.maml` (see "Role-A MAMLs live in
 `table_types/`" below) — it ships as a worked example and nothing else in the library uses it, but it
 is committed and `--check`ed exactly like the rest. **`src/parquet_tables.f90` is

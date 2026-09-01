@@ -98,16 +98,25 @@ submodule (parquet_stats) parquet_stats_order
     !> Test-only override for `QUANTILE_SORT_MIN`; negative means the shipped value applies.
     integer(int64), save :: dbg_quantile_sort_min = -1_int64
 
-    !> `Phi^-1(3/4)`, the third quartile of the standard normal. `pf_mad`'s "normal" scale DIVIDES
-    !! by it, which is what makes the median absolute deviation a consistent estimator of the
-    !! standard deviation for Gaussian data.
+    !> `1/Phi^-1(3/4)`, where `Phi^-1(3/4) = 0.6744897501960817` is the third quartile of the
+    !! standard normal. `pf_mad`'s "normal" scale MULTIPLIES by this, which is what makes the median
+    !! absolute deviation a consistent estimator of the standard deviation for Gaussian data.
     !!
-    !! **Spelled as scipy spells it -- a division by this, not a multiplication by 1.4826.** The
-    !! rounded 1.4826 that every textbook quotes differs from `1/Phi^-1(3/4)` by 1.5e-06 relative,
-    !! which is four million times the double-precision noise floor and showed up immediately as a
-    !! cross-check failure against `scipy.stats.median_abs_deviation`. Matching scipy exactly is
-    !! the whole reason this token is called "normal".
-    real(real64), parameter :: MAD_NORMAL_DENOM = 0.6744897501960817_real64
+    !! **Full precision, not the rounded 1.4826 every textbook quotes.** The two differ by 1.5e-06
+    !! relative, which is four million times the double-precision noise floor and showed up
+    !! immediately as a cross-check failure against `scipy.stats.median_abs_deviation`. Matching
+    !! scipy exactly is the whole reason this token is called "normal".
+    !!
+    !! **One constant, applied ONE way, and that is the point of it being a multiplier.** Both
+    !! scalings in this file go through it: `resolve_mad_scale`, behind `pf_mad`/`%mad`, and
+    !! `slice_mad_std`, behind `pf_sigma_clipped_stats(stdfunc="mad_std")`. One multiplying by a
+    !! reciprocal while the other divides by `Phi^-1(3/4)` is NOT the same operation in binary
+    !! floating point -- measured, the two disagree by one ulp on about 39% of inputs -- so the
+    !! same population could give the two paths different answers with nothing saying which was
+    !! meant. The literal below is bit-identical to `1.0_real64 / 0.6744897501960817_real64`, so
+    !! having both multiply by it costs nothing. **Do not reintroduce a division by `Phi^-1(3/4)`
+    !! in either path.**
+    real(real64), parameter :: MAD_NORMAL_SCALE = 1.482602218505602_real64
 
 contains
 
@@ -744,7 +753,7 @@ contains
         ! `scale="normal"` cannot come to differ -- which is exactly what happened when the two
         ! carried their own copies of the constant: a mutation to one of them survived the whole
         ! suite, because no test passed the token explicitly.
-        factor = 1.0_real64 / MAD_NORMAL_DENOM
+        factor = MAD_NORMAL_SCALE
         if (.not. present(scale)) return
         tok = ""
         do i = 1, min(len(scale), len(tok))
@@ -1002,7 +1011,10 @@ contains
         end do
         call order_in_place(dev, nw, n)
         call slice_median(dev, 1_int64, n, res)
-        res = res / MAD_NORMAL_DENOM
+        ! MULTIPLIED, not divided: the same expression `resolve_mad_scale` applies, so a
+        ! `stdfunc="mad_std"` scale and a `pf_mad(scale="normal")` over the same population agree
+        ! bit for bit. See MAD_NORMAL_SCALE's own comment.
+        res = res * MAD_NORMAL_SCALE
     end subroutine slice_mad_std
 
     module procedure sigma_clipped_stats_f64

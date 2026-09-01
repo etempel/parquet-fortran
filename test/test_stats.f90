@@ -90,6 +90,12 @@ contains
             new_unittest("%merge of two halves equals %compute over the whole", test_merge_equals_compute), &
             new_unittest("the array %merge folds in index order and recomputes once", &
                 test_merge_many_recomputes_once), &
+            new_unittest("pf_count_valid's int32 form answers what the int64 form does", &
+                test_count_valid_int32_form), &
+            new_unittest("an empty slot in a %merge array is a no-op, not an abort", &
+                test_merge_empty_slot_is_a_no_op), &
+            new_unittest('pf_mad scale="normal" is one multiplication, never a division', &
+                test_mad_normal_is_one_multiplication), &
             new_unittest("a streaming update costs one traversal and keeps nothing", &
                 test_streaming_costs_one_scan), &
             new_unittest("a streaming %merge agrees with %compute over the whole", &
@@ -1226,6 +1232,210 @@ contains
         call check(error, .not. part(1)%is_computed() .and. .not. part(4)%is_computed(), &
             "consume=.true. must clear every source it folded in")
     end subroutine test_merge_many_recomputes_once
+
+    !> **`pf_count_valid`'s int32 and int64 forms answer the same numbers, over every value type.**
+    !!
+    !! `n` is REQUIRED, which is the only reason the pair can exist: a generic's specifics must be
+    !! distinguishable, and two differing only in the kind of an OPTIONAL argument are rejected at
+    !! the declaration. `n`'s kind therefore selects the specific and `n_null`/`n_nan` follow it.
+    !! Every other generic in this module has nothing but optional integers and so cannot have this
+    !! pair -- see feature_stats_int32.md.
+    !!
+    !! **What this cannot assert, and where that is enforced instead.** A MIXED call -- int32 `n`
+    !! beside an int64 `n_null` -- matches neither specific and is a COMPILE error, so no runtime
+    !! test can reach it; the language is the enforcement. And the narrowing guard in
+    !! `stats_narrow_count` needs a population above `huge(int32)` elements, about 17 GB as real64,
+    !! so it is unreachable here and is GCOVR-excluded at the source rather than chased.
+    !!
+    !! Every value type is exercised because each reaches the counting loop through its own
+    !! generated specific, and a copy-paste slip in one would be invisible in the others. The
+    !! fixture carries a null, a NaN and a zero weight so all three counters are non-zero -- with
+    !! every count 0 the two kinds would agree for the wrong reason.
+    subroutine test_count_valid_int32_form(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        integer, parameter :: N = 12
+        real(real64) :: xr64(N), w(N)
+        real(real32) :: xr32(N)
+        integer(int32) :: xi32(N)
+        integer(int64) :: xi64(N)
+        logical :: xb(N), mask(N)
+        type(parquet_column) :: col
+        integer(int64) :: n64, null64, nan64
+        integer(int32) :: n32, null32, nan32
+        integer :: i
+
+        do i = 1, N
+            xr64(i) = real(i, real64)
+            xr32(i) = real(i, real32)
+            xi32(i) = int(i, int32)
+            xi64(i) = int(i, int64)
+            xb(i) = (mod(i, 2) == 0)
+            w(i) = 1.0_real64
+            mask(i) = .true.
+        end do
+        mask(3) = .false.               ! one null
+        mask(4) = .false.               ! two, so n_null is not 1 by accident
+        xr64(7) = ieee_value(0.0_real64, ieee_quiet_nan)
+        xr32(7) = ieee_value(0.0_real32, ieee_quiet_nan)
+        w(9) = 0.0_real64               ! one zero weight
+
+        ! real64 -- the only type that has all three counters non-zero at once.
+        call pf_count_valid(xr64, n64, is_valid=mask, weights=w, n_null=null64, n_nan=nan64)
+        call pf_count_valid(xr64, n32, is_valid=mask, weights=w, n_null=null32, n_nan=nan32)
+        call check(error, null64 == 2_int64 .and. nan64 == 1_int64 .and. n64 == 8_int64, &
+            "this fixture must exclude two nulls, one NaN and one zero weight, leaving eight")
+        if (allocated(error)) return
+        call check(error, int(n32, int64) == n64 .and. int(null32, int64) == null64 .and. &
+            int(nan32, int64) == nan64, "real64: the int32 form must answer what the int64 form does")
+        if (allocated(error)) return
+
+        call pf_count_valid(xr32, n64, is_valid=mask, n_null=null64, n_nan=nan64)
+        call pf_count_valid(xr32, n32, is_valid=mask, n_null=null32, n_nan=nan32)
+        call check(error, int(n32, int64) == n64 .and. int(null32, int64) == null64 .and. &
+            int(nan32, int64) == nan64, "real32: the int32 form must answer what the int64 form does")
+        if (allocated(error)) return
+
+        ! The three kinds with no NaN to skip declare no n_nan at all, in either form.
+        call pf_count_valid(xi32, n64, is_valid=mask, n_null=null64)
+        call pf_count_valid(xi32, n32, is_valid=mask, n_null=null32)
+        call check(error, int(n32, int64) == n64 .and. int(null32, int64) == null64, &
+            "int32 values: the int32 form must answer what the int64 form does")
+        if (allocated(error)) return
+
+        call pf_count_valid(xi64, n64, is_valid=mask, n_null=null64)
+        call pf_count_valid(xi64, n32, is_valid=mask, n_null=null32)
+        call check(error, int(n32, int64) == n64 .and. int(null32, int64) == null64, &
+            "int64 values: the int32 form must answer what the int64 form does")
+        if (allocated(error)) return
+
+        call pf_count_valid(xb, n64, is_valid=mask, n_null=null64)
+        call pf_count_valid(xb, n32, is_valid=mask, n_null=null32)
+        call check(error, int(n32, int64) == n64 .and. int(null32, int64) == null64, &
+            "logical values: the int32 form must answer what the int64 form does")
+        if (allocated(error)) return
+
+        ! A parquet_column carries its own validity, so no is_valid= here -- passing one aborts.
+        call col%init(PK_FLOAT64, int(N, int64))
+        call col%set_all(xr64)
+        call col%set_null(3_int64)
+        call pf_count_valid(col, n64, n_null=null64, n_nan=nan64)
+        call pf_count_valid(col, n32, n_null=null32, n_nan=nan32)
+        call check(error, n64 > 0_int64, "the column fixture must leave something in the population")
+        if (allocated(error)) return
+        call check(error, int(n32, int64) == n64 .and. int(null32, int64) == null64 .and. &
+            int(nan32, int64) == nan64, &
+            "parquet_column: the int32 form must answer what the int64 form does")
+        if (allocated(error)) return
+
+        ! The bare form, with no optional counter at all: `n`'s kind alone must still resolve it.
+        call pf_count_valid(xr64, n64)
+        call pf_count_valid(xr64, n32)
+        call check(error, int(n32, int64) == n64, &
+            "with no optional counter, n's kind alone must select the specific")
+    end subroutine test_count_valid_int32_form
+
+    !> **An EMPTY source is folded as a no-op; only an UNCOMPUTED one aborts.** That distinction is
+    !! what lets the documented threaded shape -- an array of accumulators sized to the team, folded
+    !! with `%merge(part, consume=.true.)` -- survive a loop that never filled every slot.
+    !!
+    !! **The refusing half is covered and the permitting half was not, which is how this survived.**
+    !! `stats_object_merge_uncomputed_source` asserts that merging an accumulator nothing has been
+    !! done to aborts, so the pair *looks* tested; but every `%merge` call site in this file passed
+    !! a source holding a real population, and `test_merge_many_recomputes_once` above fills all
+    !! four of its slots. Delete `stats_merge_worker`'s `if (other%n_seen /= 0_int64)` guard
+    !! (src/parquet_stats_core.f90) and no other named test fails.
+    !!
+    !! Three things are asserted, and the second and third are the controls. The fold must not
+    !! abort -- reaching the first `check` is that proof. `%n()` must be the three FILLED thirds'
+    !! total, so an empty slot that quietly contributed something is caught. And the answers must
+    !! equal `%compute` over the concatenation **bit for bit**, which the page promises for a
+    !! retained merge, so `==` is right here and a tolerance would not be.
+    subroutine test_merge_empty_slot_is_a_no_op(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: v(:)
+        real(real64) :: got(NQ), want(NQ)
+        type(pf_stats) :: part(4), total, whole, blank
+        integer :: q, k
+        integer(int64) :: lo, hi
+
+        call golden_fixture(999_int64, v)
+        call whole%compute(v)
+        call object_row(whole, want)
+
+        ! Slots 1, 3 and 4 hold thirds of the fixture; slot 2 is %init()ed and left EMPTY --
+        ! computed, holding no population, which is exactly what a short loop leaves behind.
+        do k = 1, 3
+            lo = (k - 1) * 333_int64 + 1_int64
+            hi = k * 333_int64
+            if (k == 1) call part(1)%compute(v(lo:hi))
+            if (k == 2) call part(3)%compute(v(lo:hi))
+            if (k == 3) call part(4)%compute(v(lo:hi))
+        end do
+        call part(2)%init()
+        call check(error, part(2)%is_computed() .and. part(2)%n() == 0_int64, &
+            "this fixture is only meaningful if slot 2 is COMPUTED and EMPTY, not uncomputed")
+        if (allocated(error)) return
+
+        call total%init()
+        call total%merge(part, consume=.true.)
+        call check(error, total%n() == 999_int64, &
+            "an empty slot must contribute nothing: %n() must be the three filled thirds' total")
+        if (allocated(error)) return
+
+        call object_row(total, got)
+        do q = 1, NQ
+            call check(error, got(q) == want(q), &
+                "a fold over an empty slot must equal %compute over the concatenation: " // &
+                trim(QNAME(q)))
+            if (allocated(error)) return
+        end do
+
+        ! `stats_invalidate_order` runs BEFORE the n_seen guard, so even a fold whose only source
+        ! is empty drops the destination's ordering. Asserted because nothing else states it and a
+        ! "no-op" that skipped the invalidation would leave a stale median behind.
+        call whole%prepare_order()
+        call check(error, whole%is_ordered(), "this control needs the destination ordered first")
+        if (allocated(error)) return
+        call blank%init()
+        call whole%merge(blank)
+        call check(error, .not. whole%is_ordered(), &
+            "merging an EMPTY source must still drop the destination's order cache")
+    end subroutine test_merge_empty_slot_is_a_no_op
+
+    !> **`scale="normal"` is ONE multiplication by `1/Phi^-1(3/4)`, never a division by
+    !! `Phi^-1(3/4)`.** The two are not the same operation in binary floating point -- measured, they
+    !! disagree by one ulp on about 39% of inputs -- and this file's two scaling sites used to
+    !! differ, one multiplying by a reciprocal and the other dividing.
+    !!
+    !! **What this can and cannot see.** It pins `resolve_mad_scale`, behind `pf_mad`/`%mad`:
+    !! restore a division there and this fails, because `raw / 0.6744897501960817` is not
+    !! `raw * 1.482602218505602` for most values. It CANNOT see `slice_mad_std`, the other site --
+    !! that value is the clip scale inside `pf_sigma_clipped_stats` and never leaves the procedure
+    !! (the `stddev` it reports comes from `slice_mean_sd`), so no public observable exists for it.
+    !! Both now multiply by the shared `MAD_NORMAL_SCALE`; that half is held by the constant being
+    !! shared, not by this test.
+    subroutine test_mad_normal_is_one_multiplication(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), parameter :: SCALE = 1.482602218505602_real64 !! 1/Phi^-1(3/4), full precision.
+        real(real64), allocatable :: v(:)
+        real(real64) :: raw, normal
+
+        ! 501 values, so the median is an element rather than a mean of two -- the scaling is what
+        ! is under test, and an interpolated median would add a rounding of its own.
+        call golden_fixture(501_int64, v)
+        call pf_mad(v, raw, scale="raw")
+        call pf_mad(v, normal, scale="normal")
+        call check(error, raw > 0.0_real64, "this fixture needs a non-zero raw deviation")
+        if (allocated(error)) return
+        ! `==`, not a tolerance: the point is WHICH operation was applied, and a tolerance would
+        ! pass against the division this test exists to forbid.
+        call check(error, normal == raw * SCALE, &
+            'pf_mad(scale="normal") must be the raw deviation times 1.482602218505602 exactly')
+        if (allocated(error)) return
+        call check(error, normal /= raw / 0.6744897501960817_real64 .or. &
+            raw * SCALE == raw / 0.6744897501960817_real64, &
+            "this test is vacuous unless multiply and divide can differ on this fixture")
+    end subroutine test_mad_normal_is_one_multiplication
 
     !> Streaming is one traversal per batch, O(1) memory, and close rather than exact.
     subroutine test_streaming_costs_one_scan(error)

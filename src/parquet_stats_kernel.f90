@@ -327,6 +327,80 @@ contains
         call count_valid_f64(wide, n, mask, weights, skipnan, n_null, n_nan)
     end procedure count_valid_col
 
+    module procedure count_valid_i32_i32
+        integer(int64) :: n64, nnull64
+
+        ! Delegated rather than duplicated: one counting loop, so the two kinds cannot
+        ! come to disagree about what the population is.
+        call count_valid_i32(values, n64, is_valid, weights, nnull64)
+        call stats_narrow_count(n64, "n", n)
+        if (present(n_null)) call stats_narrow_count(nnull64, "n_null", n_null)
+    end procedure count_valid_i32_i32
+
+    module procedure count_valid_i64_i32
+        integer(int64) :: n64, nnull64
+
+        ! Delegated rather than duplicated: one counting loop, so the two kinds cannot
+        ! come to disagree about what the population is.
+        call count_valid_i64(values, n64, is_valid, weights, nnull64)
+        call stats_narrow_count(n64, "n", n)
+        if (present(n_null)) call stats_narrow_count(nnull64, "n_null", n_null)
+    end procedure count_valid_i64_i32
+
+    module procedure count_valid_f32_i32
+        integer(int64) :: n64, nnull64, nnan64
+
+        ! Delegated rather than duplicated: one counting loop, so the two kinds cannot
+        ! come to disagree about what the population is.
+        call count_valid_f32(values, n64, is_valid, weights, skipnan, nnull64, nnan64)
+        call stats_narrow_count(n64, "n", n)
+        if (present(n_null)) call stats_narrow_count(nnull64, "n_null", n_null)
+        if (present(n_nan)) call stats_narrow_count(nnan64, "n_nan", n_nan)
+    end procedure count_valid_f32_i32
+
+    module procedure count_valid_f64_i32
+        integer(int64) :: n64, nnull64, nnan64
+
+        ! Delegated rather than duplicated: one counting loop, so the two kinds cannot
+        ! come to disagree about what the population is.
+        call count_valid_f64(values, n64, is_valid, weights, skipnan, nnull64, nnan64)
+        call stats_narrow_count(n64, "n", n)
+        if (present(n_null)) call stats_narrow_count(nnull64, "n_null", n_null)
+        if (present(n_nan)) call stats_narrow_count(nnan64, "n_nan", n_nan)
+    end procedure count_valid_f64_i32
+
+    module procedure count_valid_bool_i32
+        integer(int64) :: n64, nnull64
+
+        ! Delegated rather than duplicated: one counting loop, so the two kinds cannot
+        ! come to disagree about what the population is.
+        call count_valid_bool(values, n64, is_valid, weights, nnull64)
+        call stats_narrow_count(n64, "n", n)
+        if (present(n_null)) call stats_narrow_count(nnull64, "n_null", n_null)
+    end procedure count_valid_bool_i32
+
+    module procedure count_valid_col_i32
+        integer(int64) :: n64, nnull64, nnan64
+        call count_valid_col(values, n64, is_valid, weights, skipnan, nnull64, nnan64)
+        call stats_narrow_count(n64, "n", n)
+        if (present(n_null)) call stats_narrow_count(nnull64, "n_null", n_null)
+        if (present(n_nan)) call stats_narrow_count(nnan64, "n_nan", n_nan)
+    end procedure count_valid_col_i32
+
+    module procedure stats_narrow_count
+        ! GCOVR_EXCL_START
+        ! **Unreachable from any test, and deliberately left that way.** Tripping it needs a
+        ! population of more than huge(int32) ELEMENTS -- 2**31 real64 values is about 17 GB -- so
+        ! no fixture the suite can build gets here, and a debug override would be a second way to
+        ! reach a guard whose whole job is to refuse one impossible input. Excluded rather than
+        ! chased with an unbuildable fixture, per CLAUDE.md's rule for a defensive branch.
+        if (value > int(huge(0_int32), int64)) &
+            error stop "pf_count_valid: " // noun // " is " // trim(stats_i2s(value)) // &
+                ", which does not fit an integer(int32); declare it integer(int64) instead"
+        ! GCOVR_EXCL_STOP
+        dst = int(value, int32)
+    end procedure stats_narrow_count
+
     module procedure sum_i32
         real(real64), allocatable :: wide(:)
         allocate(wide(size(values, kind=int64)))

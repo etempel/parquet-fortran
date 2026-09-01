@@ -283,6 +283,12 @@ module parquet_stats
         module procedure count_valid_f64
         module procedure count_valid_bool
         module procedure count_valid_col
+        module procedure count_valid_i32_i32
+        module procedure count_valid_i64_i32
+        module procedure count_valid_f32_i32
+        module procedure count_valid_f64_i32
+        module procedure count_valid_bool_i32
+        module procedure count_valid_col_i32
     end interface pf_count_valid
     !
     ! ---- Counting ----
@@ -403,6 +409,119 @@ module parquet_stats
             integer(int64), intent(out), optional :: n_nan
             !! how many were excluded as NaN and were not already null.
         end subroutine count_valid_col
+        !> `pf_count_valid` over a 32-bit integer array, reporting into `integer(int32)`.
+        !>
+        !> Identical to the `integer(int64)` form in every respect but the kind of the
+        !> counts. `n` is REQUIRED, so its kind is what selects between the two, and
+        !> `n_null`/`n_nan` must then match it -- a mixed call matches neither specific
+        !> and does not compile. A count above `huge(int32)` aborts rather than wrapping.
+        module subroutine count_valid_i32_i32(values, n, is_valid, weights, n_null)
+            integer(int32), intent(in) :: values(:) !! the population to count.
+            integer(int32), intent(out) :: n !! how many elements are in the population.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight. A zero weight REMOVES the element from the population, so a
+            !! weighted count and an unweighted one over the same array legitimately differ.
+            !! A negative, NaN or infinite weight aborts.
+            integer(int32), intent(out), optional :: n_null !! how many elements were null.
+        end subroutine count_valid_i32_i32
+        !> `pf_count_valid` over a 64-bit integer array, reporting into `integer(int32)`.
+        !>
+        !> Identical to the `integer(int64)` form in every respect but the kind of the
+        !> counts. `n` is REQUIRED, so its kind is what selects between the two, and
+        !> `n_null`/`n_nan` must then match it -- a mixed call matches neither specific
+        !> and does not compile. A count above `huge(int32)` aborts rather than wrapping.
+        module subroutine count_valid_i64_i32(values, n, is_valid, weights, n_null)
+            integer(int64), intent(in) :: values(:) !! the population to count.
+            integer(int32), intent(out) :: n !! how many elements are in the population.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight. A zero weight REMOVES the element from the population, so a
+            !! weighted count and an unweighted one over the same array legitimately differ.
+            !! A negative, NaN or infinite weight aborts.
+            integer(int32), intent(out), optional :: n_null !! how many elements were null.
+        end subroutine count_valid_i64_i32
+        !> `pf_count_valid` over a 32-bit real array, reporting into `integer(int32)`.
+        !>
+        !> Identical to the `integer(int64)` form in every respect but the kind of the
+        !> counts. `n` is REQUIRED, so its kind is what selects between the two, and
+        !> `n_null`/`n_nan` must then match it -- a mixed call matches neither specific
+        !> and does not compile. A count above `huge(int32)` aborts rather than wrapping.
+        module subroutine count_valid_f32_i32(values, n, is_valid, weights, skipnan, n_null, n_nan)
+            real(real32), intent(in) :: values(:) !! the population to count.
+            integer(int32), intent(out) :: n !! how many elements are in the population.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight. A zero weight REMOVES the element from the population, so a
+            !! weighted count and an unweighted one over the same array legitimately differ.
+            !! A negative, NaN or infinite weight aborts.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` does; .false. counts it as an ordinary value.
+            integer(int32), intent(out), optional :: n_null !! how many elements were null.
+            integer(int32), intent(out), optional :: n_nan !! how many were NaN and skipped.
+        end subroutine count_valid_f32_i32
+        !> `pf_count_valid` over a 64-bit real array, reporting into `integer(int32)`.
+        !>
+        !> Identical to the `integer(int64)` form in every respect but the kind of the
+        !> counts. `n` is REQUIRED, so its kind is what selects between the two, and
+        !> `n_null`/`n_nan` must then match it -- a mixed call matches neither specific
+        !> and does not compile. A count above `huge(int32)` aborts rather than wrapping.
+        module subroutine count_valid_f64_i32(values, n, is_valid, weights, skipnan, n_null, n_nan)
+            real(real64), intent(in) :: values(:) !! the population to count.
+            integer(int32), intent(out) :: n !! how many elements are in the population.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight. A zero weight REMOVES the element from the population, so a
+            !! weighted count and an unweighted one over the same array legitimately differ.
+            !! A negative, NaN or infinite weight aborts.
+            logical, intent(in), optional :: skipnan
+            !! .true. (the default) excludes a NaN from the population, as a null is excluded and
+            !! as `pf_minmax` does; .false. counts it as an ordinary value.
+            integer(int32), intent(out), optional :: n_null !! how many elements were null.
+            integer(int32), intent(out), optional :: n_nan !! how many were NaN and skipped.
+        end subroutine count_valid_f64_i32
+        !> `pf_count_valid` over a logical array, reporting into `integer(int32)`.
+        !>
+        !> Identical to the `integer(int64)` form in every respect but the kind of the
+        !> counts. `n` is REQUIRED, so its kind is what selects between the two, and
+        !> `n_null`/`n_nan` must then match it -- a mixed call matches neither specific
+        !> and does not compile. A count above `huge(int32)` aborts rather than wrapping.
+        module subroutine count_valid_bool_i32(values, n, is_valid, weights, n_null)
+            logical, intent(in) :: values(:) !! the population to count.
+            integer(int32), intent(out) :: n !! how many elements are in the population.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            real(real64), intent(in), optional :: weights(:)
+            !! per element weight. A zero weight REMOVES the element from the population, so a
+            !! weighted count and an unweighted one over the same array legitimately differ.
+            !! A negative, NaN or infinite weight aborts.
+            integer(int32), intent(out), optional :: n_null !! how many elements were null.
+        end subroutine count_valid_bool_i32
+        !> `pf_count_valid` over a scalar numeric `parquet_column`, reporting into `integer(int32)`.
+        !!
+        !! The int32 counterpart of `count_valid_col`; see `count_valid_f64_i32` for why `n` is
+        !! required and what a mixed-kind call does.
+        module subroutine count_valid_col_i32(values, n, is_valid, weights, skipnan, n_null, n_nan)
+            type(parquet_column), intent(in) :: values !! the column to count.
+            integer(int32), intent(out) :: n !! how many elements are in the population.
+            logical, intent(in), optional :: is_valid(:)
+            !! REFUSED beside a column, which carries its own validity.
+            real(real64), intent(in), optional :: weights(:) !! per element weight; zero removes it.
+            logical, intent(in), optional :: skipnan !! .true. (the default) excludes a NaN.
+            integer(int32), intent(out), optional :: n_null !! how many elements were null.
+            integer(int32), intent(out), optional :: n_nan !! how many were NaN and skipped.
+        end subroutine count_valid_col_i32
+        !> Narrows a count to `int32`, aborting rather than wrapping.
+        !!
+        !! Reached only from the int32 `pf_count_valid` specifics. A population larger than
+        !! `huge(int32)` is entirely reachable here -- this library reads billion-row files -- so a
+        !! silent wrap would hand back a plausible wrong count, which is the one outcome worse than
+        !! forcing the caller to declare an `int64`.
+        module subroutine stats_narrow_count(value, noun, dst)
+            integer(int64), intent(in) :: value  !! the count.
+            character(len=*), intent(in) :: noun !! which count it is, for the message.
+            integer(int32), intent(out) :: dst   !! the narrowed copy.
+        end subroutine stats_narrow_count
     end interface
     !
     !> The sum of a population, computed PAIRWISE rather than left to right.
@@ -891,7 +1010,8 @@ module parquet_stats
     !> The median absolute deviation -- scipy's `median_abs_deviation`, scaled by default.
     !>
     !> `median(|x - center|)`, where `center` is the population's own median unless one is
-    !> supplied. `scale="normal"` (the default) divides by `Phi^-1(3/4)`, which makes the result
+    !> supplied. `scale="normal"` (the default) multiplies by `1/Phi^-1(3/4)` =
+    !> 1.482602218505602, which makes the result
     !> a consistent estimator of the standard deviation for Gaussian data -- so on a large
     !> Gaussian sample `pf_mad` and `pf_stddev` agree to within sampling error, and on a sample
     !> with a few wild points they do not, which is the whole reason to reach for it.
@@ -1466,7 +1586,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -1498,7 +1618,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -1538,7 +1658,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -1571,7 +1691,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -1614,7 +1734,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -1653,7 +1773,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -1695,7 +1815,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -1737,7 +1857,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -1780,7 +1900,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -1852,7 +1972,7 @@ module parquet_stats
             !! variance -- genuinely a NaN there -- turns it .false. if it was asked for.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -1911,7 +2031,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -1979,7 +2099,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -2034,7 +2154,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -2083,7 +2203,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -2127,7 +2247,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -2174,7 +2294,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -2183,7 +2303,8 @@ module parquet_stats
         !> The median absolute deviation -- scipy's `median_abs_deviation`, scaled by default.
         !>
         !> `median(|x - center|)`, where `center` is the population's own median unless one is
-        !> supplied. `scale="normal"` (the default) divides by `Phi^-1(3/4)`, which makes the result
+        !> supplied. `scale="normal"` (the default) multiplies by `1/Phi^-1(3/4)` =
+        !> 1.482602218505602, which makes the result
         !> a consistent estimator of the standard deviation for Gaussian data -- so on a large
         !> Gaussian sample `pf_mad` and `pf_stddev` agree to within sampling error, and on a sample
         !> with a few wild points they do not, which is the whole reason to reach for it.
@@ -2235,7 +2356,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -2280,7 +2401,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass and the ordering may use -- `pf_describe`
             !! does both, which no other entry point in this module does. Absent takes the
-            !! automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- the block
             !! decomposition is a function of the population size alone and a sort is a
@@ -2539,7 +2660,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -2941,7 +3062,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -2963,7 +3084,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -2985,7 +3106,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -3007,7 +3128,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -3040,7 +3161,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -3073,7 +3194,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -3106,7 +3227,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -3137,7 +3258,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -3171,7 +3292,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -3230,7 +3351,7 @@ module parquet_stats
             !! variance -- genuinely a NaN there -- turns it .false. if it was asked for.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -3268,7 +3389,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -3308,7 +3429,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -3349,7 +3470,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -3387,7 +3508,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -3415,7 +3536,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -3447,7 +3568,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -3486,7 +3607,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -3519,7 +3640,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass and the ordering may use -- `pf_describe`
             !! does both, which no other entry point in this module does. Absent takes the
-            !! automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- the block
             !! decomposition is a function of the population size alone and a sort is a
@@ -3665,7 +3786,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -3859,7 +3980,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -3886,7 +4007,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -3913,7 +4034,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -3940,7 +4061,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -3978,7 +4099,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -4016,7 +4137,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -4054,7 +4175,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -4090,7 +4211,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -4129,7 +4250,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -4193,7 +4314,7 @@ module parquet_stats
             !! variance -- genuinely a NaN there -- turns it .false. if it was asked for.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -4236,7 +4357,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -4281,7 +4402,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -4327,7 +4448,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -4370,7 +4491,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -4403,7 +4524,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -4440,7 +4561,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -4484,7 +4605,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -4522,7 +4643,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass and the ordering may use -- `pf_describe`
             !! does both, which no other entry point in this module does. Absent takes the
-            !! automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- the block
             !! decomposition is a function of the population size alone and a sort is a
@@ -4668,7 +4789,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -4863,7 +4984,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -4891,7 +5012,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -4919,7 +5040,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -4947,7 +5068,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -4986,7 +5107,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -5025,7 +5146,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -5064,7 +5185,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -5101,7 +5222,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -5141,7 +5262,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -5206,7 +5327,7 @@ module parquet_stats
             !! variance -- genuinely a NaN there -- turns it .false. if it was asked for.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -5251,7 +5372,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -5298,7 +5419,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -5345,7 +5466,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -5390,7 +5511,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -5424,7 +5545,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -5462,7 +5583,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -5508,7 +5629,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -5545,7 +5666,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass and the ordering may use -- `pf_describe`
             !! does both, which no other entry point in this module does. Absent takes the
-            !! automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- the block
             !! decomposition is a function of the population size alone and a sort is a
@@ -5701,7 +5822,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -5936,7 +6057,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -5961,7 +6082,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -5986,7 +6107,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -6011,7 +6132,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -6047,7 +6168,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -6083,7 +6204,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -6119,7 +6240,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -6153,7 +6274,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -6190,7 +6311,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -6252,7 +6373,7 @@ module parquet_stats
             !! variance -- genuinely a NaN there -- turns it .false. if it was asked for.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -6293,7 +6414,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -6336,7 +6457,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -6380,7 +6501,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -6421,7 +6542,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -6452,7 +6573,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -6487,7 +6608,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -6529,7 +6650,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -6565,7 +6686,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass and the ordering may use -- `pf_describe`
             !! does both, which no other entry point in this module does. Absent takes the
-            !! automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- the block
             !! decomposition is a function of the population size alone and a sort is a
@@ -6711,7 +6832,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -6913,7 +7034,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -6948,7 +7069,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -6983,7 +7104,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -7018,7 +7139,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -7064,7 +7185,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -7110,7 +7231,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -7156,7 +7277,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -7200,7 +7321,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -7247,7 +7368,7 @@ module parquet_stats
             !! quiet NaN and must not be relied on. Partial nullness is not a failure.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -7319,7 +7440,7 @@ module parquet_stats
             !! variance -- genuinely a NaN there -- turns it .false. if it was asked for.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -7371,7 +7492,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -7425,7 +7546,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -7479,7 +7600,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -7531,7 +7652,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -7572,7 +7693,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -7617,7 +7738,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -7670,7 +7791,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -7714,7 +7835,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass and the ordering may use -- `pf_describe`
             !! does both, which no other entry point in this module does. Absent takes the
-            !! automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- the block
             !! decomposition is a function of the population size alone and a sort is a
@@ -7870,7 +7991,7 @@ module parquet_stats
             integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -8110,7 +8231,7 @@ module parquet_stats
             !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -8155,7 +8276,7 @@ module parquet_stats
             !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -8199,7 +8320,7 @@ module parquet_stats
             !! which one NaN makes every answer NaN.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -8242,7 +8363,7 @@ module parquet_stats
             !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -8293,7 +8414,7 @@ module parquet_stats
             !! which one NaN makes every answer NaN.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -8346,7 +8467,7 @@ module parquet_stats
             !! which one NaN makes every answer NaN.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same

@@ -341,7 +341,7 @@ D["count"] = """            integer(int64), intent(out), optional :: count
             !! occurrences of the value carrying the greatest total weight."""
 D["threads"] = """            integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
-            !! the `parquet_sort_threads` setting, capped by the processors actually available and
+            !! the `sort_threads` setting, capped by the processors actually available and
             !! by a measured work floor, and 1 inside a caller's own parallel region. **The answer
             !! does not depend on this argument** -- the block decomposition is a function of the
             !! population size alone, so 1, 8 and a build with no OpenMP at all return the same
@@ -2099,7 +2099,7 @@ ORDER_D = dict(D)
 ORDER_D["threads"] = """            integer, intent(in), optional :: threads
             !! how many threads the ORDERING may use -- this is an order statistic and has no
             !! central-moment pass, so the work `threads=` divides is `pf_argsort`'s. Absent takes
-            !! the automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! the automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- a sort is a
             !! permutation and the selection off it is exact, so 1, 8 and a build with no OpenMP
@@ -2110,7 +2110,7 @@ DESCRIBE_D = dict(D)
 DESCRIBE_D["threads"] = """            integer, intent(in), optional :: threads
             !! how many threads the central-moment pass and the ordering may use -- `pf_describe`
             !! does both, which no other entry point in this module does. Absent takes the
-            !! automatic rule: the `parquet_sort_threads` setting, capped by the processors
+            !! automatic rule: the `sort_threads` setting, capped by the processors
             !! actually available and by a measured work floor, and 1 inside a caller's own
             !! parallel region. **The answer does not depend on this argument** -- the block
             !! decomposition is a function of the population size alone and a sort is a
@@ -2713,7 +2713,8 @@ ORDER_DOC = {
         "The median absolute deviation -- scipy's `median_abs_deviation`, scaled by default.",
         "",
         "`median(|x - center|)`, where `center` is the population's own median unless one is",
-        "supplied. `scale=\"normal\"` (the default) divides by `Phi^-1(3/4)`, which makes the result",
+        "supplied. `scale=\"normal\"` (the default) multiplies by `1/Phi^-1(3/4)` =",
+        "1.482602218505602, which makes the result",
         "a consistent estimator of the standard deviation for Gaussian data -- so on a large",
         "Gaussian sample `pf_mad` and `pf_stddev` agree to within sampling error, and on a sample",
         "with a few wild points they do not, which is the whole reason to reach for it.",
@@ -2840,6 +2841,117 @@ def body(tag, decl, what, is_real):
     return "\n".join(out)
 
 
+#: The int32 counterpart of `count_valid_<tag>`, and the narrowing guard behind it.
+#:
+#: **`n` is REQUIRED, and that is the whole reason this pair can exist.** A generic's specifics must
+#: be distinguishable, and an OPTIONAL dummy cannot distinguish them -- two specifics differing only
+#: in the kind of an optional `n_null` are rejected at the DECLARATION ("Ambiguous interfaces in
+#: generic interface"), not at the call. `pf_count_valid` is the one procedure in this module whose
+#: reporting integer is required, so `n`'s kind resolves the call and `n_null`/`n_nan` follow it.
+#: Every other generic here has nothing but optional integers and therefore cannot have this pair --
+#: see feature_stats_int32.md for the census and the two compiler probes.
+#:
+#: **Mixed kinds are a COMPILE error, which is the point.** `n` int32 with `n_null` int64 matches
+#: neither specific, so the "no mixed arguments" rule is enforced by the language rather than by a
+#: runtime check.
+NARROW_IFACE = """        !> Narrows a count to `int32`, aborting rather than wrapping.
+        !!
+        !! Reached only from the int32 `pf_count_valid` specifics. A population larger than
+        !! `huge(int32)` is entirely reachable here -- this library reads billion-row files -- so a
+        !! silent wrap would hand back a plausible wrong count, which is the one outcome worse than
+        !! forcing the caller to declare an `int64`.
+        module subroutine stats_narrow_count(value, noun, dst)
+            integer(int64), intent(in) :: value  !! the count.
+            character(len=*), intent(in) :: noun !! which count it is, for the message.
+            integer(int32), intent(out) :: dst   !! the narrowed copy.
+        end subroutine stats_narrow_count"""
+
+NARROW_BODY = """    module procedure stats_narrow_count
+        ! GCOVR_EXCL_START
+        ! **Unreachable from any test, and deliberately left that way.** Tripping it needs a
+        ! population of more than huge(int32) ELEMENTS -- 2**31 real64 values is about 17 GB -- so
+        ! no fixture the suite can build gets here, and a debug override would be a second way to
+        ! reach a guard whose whole job is to refuse one impossible input. Excluded rather than
+        ! chased with an unbuildable fixture, per CLAUDE.md's rule for a defensive branch.
+        if (value > int(huge(0_int32), int64)) &
+            error stop "pf_count_valid: " // noun // " is " // trim(stats_i2s(value)) // &
+                ", which does not fit an integer(int32); declare it integer(int64) instead"
+        ! GCOVR_EXCL_STOP
+        dst = int(value, int32)
+    end procedure stats_narrow_count"""
+
+
+def spec_iface_i32(tag, decl, what, is_real):
+    """One interface body for count_valid_<tag>_i32 -- every integer argument int32."""
+    out = []
+    out.append("        !> `pf_count_valid` over a %s array, reporting into `integer(int32)`." % what)
+    out.append("        !>")
+    out.append("        !> Identical to the `integer(int64)` form in every respect but the kind of the")
+    out.append("        !> counts. `n` is REQUIRED, so its kind is what selects between the two, and")
+    out.append("        !> `n_null`/`n_nan` must then match it -- a mixed call matches neither specific")
+    out.append("        !> and does not compile. A count above `huge(int32)` aborts rather than wrapping.")
+    out.append("        module subroutine count_valid_%s_i32(values, n, is_valid, weights%s, n_null%s)"
+               % (tag, ", skipnan" if is_real else "", ", n_nan" if is_real else ""))
+    out.append("            %s, intent(in) :: values(:) !! the population to count." % decl)
+    out.append("            integer(int32), intent(out) :: n !! how many elements are in the population.")
+    out.append("            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.")
+    out.append("            real(real64), intent(in), optional :: weights(:)")
+    out.append("            !! per element weight. A zero weight REMOVES the element from the population, so a")
+    out.append("            !! weighted count and an unweighted one over the same array legitimately differ.")
+    out.append("            !! A negative, NaN or infinite weight aborts.")
+    if is_real:
+        out.append("            logical, intent(in), optional :: skipnan")
+        out.append("            !! .true. (the default) excludes a NaN from the population, as a null is excluded and")
+        out.append("            !! as `pf_minmax` does; .false. counts it as an ordinary value.")
+    out.append("            integer(int32), intent(out), optional :: n_null !! how many elements were null.")
+    if is_real:
+        out.append("            integer(int32), intent(out), optional :: n_nan !! how many were NaN and skipped.")
+    out.append("        end subroutine count_valid_%s_i32" % tag)
+    return "\n".join(out)
+
+
+def body_i32(tag, decl, what, is_real):
+    """One implementation of count_valid_<tag>_i32: the int64 specific, then narrowed."""
+    out = []
+    out.append("    module procedure count_valid_%s_i32" % tag)
+    out.append("        integer(int64) :: n64, nnull64%s" % (", nnan64" if is_real else ""))
+    out.append("")
+    out.append("        ! Delegated rather than duplicated: one counting loop, so the two kinds cannot")
+    out.append("        ! come to disagree about what the population is.")
+    out.append("        call count_valid_%s(values, n64, is_valid, weights%s, nnull64%s)"
+               % (tag, ", skipnan" if is_real else "", ", nnan64" if is_real else ""))
+    out.append('        call stats_narrow_count(n64, "n", n)')
+    out.append("        if (present(n_null)) call stats_narrow_count(nnull64, \"n_null\", n_null)")
+    if is_real:
+        out.append("        if (present(n_nan)) call stats_narrow_count(nnan64, \"n_nan\", n_nan)")
+    out.append("    end procedure count_valid_%s_i32" % tag)
+    return "\n".join(out)
+
+
+COUNT_COL_I32_IFACE = """        !> `pf_count_valid` over a scalar numeric `parquet_column`, reporting into `integer(int32)`.
+        !!
+        !! The int32 counterpart of `count_valid_col`; see `count_valid_f64_i32` for why `n` is
+        !! required and what a mixed-kind call does.
+        module subroutine count_valid_col_i32(values, n, is_valid, weights, skipnan, n_null, n_nan)
+            type(parquet_column), intent(in) :: values !! the column to count.
+            integer(int32), intent(out) :: n !! how many elements are in the population.
+            logical, intent(in), optional :: is_valid(:)
+            !! REFUSED beside a column, which carries its own validity.
+            real(real64), intent(in), optional :: weights(:) !! per element weight; zero removes it.
+            logical, intent(in), optional :: skipnan !! .true. (the default) excludes a NaN.
+            integer(int32), intent(out), optional :: n_null !! how many elements were null.
+            integer(int32), intent(out), optional :: n_nan !! how many were NaN and skipped.
+        end subroutine count_valid_col_i32"""
+
+COUNT_COL_I32_BODY = """    module procedure count_valid_col_i32
+        integer(int64) :: n64, nnull64, nnan64
+        call count_valid_col(values, n64, is_valid, weights, skipnan, nnull64, nnan64)
+        call stats_narrow_count(n64, "n", n)
+        if (present(n_null)) call stats_narrow_count(nnull64, "n_null", n_null)
+        if (present(n_nan)) call stats_narrow_count(nnan64, "n_nan", n_nan)
+    end procedure count_valid_col_i32"""
+
+
 def type_block():
     """TYPE_BLOCK with the per-kind `%compute`/`%update` binding lists filled in."""
     tags = [k[0] for k in MOMENT_KINDS]
@@ -2897,6 +3009,10 @@ def gen_spec():
     for tag, _, _, _ in TYPES:
         out.append("        module procedure count_valid_%s" % tag)
     out.append("        module procedure count_valid_col")
+    # The int32 forms. `n` is required, so its kind selects between each pair; see NARROW_IFACE.
+    for tag, _, _, _ in TYPES:
+        out.append("        module procedure count_valid_%s_i32" % tag)
+    out.append("        module procedure count_valid_col_i32")
     out.append("    end interface pf_count_valid")
     out.append("    !")
     out.append("    ! ---- Counting ----")
@@ -2904,6 +3020,9 @@ def gen_spec():
     out.append("\n".join(spec_iface(*t) for t in TYPES))
     out.append(COUNT_COL_IFACE.replace("@@count_col_counts@@",
                                        D["n_null"] + "\n" + D["n_nan"]))
+    out.append("\n".join(spec_iface_i32(*t) for t in TYPES))
+    out.append(COUNT_COL_I32_IFACE)
+    out.append(NARROW_IFACE)
     out.append("    end interface")
     for name in ("pf_sum", "pf_mean", "pf_gmean", "pf_hmean", "pf_variance", "pf_stddev",
                  "pf_sem", "pf_skewness", "pf_kurtosis", "pf_moments"):
@@ -3063,6 +3182,12 @@ def gen_kernel():
     out.append("\n\n".join(body(*t) for t in TYPES))
     out.append("")
     out.append(COUNT_COL_BODY)
+    out.append("")
+    out.append("\n\n".join(body_i32(*t) for t in TYPES))
+    out.append("")
+    out.append(COUNT_COL_I32_BODY)
+    out.append("")
+    out.append(NARROW_BODY)
     out.append("")
     bodies = []
     for tag, _, widen, has_nan, _ in MOMENT_KINDS:

@@ -189,7 +189,7 @@ contains
                 cid(i) = spatial_cell_of(self, xs(i), ys(i), zs(i))
             end do
         end if
-        call pf_argsort(cid, perm, threads=threads, group_offsets=offs)
+        call pf_argsort(cid, perm, group_offsets=offs)
         ! group_offsets gives one entry per DISTINCT cell present, not one per grid cell, so the
         ! dense array is scattered from it -- O(occupied + cells) rather than a second O(n) pass.
         allocate(newstart(self%n_cells + 1_int64))
@@ -499,7 +499,7 @@ contains
                     "0.3 cells per point, which is what keeps the bucketing on the counting fast path")
             end if
         end if
-        call spatial_bucket(self, threads)
+        call spatial_bucket(self)
         self%built_ok = .true.
     end procedure spatial_build_worker
 
@@ -550,7 +550,7 @@ contains
         ! the [-1, 1]^3 box, so a bounding-box density would be meaningless -- the tuner takes the
         ! MEDIAN OCCUPIED CELL instead, and the sphere is the sharpest instance of the problem that
         ! choice already solves rather than a new one.
-        call spatial_build_worker(self, vx, vy, vz, chords, cell, threads=threads, backend=back, &
+        call spatial_build_worker(self, vx, vy, vz, chords, cell, backend=back, &
                                   nside=nside)
         self%metric_id = PF_METRIC_SKY
     end procedure spatial_build_sky_worker

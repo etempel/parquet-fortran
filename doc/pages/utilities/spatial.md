@@ -519,9 +519,8 @@ different cell from the one the index was built with, and says so once per index
 ## Threading and settings
 
 Every bulk form threads internally. Single queries do not, and **neither does building**: `%build`
-and `%build_sky` accept a `threads=` that is forwarded to their bucketing sort, but the sort reaches
-that grid through a grouped path which never opens a team, so the argument is accepted and has no
-effect. Do not size a build around it.
+and `%build_sky` take no `threads=` at all, because the bucketing sort behind them reaches its grid
+through a grouped path that never opens a team. Do not size a build around threading.
 
 ```fortran
 call sx%all_within(0.05_real64, offsets, neighbours, threads=8)

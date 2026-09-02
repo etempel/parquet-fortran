@@ -429,7 +429,7 @@ module parquet_spatial
         !> Builds `self` over the caller's coordinates. The single worker every `%build` specific
         !! reaches, taking the radius hint as an already-flattened array.
         module subroutine spatial_build_worker(self, x, y, z, radii, cell, box_lo, box_hi, copy, &
-                                              threads, backend, nside)
+                                              backend, nside)
             type(pf_spatial_index), intent(inout), target :: self !! the index to fill.
             real(real64), intent(in), target :: x(:) !! x of every point.
             real(real64), intent(in), target :: y(:) !! y of every point.
@@ -439,7 +439,6 @@ module parquet_spatial
             real(real64), intent(in), optional :: box_lo(:) !! periodic box corner; with box_hi turns wrapping on.
             real(real64), intent(in), optional :: box_hi(:) !! the opposite periodic box corner.
             logical, intent(in), optional :: copy !! .false. points at the caller's arrays instead of copying.
-            integer, intent(in), optional :: threads !! passed to the bucketing sort; that path is serial, so it has no effect.
             !> `PF_SKY_GRID3D` (default) or `PF_SKY_HEALPIX`. Passed only by
             !! `spatial_build_sky_worker`: `%build` takes no `backend=` at all, a Euclidean cloud
             !! having no sphere to pixelate. It arrives here rather than being set afterwards
@@ -470,13 +469,12 @@ module parquet_spatial
             logical, intent(out), optional :: coarsened !! whether the cap bound before `want` did.
         end subroutine spatial_set_nside
 
-        module subroutine spatial_build_sky_worker(self, ra, dec, radii_deg, cell, threads, backend, nside)
+        module subroutine spatial_build_sky_worker(self, ra, dec, radii_deg, cell, backend, nside)
             type(pf_spatial_index), intent(inout), target :: self !! the index to build.
             real(real64), intent(in) :: ra(:) !! right ascension of every point, in degrees.
             real(real64), intent(in) :: dec(:) !! declination of every point, in degrees.
             real(real64), intent(in) :: radii_deg(:) !! the angular radii later queries will use.
             real(real64), intent(in), optional :: cell !! forced cell side, in unit-vector space.
-            integer, intent(in), optional :: threads !! passed to the bucketing sort; that path is serial, so it has no effect.
             integer, intent(in), optional :: backend !! PF_SKY_GRID3D (default) or PF_SKY_HEALPIX.
             integer(int64), intent(in), optional :: nside !! forced HEALPix resolution; disables tuning.
         end subroutine spatial_build_sky_worker
@@ -525,9 +523,8 @@ module parquet_spatial
         end subroutine spatial_grid_dims
 
         !> Buckets the stored points into the current grid, filling `start` and `idx`.
-        module subroutine spatial_bucket(self, threads)
+        module subroutine spatial_bucket(self)
             type(pf_spatial_index), intent(inout), target :: self !! the index to bucket.
-            integer, intent(in), optional :: threads !! forwarded to `pf_argsort`; its grouped path is serial, so it has no effect.
         end subroutine spatial_bucket
 
         !> Aims three local pointers at wherever the coordinates actually live.
@@ -843,7 +840,7 @@ contains
     ! ---- %build ----
 
     !> `%build` with a single radius hint.
-    subroutine bind_build_r0(self, x, y, z, radius, cell, box_lo, box_hi, copy, threads)
+    subroutine bind_build_r0(self, x, y, z, radius, cell, box_lo, box_hi, copy)
         class(pf_spatial_index), intent(inout), target :: self !! the index to fill.
         real(real64), intent(in), target :: x(:) !! x of every point.
         real(real64), intent(in), target :: y(:) !! y of every point.
@@ -853,13 +850,12 @@ contains
         real(real64), intent(in), optional :: box_lo(:) !! periodic box corner; with box_hi turns wrapping on.
         real(real64), intent(in), optional :: box_hi(:) !! the opposite periodic box corner.
         logical, intent(in), optional :: copy !! .false. points at the caller's arrays; default .true.
-        integer, intent(in), optional :: threads !! passed to the bucketing sort; that path is serial, so it has no effect.
 
-        call spatial_build_worker(self, x, y, z, [radius], cell, box_lo, box_hi, copy, threads)
+        call spatial_build_worker(self, x, y, z, [radius], cell, box_lo, box_hi, copy)
     end subroutine bind_build_r0
 
     !> `%build` with a list of radii; the list collapses to `r_eff = sum(r^3)/sum(r^2)`.
-    subroutine bind_build_r1(self, x, y, z, radius, cell, box_lo, box_hi, copy, threads)
+    subroutine bind_build_r1(self, x, y, z, radius, cell, box_lo, box_hi, copy)
         class(pf_spatial_index), intent(inout), target :: self !! the index to fill.
         real(real64), intent(in), target :: x(:) !! x of every point.
         real(real64), intent(in), target :: y(:) !! y of every point.
@@ -869,9 +865,8 @@ contains
         real(real64), intent(in), optional :: box_lo(:) !! periodic box corner; with box_hi turns wrapping on.
         real(real64), intent(in), optional :: box_hi(:) !! the opposite periodic box corner.
         logical, intent(in), optional :: copy !! .false. points at the caller's arrays; default .true.
-        integer, intent(in), optional :: threads !! passed to the bucketing sort; that path is serial, so it has no effect.
 
-        call spatial_build_worker(self, x, y, z, radius, cell, box_lo, box_hi, copy, threads)
+        call spatial_build_worker(self, x, y, z, radius, cell, box_lo, box_hi, copy)
     end subroutine bind_build_r1
 
     !> `%build_sky` with a single angular radius.
@@ -889,31 +884,29 @@ contains
     !> `cell=` and `%cell_size()` are both in unit-vector space rather than degrees, so they are a
     !> matched pair and a value read from one can be fed back into the other. `%effective_radius()`
     !> is the one that comes back in DEGREES, because it is a radius the caller gave in degrees.
-    subroutine bind_build_sky_r0(self, ra, dec, radius_deg, cell, threads, backend, nside)
+    subroutine bind_build_sky_r0(self, ra, dec, radius_deg, cell, backend, nside)
         class(pf_spatial_index), intent(inout), target :: self !! the index to build.
         real(real64), intent(in) :: ra(:) !! right ascension of every point, in degrees.
         real(real64), intent(in) :: dec(:) !! declination of every point, in degrees; |dec| <= 90.
         real(real64), intent(in) :: radius_deg !! the angular radius later queries will use.
         real(real64), intent(in), optional :: cell !! forced cell side, in unit-vector space.
-        integer, intent(in), optional :: threads !! passed to the bucketing sort; that path is serial, so it has no effect.
         integer, intent(in), optional :: backend !! PF_SKY_GRID3D (default) or PF_SKY_HEALPIX.
         integer(int64), intent(in), optional :: nside !! forced HEALPix resolution; disables tuning.
 
-        call spatial_build_sky_worker(self, ra, dec, [radius_deg], cell, threads, backend, nside)
+        call spatial_build_sky_worker(self, ra, dec, [radius_deg], cell, backend, nside)
     end subroutine bind_build_sky_r0
 
     !> `%build_sky` with a list of angular radii. See `bind_build_sky_r0`.
-    subroutine bind_build_sky_r1(self, ra, dec, radius_deg, cell, threads, backend, nside)
+    subroutine bind_build_sky_r1(self, ra, dec, radius_deg, cell, backend, nside)
         class(pf_spatial_index), intent(inout), target :: self !! the index to build.
         real(real64), intent(in) :: ra(:) !! right ascension of every point, in degrees.
         real(real64), intent(in) :: dec(:) !! declination of every point, in degrees; |dec| <= 90.
         real(real64), intent(in) :: radius_deg(:) !! the angular radii later queries will use.
         real(real64), intent(in), optional :: cell !! forced cell side, in unit-vector space.
-        integer, intent(in), optional :: threads !! passed to the bucketing sort; that path is serial, so it has no effect.
         integer, intent(in), optional :: backend !! PF_SKY_GRID3D (default) or PF_SKY_HEALPIX.
         integer(int64), intent(in), optional :: nside !! forced HEALPix resolution; disables tuning.
 
-        call spatial_build_sky_worker(self, ra, dec, radius_deg, cell, threads, backend, nside)
+        call spatial_build_sky_worker(self, ra, dec, radius_deg, cell, backend, nside)
     end subroutine bind_build_sky_r1
 
     ! ---- %rebuild and %rebuild_for ----

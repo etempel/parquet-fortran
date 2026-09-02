@@ -163,9 +163,7 @@ contains
             new_unittest("rebuild_for takes degrees on a sky index, not chords", &
                          test_sky_rebuild_for_takes_degrees), &
             new_unittest("count_within_sky agrees with within_sky's own count", &
-                         test_count_within_sky), &
-            new_unittest("build's answers do not depend on threads=", &
-                         test_build_threads_do_not_change_answers) &
+                         test_count_within_sky) &
             ]
     end subroutine collect_tests_parquet_spatial
 
@@ -3560,44 +3558,5 @@ contains
         call check(error, sky%count_within_sky(ra(1), dec(1), 90.0_real64) > 0_int64, &
             "a hemisphere-wide radius must count something rather than nothing")
     end subroutine test_count_within_sky
-
-    !> `%build`'s answers do not depend on `threads=` — which today is trivially true, and says so.
-    !>
-    !> **This is NOT the test the review proposed, and the difference matters.** `feature_doc_spatial.md`
-    !> D2 asked for a test pinning that `%build(threads=n)` opens a team of `n` in the bucketing
-    !> sort. Writing it established that it cannot: `spatial_bucket` always calls `pf_argsort` with
-    !> `group_offsets=`, which routes through `engine_build_runs` to `sort_build_runs_permutation`
-    !> and thence to `sort_build_permutation` — the SERIAL entry point. The resolved thread count is
-    !> used only by the test-only C++ oracle, so on the shipped path `threads=` on `%build` is
-    !> accepted and discarded. There is no team to assert, and a test claiming otherwise would have
-    !> been asserting a behaviour the library does not have.
-    !>
-    !> **What is asserted instead is the property that has to survive if that ever changes**: the
-    !> permutation, and so every later answer, must not depend on the thread count. That is vacuous
-    !> today — both arms run identical serial code — and it is written down as vacuous rather than
-    !> dressed up, because the day the grouped path learns to thread this is the test that catches a
-    !> reordering, and a reader needs to know it was not guarding anything before then.
-    subroutine test_build_threads_do_not_change_answers(error)
-        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
-        real(real64), allocatable :: x(:), y(:), z(:)
-        type(pf_spatial_index) :: one, many
-        integer(int64), allocatable :: o1(:), n1(:), o8(:), n8(:)
-
-        call make_cloud(4000_int64, 1.0_real64, .false., x, y, z)
-        call one%build(x, y, z, radius=0.05_real64, threads=1)
-        call many%build(x, y, z, radius=0.05_real64, threads=8)
-        call check(error, one%size(), many%size(), "threads= must not change how many points an index holds")
-        if (allocated(error)) return
-        call check(error, one%cells(), many%cells(), "threads= must not change the grid the tuner chose")
-        if (allocated(error)) return
-        call one%all_within(0.05_real64, o1, n1)
-        call many%all_within(0.05_real64, o8, n8)
-        call check(error, size(n1, kind=int64), size(n8, kind=int64), &
-            "threads= on %build must not change how many neighbours the index later reports")
-        if (allocated(error)) return
-        call check(error, all(o1 == o8), "threads= on %build must not change the CSR offsets")
-        if (allocated(error)) return
-        call check(error, all(n1 == n8), "threads= on %build must not change the neighbour lists")
-    end subroutine test_build_threads_do_not_change_answers
 
 end module test_spatial

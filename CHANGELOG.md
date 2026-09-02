@@ -253,6 +253,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now an error. A copied file previously carried a second entry for each, and for `column.*` that
   second entry was the one a reader got back.
 
+- **A zero-radius sky query is documented as unreliable for finding one catalogue entry.** The
+  query point's unit vector is re-derived from `(ra, dec)`, and that conversion need not agree to
+  the last bit with the one `%build_sky` stored, so `%within_sky(ra(k), dec(k), 0.0)` may find
+  nothing. Ask for a radius above that error — 1e-9 degrees is 3.6 microarcseconds. `%within` is
+  unaffected.
+
 ### Fixed
 
 - **`%fatal`/`pf_log_fatal` aborts exactly once when several threads reach it together.** The

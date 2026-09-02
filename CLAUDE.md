@@ -3448,6 +3448,46 @@ Compiler-independent rules. Anything specific to one compiler is in its own sect
   raised but the source line is not obvious, single-step it: a gdb `while` loop over `stepi` that
   stops on `$mxcsr & 1` names the instruction and the SVML entry point in one run.
 
+- **Two threads reaching `ERROR STOP` at once leave the process exit status NONDETERMINISTIC,
+  including 0 for a run that plainly aborted.** `ERROR STOP` is `exit()`, and calling `exit()` from
+  more than one thread is undefined behaviour in C. Measured on ifx 2026.1 with a 15-line program
+  whose `!$omp parallel do` aborts on two iterations: **13 runs in 200 exited 0** instead of the
+  abort status. gfortran 15 was deterministic over the same 200. **A single abort inside a parallel
+  region is safe** — 200 in 200 correct — and so is one after the region, so the whole fix is to
+  ensure only one thread can get there.
+
+  Two things make this expensive to meet fresh. **The failure is silent and inverted**: a guard
+  that fired, printed its message and killed the run reports *success* to the shell, so a wrapper
+  script, a CI job or a scheduler treats a fatal error as a completed run — the same defect shape
+  as `STOP` exiting 0. And **it is invisible to a gfortran-only CI**, so it surfaces only on a
+  developer machine, as an intermittent test failure with no plausible cause in the code under
+  test.
+
+  It is also the ordinary case rather than a contrived one: a validity guard inside a parallel loop
+  fires for *every* offending element, on whichever threads hold them, so two threads aborting
+  together is what a malformed input naturally produces. `logger_fatal` (`src/parquet_logging.f90`)
+  therefore wraps its whole body in `!$omp critical (pf_log_fatal)`: the first thread to arrive
+  aborts and the rest block on a lock it never releases, which also collapses N interleaved copies
+  of the fatal record down to one. Any *new* `error stop` that a parallel region can reach needs
+  the same treatment — reached through `pf_log_fatal`, it already has it.
+
+- **The same transcendental expression can differ by 1-2 ulp between a bulk loop and a scalar
+  evaluation, at `-O0` but not at `-O2`.** So two textually identical conversions of the same input
+  — one applied to an array, one to a single value — are NOT guaranteed to agree to the last bit,
+  and whether they do changes with the optimisation level. Measured on ifx 2026.1 for
+  `cd = cos(dec*d2r); v = [cd*cos(ra*d2r), cd*sin(ra*d2r), sin(dec*d2r)]`: under the debug profile
+  the loop form and the scalar form disagreed in the last bit of two components, and under
+  `--profile release` they were identical. gfortran agreed at both.
+
+  **What this costs is any test that asserts an exact round-trip through such a conversion.**
+  `%build_sky` stores unit vectors derived from a catalogue's `(ra, dec)` in a loop, and a sky
+  query re-derives one scalar vector from the *same* `(ra, dec)`; the 1-2 ulp gap put a catalogue
+  point 1.3e-14 degrees from itself, so `%count_within_sky(ra(k), dec(k), 0.0)` counted **nothing**
+  — under ifx debug only. Assert such a property at a tolerance above the round-trip error rather
+  than at zero (`test_count_within_sky` in `test/test_spatial.f90` uses 1e-9 degrees, 3.6
+  microarcseconds), and reserve exact-equality assertions for values that are *stored*, never for
+  values re-derived through a transcendental function.
+
 #### flang-specific gotchas
 
 flang builds here are **serial only** and `--profile release` does not link — see

@@ -290,6 +290,17 @@ the chord `2*sin(theta/2)`, which is strictly increasing, so a Euclidean ball of
 unit-vector space selects exactly the points within that angle. There is no pole special case and
 no wrap at 0h, because a sphere has neither.
 
+**A zero radius is a knife edge, and not the way to find one catalogue entry.** The query point is
+not compared as `(ra, dec)`: it is converted to a unit vector by the same expression `%build_sky`
+applied to the catalogue. Two evaluations of that expression are not required to agree to the last
+bit, and on some compilers they do not — measured on ifx 2026.1, in a bulk loop versus as a scalar
+they differ by 1–2 ulp under `-O0`, which leaves a catalogue point about `1e-14` degrees away from
+its own `(ra, dec)`. So `%within_sky(ra(k), dec(k), 0.0)` may find nothing, and whether it does
+varies with the compiler and the optimisation level. Nothing is lost by asking for a radius instead:
+`1e-9` degrees is 3.6 microarcseconds, far below any radius an observation implies and five orders
+of magnitude above that error. The Euclidean `%within` has no such caveat — it compares the stored
+coordinates themselves, so `r = 0` there does find the point.
+
 ### Sky queries in bulk
 
 The same three self-join forms, with radii in degrees:

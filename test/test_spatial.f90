@@ -3564,8 +3564,25 @@ contains
         call check(error, m_cnt, m_ref, "%count_within_sky must honour r_inner_deg= as %within_sky does")
         if (allocated(error)) return
         ! Both extremes, so the agreement above is not an accident of one populated radius.
-        call check(error, sky%count_within_sky(ra(1), dec(1), 0.0_real64) >= 1_int64, &
-            "a zero radius still finds the point itself, which sits at separation zero")
+        !
+        ! At r = 0 the two bindings must AGREE -- which is what this test is about -- but neither
+        ! is asserted to find the query point. A sky query does not compare (ra, dec): it derives a
+        ! unit vector from them by the same expression `%build_sky` used on the catalogue, and two
+        ! evaluations of a transcendental expression are not required to agree to the last bit.
+        ! Measured on ifx 2026.1, that expression in a bulk loop and as a scalar differ by 1-2 ulp
+        ! under the -O0 debug profile -- putting this point 1.3e-14 degrees from itself, so a
+        ! zero-radius ball round it is empty -- while the same source at -O2, and gfortran at
+        ! either, give exactly 0. Asserting self-discovery at r = 0 therefore tests the compiler's
+        ! libm, not this library, and passes or fails with the optimisation level.
+        m_ref = sky%within_sky(ra(1), dec(1), 0.0_real64, found)
+        m_cnt = sky%count_within_sky(ra(1), dec(1), 0.0_real64)
+        call check(error, m_cnt, m_ref, "%count_within_sky must equal %within_sky at a zero radius")
+        if (allocated(error)) return
+        ! Self-discovery is asserted just above that round-trip error instead. 1e-9 degrees is
+        ! 3.6 microarcseconds -- below any radius an astronomer would ask for, and five orders of
+        ! magnitude above the 1.3e-14 degrees the conversion can cost.
+        call check(error, sky%count_within_sky(ra(1), dec(1), 1.0e-9_real64) >= 1_int64, &
+            "a radius above the unit-vector round-trip error must find the point itself")
         if (allocated(error)) return
         call check(error, sky%count_within_sky(ra(1), dec(1), 90.0_real64) > 0_int64, &
             "a hemisphere-wide radius must count something rather than nothing")

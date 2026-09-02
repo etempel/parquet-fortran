@@ -1214,6 +1214,17 @@ contains
     !> Refused on a Euclidean index, and every Euclidean query is refused on a sky one. That guard
     !> is the entire reason the metric is a property of the INDEX rather than of the call: without
     !> it, `%within` on a sky index would quietly answer in chords to someone who asked in degrees.
+    !>
+    !> **`rsky_deg = 0` is a knife edge and is not the way to find one catalogue entry.** The query
+    !> point is not compared as `(ra, dec)`: `sky_vector` derives a unit vector from it by the same
+    !> expression `spatial_build_sky_worker` applied to the catalogue, and two evaluations of a
+    !> transcendental expression need not agree to the last bit. On ifx 2026.1 they do not -- that
+    !> expression in a bulk loop and as a scalar differ by 1-2 ulp under `-O0`, putting a catalogue
+    !> point about 1e-14 degrees from its own `(ra, dec)`; at `-O2`, and under gfortran at either,
+    !> they agree exactly. So a zero radius may find the point or may find nothing, depending on
+    !> the compiler and the optimisation level. Ask for a radius above that error instead: 1e-9
+    !> degrees is 3.6 microarcseconds. `%within` has no such caveat, because it compares the
+    !> stored coordinates rather than re-deriving them.
     integer(int64) function bind_sky_i32(self, ra, dec, rsky_deg, out, dist_deg, r_inner_deg, sorted) result(m)
         class(pf_spatial_index), intent(in), target :: self !! the sky index to search.
         real(real64), intent(in) :: ra !! right ascension of the query point, in degrees.

@@ -263,6 +263,19 @@ contains
             den = sqrt(sxx) * sqrt(syy)
             if (den <= 0.0_real64) return
             r = sxy / den
+            ! **The NaN leaves before the clamp, and it is the CLAMP that needs it, not the
+            ! comparison.** An infinity in either variable makes all three centred sums NaN (the
+            ! screen in `stats_pair_moments`), so `r` is NaN here, and a NaN with `ok = .false.`
+            ! is what this procedure reports rather than aborting. But `if (r > 1) r = 1` is a
+            ! clamp, and a backend is free to emit it as x86 `minsd`/`maxsd` -- measured under
+            ! nagfor from `-O2` upward, and under gfortran at `-O2` -- and those raise
+            ! IEEE_INVALID for a QUIET-NaN operand, where the bare comparisons above and below
+            ! come out as the quiet `ucomisd`. Under nagfor's default `-ieee=stop` that is a dead
+            ! process, and only in an optimised build: a plain `fpm test` never reaches it, and
+            ! `fpm test --profile release` is what found it.
+            !
+            ! `r /= r` rather than `ieee_is_nan`: this module's standing rule, and quiet either way.
+            if (r /= r) return
             ! Rounding can still put a near-perfect correlation a few ulp OUTSIDE [-1, 1], which
             ! is startling to meet and never useful.
             if (r > 1.0_real64) r = 1.0_real64

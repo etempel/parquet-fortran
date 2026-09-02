@@ -874,11 +874,16 @@ contains
         integer(int64), parameter :: nsides(4) = [1_int64, 4_int64, 32_int64, 256_int64]
         real(real64), parameter :: rmul(6) = [0.0_real64, 0.5_real64, 1.0_real64, 3.0_real64, &
                                               12.0_real64, 90.0_real64]
-        integer(int64) :: nside, npix, bound, cnt, worst, ip, stride, seed
+        integer(int64) :: nside, npix, bound, cnt, worst, ip, stride
         real(real64) :: radius, vec(3), th, ph
         integer :: is, ir, k, mode
         logical :: inc
         character(len=160) :: detail
+        integer, parameter :: nscatter = 700 !! positions in the spiral, beyond the ring walk.
+        !> The golden angle, `pi*(3 - sqrt(5))`. Successive multiples of it are the standard
+        !! low-discrepancy way to spread points around a sphere, and it is what makes the scatter
+        !! below deterministic on every compiler without any integer arithmetic to overflow.
+        real(real64), parameter :: golden_angle = pi * (3.0_real64 - sqrt(5.0_real64))
 
         do is = 1, size(nsides)
             nside = nsides(is)
@@ -899,14 +904,21 @@ contains
                         call pf_query_disc_count(nside, vec, radius, cnt, inclusive=inc)
                         worst = max(worst, cnt)
                     end do
-                    seed = 20260902_int64
-                    do k = 1, 700
-                        seed = modulo(seed * 6364136223846793005_int64 + 1442695040888963407_int64, &
-                                      2147483647_int64)
-                        th = acos(1.0_real64 - 2.0_real64 * real(seed, real64) / 2147483647.0_real64)
-                        seed = modulo(seed * 6364136223846793005_int64 + 1442695040888963407_int64, &
-                                      2147483647_int64)
-                        ph = 2.0_real64 * pi * real(seed, real64) / 2147483647.0_real64
+                    ! A Fibonacci spiral rather than a pseudo-random scatter. It is a better
+                    ! sampling of the sphere for this purpose -- low-discrepancy rather than
+                    ! merely unbiased -- and it has no integer arithmetic in it, which matters
+                    ! more: the LCG that stood here relied on a signed int64 multiply wrapping,
+                    ! which is undefined behaviour, and nagfor at --profile release optimised on
+                    ! the assumption that it could not overflow. `modulo` then returned a
+                    ! NEGATIVE seed, `acos` was handed 2.42, and the disc centre came back a NaN.
+                    ! See src/parquet_expkey.f90's `fp_step`, which spells the same LCG without
+                    ! the overflow, and feature_risks.md Risk-94.
+                    do k = 1, nscatter
+                        ! `(k - 0.5)/nscatter` is strictly inside (0, 1), so `z` is strictly
+                        ! inside (-1, 1) and `acos` cannot be handed an out-of-range argument.
+                        th = acos(1.0_real64 - 2.0_real64 * (real(k, real64) - 0.5_real64) &
+                                  / real(nscatter, real64))
+                        ph = modulo(real(k, real64) * golden_angle, 2.0_real64 * pi)
                         call pf_ang2vec(th, ph, vec)
                         call pf_query_disc_count(nside, vec, radius, cnt, inclusive=inc)
                         worst = max(worst, cnt)

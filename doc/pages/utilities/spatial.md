@@ -436,7 +436,7 @@ integer(int64), allocatable :: i(:), j(:), labels(:), sizes(:)
 integer(int64) :: ncomp
 
 call sx%pairs_within(link_length, i, j)
-call pf_connected_components(i, j, sx%size(), labels, ncomp=ncomp, sizes=sizes)
+call pf_connected_components(i, j, sx%size(), labels, ncomp=ncomp, sizes=sizes, min_size=2)
 ```
 
 - `i`, `j` are the edge list. Neither direction nor `i < j` is required, and duplicate edges and
@@ -448,14 +448,16 @@ call pf_connected_components(i, j, sx%size(), labels, ncomp=ncomp, sizes=sizes)
   trailing isolated point and return a `labels` array shorter than the catalogue.
 - `labels` comes back length `nvert`. A vertex in a qualifying component gets a label in
   `1..ncomp`; **everything else gets 0**.
-- `min_size` (default 2) is the smallest component that earns a label. `min_size = 1` restores the
-  strict graph-theoretic reading in which every vertex belongs to some component.
+- `min_size` (default 1) is the smallest component that earns a label. The default is the textbook
+  reading, in which a singleton *is* a connected component: every vertex is labelled, and
+  `sum(sizes)` is `nvert`.
 - `sizes` is length `ncomp`, in label order.
 
-**The default is deliberately not the textbook definition.** Mathematically a singleton *is* a
-connected component; here an isolated vertex is unlabelled, because in a group catalogue a galaxy
-with no neighbours is not a group of one, it is a field galaxy. `labels > 0` is then the mask that
-selects group members and `ncomp` is the number of groups anyone would quote.
+**That is why the example above passes `min_size = 2`.** In a group catalogue a galaxy with no
+neighbours is not a group of one, it is a field galaxy — so a group finder asks for the threshold,
+and `labels > 0` is then the mask that selects group members while `ncomp` is the number of groups
+anyone would quote. It is the caller who says so, because which components count is a domain
+question rather than a graph one.
 
 **Labels are assigned by ascending vertex index of first appearance**, so the qualifying component
 containing the lowest-numbered vertex is 1, and so on. That is a contract rather than an

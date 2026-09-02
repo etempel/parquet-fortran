@@ -2195,6 +2195,10 @@ program error_scenarios
         call scenario_healpix_disc_count_bad_nside()
     case ("healpix_disc_alloc_bad_scheme")
         call scenario_healpix_disc_alloc_bad_scheme()
+    case ("healpix_disc_max_count_bad_nside")
+        call scenario_healpix_disc_max_count_bad_nside()
+    case ("healpix_disc_max_count_negative_radius")
+        call scenario_healpix_disc_max_count_negative_radius()
     case ("healpix_bulk_nside_invalid")
         call scenario_healpix_bulk_nside_invalid()
     case ("healpix_bulk_size_mismatch")
@@ -19936,6 +19940,24 @@ contains
         call pf_query_disc_count(6_int64, [0.0_real64, 0.0_real64, 1.0_real64], 0.1_real64, nlist)
         print '(a)', "unexpectedly accepted nside= 6"
     end subroutine scenario_healpix_disc_count_bad_nside
+
+    !> `pf_query_disc_max_count` validates `nside` and names ITSELF, rather than answering -1 the
+    !> way the `pure elemental` arithmetic does. A sizing routine that returned -1 would have the
+    !> caller allocate a zero-length buffer and meet the complaint one call later.
+    subroutine scenario_healpix_disc_max_count_bad_nside()
+        integer(int64) :: nmax
+
+        nmax = pf_query_disc_max_count(6_int64, 0.1_real64)
+        print '(a,i0)', "unexpectedly accepted nside= 6, nmax=", nmax
+    end subroutine scenario_healpix_disc_max_count_bad_nside
+
+    !> And it validates `radius` on the same shared checker, so a negative one aborts here too.
+    subroutine scenario_healpix_disc_max_count_negative_radius()
+        integer(int64) :: nmax
+
+        nmax = pf_query_disc_max_count(64_int64, -0.5_real64)
+        print '(a,i0)', "unexpectedly accepted a negative radius, nmax=", nmax
+    end subroutine scenario_healpix_disc_max_count_negative_radius
 
     !> `pf_query_disc_alloc` on an unknown scheme: the message must name it, not its sibling.
     subroutine scenario_healpix_disc_alloc_bad_scheme()

@@ -813,7 +813,7 @@ module parquet_spatial
             integer(int64), allocatable, intent(out) :: labels(:) !! length nvert; 0 where nothing qualifies.
             integer(int64), intent(out), optional :: ncomp !! how many components earned a label.
             integer(int64), allocatable, intent(out), optional :: sizes(:) !! length ncomp, in label order.
-            integer, intent(in), optional :: min_size !! smallest component that earns a label; default 2.
+            integer, intent(in), optional :: min_size !! smallest component that earns a label; default 1.
         end subroutine spatial_components_worker
 
         !> Rebuilds `self` when `radii` would choose a cell more than `spatial_rebuild_factor` from
@@ -1981,14 +1981,15 @@ contains
     !> with no symptom.
     !>
     !> `labels` comes back length `nvert`: a vertex in a qualifying component gets a label in
-    !> `1..ncomp`, and **everything else gets 0**. `min_size` (default 2) is the smallest component
-    !> that earns one, so by default an isolated vertex is unlabelled: in a group catalogue a
-    !> galaxy with no neighbours is not a group of one, it is a field galaxy. `min_size = 1`
-    !> restores the strict graph-theoretic reading in which every vertex belongs to a component.
+    !> `1..ncomp`, and **everything else gets 0**. `min_size` (default 1) is the smallest component
+    !> that earns one, so by default every vertex is labelled and `sum(sizes)` is `nvert` -- the
+    !> textbook reading, in which a singleton *is* a connected component.
     !>
-    !> **Note this differs from the textbook definition on purpose**: mathematically a singleton
-    !> *is* a connected component, so a reader who knows the graph theory and not this default will
-    !> be surprised that `ncomp` omits them.
+    !> **A group finder wants `min_size = 2`**, and should say so at the call: in a group catalogue
+    !> a galaxy with no neighbours is not a group of one, it is a field galaxy. Then `labels > 0` is
+    !> the mask that selects group members and `ncomp` is the number of groups anyone would quote.
+    !> That threshold is a domain choice, so it is the caller's to make rather than this routine's
+    !> to assume.
     !>
     !> **Labels are assigned by ascending vertex index of first appearance**, which is a contract
     !> rather than a detail: without it the numbering would fall out of the union-find's internal
@@ -2004,7 +2005,7 @@ contains
         integer(int64), allocatable, intent(out) :: labels(:) !! length nvert; 0 where nothing qualifies.
         integer(int64), intent(out), optional :: ncomp !! how many components earned a label.
         integer(int64), allocatable, intent(out), optional :: sizes(:) !! length ncomp, in label order.
-        integer, intent(in), optional :: min_size !! smallest component that earns a label; default 2.
+        integer, intent(in), optional :: min_size !! smallest component that earns a label; default 1.
 
         call spatial_components_worker(i, j, int(nvert, kind=int64), labels, ncomp, sizes, min_size)
     end subroutine components_n32
@@ -2017,7 +2018,7 @@ contains
         integer(int64), allocatable, intent(out) :: labels(:) !! length nvert; 0 where nothing qualifies.
         integer(int64), intent(out), optional :: ncomp !! how many components earned a label.
         integer(int64), allocatable, intent(out), optional :: sizes(:) !! length ncomp, in label order.
-        integer, intent(in), optional :: min_size !! smallest component that earns a label; default 2.
+        integer, intent(in), optional :: min_size !! smallest component that earns a label; default 1.
 
         call spatial_components_worker(i, j, nvert, labels, ncomp, sizes, min_size)
     end subroutine components_n64

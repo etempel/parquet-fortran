@@ -392,7 +392,8 @@ contains
         if (what == "" .and. (m /= 2_int64 .or. got(1) /= 3_int64)) what = "pf_spatial_index%nearest"
         ! The module procedure, not a binding: a facade that re-exported only the type would
         ! satisfy every assertion above and leave Friends-of-Friends needing a second import.
-        call pf_connected_components([1_int64, 2_int64], [2_int64, 3_int64], 5_int64, labels, ncomp=ncomp)
+        call pf_connected_components([1_int64, 2_int64], [2_int64, 3_int64], 5_int64, labels, ncomp=ncomp, &
+                                     min_size=2)
         if (what == "" .and. (ncomp /= 1_int64 .or. size(labels) /= 5 .or. labels(5) /= 0_int64)) &
             what = "pf_connected_components"
         if (what == "" .and. sx%metric() /= PF_METRIC_EUCLIDEAN) what = "PF_METRIC_EUCLIDEAN"

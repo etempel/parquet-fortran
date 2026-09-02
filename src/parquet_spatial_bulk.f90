@@ -460,7 +460,11 @@ contains
         integer(int64) :: e, a, b, ra, rb, v, root, nc, nedge
         integer(int64) :: ms
 
-        ms = 2_int64
+        ! The default is 1, the strict graph-theoretic reading in which every vertex belongs to
+        ! some component. A group finder that wants singletons dropped says `min_size = 2` at the
+        ! call, where the choice is visible; making that the default would have this routine answer
+        ! a domain question a general graph utility has no business deciding.
+        ms = 1_int64
         if (present(min_size)) ms = int(min_size, kind=int64)
         if (ms < 1_int64) error stop "pf_connected_components: min_size must be >= 1"
         nedge = size(i, kind=int64)

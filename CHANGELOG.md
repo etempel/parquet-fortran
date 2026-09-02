@@ -99,7 +99,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   schemes (`pf_ring2nest`/`pf_nest2ring`) and between resolutions within NEST
   (`pf_ud_pix_nest`), and the pixels of a disc — exact or overlapping, in either scheme, into your
   buffer (`pf_query_disc`), into one the library sizes itself (`pf_query_disc_alloc`), or as a
-  count alone (`pf_query_disc_count`). Grid arithmetic over `nside`, `npix`, order, pixel area,
+  count alone (`pf_query_disc_count`); `pf_query_disc_max_count` bounds that count for any
+  position, so one buffer can serve a whole loop of queries. Grid arithmetic over `nside`, `npix`, order, pixel area,
   resolution, ring index and ring latitude (`pf_nside2npix`, `pf_npix2nside`, `pf_nside2order`,
   `pf_order2nside`, `pf_nside2pixarea`, `pf_nside2resol`, `pf_max_pixrad`, `pf_pix2ring_*`,
   `pf_ring2z`), angular separation between two directions (`pf_angdist`) or between two RA/Dec

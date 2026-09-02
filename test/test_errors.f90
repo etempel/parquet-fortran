@@ -1532,6 +1532,10 @@ contains
                          test_healpix_count_names_itself), &
             new_unittest("query_disc_alloc names ITSELF when it rejects a scheme", &
                          test_healpix_alloc_names_itself), &
+            new_unittest("query_disc_max_count rejects an nside rather than answering -1", &
+                         test_healpix_max_count_nside_aborts), &
+            new_unittest("query_disc_max_count rejects a negative radius", &
+                         test_healpix_max_count_radius_aborts), &
             new_unittest("a bulk form rejects an invalid nside", test_healpix_bulk_nside_aborts), &
             new_unittest("a bulk form rejects arrays that do not conform", &
                          test_healpix_bulk_size_aborts), &
@@ -3599,6 +3603,25 @@ contains
             failure_message="query_disc_alloc was expected to reject scheme= 9", &
             required_stderr="pf_query_disc_alloc: scheme must be PF_HP_RING (0) or PF_HP_NEST (1)")
     end subroutine test_healpix_alloc_names_itself
+
+    subroutine test_healpix_max_count_nside_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        ! It ABORTS where pf_max_pixrad and pf_nside2npix return -1, because a sizing routine that
+        ! answered -1 would have the caller allocate a zero-length buffer and meet the real
+        ! complaint one call later, naming the query rather than the mistake.
+        call check_scenario_exit_status_and_stderr(error, "healpix_disc_max_count_bad_nside", &
+            expect_abort=.true., &
+            failure_message="query_disc_max_count was expected to reject an nside of 6", &
+            required_stderr="pf_query_disc_max_count: nside must be a positive power of two")
+    end subroutine test_healpix_max_count_nside_aborts
+
+    subroutine test_healpix_max_count_radius_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "healpix_disc_max_count_negative_radius", &
+            expect_abort=.true., &
+            failure_message="query_disc_max_count was expected to reject a negative radius", &
+            required_stderr="pf_query_disc_max_count: radius must be at least zero")
+    end subroutine test_healpix_max_count_radius_aborts
 
     subroutine test_healpix_bulk_nside_aborts(error)
         type(error_type), allocatable, intent(out) :: error

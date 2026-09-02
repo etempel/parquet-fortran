@@ -106,8 +106,7 @@ This is the layer the object exists for, and the only place this module offers i
 **`PF_HP_DEC_NORTH` is the default**: `theta = pi/2 - dec`, positive declination towards the north
 pole, the standard astronomical convention. A grid built without `frame=` uses it, so ordinary
 catalogue declinations need nothing said. **If your data uses the mirrored `theta = pi/2 + dec`**,
-where positive declination points *south* — as `radec_to_vec_healpix` and the code downstream of it
-do — you must say so, once:
+where positive declination points *south*, you must say so, once:
 
 ```fortran
 call sky%init(1024_int64, PF_HP_NEST, frame=PF_HP_DEC_SOUTH)
@@ -214,7 +213,7 @@ arithmetic — no direction is computed and nothing rounds — so a round trip i
 
 - **int32**: `nside` up to **8192**. Above that the pixel index overflows a signed 32-bit integer —
   `12*8192**2` is 805306368, and the next power of two does not fit.
-- **int64**: `nside` up to **2**29** (536870912), which is the ceiling the HEALPix ecosystem itself
+- **int64**: `nside` up to `2**29` (536870912), which is the ceiling the HEALPix ecosystem itself
   uses.
 
 Mixing kinds within one call is a compile error rather than a silent conversion, which is the point
@@ -248,8 +247,9 @@ sequence.
 
 **The buffer is yours and is not resized.** If the disc holds more pixels than `listpix` can take,
 the call aborts with a message naming the capacity, the count reached, the `nside` and the radius,
-rather than truncating silently. A disc of radius `r` covers roughly `nside**2 * 3 * r**2` pixels
-for a small `r`; size generously, and remember that `inclusive = .true.` adds a pixel-wide fringe.
+rather than truncating silently. To size it once for a whole loop of positions, ask
+`pf_query_disc_max_count` — see [Sizing one buffer for many discs](#sizing-one-buffer-for-many-discs)
+— rather than reaching for a rule of thumb.
 
 ### A limit on very small discs
 
@@ -494,6 +494,46 @@ only so that one call can be switched between the three forms without editing it
 allocation inside the walk and no over-allocation. The counting pass records where each run of
 pixels landed, so the filling pass replays those runs rather than walking the ring geometry a
 second time; a disc large enough to exhaust that record simply walks again.
+
+### Sizing one buffer for many discs
+
+```fortran
+n_max = pf_query_disc_max_count(nside, radius, [inclusive])
+```
+
+**The largest a disc of this radius can be, at any position on the sky.** It takes no `vec`, which
+is the whole point: allocate `listpix(n_max)` once, then run `pf_query_disc` into it for as many
+positions as you like without ever sizing it again.
+
+```fortran
+allocate (listpix(pf_query_disc_max_count(nside, radius)))
+do k = 1, npos
+    call pf_query_disc(nside, vecs(:, k), radius, listpix, nlist)
+    ! ... use listpix(1:nlist)
+end do
+```
+
+That is the answer to the sizing problem `pf_query_disc` leaves you with. `pf_query_disc_count` is
+exact, but only for the position you hand it, so using it to size a loop means walking every disc
+twice; `pf_query_disc_alloc` sizes itself, but allocates on every call. This costs one call for the
+whole loop.
+
+**It is an upper bound, never an under-estimate.** A buffer of this size cannot overflow at any
+position, which is the property that makes it safe to allocate from; the price is that most
+positions leave part of it unused. It is within a few per cent for a disc of fifty pixel widths or
+more, and around a fifth at ten — loose only for a disc a pixel or two across, where the count is a
+handful of elements either way. `inclusive = .true.` bounds that mode's wider superset, and the two
+share a `radius` meaning with `pf_query_disc` exactly.
+
+**It is not the attained maximum**, and asking for one would be a worse trade: an exact maximum
+that is wrong at one position in ten million is a buffer overflow, where a bound that is a few per
+cent generous is a few per cent of memory. There is no `scheme` argument, because RING and NEST
+enumerate the same pixels in a different order. A `radius` at or above pi gives
+`pf_nside2npix(nside)` exactly.
+
+**It validates and aborts**, where the arithmetic of `pf_max_pixrad` and `pf_nside2npix` returns -1
+on a bad `nside`. A sizing routine that answered -1 would have you allocate a zero-length buffer and
+meet the real complaint one call later, naming the query rather than the mistake.
 
 ## Comparing angles without computing them
 

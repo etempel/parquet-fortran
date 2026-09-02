@@ -123,7 +123,7 @@ contains
             new_unittest("the carried radius saves expansion rounds", &
                          test_kth_distance_carry_over_saves_rounds), &
             new_unittest("connected components on hand-built graphs", test_components_hand_built_graphs), &
-            new_unittest("min_size thresholds components, and 1 restores singletons", &
+            new_unittest("min_size thresholds components, and the default of 1 keeps singletons", &
                          test_components_min_size_threshold), &
             new_unittest("Friends-of-Friends matches a label-propagation scan", &
                          test_components_friends_of_friends), &
@@ -2374,7 +2374,7 @@ contains
         ! The list carries a duplicate edge and a reversed one, both of which must be harmless.
         ei = [1_int64, 2_int64, 3_int64, 5_int64, 5_int64, 8_int64, 9_int64, 3_int64, 2_int64]
         ej = [2_int64, 3_int64, 4_int64, 6_int64, 7_int64, 9_int64, 8_int64, 2_int64, 1_int64]
-        call pf_connected_components(ei, ej, 12_int32, labels, ncomp=ncomp, sizes=sizes)
+        call pf_connected_components(ei, ej, 12_int32, labels, ncomp=ncomp, sizes=sizes, min_size=2)
         call check(error, size(labels, kind=int64) == 12_int64, &
             "labels must be as long as the vertex count, isolated vertices included")
         if (allocated(error)) return
@@ -2389,7 +2389,7 @@ contains
         call check(error, all(labels(8:9) == 3_int64), "and the next after that must be label 3")
         if (allocated(error)) return
         call check(error, all(labels(10:12) == 0_int64), &
-            "an isolated vertex must be labelled 0 under the default min_size of 2")
+            "under min_size = 2 an isolated vertex must be labelled 0")
         if (allocated(error)) return
         call check(error, size(sizes, kind=int64) == 3_int64, "sizes must be as long as ncomp")
         if (allocated(error)) return
@@ -2402,20 +2402,20 @@ contains
             pi(k) = ei(10_int64 - k)
             pj(k) = ej(10_int64 - k)
         end do
-        call pf_connected_components(pi, pj, 12_int64, other)
+        call pf_connected_components(pi, pj, 12_int64, other, min_size=2)
         call check(error, all(other == labels), &
             "the labels must not depend on the order the edges arrived in")
         if (allocated(error)) return
         ! An int64 vertex count must agree with an int32 one.
-        call pf_connected_components(ei, ej, 12_int64, other)
+        call pf_connected_components(ei, ej, 12_int64, other, min_size=2)
         call check(error, all(other == labels), "both vertex-count kinds must give the same labels")
     end subroutine test_components_hand_built_graphs
 
-    !> `min_size` thresholds components, with `min_size = 1` as the negative control.
+    !> `min_size` thresholds components, with the default of 1 as the negative control.
     subroutine test_components_min_size_threshold(error)
         type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
         integer(int64) :: ei(5), ej(5), none_i(0), none_j(0)
-        integer(int64), allocatable :: labels(:), sizes(:)
+        integer(int64), allocatable :: labels(:), other(:), sizes(:)
         integer(int64) :: ncomp, k
 
         ! Components of size 2, 3 and 4, plus vertex 10 isolated with a self-loop on it.
@@ -2423,22 +2423,41 @@ contains
         ej = [2_int64, 4_int64, 5_int64, 7_int64, 10_int64]
         ei(4) = 6_int64
         ej(4) = 7_int64
+        ! The DEFAULT is the textbook reading: every vertex belongs to some component, so the
+        ! three groups plus the two singletons are five, and the labels leave nobody out.
         call pf_connected_components([ei(1), ei(2), ei(3), 6_int64, 7_int64, 10_int64], &
             [ej(1), ej(2), ej(3), 7_int64, 8_int64, 10_int64], 10_int64, labels, ncomp=ncomp, sizes=sizes)
-        call check(error, ncomp == 3_int64, "three components reach the default min_size of 2")
+        call check(error, ncomp == 5_int64, &
+            "the default min_size of 1 must count every vertex: three groups plus vertices 9 and 10")
+        if (allocated(error)) return
+        call check(error, all(labels > 0_int64), "and must leave no vertex unlabelled")
+        if (allocated(error)) return
+        call check(error, sum(sizes) == 10_int64, "under the default the sizes must add up to every vertex")
+        if (allocated(error)) return
+        ! Passing 1 explicitly must be the same call.
+        call pf_connected_components([ei(1), ei(2), ei(3), 6_int64, 7_int64, 10_int64], &
+            [ej(1), ej(2), ej(3), 7_int64, 8_int64, 10_int64], 10_int64, other, ncomp=ncomp, min_size=1)
+        call check(error, ncomp == 5_int64 .and. all(other == labels), &
+            "min_size = 1 must be exactly what the default already does")
+        if (allocated(error)) return
+        ! min_size = 2 is the group-catalogue threshold, and the control that proves the argument
+        ! is doing something rather than nothing.
+        call pf_connected_components([ei(1), ei(2), ei(3), 6_int64, 7_int64, 10_int64], &
+            [ej(1), ej(2), ej(3), 7_int64, 8_int64, 10_int64], 10_int64, labels, ncomp=ncomp, sizes=sizes, &
+            min_size=2)
+        call check(error, ncomp == 3_int64, "min_size = 2 must keep only the three multi-vertex components")
         if (allocated(error)) return
         call check(error, all(sizes == [2_int64, 3_int64, 3_int64]), &
             "their sizes are 2, 3 and 3, in ascending first-vertex order")
         if (allocated(error)) return
         ! **A self-loop is not company.** "Isolated" means component size 1, not "has no edge" --
         ! the two differ exactly here, and a vertex whose only edge is to itself is alone.
-        call check(error, labels(10) == 0_int64, "a vertex whose only edge is a self-loop is still isolated")
+        call check(error, labels(10) == 0_int64, &
+            "under min_size = 2 a vertex whose only edge is a self-loop is still isolated")
         if (allocated(error)) return
         call check(error, labels(9) == 0_int64, "and so is one with no edge at all")
         if (allocated(error)) return
-        ! min_size = 3 drops the pair; min_size = 1 restores the strict graph-theoretic reading, in
-        ! which every vertex belongs to some component. The second is the negative control that
-        ! proves the default is doing something rather than nothing.
+        ! min_size = 3 drops the pair as well.
         call pf_connected_components([ei(1), ei(2), ei(3), 6_int64, 7_int64, 10_int64], &
             [ej(1), ej(2), ej(3), 7_int64, 8_int64, 10_int64], 10_int64, labels, ncomp=ncomp, min_size=3)
         call check(error, ncomp == 2_int64, "min_size = 3 must drop the two-vertex component")
@@ -2446,20 +2465,13 @@ contains
         call check(error, labels(1) == 0_int64 .and. labels(2) == 0_int64, &
             "and must unlabel both its vertices")
         if (allocated(error)) return
-        call pf_connected_components([ei(1), ei(2), ei(3), 6_int64, 7_int64, 10_int64], &
-            [ej(1), ej(2), ej(3), 7_int64, 8_int64, 10_int64], 10_int64, labels, ncomp=ncomp, min_size=1)
-        call check(error, ncomp == 5_int64, &
-            "min_size = 1 must count every vertex, singletons included: three groups plus vertices 9 and 10")
-        if (allocated(error)) return
-        call check(error, all(labels > 0_int64), "and must leave no vertex unlabelled")
-        if (allocated(error)) return
-        ! An empty edge list is every vertex on its own.
+        ! An empty edge list is every vertex on its own -- which the default now says outright.
         call pf_connected_components(none_i, none_j, 5_int64, labels, ncomp=ncomp, sizes=sizes)
-        call check(error, ncomp == 0_int64 .and. all(labels == 0_int64) .and. size(sizes) == 0, &
-            "an empty edge list has no component of two or more, so every label is 0")
+        call check(error, ncomp == 5_int64, "under the default an empty edge list is five components")
         if (allocated(error)) return
-        call pf_connected_components(none_i, none_j, 5_int64, labels, ncomp=ncomp, sizes=sizes, min_size=1)
-        call check(error, ncomp == 5_int64, "under min_size = 1 an empty edge list is five components")
+        call pf_connected_components(none_i, none_j, 5_int64, other, ncomp=ncomp, min_size=2)
+        call check(error, ncomp == 0_int64 .and. all(other == 0_int64), &
+            "under min_size = 2 an empty edge list has no component of two or more, so every label is 0")
         if (allocated(error)) return
         do k = 1_int64, 5_int64
             call check(error, labels(k) == k, "each of which is its own vertex, numbered in vertex order")

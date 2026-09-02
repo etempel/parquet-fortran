@@ -1165,6 +1165,8 @@ scenarios=(
     "healpix_disc_runs_bad_rows:1"
     "healpix_disc_count_bad_nside:1"
     "healpix_disc_alloc_bad_scheme:1"
+    "healpix_disc_max_count_bad_nside:1"
+    "healpix_disc_max_count_negative_radius:1"
     "healpix_bulk_nside_invalid:1"
     "healpix_bulk_size_mismatch:1"
     "healpix_bulk_threads_zero:1"

@@ -53,7 +53,7 @@ module parquet_healpix
     public :: pf_pix2vec_ring, pf_pix2vec_nest
     public :: pf_ring2nest, pf_nest2ring
     public :: pf_query_disc, pf_query_disc_count, pf_query_disc_alloc
-    public :: pf_query_disc_runs
+    public :: pf_query_disc_runs, pf_query_disc_max_count
     public :: pf_angdist
     public :: pf_max_pixrad
     !
@@ -134,9 +134,8 @@ module parquet_healpix
     !!
     !! A mirrored frame, self-consistent in itself -- a reflection preserves angular distance, so
     !! every separation and every disc comes out the same size -- and in live use in several
-    !! projects that feed this module, `../qfeet`'s `radec_to_vec_healpix` among them. **Mixing the
-    !! two searches the wrong hemisphere and reports nothing**, which is why a grid whose data uses
-    !! this convention must say so once, at `%init`.
+    !! projects that feed this module. **Mixing the two searches the wrong hemisphere and reports
+    !! nothing**, which is why a grid whose data uses this convention must say so once, at `%init`.
     integer, parameter :: PF_HP_DEC_SOUTH = 1
 
     ! ---- Kind and range limits ----
@@ -602,6 +601,48 @@ module parquet_healpix
         module procedure hpx_query_disc_alloc_i64
     end interface pf_query_disc_alloc
 
+    !> An upper bound on how many pixels a disc of this radius can hold, at ANY sky position.
+    !!
+    !! **What it is for.** Sizing one `listpix` buffer that a whole loop of `pf_query_disc` calls
+    !! can then reuse. `pf_query_disc_count` answers exactly, but only for the position you give
+    !! it, so a loop over many positions would have to call it once per position -- which is the
+    !! same walk the query itself does, i.e. the work twice. This takes no position at all.
+    !!
+    !! **It is an UPPER BOUND, not the attained maximum, and it is never an under-estimate.** A
+    !! buffer of this size cannot overflow at any position, which is the property a caller needs;
+    !! the price is that most positions use fewer elements than it reserves. It is within a few
+    !! per cent for a disc of fifty pixel widths or more, around a fifth at ten, and loose only for
+    !! a disc of a pixel or two, where the count is a handful of elements either way.
+    !!
+    !! **Where the bound comes from.** Every HEALPix pixel has exactly the same area and lies
+    !! wholly within `pf_max_pixrad(nside)` of its own centre. So every pixel this query can
+    !! return lies inside the cap of radius `t` about the disc centre, where `t` is the radius
+    !! that decides membership plus one `pf_max_pixrad`; the pixels are disjoint, so their count
+    !! cannot exceed that cap's area divided by the pixel area, which is
+    !! `npix * sin(t/2)**2`. `inclusive = .true.` reaches one `pf_max_pixrad` further out --
+    !! that is exactly the bound `pf_query_disc` publishes for the pixels it may return -- so `t`
+    !! carries two of them rather than one. The result is that quantity rounded up, with a margin
+    !! that keeps floating-point rounding from turning an upper bound into a lower one, and
+    !! clamped to `pf_nside2npix(nside)`.
+    !!
+    !! **The answer does not depend on the numbering scheme**, so there is no `scheme` argument:
+    !! RING and NEST enumerate the same set of pixels in a different order. There is no `vec`
+    !! either, which is the whole point -- it is `pf_query_disc_count` without the position.
+    !!
+    !! **It validates and aborts**, unlike the `pure elemental` arithmetic of `pf_max_pixrad` and
+    !! `pf_nside2npix`, which return -1 on a bad `nside` rather than stopping. A sizing routine
+    !! that answered -1 would have the caller allocate a zero-length buffer and meet the real
+    !! complaint one call later, naming the query rather than the mistake; `nside` and `radius`
+    !! are checked here exactly as `pf_query_disc` checks them, and every message names this
+    !! routine.
+    !!
+    !! `nside` takes either integer kind and the result comes back in that kind. A `radius` at or
+    !! above pi covers the sphere, so the answer is `pf_nside2npix(nside)`.
+    interface pf_query_disc_max_count
+        module procedure hpx_query_disc_max_count_i32
+        module procedure hpx_query_disc_max_count_i64
+    end interface pf_query_disc_max_count
+
     !> A disc as CONTIGUOUS RUNS of RING pixels, rather than as a list of pixels.
     !!
     !! **What a run is.** RING numbering is contiguous along each ring, and a disc covers one arc
@@ -996,8 +1037,9 @@ module parquet_healpix
         !> to a fraction `2.2e-16/radius**2` of itself, which is 2e-10 at a milliradian and 1 at
         !> 1.05e-08 rad (0.0022 arcsec), where `cos(radius)` is exactly 1.0. It approaches 1 FROM
         !> BELOW, so rounding it to 1.0 rounds the effective radius DOWN: `dot >= cos(radius)`
-        !> tightens until no pixel centre satisfies it and the disc comes back empty. This is a property of a double-precision disc query rather than
-        !> of this implementation, and it only becomes reachable at extreme resolution: a
+        !> tightens until no pixel centre satisfies it and the disc comes back empty. This is a
+        !> property of a double-precision disc query rather than of this implementation, and it
+        !> only becomes reachable at extreme resolution: a
         !> pixel-scale disc is resolvable through `nside = 2**28` and degenerates at `2**29`. Every
         !> `nside` a survey actually uses is many orders away from it.
         !>
@@ -1079,6 +1121,22 @@ module parquet_healpix
             integer, intent(in), optional :: scheme !! `PF_HP_RING` (default) or `PF_HP_NEST`.
             logical, intent(in), optional :: inclusive !! overlap superset; default `.false.`.
         end subroutine hpx_query_disc_count_i64
+
+        !> `pf_query_disc_max_count`, int32 kind. See the generic for the bound it computes.
+        module function hpx_query_disc_max_count_i32(nside, radius, inclusive) result(nmax)
+            integer(int32), intent(in) :: nside !! resolution parameter, a positive power of two.
+            real(real64), intent(in) :: radius !! disc radius, radians, >= 0; above pi acts as pi.
+            logical, intent(in), optional :: inclusive !! bound the overlap superset; default `.false.`.
+            integer(int32) :: nmax !! upper bound on the pixel count, at any position.
+        end function hpx_query_disc_max_count_i32
+
+        !> `pf_query_disc_max_count`, int64 kind. See the generic for the bound it computes.
+        module function hpx_query_disc_max_count_i64(nside, radius, inclusive) result(nmax)
+            integer(int64), intent(in) :: nside !! resolution parameter, a positive power of two.
+            real(real64), intent(in) :: radius !! disc radius, radians, >= 0; above pi acts as pi.
+            logical, intent(in), optional :: inclusive !! bound the overlap superset; default `.false.`.
+            integer(int64) :: nmax !! upper bound on the pixel count, at any position.
+        end function hpx_query_disc_max_count_i64
 
         !> `pf_query_disc_alloc`, int32 kinds.
         module subroutine hpx_query_disc_alloc_i32(nside, vec, radius, listpix, nlist, scheme, &

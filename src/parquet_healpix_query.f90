@@ -460,6 +460,79 @@ contains
         nlist = int(n64, int32)
     end procedure hpx_query_disc_count_i32
 
+    module procedure hpx_query_disc_max_count_i64
+        nmax = hpx_disc_max_count(nside, hpx_nside_max, radius, inclusive)
+    end procedure hpx_query_disc_max_count_i64
+
+    module procedure hpx_query_disc_max_count_i32
+        nmax = int(hpx_disc_max_count(int(nside, int64), hpx_nside_max_i32, radius, inclusive), int32)
+    end procedure hpx_query_disc_max_count_i32
+
+    !> The position-free pixel-count bound both `pf_query_disc_max_count` kinds return.
+    !>
+    !> **The bound is a packing argument, not a geometric enumeration.** Every pixel has area
+    !> `4*pi/npix` exactly and lies wholly within `pf_max_pixrad(nside)` of its own centre, so a
+    !> pixel the query can return lies entirely inside the cap of radius `t` about the disc
+    !> centre, where `t` is the membership radius plus one `max_pixrad`. Those pixels are
+    !> disjoint, so `n * 4*pi/npix <= 2*pi*(1 - cos t)`, i.e. `n <= npix * sin(t/2)**2`. Written
+    !> as a half-angle sine rather than as `(1 - cos t)/2` because the latter cancels to nothing
+    !> for the small `t` that matter most here.
+    !>
+    !> **`inclusive` widens the MEMBERSHIP radius, which is a second `max_pixrad` on top of the
+    !> containment one.** `pf_query_disc`'s published contract for that mode is that no pixel
+    !> whose centre lies farther than `radius + max_pixrad` is returned, so the centres in play
+    !> reach that far and their pixels reach one `max_pixrad` beyond it.
+    !>
+    !> **The margins are what stop a rounding error inverting the bound**, which would be the one
+    !> failure worth having: a buffer sized from an under-estimate overflows. The relative term
+    !> covers `real(npix, real64)` losing the low bits of an `npix` above 2**53 (it reaches
+    !> 3.5e18 at the `nside` ceiling) and the rounding of `sin`; the absolute term covers a small
+    !> count, where a relative margin is worth nothing. Both are far below what any caller would
+    !> notice, and the clamp to `npix` keeps the whole-sphere answer exact.
+    function hpx_disc_max_count(nside, nside_max, radius, inclusive) result(nmax)
+        integer(int64), intent(in) :: nside !! resolution parameter, checked here.
+        integer(int64), intent(in) :: nside_max !! the ceiling for the caller's integer kind.
+        real(real64), intent(in) :: radius !! disc radius, radians, checked here.
+        logical, intent(in), optional :: inclusive !! bound the overlap superset; default `.false.`.
+        integer(int64) :: nmax !! upper bound on the pixel count, at any position.
+
+        real(real64), parameter :: rel_margin = 1.0e-12_real64 !! covers real64 rounding of the product.
+        integer(int64), parameter :: abs_margin = 8_int64 !! covers rounding where the count is tiny.
+        !> A placeholder direction, so that the shared validator can check `nside` and `radius`
+        !! with the same messages the rest of the family uses. It is a `parameter` rather than an
+        !! array constructor at the call because an explicit-shape dummy makes ifx build an array
+        !! temporary for a constructor, and report one on every call under `-check`.
+        real(real64), parameter :: axis(3) = [0.0_real64, 0.0_real64, 1.0_real64]
+        real(real64) :: t, npix_r, bound
+        integer(int64) :: npix
+        logical :: inc
+
+        inc = .false.
+        if (present(inclusive)) inc = inclusive
+        ! `axis` and PF_HP_RING are both valid by construction, so only nside and radius can fire.
+        call hpx_check_disc_args(nside, nside_max, axis, radius, PF_HP_RING, "pf_query_disc_max_count")
+        npix = 12_int64 * nside * nside
+        t = radius + hpx_max_pixrad(nside)
+        if (inc) t = t + hpx_max_pixrad(nside)
+        ! **Past pi the formula turns around and becomes an UNDER-estimate**, which is the one
+        ! way this routine could do real damage: `sin(t/2)**2` peaks at `t = pi` and decreases
+        ! after it, so a hemisphere-and-a-half disc would be bounded below its true count and the
+        ! caller's buffer would overflow. Clamping here rather than clamping `t` also keeps `sin`
+        ! away from a `radius` of infinity, which passes validation -- only NaN and a negative are
+        ! refused -- and would otherwise reach `sin(infinity)`: a NaN, and IEEE_INVALID raised,
+        ! which ends a NAG process. The cap is the whole sphere either way, so the answer is
+        ! exactly `npix` and no arithmetic is needed. (The negated spelling is belt-and-braces
+        ! against a NaN `t`; `t > hpx_pi` behaves identically for every input reachable today,
+        ! confirmed by mutation.)
+        if (.not. (t < hpx_pi)) then
+            nmax = npix
+            return
+        end if
+        npix_r = real(npix, real64)
+        bound = npix_r * sin(0.5_real64 * t)**2
+        nmax = min(npix, ceiling(bound * (1.0_real64 + rel_margin), int64) + abs_margin)
+    end function hpx_disc_max_count
+
     module procedure hpx_query_disc_alloc_i64
         integer :: sch
         logical :: inc

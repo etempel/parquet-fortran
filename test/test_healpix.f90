@@ -34,7 +34,8 @@ module test_healpix
     use parquet_healpix
     use iso_fortran_env, only : int32, int64, real64
     use, intrinsic :: ieee_arithmetic, only : ieee_get_flag, ieee_set_flag, ieee_support_flag, &
-        ieee_invalid, ieee_divide_by_zero, ieee_overflow, ieee_value, ieee_quiet_nan, ieee_is_nan
+        ieee_invalid, ieee_divide_by_zero, ieee_overflow, ieee_value, ieee_quiet_nan, ieee_is_nan, &
+        ieee_positive_inf
     use testdrive, only : new_unittest, unittest_type, error_type, check
     implicit none
     private
@@ -99,6 +100,10 @@ contains
                          test_disc_alloc_run_overflow), &
             new_unittest("query_disc at the int32 ceiling agrees with the int64 kind", &
                          test_disc_int32_ceiling), &
+            new_unittest("query_disc_max_count bounds every position, in both modes", &
+                         test_disc_max_count_bounds_every_position), &
+            new_unittest("query_disc_max_count is tight enough to be worth calling", &
+                         test_disc_max_count_is_useful), &
             new_unittest("no IEEE exception is raised by any entry point", test_no_ieee_exceptions), &
             new_unittest("results are identical from many threads and from one", test_thread_safety), &
             new_unittest("angdist is stable at both ends of its range", test_angdist_extremes), &
@@ -854,6 +859,121 @@ contains
         call check(error, nbad, 0, "the two kinds returned different pixels at nside 8192")
     end subroutine test_disc_int32_ceiling
 
+    !> `pf_query_disc_max_count` is never exceeded, at any position, in either mode.
+    !>
+    !> **The oracle is `pf_query_disc_count` itself, at many positions**, which is the only thing
+    !> that can falsify an upper bound: the bound is a claim about the maximum over the sphere, so
+    !> it is tested by sampling the sphere. The positions are every pixel centre of a coarse ring
+    !> walk plus a deterministic pseudo-random scatter, because the extreme position is not
+    !> obviously either a pole or an equator point and the two samplings miss different things.
+    !>
+    !> **This test alone would pass against a bound of `pf_nside2npix(nside)`**, which is why
+    !> `test_disc_max_count_is_useful` exists beside it and asserts the other direction.
+    subroutine test_disc_max_count_bounds_every_position(error)
+        type(error_type), allocatable, intent(out) :: error !! set when a position exceeds the bound.
+        integer(int64), parameter :: nsides(4) = [1_int64, 4_int64, 32_int64, 256_int64]
+        real(real64), parameter :: rmul(6) = [0.0_real64, 0.5_real64, 1.0_real64, 3.0_real64, &
+                                              12.0_real64, 90.0_real64]
+        integer(int64) :: nside, npix, bound, cnt, worst, ip, stride, seed
+        real(real64) :: radius, vec(3), th, ph
+        integer :: is, ir, k, mode
+        logical :: inc
+        character(len=160) :: detail
+
+        do is = 1, size(nsides)
+            nside = nsides(is)
+            npix = pf_nside2npix(nside)
+            do ir = 1, size(rmul)
+                radius = rmul(ir) * pf_nside2resol(nside)
+                if (radius > pi) cycle
+                do mode = 1, 2
+                    inc = (mode == 2)
+                    bound = pf_query_disc_max_count(nside, radius, inclusive=inc)
+                    call check(error, bound >= 0_int64 .and. bound <= npix, &
+                        "the bound must be a pixel count: at least zero and at most npix")
+                    if (allocated(error)) return
+                    worst = 0_int64
+                    stride = max(1_int64, npix / 512_int64)
+                    do ip = 0_int64, npix - 1_int64, stride
+                        call pf_pix2vec_ring(nside, ip, vec)
+                        call pf_query_disc_count(nside, vec, radius, cnt, inclusive=inc)
+                        worst = max(worst, cnt)
+                    end do
+                    seed = 20260902_int64
+                    do k = 1, 700
+                        seed = modulo(seed * 6364136223846793005_int64 + 1442695040888963407_int64, &
+                                      2147483647_int64)
+                        th = acos(1.0_real64 - 2.0_real64 * real(seed, real64) / 2147483647.0_real64)
+                        seed = modulo(seed * 6364136223846793005_int64 + 1442695040888963407_int64, &
+                                      2147483647_int64)
+                        ph = 2.0_real64 * pi * real(seed, real64) / 2147483647.0_real64
+                        call pf_ang2vec(th, ph, vec)
+                        call pf_query_disc_count(nside, vec, radius, cnt, inclusive=inc)
+                        worst = max(worst, cnt)
+                    end do
+                    write (detail, '(a,i0,a,es11.4,a,l1,a,i0,a,i0)') "nside=", nside, " radius=", &
+                        radius, " inclusive=", inc, " observed=", worst, " bound=", bound
+                    call check(error, worst <= bound, &
+                        "a disc held more pixels than the bound allows: " // trim(detail))
+                    if (allocated(error)) return
+                end do
+            end do
+        end do
+        ! A radius at or above pi is the whole sphere, where the bound is exact rather than loose.
+        call check(error, pf_query_disc_max_count(64_int64, pi) == pf_nside2npix(64_int64), &
+            "a radius of pi must bound at exactly npix")
+        if (allocated(error)) return
+        call check(error, pf_query_disc_max_count(64_int64, 7.0_real64) == pf_nside2npix(64_int64), &
+            "a radius past pi must still bound at exactly npix rather than overflowing it")
+        if (allocated(error)) return
+        ! Both integer kinds must answer the same number.
+        call check(error, int(pf_query_disc_max_count(512_int32, 0.01_real64), int64) == &
+                          pf_query_disc_max_count(512_int64, 0.01_real64), &
+            "the int32 and int64 kinds must agree")
+    end subroutine test_disc_max_count_bounds_every_position
+
+    !> The bound is TIGHT enough to be worth calling, which is the half an upper bound can fake.
+    !>
+    !> Without this, `nmax = pf_nside2npix(nside)` would satisfy every assertion in
+    !> `test_disc_max_count_bounds_every_position` while making the routine useless -- so this is
+    !> that test's negative control rather than a separate concern. It asserts a ratio against the
+    !> attained maximum rather than an absolute count, so it says nothing about which `nside` is
+    !> in use and does not have to be re-tuned when one changes.
+    subroutine test_disc_max_count_is_useful(error)
+        type(error_type), allocatable, intent(out) :: error !! set when the bound is uselessly loose.
+        integer(int64) :: nside, npix, bound, cnt, worst, ip, stride
+        real(real64) :: radius, vec(3)
+        character(len=160) :: detail
+
+        nside = 256_int64
+        npix = pf_nside2npix(nside)
+        ! A disc of about forty pixel widths: large enough for the area argument to be sharp, and
+        ! small enough that a bound of npix would be four hundred times too big.
+        radius = 40.0_real64 * pf_nside2resol(nside)
+        bound = pf_query_disc_max_count(nside, radius)
+        worst = 0_int64
+        stride = max(1_int64, npix / 4096_int64)
+        do ip = 0_int64, npix - 1_int64, stride
+            call pf_pix2vec_ring(nside, ip, vec)
+            call pf_query_disc_count(nside, vec, radius, cnt)
+            worst = max(worst, cnt)
+        end do
+        write (detail, '(a,i0,a,i0,a,i0)') "observed=", worst, " bound=", bound, " npix=", npix
+        call check(error, worst > 0_int64, "the fixture disc must hold pixels at all: " // trim(detail))
+        if (allocated(error)) return
+        ! 1.25 is far above the ~1.05 measured here and far below the ~400 a bound of npix would
+        ! give, so it fails a useless bound without pinning this implementation's exact tightness.
+        call check(error, real(bound, real64) < 1.25_real64 * real(worst, real64), &
+            "the bound must be within a quarter of the attained maximum: " // trim(detail))
+        if (allocated(error)) return
+        call check(error, bound < npix / 100_int64, &
+            "and must be far below npix, or it is not sizing anything: " // trim(detail))
+        if (allocated(error)) return
+        ! The inclusive mode bounds a superset, so its bound cannot be the smaller of the two.
+        call check(error, pf_query_disc_max_count(nside, radius, inclusive=.true.) >= bound, &
+            "the inclusive bound must be at least the exact-mode one")
+    end subroutine test_disc_max_count_is_useful
+
     ! ---- The trap-cleanliness property ----
 
     !> No entry point raises an IEEE exception on any valid input.
@@ -987,7 +1107,19 @@ contains
             sink = sink + nlist
             call pf_query_disc(32_int64, vec, dist, listpix, nlist, scheme=PF_HP_NEST, inclusive=.true.)
             sink = sink + nlist
+            sink = sink + pf_query_disc_max_count(32_int64, dist)
+            sink = sink + pf_query_disc_max_count(32_int64, dist, inclusive=.true.)
         end do
+        ! An INFINITE radius, which passes validation -- only NaN and a negative are refused --
+        ! and which pf_query_disc_max_count must answer without reaching `sin`. `sin(infinity)`
+        ! is a NaN and raises IEEE_INVALID, which ends a NAG process; this is the one input where
+        ! dropping that routine's whole-sphere shortcut is a raised flag rather than a wrong
+        ! number, and it is what this assertion is here to catch.
+        sink = sink + pf_query_disc_max_count(32_int64, ieee_value(0.0_real64, ieee_positive_inf))
+        call check(error, pf_query_disc_max_count(32_int64, &
+                              ieee_value(0.0_real64, ieee_positive_inf)) == pf_nside2npix(32_int64), &
+            "an infinite radius must bound at npix")
+        if (allocated(error)) return
 
         call ieee_get_flag(ieee_invalid, got_inv)
         call ieee_get_flag(ieee_divide_by_zero, got_div)

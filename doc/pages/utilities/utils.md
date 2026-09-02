@@ -6,16 +6,24 @@ title: Text and path helpers with parquet_utils
 Fortran does not supply: ASCII case folding, turning a value into text, and joining and taking
 apart POSIX paths.
 
-It is a leaf. `use parquet_utils` compiles **one** of this library's Fortran files, imports nothing
-but `iso_fortran_env`, and never crosses the C++ boundary. It is also available through
+It is a leaf. `use parquet_utils` compiles **one** of this library's Fortran files and imports
+nothing but `iso_fortran_env`, so its Fortran graph never reaches the C++ bindings. That is
+narrower than "no C++": `link` is a package-level key in `fpm.toml`, so the wrapper is still
+compiled and Arrow still linked whichever module you import — see
+[Choosing a module](../operating/choosing-a-module.html). It is also available through
 `use parquet` like everything else.
 
-## Two rules that apply to everything here
+## Rules that apply to everything here
 
 **Nothing in this module can fail.** There is no `error stop` anywhere in it, no argument you can
 get wrong, and no precondition to violate. A minimum width that is too small grows the result
 rather than refusing it; a path with no directory part has an empty directory part; even a format
 string the runtime rejects comes back as a run of asterisks rather than ending your program.
+
+**Every procedure here is `pure`.** Fortran forbids a `pure` procedure from printing, from any
+other external I/O and from executing a `STOP`, so most of the paragraph above is enforced by the
+compiler on every build rather than being a promise. It is also a capability: you can call these
+from your own `pure` procedures and from inside a `do concurrent` block.
 
 **Every result is allocated, on every path.** Where the answer is empty you get an allocated,
 zero-length string — never an unallocated one. So `len(result) == 0` is the only test you ever
@@ -56,6 +64,10 @@ key = "Verbosity"
 call pf_to_lower(key)      ! key is now "verbosity", still length 16
 ```
 
+**Neither form trims.** The copy is exactly `len(s)` characters long and the in-place form cannot
+change its variable's length at all, so `pf_to_lower("AB   ", out)` gives `"ab   "`. These two are
+the exception to the module's trimming rule — see [Trailing blanks](#trailing-blanks) below.
+
 ## Turning a value into text
 
 One signature for all five types — `integer(int32)`, `integer(int64)`, `real(real32)`,
@@ -81,8 +93,9 @@ call pf_to_str(.true., res)                 ! "true"
 refused.
 
 **`fmt` renders and `min_width` then pads what it produced**, in that order, so the two never
-fight. `pad` defaults to `"0"` for the two integer types — the zero-padded file counter is the case
-this exists for — and to `" "` for the reals and the logical.
+fight. `fmt` is a Fortran format specification and carries its own parentheses — `'(i0)'`, not
+`'i0'`. `pad` defaults to `"0"` for the two integer types — the zero-padded file counter is the
+case this exists for — and to `" "` for the reals and the logical.
 
 **Exactly one case puts padding between the sign and the digits: an integer padded with `"0"`.**
 Everything else pads in front of the sign.
@@ -101,6 +114,16 @@ so it goes outside the sign like a blank.
 
 **A format the runtime rejects gives you asterisks**, not a crash. How many asterisks is not part
 of the contract and differs between compilers, so test for "all asterisks" rather than a length.
+
+**Asterisks have two other causes, and the first is much the commoner.** A perfectly valid format
+whose field is too narrow makes Fortran itself write asterisks and report success, so
+`pf_to_str(12345, res, fmt='(i2)')` is `"**"` — and `min_width` then pads *that*, so adding
+`min_width=6` gives `"0000**"`. Separately, a rendering longer than **512 characters** overflows
+the fixed buffer each value is rendered through, so `fmt='(f600.2)'` is asterisks as well; that
+buffer is the only limit in the module and is far above any width these five types need.
+
+So asterisks mean "look at your `fmt`", not specifically "your `fmt` was rejected" — and in all
+three cases you get them instead of an abort, which is the rule this module never breaks.
 
 ### `pf_to_str` and `pf_str` are different, and they disagree about one value
 
@@ -176,6 +199,7 @@ These follow `posixpath.dirname`, `posixpath.basename` and `posixpath.splitext`:
 | `a.tar.gz` | | `a.tar.gz` | `.gz` | `a.tar` |
 | `/a.b/c` | `/a.b` | `c` | | `c` |
 | `a.` | | `a.` | `.` | `a` |
+| `a//b` | `a` | `b` | | `b` |
 
 Three of those rows are the ones a hand-rolled version gets wrong, and each is worth knowing:
 **`.bashrc` has no extension** (a leading dot marks a hidden file), **`/a.b/c` has no extension**
@@ -187,6 +211,10 @@ what makes the no-extension case compose without leaving a stray dot behind.
 Everything is purely lexical: nothing is normalised, no symlink is resolved, and the filesystem is
 never touched. `a/b/../c` comes back as `a/b/../c`, because it is only `a/c` when `b` is not a
 symlink, and answering that needs the filesystem.
+
+**A repeated separator is preserved everywhere except in `dirname`**, which strips the whole run —
+hence the `a//b` row above. That is Python's rule rather than a choice made here; joining and
+`pf_path_add_suffix` both leave `a//b` exactly as they found it.
 
 ## Renaming a file, which is what most of this is for
 
@@ -217,10 +245,13 @@ call pf_join_path(dir, stem // "_stat" // ext, outfile)
 
 ## Trailing blanks
 
-**Every text argument has its trailing blanks trimmed and its leading blanks preserved.** This is
-one rule for the whole module, and it is forced rather than chosen: a `character(len=*)` actual is
-blank-padded and nothing can tell padding from intent, while a leading blank is a legal filename
-character.
+**Every path argument, and every `suffix`, has its trailing blanks trimmed and its leading blanks
+preserved.** It is forced rather than chosen: a `character(len=*)` actual is blank-padded and
+nothing can tell padding from intent, while a leading blank is a legal filename character.
+
+**`pf_to_lower` and `pf_to_upper` are the exception and do not trim** — they preserve length
+exactly, which is the whole point of the in-place form. Nothing in the path or `pf_to_str` families
+behaves that way.
 
 It matters most for `suffix`, where the alternative is silently wrong:
 
@@ -234,9 +265,11 @@ call pf_path_add_suffix("myfile.txt", suffix, outfile)
 
 The cost is that a suffix genuinely ending in a blank cannot go through this procedure. Build it
 yourself if you need one — ordinary concatenation preserves the padding of a fixed-length variable
-exactly:
+exactly. Join the directory back on with `pf_join_path` rather than writing the separator yourself,
+since `dir` is empty for a bare filename and `dir // "/"` would root the result at `/`:
 
 ```fortran
 call pf_split_path(infile, dir, stem, ext)
-outfile_text = dir // "/" // stem // suffix // ext   ! every blank kept
+call pf_join_path(dir, stem, prefix)        ! "" + "myfile" is "myfile", not "/myfile"
+outfile = prefix // suffix // ext           ! every blank in suffix kept
 ```

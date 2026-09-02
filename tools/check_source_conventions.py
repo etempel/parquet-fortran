@@ -1769,6 +1769,66 @@ def check_parquet_utils_stays_arrow_free():
         "Joining two path components must not require the Arrow stack.")
 
 
+def check_parquet_utils_is_total():
+    """Every `parquet_utils` procedure is `pure`, and the module contains no `error stop`.
+
+    The module's central claim -- stated in its own header and in doc/pages/utilities/utils.md --
+    is a NEGATIVE: "nothing validates, nothing aborts, nothing prints". It is the reason the module
+    needs no out-of-process error scenarios at all, and no test can assert it: an in-process test
+    cannot observe an abort that never happens, and a scenario harness has nothing to run.
+
+    **Two thirds of it are enforced by the compiler, because every procedure is `pure`.** Measured
+    with three-line programs under gfortran 15.2: a `pure` procedure containing `print` is rejected
+    ("PRINT statement at (1) not allowed within PURE procedure"), one containing `stop` is rejected
+    ("STOP statement not allowed in PURE procedure"), and one containing `error stop` COMPILES
+    FINE. So `pure` is what makes "nothing prints" and "nothing stops" build-time facts rather than
+    promises, and only the `error stop` third rests on there being none in the file.
+
+    Hence two clauses, neither of which covers the other. Clause (a) keeps the compiler doing that
+    work: a future procedure added without `pure` silently removes the guarantee for itself while
+    every test stays green. Clause (b) is the third the compiler declines to check.
+
+    An empty scan FAILS (CLAUDE.md, "A static check that enumerates names goes stale silently"): no
+    procedures found means the regex or the file moved, not that the module has none.
+    """
+    problems = []
+    path = REPO_ROOT / "src" / "parquet_utils.f90"
+    if not path.exists():
+        return ["src/parquet_utils.f90: not found -- this check has gone blind on the module"]
+
+    # A definition statement, not `end subroutine` and not a call. The part before the keyword is
+    # the prefix, which is where `pure` has to be (a function may also carry a type there).
+    define_re = re.compile(r"^\s*(?P<prefix>[^!]*?)\b(?P<kind>subroutine|function)\s+(?P<name>\w+)")
+    found = 0
+    for lineno, raw in enumerate(path.read_text().split("\n"), start=1):
+        code = strip_comment(raw)
+        stripped = code.strip()
+        if not stripped or stripped.lower().startswith("end "):
+            continue
+        if "error stop" in code.lower():
+            problems.append(
+                "src/parquet_utils.f90:%d: `error stop` -- this module documents that nothing in "
+                "it aborts, which is why it has no error scenarios. Report the condition through a "
+                "result the caller can test, or the guarantee has to come off the page and out of "
+                "the module header." % lineno
+            )
+        match = define_re.match(code)
+        if match is None:
+            continue
+        found += 1
+        if not re.search(r"\bpure\b", match.group("prefix"), re.IGNORECASE):
+            problems.append(
+                "src/parquet_utils.f90:%d: %s %s is not `pure` -- `pure` is what makes the "
+                "module's \"nothing prints, nothing stops\" guarantee a compile-time fact rather "
+                "than a promise, since Fortran forbids both inside a pure procedure."
+                % (lineno, match.group("kind"), match.group("name"))
+            )
+    if found == 0:
+        problems.append(
+            "src/parquet_utils.f90: no procedure definitions matched -- this check has gone blind")
+    return problems
+
+
 def check_parquet_stats_stays_arrow_free():
     """`use parquet_stats` must not reach parquet_bindings.
 
@@ -4189,6 +4249,8 @@ CHECKS = (
     ("parquet_spatial stays Arrow-free", check_parquet_spatial_stays_arrow_free),
     ("parquet_healpix stays Arrow-free", check_parquet_healpix_stays_arrow_free),
     ("parquet_logging stays Arrow-free", check_parquet_logging_stays_arrow_free),
+    ("parquet_utils is total: every procedure pure, no error stop",
+     check_parquet_utils_is_total),
     ("parquet_stats stays Arrow-free", check_parquet_stats_stays_arrow_free),
     ("parquet_stats optionals follow one canonical order", check_stats_optional_argument_order),
     ("the facade inventory names every re-exported module",

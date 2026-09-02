@@ -13,10 +13,16 @@
 !! value came from.
 !!
 !! **No test compares a default-formatted real against a literal string**, and none asserts how
-!! many asterisks a rejected `fmt` produces. Both are measured differences between compilers --
+!! many asterisks a REJECTED `fmt` produces. Both are measured differences between compilers --
 !! `(g0)` renders `3.14_real64` with a different number of digits, and a type-mismatched edit
 !! descriptor is rejected through `iostat` by some runtimes and turned into asterisks by others.
 !! Real rendering is asserted with an explicit `fmt` or by reading the text back.
+!!
+!! **The asterisks from a too-narrow field ARE counted, and that is not a contradiction.** There
+!! the format is valid and Fortran writes the asterisks itself, with the standard fixing the count
+!! at the field width -- so `'(i2)'` on `12345` is `"**"` on every conforming compiler. Only the
+!! rejected-`fmt` path, which goes through the module's own `bad_format_result`, has a length that
+!! must not be pinned.
 !!
 !! There are no error-path tests because `parquet_utils` has no error paths: nothing in it
 !! validates, aborts or prints. That is why nothing here appears in `test/error_scenarios.f90`.
@@ -43,12 +49,13 @@ contains
             new_unittest("case folding covers every ASCII letter", test_fold_ascii), &
             new_unittest("case folding leaves every other byte alone", test_fold_leaves_others), &
             new_unittest("case folding in place preserves length", test_fold_inplace), &
+            new_unittest("case folding does not trim, unlike the path family", test_fold_does_not_trim), &
             new_unittest("to_str renders integers exactly", test_to_str_integers), &
             new_unittest("to_str min_width grows rather than refusing", test_to_str_min_width), &
             new_unittest("to_str pads after the sign", test_to_str_sign), &
             new_unittest("to_str renders reals and logicals", test_to_str_reals_logicals), &
             new_unittest("to_str fmt renders and min_width then pads", test_to_str_fmt), &
-            new_unittest("to_str returns asterisks for a rejected fmt", test_to_str_bad_fmt), &
+            new_unittest("to_str returns asterisks, and for three different reasons", test_to_str_bad_fmt), &
             new_unittest("join_path matches CPython at every arity", test_join_matches_python), &
             new_unittest("join_path array form matches the scalar forms", test_join_many_agrees), &
             new_unittest("join_path array form on 0, 1 and n elements", test_join_many_degenerate), &
@@ -164,6 +171,52 @@ contains
         call pf_to_lower(blanks)
         call check(error, blanks == "      ", "pf_to_lower in place on an all-blank variable must change nothing")
     end subroutine test_fold_inplace
+
+    !> The COPY form does not trim either, which is the half nothing else pins.
+    !!
+    !! The module trims a trailing blank from every path argument and from `suffix`, and
+    !! `pf_to_lower`/`pf_to_upper` are the deliberate exception: the copy is documented as exactly
+    !! `len(s)` long. `doc/pages/utilities/utils.md` claimed the trimming rule held for the whole
+    !! module until 2026-09-02, and it was wrong in exactly this direction -- so the exception is
+    !! now stated on the page and pinned here.
+    !!
+    !! **Every assertion here is on `len` or on a fixed-width section, never on `==` against a
+    !! blank-tailed literal.** Fortran blank-pads the shorter operand of a character comparison, so
+    !! `got == "ab   "` is `.true.` for `got == "ab"` and would assert nothing at all about the
+    !! very blanks this test exists for.
+    !!
+    !! The `pf_join_path` call at the end is the **negative control**: it feeds the same padded
+    !! text to a procedure that does trim. Without it these assertions would pass just as happily
+    !! against a module in which nothing trims anywhere, which is the opposite of the property.
+    !!
+    !! The in-place form needs nothing here -- `test_fold_inplace` above already asserts that it
+    !! leaves `text(4:10)` blank, and a fixed-length variable cannot change length in any case.
+    subroutine test_fold_does_not_trim(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+        character(len=:), allocatable :: got
+
+        call pf_to_lower("AB   ", got)
+        call check(error, len(got) == 5, "pf_to_lower's copy must be len(s), trailing blanks included")
+        if (allocated(error)) return
+        call check(error, got(1:2) == "ab", "pf_to_lower's copy must fold the value")
+        if (allocated(error)) return
+        call check(error, got(3:5) == "   ", "pf_to_lower must leave a trailing blank exactly where it was")
+        if (allocated(error)) return
+
+        call pf_to_upper("ab   ", got)
+        call check(error, len(got) == 5, "pf_to_upper's copy must be len(s), trailing blanks included")
+        if (allocated(error)) return
+        call check(error, got(1:2) == "AB", "pf_to_upper's copy must fold the value")
+        if (allocated(error)) return
+        call check(error, got(3:5) == "   ", "pf_to_upper must leave a trailing blank exactly where it was")
+        if (allocated(error)) return
+
+        ! The negative control: the same padded text through a procedure that DOES trim.
+        call pf_join_path("AB   ", "b", got)
+        call check(error, len(got) == 4, "a path component must be trimmed (control: the folds are the exception)")
+        if (allocated(error)) return
+        call check(error, got == "AB/b", "the control's value must be AB/b, with no blank surviving")
+    end subroutine test_fold_does_not_trim
 
     ! ================================================================================
     ! Value to text
@@ -390,6 +443,39 @@ contains
         ! assertions above would pass against a procedure that always returns them.
         call pf_to_str(1_int32, got, fmt='(i0)')
         call check(error, got == "1", "a good fmt must render normally (negative control for the asterisk path)")
+        if (allocated(error)) return
+
+        ! Cause 2, and by far the commonest: a PERFECTLY VALID format whose field is too narrow.
+        ! Fortran fills the field with asterisks itself and reports success, so the iostat check
+        ! above never fires. Unlike the rejected-fmt case, the count here IS assertable: the
+        ! standard fixes it at the field width, so every conforming compiler gives the same text.
+        call pf_to_str(12345_int32, got, fmt='(i2)')
+        call check(error, got == "**", "a field too narrow must give exactly its own width in asterisks")
+        if (allocated(error)) return
+        call pf_to_str(1234.5_real64, got, fmt='(f4.2)')
+        call check(error, got == "****", "a narrow real field must give exactly its own width in asterisks")
+        if (allocated(error)) return
+
+        ! ...and min_width then pads THAT, which is the two documented rules composing into a
+        ! result no reader would predict.
+        call pf_to_str(12345_int32, got, fmt='(i2)', min_width=6)
+        call check(error, got == "0000**", "min_width must pad the asterisks a narrow field produced")
+        if (allocated(error)) return
+
+        ! Cause 3: the 512-character buffer each value is rendered through. The COUNT is not
+        ! asserted -- this path goes through bad_format_result, whose length is explicitly not
+        ! part of the contract.
+        call pf_to_str(1.0_real64, got, fmt='(f600.2)')
+        call check(error, verify(got, "*") == 0, "a rendering past the 512-character buffer must give asterisks")
+        if (allocated(error)) return
+
+        ! The negative control for cause 3, and the half that makes it a CEILING rather than "a
+        ! long format always fails". It is also what would catch someone lowering the buffer, which
+        ! otherwise turns ordinary numbers into asterisks with nothing to report it.
+        call pf_to_str(1.0_real64, got, fmt='(f400.2)')
+        call check(error, len(got) == 400, "a 400-character rendering must fit the buffer and render")
+        if (allocated(error)) return
+        call check(error, got(397:400) == "1.00", "the 400-character rendering must be the number, right-justified")
     end subroutine test_to_str_bad_fmt
 
     ! ================================================================================

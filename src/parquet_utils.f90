@@ -18,17 +18,27 @@
 !! a precondition a caller can violate. That is also why the module needs no out-of-process error
 !! scenarios: it has no error paths to run in one.
 !!
+!! **`pure` on every procedure is what enforces most of that, on every build.** Fortran forbids a
+!! `pure` procedure from printing, from any other external I/O and from executing a `STOP`, so
+!! "nothing prints" and "nothing stops" are compile-time facts rather than promises. It does NOT
+!! forbid `ERROR STOP` -- that third of the claim rests on there being none in the file, which is
+!! the one part a future edit can break silently. A new procedure here is declared `pure` too.
+!!
 !! **Every allocatable result is ALLOCATED on every path, zero-length where the answer is empty.**
 !! `pf_dirname("cat.parquet")`, `pf_path_ext("cat")` and `pf_join_path` over a zero-size array all
 !! return an allocated, zero-length string, never an unallocated one -- so `len(result)` is the
 !! only thing a caller ever has to test. An `intent(out)` allocatable is deallocated on entry, so a
 !! path that merely failed to assign would hand back a variable whose `len` is undefined.
 !!
-!! **Every `character(len=*)` text argument has its TRAILING blanks trimmed and its LEADING blanks
-!! preserved** -- path components, `suffix`, and anything else passed as text. A `character(len=*)`
-!! actual is blank-padded and nothing can distinguish padding from intent, so trailing blanks
-!! cannot be honoured; a leading blank is a legal filename character and is kept. A caller who
-!! genuinely means a trailing blank builds the string with `pf_split_path` plus concatenation.
+!! **Every PATH argument, and `suffix`, has its TRAILING blanks trimmed and its LEADING blanks
+!! preserved.** A `character(len=*)` actual is blank-padded and nothing can distinguish padding
+!! from intent, so trailing blanks cannot be honoured; a leading blank is a legal filename
+!! character and is kept. A caller who genuinely means a trailing blank builds the string with
+!! `pf_split_path` plus concatenation.
+!!
+!! **`pf_to_lower`/`pf_to_upper` are the exception and do not trim**: the copy form is exactly
+!! `len(s)` long and the in-place form cannot alter its variable's length at all, which is the
+!! whole point of folding a fixed-length key in place. Do not widen the rule above to cover them.
 !!
 !! **Everything text-producing is a SUBROUTINE with a `character(len=:), allocatable, intent(out)`
 !! result**, never a function returning a deferred-length character. GCC PR113797 makes the hidden

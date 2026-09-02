@@ -14,7 +14,11 @@ use iso_fortran_env, only : int64, real64
 integer(int64) :: nside, ipix, nfound
 integer(int64) :: listpix(4096)
 real(real64) :: theta, phi, vec(3)
+real(real64) :: ra, dec
+real(real64), parameter :: deg2rad = 3.14159265358979_real64 / 180.0_real64
 
+ra = 214.25_real64
+dec = 52.5_real64
 nside = 1024_int64
 theta = 0.5_real64 * 3.14159265358979_real64 - dec * deg2rad   ! colatitude, radians
 phi = ra * deg2rad
@@ -24,9 +28,17 @@ call pf_pix2vec_nest(nside, ipix, vec)                         ! and where is th
 call pf_query_disc(nside, vec, 0.01_real64, listpix, nfound)   ! which pixels lie within 0.01 rad?
 ```
 
-`use parquet_healpix` compiles seven of this library's Fortran files and reaches no reader, no
-writer and no Arrow — see [Which module do I import?](../operating/choosing-a-module.html) for the
-whole table. Everything here is also available through `use parquet`.
+Signatures below are written with optional arguments in **square brackets** —
+`pf_query_disc(nside, vec, radius, listpix, nlist, [scheme])` means `scheme` may be omitted. The
+brackets are not Fortran and a block containing them is a description rather than a runnable
+example.
+
+`use parquet_healpix` compiles seven of this library's Fortran files and never reaches this
+library's reader, its writer or its C++ bindings. That is a statement about the *Fortran* graph and
+not about linking: `link` is a package-level key in `fpm.toml`, so every import of this package
+still compiles the C++ wrapper and still links `-larrow`. See
+[Which module do I import?](../operating/choosing-a-module.html) for the whole table. Everything
+documented on this page is also available through `use parquet`.
 
 ## Two conventions to get right
 
@@ -66,10 +78,13 @@ call sky%get_npix(npix)                        ! 12582912
 call sky%radec2pix(214.25_real64, 52.5_real64, ipix)
 ```
 
-**`%init` is the only binding that validates, and the only one that can abort.** It refuses an
-`nside` that is not a positive power of two or is beyond the kind's ceiling, a `scheme` that is
-neither selector, and a `frame` that is neither. After that the object is known good, so the
-conversions on it are free to be total — they never abort, exactly as the free procedures never do.
+**`%init` is the only binding that validates its arguments.** It refuses an `nside` that is not a
+positive power of two or is beyond the kind's ceiling, a `scheme` that is neither selector, and a
+`frame` that is neither. After that the object is known good, so the conversions on it are free to
+be total — they never abort, exactly as the free procedures never do. The bindings that *can* still
+abort are the ones that are not conversions: a disc or bulk query on a grid `%init` has never run
+on, an int32 disc or bulk call on a grid too fine for an int32 index, and `%get_nside`/`%get_npix`
+asked for a value in a kind too small to hold it. Each is covered in its own section below.
 `scheme` is mandatory: it is written once, possibly far from every query, and a grid silently RING
 against NEST data would be wrong everywhere with nothing to notice it.
 
@@ -105,8 +120,9 @@ assertion at start-up settles it.
 Every angle in this layer is in **degrees** — right ascension, declination, and a disc radius:
 `%radec2pix`, `%pix2radec`, `%radec2vec`, `%vec2radec`, and `%query_disc_radec` with its `_count`
 and `_alloc` siblings. Right ascension comes back in `[0, 360)` and declination in `[-90, 90]`.
-The radian spellings (`%ang2pix`, `%query_disc`) are the same procedures without the conversion, so
-pick by the units you are holding, never by mixing them.
+The radian spellings (`%ang2pix`, and `%query_disc` with the same `_count` and `_alloc` siblings)
+are the same procedures without the conversion, so pick by the units you are holding, never by
+mixing them.
 
 ### Resolutions, and comparing two grids
 
@@ -136,34 +152,42 @@ call sky%get_npix(n64)     ! always fine
 call sky%get_npix(n32)     ! aborts if this grid's npix exceeds huge(0_int32)
 ```
 
+The same ceiling reaches the disc and bulk bindings, which is easier to trip: calling one of them
+with `integer(int32)` arguments on a grid finer than `nside = 8192` **aborts** telling you to use
+`integer(int64)` arguments, because an int32 pixel index cannot address that grid at all. The
+elemental conversions are unaffected — being total, they answer `-1` rather than aborting.
+
 `%order`, `%scheme`, `%frame`, `%is_set`, `%pixarea`, `%resol` and `%max_pixrad` are ordinary
 functions — none of them has a kind question.
 
 ### What an unbuilt grid does
 
 A `pf_healpix_grid` that `%init` has never run on is usable and reports so rather than crashing:
-`%is_set()` is `.false.`, a pixel-valued binding returns `-1`, an angle-valued one returns `-999`
-(outside the range of every angle here), and a disc or bulk query aborts naming the binding. **No
+`%is_set()` is `.false.`, a disc or bulk query aborts naming the binding, and everything else
+answers a sentinel. Which sentinel follows one rule — **`-1` wherever `-1` could not be a real
+answer, `-999` where it could.** So `%order`, `%get_nside`, `%get_npix`, `%ang2pix`, `%vec2pix`,
+`%radec2pix`, `%pixarea`, `%resol` and `%max_pixrad` all report `-1`, while the bindings that
+report a *direction* — `%pix2ang`, `%pix2vec`, `%pix2radec`, `%radec2vec` and `%vec2radec` — report
+`-999`, which is outside the range of every angle and vector component here. A declination or a
+vector component of `-1` is perfectly ordinary, so `-1` would go unnoticed there. **No
 floating-point exception is raised on that path either** — the sentinel is answered directly rather
 than by dividing by a zero `nside`.
 
 **The free procedures remain the primary API.** The object is sugar over them: every binding
 delegates to one, so the answers are identical by construction.
 
-**Pick by what reads better.** The delegation costs a call and nothing more. Measured with
-`bench/benchmark_healpix.sh --mode=grid` — each binding against the free procedure it calls, best
-of five passes over two million elements at `nside` 1024 — every operation is within 5% of the free
-form under gfortran.
+**Pick by what reads better.** The delegation costs a call and nothing more:
+`bench/benchmark_healpix.sh --mode=grid` measures each binding against the free procedure it calls,
+and on the compilers this has been run on the two are indistinguishable.
 
-Under ifx the same table spreads from 0.66x to 1.09x, and that is worth one paragraph because it
-looks like a dispatch cost and is not. ifx collapses a hand-written loop of *elemental* calls into
-a single array-wide call through a temporary; it does that to the benchmark's free column and not
-to its bound column, because a type-bound call carrying a passed object is not collapsed. So under
-ifx the two columns of an elemental row are not the same computation. The absolute figures say so
-plainly: on `%pix2ang`, which deviates most, the bound column is 18.58 ns under ifx against 18.54
-under gfortran, while the free column is 28.08 against 17.70 — the free column is what moved. And
-`%query_disc`, the one operation whose free form is not elemental and so cannot be collapsed,
-measures 0.998 under ifx and 1.002 under gfortran.
+One artifact of that measurement is worth knowing before you run it yourself, because it looks like
+a dispatch cost and is not. Some compilers collapse a hand-written loop of *elemental* calls into a
+single array-wide call through a temporary — and they do it to the benchmark's free column and not
+to its bound column, because a type-bound call carrying a passed object is not collapsed. Where that
+happens the two columns of an elemental row are no longer the same computation, and any spread you
+see is the free column moving rather than the binding costing you anything. `%query_disc`, the one
+operation whose free form is not elemental and so cannot be collapsed, shows no such spread on any
+compiler.
 
 ## The two schemes
 
@@ -199,10 +223,8 @@ of having both.
 ## Finding the pixels of a disc
 
 ```fortran
-call pf_query_disc(nside, vec, radius, listpix, nlist [, scheme] [, inclusive])
+call pf_query_disc(nside, vec, radius, listpix, nlist, [scheme], [inclusive])
 ```
-
-(Square brackets mark optional arguments; they are not part of the syntax.)
 
 `vec` is the direction of the disc centre and need not be normalised; `radius` is in radians. The
 result is `listpix(1:nlist)`.
@@ -231,11 +253,13 @@ for a small `r`; size generously, and remember that `inclusive = .true.` adds a 
 
 ### A limit on very small discs
 
-**A disc smaller than about `1e-8` radians (0.0022 arcsec) cannot be resolved, and returns too many
-pixels rather than too few.** Membership is decided against `cos(radius)`, and the distance of that
-from 1 is about `radius**2/2` — so the radius is resolved to a fraction `2.2e-16 / radius**2` of
-itself: 2e-10 at a milliradian, 6e-3 at 2e-7 rad, and 1 at 1.05e-8, where `cos(radius)` is exactly
-1.0 in double precision and the comparison stops distinguishing anything at all.
+**A disc smaller than about `1e-8` radians (0.0022 arcsec) cannot be resolved, and returns too few
+pixels — below `1.05e-8` radians, none at all.** Membership is decided against `cos(radius)`, and
+the distance of that from 1 is about `radius**2/2` — so the radius is resolved to a fraction
+`2.2e-16 / radius**2` of itself: 2e-10 at a milliradian, 6e-3 at 2e-7 rad, and 1 at 1.05e-8, where
+`cos(radius)` is exactly 1.0 in double precision. `cos(radius)` approaches 1 **from below**, so
+rounding it to 1.0 rounds the effective radius *down*: the test `dot >= cos(radius)` tightens until
+no pixel centre can satisfy it, and the disc comes back empty rather than over-full.
 
 This is a property of any double-precision disc query rather than of this implementation, and it
 only becomes reachable at extreme resolution: a disc a few pixels across is resolvable through
@@ -263,9 +287,10 @@ d = pf_angdist_deg(ra1, dec1, ra2, dec2)      ! degrees in, degrees out
 ```
 
 It is `pure elemental`, so it broadcasts over whole arrays — which `pf_angdist` cannot, its
-arguments being arrays already — and it is **31% cheaper than converting to vectors and calling
-`pf_angdist`**, because working in the frame where only the RA difference survives removes one of
-the four sine/cosine pairs.
+arguments being arrays already — and it is **appreciably cheaper than converting to vectors and
+calling `pf_angdist`** (`bench/benchmark_healpix.sh --mode=dist` measures it on your machine),
+because working in the frame where only the RA difference survives removes one of the four
+sine/cosine pairs.
 
 **This is the one place the module takes a bare `dec`, and it can because the answer does not
 depend on which declination convention you mean.** Everywhere else a bare `dec` is refused and
@@ -318,9 +343,17 @@ before it can get that far.
 ## Thread safety
 
 The module holds no state — no saved variables, no cache, no lazy initialisation — so every
-procedure is a function of its arguments alone and can be called from any number of threads with
-nothing to arrange. The scalar conversions are `pure`, so a loop over them threads with a plain
-`!$omp parallel do`.
+procedure's *answer* is a function of its arguments alone and can be called from any number of
+threads with nothing to arrange. The scalar conversions are `pure`, so a loop over them threads
+with a plain `!$omp parallel do`.
+
+The one thing a `_bulk` call can do besides return a value is **warn, once per process**, when the
+thread count it resolved had to be lowered to the processors your CPU affinity mask actually
+allows. That warning is shared with every other part of the library that resolves a thread count,
+and it exists because nothing else reveals the situation: no call fails and no answer changes, only
+wall-clock. `parquet_healpix` re-exports `parquet_set_verbosity`/`parquet_get_verbosity` and
+`parquet_set_message_stream`/`parquet_get_message_stream` for exactly this, so a program on the
+narrow import can silence or redirect it without importing `parquet_settings`.
 
 ## Precision near the poles
 
@@ -360,12 +393,14 @@ guarded rather than passed through.
 
 ### One limit worth knowing before you use vectors at extreme resolution
 
-**Above about `nside = 2**24`, a direction vector can no longer name a pixel near a pole.** A
-ring's latitude is its `z`, and near a pole consecutive rings converge: the gap between ring `i`
-and ring `i+1` is `(2i+1)/(3*nside**2)`, which at `nside = 2**29` is `3.5e-18` at the first ring
-and `1.5e-16` at the sixty-fifth — 0.02 and 0.68 of one ulp of `z = 1`. Two adjacent rings there
-are not distinct double-precision numbers, so no implementation can recover the right one from a
-unit vector.
+**Once consecutive rings near a pole are within a few ulp of each other, a direction vector can no
+longer name the pixel — which begins around `nside = 2**25`.** A ring's latitude is its `z`, and
+near a pole consecutive rings converge: the gap between ring `i` and ring `i+1` is
+`(2i+1)/(3*nside**2)`, so at the first ring it is one ulp of `z = 1` at `nside = 2**26`, four ulp at
+`2**25`, and sixteen at `2**24`. By `nside = 2**29` it is `3.5e-18` at the first ring and `1.5e-16`
+at the sixty-fifth — 0.02 and 0.68 of one ulp. Two adjacent rings that close are not distinct
+double-precision numbers, so no implementation can recover the right one from a unit vector, and a
+vector's own rounding error of a few ulp is what makes the boundary a band rather than a line.
 
 `pf_ang2pix_*` is unaffected: it works from `theta`, where the same rings are millions of ulps
 apart. So at extreme resolution near a pole, keep angles rather than vectors — and note that every
@@ -429,9 +464,9 @@ this is exact.
 ## The three disc forms
 
 ```fortran
-call pf_query_disc(nside, vec, radius, listpix, nlist [, scheme] [, inclusive])        ! your buffer
-call pf_query_disc_alloc(nside, vec, radius, listpix, nlist [, scheme] [, inclusive])  ! its buffer
-call pf_query_disc_count(nside, vec, radius, nlist [, scheme] [, inclusive])           ! no buffer
+call pf_query_disc(nside, vec, radius, listpix, nlist, [scheme], [inclusive])        ! your buffer
+call pf_query_disc_alloc(nside, vec, radius, listpix, nlist, [scheme], [inclusive])  ! its buffer
+call pf_query_disc_count(nside, vec, radius, nlist, [scheme], [inclusive])           ! no buffer
 ```
 
 All three answer the same question and run the same walk, so they cannot disagree.
@@ -486,10 +521,10 @@ your own arithmetic can easily produce — gives 0 or pi rather than raising.
 Every conversion has a `_bulk` form taking arrays and an optional `threads=`:
 
 ```fortran
-call pf_ang2pix_ring_bulk(nside, theta, phi, ipix [, threads])
-call pf_vec2pix_nest_bulk(nside, vec, ipix [, threads])      ! vec is (3, n)
-call pf_ang2vec_bulk(theta, phi, vec [, threads])
-call pf_pix2vec_ring_bulk(nside, ipix, vec [, threads])
+call pf_ang2pix_ring_bulk(nside, theta, phi, ipix, [threads])
+call pf_vec2pix_nest_bulk(nside, vec, ipix, [threads])      ! vec is (3, n)
+call pf_ang2vec_bulk(theta, phi, vec, [threads])
+call pf_pix2vec_ring_bulk(nside, ipix, vec, [threads])
 ```
 
 and likewise `pf_ang2pix_nest_bulk`, `pf_pix2ang_ring_bulk`, `pf_pix2ang_nest_bulk`,
@@ -518,13 +553,20 @@ work available rather than from the machine: one thread per thousand elements, u
 CPU affinity mask allows and never more than 64. So an array of 500 runs serial, 10 000 gets ten
 threads, and anything from 64 000 upward gets the full team. Two things drove that shape. Threading
 a short array is a loss, and a single element count cannot mark where that stops on both a laptop
-and a 384-processor node -- but the work *one* thread needs to be worth waking is much the same on
-both, so that is what the rule is written in terms of. And the ceiling is real rather than
-defensive: on the 384-processor machine these forms were measured on, a 192-thread team costs
-**1118 ns per element** on 10 000 elements against 16 ns for a plain serial loop -- a 69x
-regression, entirely in libgomp's fork and join -- while 64 threads is at or within noise of the
-best figure at every size measured. An explicit `threads=` overrides all of it, including the
-ceiling, on the rule that an explicit argument always wins.
+and a node with hundreds of processors -- but the work *one* thread needs to be worth waking is much
+the same on both, so that is what the rule is written in terms of. And the ceiling is real rather
+than defensive: on a machine with several hundred processors, a team of nearly two hundred threads
+was measured costing **orders of magnitude more per element** than a plain serial loop on a
+ten-thousand-element array, entirely in libgomp's fork and join, while 64 threads was at or within
+noise of the best figure at every size measured. An explicit `threads=` overrides all of it,
+including the ceiling, on the rule that an explicit argument always wins.
+
+**There is no process-wide default to set, and that is deliberate.** The team is derived from the
+work in front of it rather than from a configured number, so a caller who wants a different one says
+so at the call site. `parquet_spatial` does expose `parquet_set_spatial_threads`, and the difference
+is not an oversight: its automatic count starts from what the environment asked for rather than from
+the size of the job, so a process-wide cap is the only lever it has. Here the work already is the
+lever.
 
 Note the spelling: this module's array-with-threads forms end in `_bulk`, where `parquet_random`'s
 array forms are spelled `pf_random_fill_*`. Two tiers, two conventions, and neither is going to

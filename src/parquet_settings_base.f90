@@ -292,12 +292,13 @@ contains
     !> Lowers `n` to the number of processors this process's CPU affinity actually allows, and says
     !> so **once per process** when that clamp bites.
     !!
-    !! **This is the ONE place the affinity clamp lives.** Four resolvers reach it -- the sort's
-    !! `resolve_thread_count`, `pf_sort_threads` and the bulk random draws through
-    !! `parquet_auto_thread_count`, `prefetch_thread_count` (`src/parquet_tables_read.f90`) and
-    !! `parquet_string_threads` (`src/parquet_strings.f90`). It is here rather than in any of them
-    !! because three of the four live in tiers that cannot see each other, and a second copy of a
-    !! rule like this is how two subsystems come to disagree about the same machine.
+    !! **This is the ONE place the affinity clamp lives.** Every subsystem that resolves a thread
+    !! count reaches it, directly or through `parquet_auto_thread_count`; the `area` strings passed
+    !! at those call sites are the authoritative list, so re-derive it with
+    !! `grep -rn parquet_clamp_to_affinity src/` rather than trusting an enumeration written here
+    !! (one went stale, naming five sites as four while three more had appeared). It is here rather
+    !! than in any of them because most live in tiers that cannot see each other, and a second copy
+    !! of a rule like this is how two subsystems come to disagree about the same machine.
     !!
     !! **`omp_get_max_threads` is what the environment ASKED for; `omp_get_num_procs` is what the
     !! affinity mask allows.** They differ whenever the initial thread was bound before `main` --

@@ -27,7 +27,10 @@ every feature below (`find`/`contains`, the interop hooks, everything) is reacha
 types themselves once you have them in scope. A separate `use parquet_strings` is only needed if
 you want this module *without* the rest of the library — e.g. a project that wants compact string
 storage but not the Arrow/Parquet C++ dependency `parquet` (via `parquet_bindings`) pulls in. That
-build really does link without Arrow, and a lint check keeps it that way.
+module's *Fortran* graph really is free of `parquet_bindings`, and a lint check keeps it that way —
+but `link` is a package-level key in `fpm.toml`, so the package still compiles the C++ wrapper and
+still links `-larrow` whichever module you import. See
+[Which module do I import?](../operating/choosing-a-module.html).
 
 ## Why not an array of allocatable strings?
 

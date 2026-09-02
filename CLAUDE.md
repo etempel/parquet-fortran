@@ -572,12 +572,19 @@ Working rules:
 - **Optional arguments are shown in square brackets** when a signature is written out in prose or
   in a table — `call t%get_file_metadata(key, value, [found])`, `%ncols([resident_only])`. **The
   comma goes OUTSIDE the bracket** — `%f(a, [b])`, never `%f(a [, b])` — so the brackets enclose the
-  argument and nothing else; both spellings were in the guide until this was settled. This
-  applies to *descriptions* of a call, never to a runnable code example inside a ```fortran fence,
-  where brackets would not compile. Adopted after the fact rather than in one sweep: apply it to
-  any signature you write or edit, and retrofit a whole page the next time that page is touched
-  for another reason (`doc/pages/tables/table.md` is retrofitted; the others are not yet). The first
-  bracketed signature on a page should carry a one-line note saying what the brackets mean.
+  argument and nothing else; both spellings were in the guide until this was settled. Adopted after
+  the fact rather than in one sweep: apply it to any signature you write or edit, and retrofit a
+  whole page the next time that page is touched for another reason. **Which pages are still on the
+  old spelling is a fact the repository owns, so do not write the list here** — `grep -rn ' \[, '
+  doc/pages/` returns it. A list written here went stale inside one campaign, naming a page as
+  retrofitted that carried eleven of the old spelling. The first bracketed signature on a page
+  should carry a one-line note saying what the brackets mean.
+- **A signature-only block may keep its ```fortran tag even though brackets are not Fortran**, and
+  that page-top note is what makes it legible: a block containing brackets is a *description* of a
+  call, not a runnable example. Settled deliberately over the alternative — move every bracketed
+  signature out into prose, as `doc/pages/utilities/spatial.md` does — because the alternative is a
+  restructure of several pages and buys tidiness rather than clarity. Either way a **runnable**
+  example never contains a bracket, and that is the rule with no exception.
 - **A reference bullet carrying more than about three distinct claims becomes its own `###`
   subsection.** Most `doc/pages/` reference pages are shaped as a bullet list with one bullet per
   procedure, and a bullet in that shape grows without anything pushing back: `schema/building-schema-in-code.md`'s

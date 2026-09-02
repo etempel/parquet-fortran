@@ -86,7 +86,11 @@ contains
             new_unittest("every bulk form accepts an empty and a one-element array", &
                          test_bulk_degenerate_sizes), &
             new_unittest("the bulk forms agree across the int32 and int64 kinds", &
-                         test_bulk_kind_agreement) &
+                         test_bulk_kind_agreement), &
+            new_unittest("a disc below the cos(radius) limit comes back empty, not over-full", &
+                         test_disc_below_resolution_limit), &
+            new_unittest("the vector-versus-pole boundary sits where the page says it does", &
+                         test_vector_pole_boundary) &
             ]
     end subroutine collect_tests_healpix_tier_b
 
@@ -1109,5 +1113,113 @@ contains
         call check(error, all(int(got32, int64) == got64), &
                    "the two vec2pix_nest_bulk kinds disagree")
     end subroutine test_bulk_kind_agreement
+
+    ! ---- Documented limits of double precision ----
+
+    !> The documented small-disc limit, in the direction the guide states it.
+    !>
+    !> `doc/pages/utilities/healpix.md` says a disc below about `1e-8` radians "cannot be resolved,
+    !> and returns too few pixels -- below `1.05e-8` radians, none at all". That direction is the
+    !> whole claim and it is not obvious: membership is `dot >= cos(radius)`, and `cos(radius)`
+    !> approaches 1 FROM BELOW, so rounding it to exactly 1.0 rounds the effective radius DOWN and
+    !> the test tightens until no pixel centre satisfies it. Rounding the other way would have
+    !> over-returned, which is what the page claimed before this test was written.
+    !>
+    !> **The negative control is the arm that makes this mean anything**: at the same `nside`, a
+    !> radius two orders of magnitude above the limit returns the geometrically expected count.
+    !> Without it the test passes just as happily against a `pf_query_disc_count` that always
+    !> answers zero.
+    subroutine test_disc_below_resolution_limit(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first fault.
+        integer(int64), parameter :: ns = 2_int64**27  !! fine enough that a 1e-8 disc spans pixels.
+        real(real64) :: v(3), pixarea, expect
+        integer(int64) :: n_below, n_above, n_at
+
+        ! A direction that is neither a pole, nor on the RA seam, nor a pixel centre.
+        call pf_ang2vec(0.7_real64, 1.3_real64, v)
+        pixarea = pf_nside2pixarea(ns)
+
+        ! Below the limit: cos(radius) is exactly 1.0, so nothing can satisfy the membership test.
+        call pf_query_disc_count(ns, v, 1.0e-9_real64, n_below)
+        call check(error, n_below, 0_int64, &
+                   "a disc below the cos(radius) limit did not come back empty")
+        if (allocated(error)) return
+
+        ! Just below the stated 1.05e-8 crossing, the same thing must hold.
+        call pf_query_disc_count(ns, v, 1.0e-8_real64, n_at)
+        call check(error, n_at, 0_int64, &
+                   "a disc at 1.0e-8 rad did not come back empty")
+        if (allocated(error)) return
+
+        ! NEGATIVE CONTROL: two orders of magnitude above the limit the walk is healthy, so the
+        ! zeros above are the documented degeneracy and not a query that never returns anything.
+        expect = pi * 1.0e-6_real64 * 1.0e-6_real64 / pixarea
+        call pf_query_disc_count(ns, v, 1.0e-6_real64, n_above)
+        call check(error, n_above > 0_int64, &
+                   "the control disc, far above the limit, returned nothing at all")
+        if (allocated(error)) return
+        call check(error, abs(real(n_above, real64) - expect) < 0.2_real64 * expect, &
+                   "the control disc did not return roughly its geometric pixel count")
+        if (allocated(error)) return
+
+        ! And the claim is specifically that it errs LOW: an over-returning implementation would
+        ! fail here even if both arms above happened to pass.
+        call check(error, n_below < n_above, &
+                   "the sub-limit disc did not return fewer pixels than the control")
+    end subroutine test_disc_below_resolution_limit
+
+    !> The documented vector-versus-pole boundary, pinned to the `nside` the guide names.
+    !>
+    !> `doc/pages/utilities/healpix.md` says a direction vector can no longer name a pixel near a
+    !> pole "once consecutive rings near a pole are within a few ulp of each other, which begins
+    !> around `nside = 2**25`". Nothing asserted that: `test_vec2pix_matches_frozen_ang2pix`'s own
+    !> `resolvable` helper SKIPS those cases, so the boundary could move without any test noticing
+    !> and the page's number was pinned by nothing.
+    !>
+    !> This asserts the gap between the first two rings against one ulp of `z = 1`, which is the
+    !> criterion `resolvable` uses and the criterion the page now states -- so the page, the helper
+    !> and this test all draw the same line. The negative control is the low-`nside` arm, where the
+    !> rings are thousands of ulp apart and `pf_vec2pix_ring` round trips exactly.
+    subroutine test_vector_pole_boundary(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first fault.
+        real(real64) :: gap_24, gap_25, gap_26, ulp, v(3)
+        integer(int64) :: ip, back
+
+        ulp = spacing(1.0_real64)
+
+        gap_24 = pf_ring2z(2_int64**24, 1_int64) - pf_ring2z(2_int64**24, 2_int64)
+        gap_25 = pf_ring2z(2_int64**25, 1_int64) - pf_ring2z(2_int64**25, 2_int64)
+        gap_26 = pf_ring2z(2_int64**26, 1_int64) - pf_ring2z(2_int64**26, 2_int64)
+
+        ! The page states the ladder 16 / 4 / 1 ulp at nside 2**24 / 2**25 / 2**26. Assert each
+        ! within half an ulp of the stated value rather than exactly, since these are computed.
+        call check(error, abs(gap_24 / ulp - 16.0_real64) < 0.5_real64, &
+                   "the first-ring gap at nside 2**24 was not 16 ulp of z = 1")
+        if (allocated(error)) return
+        call check(error, abs(gap_25 / ulp - 4.0_real64) < 0.5_real64, &
+                   "the first-ring gap at nside 2**25 was not 4 ulp of z = 1")
+        if (allocated(error)) return
+        call check(error, abs(gap_26 / ulp - 1.0_real64) < 0.5_real64, &
+                   "the first-ring gap at nside 2**26 was not 1 ulp of z = 1")
+        if (allocated(error)) return
+
+        ! `resolvable` in this file draws its line at 4 ulp, which is exactly 2**25 -- so the page
+        ! and the helper agree by construction, and this is what fails if either moves.
+        call check(error, gap_25 <= 4.0_real64 * ulp .and. gap_24 > 4.0_real64 * ulp, &
+                   "the 4-ulp boundary no longer falls between nside 2**24 and 2**25")
+        if (allocated(error)) return
+
+        ! NEGATIVE CONTROL: far below the boundary the rings are thousands of ulp apart and a unit
+        ! vector really does name its pixel, so the assertions above describe a boundary rather
+        ! than a pixelisation that never round trips near a pole.
+        call check(error, pf_ring2z(2_int64**16, 1_int64) - pf_ring2z(2_int64**16, 2_int64) &
+                   > 1000.0_real64 * ulp, &
+                   "the first-ring gap at nside 2**16 was not thousands of ulp")
+        if (allocated(error)) return
+        call pf_pix2vec_ring(2_int64**16, 1_int64, v)
+        call pf_vec2pix_ring(2_int64**16, v, back)
+        call check(error, back, 1_int64, &
+                   "a near-pole pixel did not round trip through a vector well below the boundary")
+    end subroutine test_vector_pole_boundary
 
 end module test_healpix_tier_b

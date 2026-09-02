@@ -15,10 +15,13 @@
 !! **Three rules govern what a binding does with a grid `%init` has never run on**, and they are
 !! the module's existing rules rather than new ones:
 !!
-!! * a pixel-valued binding returns -1, the sentinel every total procedure in this module uses;
-!! * an angle-valued binding returns `hpx_grid_unset_real` (-999), which is outside the range of
-!!   every angle this module returns -- and it is answered HERE rather than delegated, because
-!!   delegating would divide by `nside = 0` and raise `IEEE_DIVIDE_BY_ZERO`;
+!! * a binding whose result could never legitimately be -1 returns -1: the pixel-valued ones, and
+!!   `%order`, `%pixarea`, `%resol` and `%max_pixrad`, whose real results are all positive;
+!! * a binding reporting a DIRECTION -- `%pix2ang`, `%pix2vec`, `%pix2radec`, `%radec2vec`,
+!!   `%vec2radec` -- returns `hpx_grid_unset_real` (-999), because -1 is an ordinary declination or
+!!   vector component there and would go unnoticed. -999 is outside the range of every angle this
+!!   module returns, and it is answered HERE rather than delegated, because delegating would divide
+!!   by `nside = 0` and raise `IEEE_DIVIDE_BY_ZERO`;
 !! * a disc or bulk binding aborts, being a once-per-query entry point where validation belongs.
 !!
 !! The same three apply when an int32 output is asked of a grid finer than `nside = 8192`, where

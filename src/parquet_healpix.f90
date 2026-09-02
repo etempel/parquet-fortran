@@ -258,10 +258,13 @@ module parquet_healpix
     !! whose free form is not elemental and so cannot be collapsed, measures **0.998** under ifx
     !! and 1.002 under gfortran. The binding is a call, and a call is what it costs.
     !!
-    !! **`%init` is the only binding that validates, and the only one that can abort.** Everything
-    !! elemental is total, exactly as the free conversions are: a grid `%init` has never run on
-    !! yields -1 from a pixel binding and `-999` from a real-valued one, rather than an error. The
-    !! disc bindings do abort, being once-per-query entry points.
+    !! **`%init` is the only binding that validates its ARGUMENTS.** Everything elemental is total,
+    !! exactly as the free conversions are: a grid `%init` has never run on answers a sentinel
+    !! rather than an error, `-1` wherever `-1` could not be a real answer and `-999` from the
+    !! bindings that report a DIRECTION, where `-1` is an ordinary declination or vector component.
+    !! Three other things do abort, none of them a conversion: a disc or bulk binding on an unbuilt
+    !! grid, an int32 disc or bulk call on a grid finer than `nside = 8192`, and
+    !! `%get_nside`/`%get_npix` asked for a value in a kind too small to hold it.
     !!
     !! **No allocatable components, no pointers, no finalizer.** 32 bytes, trivially copyable and
     !! assignable, safe to share across an OpenMP team, safe in a `private`/`firstprivate` clause,
@@ -974,12 +977,13 @@ module parquet_healpix
         !> result is `listpix(1:nlist)`, and a value of 0 in it means pixel zero rather than an
         !> empty slot.
         !>
-        !> **A disc smaller than about 1e-08 radians cannot be resolved, and returns too many
-        !> pixels rather than too few.** Membership is decided against `cos(radius)`, whose
-        !> distance from 1 is about `radius**2/2` -- so the radius is resolved to a fraction
-        !> `2.2e-16/radius**2` of itself, which is 2e-10 at a milliradian and 1 at 1.05e-08 rad
-        !> (0.0022 arcsec), where `cos(radius)` is exactly 1.0 and the comparison stops
-        !> distinguishing anything. This is a property of a double-precision disc query rather than
+        !> **A disc smaller than about 1e-08 radians cannot be resolved, and returns too few
+        !> pixels -- below 1.05e-08 radians, none at all.** Membership is decided against
+        !> `cos(radius)`, whose distance from 1 is about `radius**2/2` -- so the radius is resolved
+        !> to a fraction `2.2e-16/radius**2` of itself, which is 2e-10 at a milliradian and 1 at
+        !> 1.05e-08 rad (0.0022 arcsec), where `cos(radius)` is exactly 1.0. It approaches 1 FROM
+        !> BELOW, so rounding it to 1.0 rounds the effective radius DOWN: `dot >= cos(radius)`
+        !> tightens until no pixel centre satisfies it and the disc comes back empty. This is a property of a double-precision disc query rather than
         !> of this implementation, and it only becomes reachable at extreme resolution: a
         !> pixel-scale disc is resolvable through `nside = 2**28` and degenerates at `2**29`. Every
         !> `nside` a survey actually uses is many orders away from it.

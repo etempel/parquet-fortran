@@ -436,7 +436,7 @@ integer(int64), allocatable :: i(:), j(:), labels(:), sizes(:)
 integer(int64) :: ncomp
 
 call sx%pairs_within(link_length, i, j)
-call pf_connected_components(i, j, sx%size(), labels, ncomp=ncomp, sizes=sizes, [min_size=])
+call pf_connected_components(i, j, sx%size(), labels, ncomp=ncomp, sizes=sizes)
 ```
 
 - `i`, `j` are the edge list. Neither direction nor `i < j` is required, and duplicate edges and

@@ -106,6 +106,69 @@ contains
             "the WARNING record is second")
     end subroutine test_level_threshold
 
+    !> The `max` composition with BOTH operands non-trivial, which is the guide's own worked table.
+    !>
+    !> **The two arms were covered separately and never together.** `test_level_threshold` binds the
+    !> logger with its sink at `PF_LEVEL_ALL`; `test_two_sinks_filter_independently` binds the sinks
+    !> with the logger at `PF_LEVEL_ALL`. Neither exercises `max(logger-side, sink)` with both sides
+    !> actually deciding something, which is the case `doc/pages/utilities/logging.md`'s "Which
+    !> threshold decides" exists to explain and the one a reader gets wrong.
+    !>
+    !> The fixture is that page's table verbatim: logger `INFO`, one sink at `DEBUG`, and a rule
+    !> putting `deep` at `TRACE`. Each row is a different reason:
+    !>
+    !> * `TRACE`/`deep`  -- the rule admits it at 5, the SINK's 10 blocks it        -> dropped
+    !> * `DEBUG`/`deep`  -- the rule admits it at 5, the sink's 10 admits it        -> written
+    !> * `DEBUG`/`other` -- no rule, so the LOGGER's 20 blocks it though the sink would take it
+    !> * `INFO`/`other`  -- no rule, the logger's 20 admits it                      -> written
+    !>
+    !> **The two written rows are the negative control**: without them a test asserting only the
+    !> drops passes against a logger that emits nothing at all.
+    !>
+    !> **What this test does and does not pin, established by mutation rather than by assertion.**
+    !> Removing the per-name rule's contribution to the cached floor fails it (`n == 2` becomes
+    !> `n == 1`). Removing the PER-SINK gate in `emit_to_sink` does NOT fail it, and that is a
+    !> property of the fixture rather than a gap: with a single sink the cached `min_level` is
+    !> already `max(floor_level, sink%level)`, so the sink's threshold reaches the decision through
+    !> the pre-filter and the per-sink gate is redundant here. The two are individually redundant
+    !> and jointly load-bearing, and it takes two sinks at different levels to separate them --
+    !> which is what `test_two_sinks_filter_independently` does, and why both tests are needed.
+    subroutine test_threshold_composition(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
+        type(pf_logger) :: lg
+        character(len=*), parameter :: path = "test_run/log_compose.txt"
+        character(len=512), allocatable :: lines(:)
+        integer :: n
+
+        call lg%init(level = PF_LEVEL_INFO, console = .false.)
+        call lg%add_file(path, level = PF_LEVEL_DEBUG, append = .false., format = "{message}")
+        call lg%set_level(PF_LEVEL_TRACE, name = "deep")
+
+        call lg%trace("trace-deep",  name = "deep")    ! rule 5  vs sink 10 -> max 10 -> dropped
+        call lg%debug("debug-deep",  name = "deep")    ! rule 5  vs sink 10 -> max 10 -> written
+        call lg%debug("debug-other", name = "other")   ! logger 20 vs sink 10 -> max 20 -> dropped
+        call lg%info("info-other",   name = "other")   ! logger 20 vs sink 10 -> max 20 -> written
+        call lg%close()
+
+        call read_back(path, lines, n)
+        call check(error, n == 2, "exactly two of the four records compose through to the sink")
+        if (allocated(error)) return
+        ! The sink blocked a record the name rule admitted: the half a logger-only reading misses.
+        call check(error, .not. has(lines(1), "trace-deep") .and. .not. has(lines(2), "trace-deep"), &
+            "the sink did not block a TRACE record its logger-side rule admitted")
+        if (allocated(error)) return
+        ! The logger blocked a record the sink would have taken: the half a sink-only reading misses.
+        call check(error, .not. has(lines(1), "debug-other") .and. .not. has(lines(2), "debug-other"), &
+            "the logger did not block a DEBUG record the sink would have accepted")
+        if (allocated(error)) return
+        ! NEGATIVE CONTROL: the two that must survive, in order.
+        call check(error, has(lines(1), "debug-deep"), &
+            "the record the rule lowered and the sink accepted was not written first")
+        if (allocated(error)) return
+        call check(error, has(lines(2), "info-other"), &
+            "the record at the logger's own level was not written second")
+    end subroutine test_threshold_composition
+
     !> A freshly declared logger owns no sinks and is silent; `%enabled` says so at every level.
     subroutine test_fresh_logger_is_silent(error)
         type(error_type), allocatable, intent(out) :: error  !! test-drive error handle.
@@ -1964,7 +2027,9 @@ contains
                 test_name_stack_clear_and_empty_pop), &
             new_unittest("name frames are per-thread", test_name_stack_is_per_thread), &
             new_unittest("get_name reports the base name", test_get_name), &
-            new_unittest("get_full_name reports the composed name", test_get_full_name) &
+            new_unittest("get_full_name reports the composed name", test_get_full_name), &
+            new_unittest("logger, sink and name rule compose with max, all three binding at once", &
+                test_threshold_composition) &
             ]
     end subroutine collect_tests_logging
 

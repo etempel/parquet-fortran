@@ -265,6 +265,12 @@ contains
         ! forks from inside an OpenMP team, which is the hazard `prime_error_scenarios` is built
         ! to avoid (see its own comment: exactly one fork, with no team active). Matching the
         ! suffix rather than listing the four means the next split inherits this for free; listing
+        ! `logging_env` is here for the same reason as `logging`: both drive the process-global
+        ! DEFAULT logger, so two of their tests running at once can close a sink the other is
+        ! writing to -- an abort reading "writing a record failed ... Unit number is negative".
+        ! It was absent from this list while the suite held a single test, where the omission
+        ! could not bite and `test_logging_env.f90`'s own header already claimed the exclusion;
+        ! adding a second test to that suite is what found it.
         ! them is what a future split would forget. Both failures were observed, in order:
         ! `writing_errors` segfaulted because 41 tests that had always run serially suddenly ran
         ! concurrently, and `reading_errors` segfaulted with only FOUR tests, because all four
@@ -280,7 +286,8 @@ contains
             .or. name == "sort" .or. name == "settings" &
             .or. name == "table_parallel" .or. name == "string_parallel" .or. name == "diagnostics" &
             .or. name == "random_omp" .or. name == "random_perm" .or. name == "module_surface" &
-            .or. name == "spatial" .or. name == "logging" .or. name == "stats")
+            .or. name == "spatial" .or. name == "logging" .or. name == "logging_env" &
+            .or. name == "stats")
     end function suite_is_safe_to_parallelize
 
 end module test_runner_support

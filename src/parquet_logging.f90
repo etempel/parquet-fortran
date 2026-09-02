@@ -2865,6 +2865,16 @@ contains
             call pf_log_set_level(lev)
         end if
 
+        ! FILE is read BEFORE both COLOR and FORMAT, and the order is load-bearing: a setter given
+        ! no sink= argument applies to every sink that exists WHEN IT RUNS, so reading either one
+        ! first would leave the file sink this call is about to add -- the one sink the caller
+        ! actually asked for -- carrying the default layout or the default colour policy instead of
+        ! the requested one. The rule is that every "applies to every current sink" setter runs
+        ! after every call that adds one; COLOR was on the wrong side of it until 2026-09-02, so
+        ! `PF_LOG_COLOR=always` with `PF_LOG_FILE=` silently left the file uncoloured.
+        call get_environment_variable(trim(pre) // "FILE", val, ln, st)
+        if (st == 0 .and. ln > 0) call pf_log_add_file(val(1:ln))
+
         call get_environment_variable(trim(pre) // "COLOR", val, ln, st)
         if (st == 0 .and. ln > 0) then
             select case (val(1:ln))
@@ -2876,13 +2886,6 @@ contains
                     "auto, always or never"
             end select
         end if
-
-        ! FILE is read BEFORE FORMAT, and the order is load-bearing: FORMAT with no sink argument
-        ! sets the layout of every sink that exists WHEN IT RUNS, so reading it first would leave
-        ! the file sink this call is about to add -- the one sink the caller actually asked for --
-        ! carrying the default layout instead of the requested one.
-        call get_environment_variable(trim(pre) // "FILE", val, ln, st)
-        if (st == 0 .and. ln > 0) call pf_log_add_file(val(1:ln))
 
         call get_environment_variable(trim(pre) // "FORMAT", val, ln, st)
         if (st == 0 .and. ln > 0) call pf_log_set_format(val(1:ln))

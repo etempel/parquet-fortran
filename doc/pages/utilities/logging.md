@@ -6,8 +6,11 @@ title: Logging with parquet_logging
 several destinations at once, a line layout you choose, colour, cheap level checks — and, unusually
 for a Fortran logger, correct and readable output from inside an OpenMP parallel region.
 
-It is a leaf: `use parquet_logging` compiles **one** of this library's Fortran files and never
-crosses the C++ boundary. It is also available through `use parquet` like everything else.
+It is a leaf: `use parquet_logging` compiles **one** of this library's Fortran files and its Fortran
+graph never reaches the C++ bindings. That is narrower than "no C++": `link` is a package-level key
+in `fpm.toml`, so the wrapper is still compiled and Arrow still linked whichever module you import —
+see [Choosing a module](../operating/choosing-a-module.html). It is also available through
+`use parquet` like everything else.
 
 **It is not this library's own messaging.** What parquet-fortran itself prints is governed by the
 `verbosity` and `message_stream` [settings](../operating/settings.html); nothing in the library
@@ -43,7 +46,8 @@ program simple
     use parquet_logging
     implicit none
 
-    call pf_log_init(level = PF_LEVEL_INFO)
+    call pf_log_init(level = PF_LEVEL_DEBUG, console = .false.)
+    call pf_log_add_console(level = PF_LEVEL_INFO)
     call pf_log_add_file('run.log', level = PF_LEVEL_DEBUG)
 
     call pf_log_info("starting")
@@ -57,6 +61,14 @@ end program simple
 14:03:12.481 [INFO    ] starting
 14:03:12.499 [WARNING ] no statistics in row group 4
 ```
+
+Look at those three configuration lines, because their shape is the thing most often got wrong.
+**The logger's own level is a floor under every sink**, so it has to be at `PF_LEVEL_DEBUG` for the
+file to see a `DEBUG` record at all, and it is the *console's* `PF_LEVEL_INFO` that keeps
+`cache warm` off the terminal. The obvious two-line spelling — `pf_log_init(level =
+PF_LEVEL_INFO)` and then a file sink at `PF_LEVEL_DEBUG` — looks equivalent and is not: it would
+drop `cache warm` everywhere, the file included. [Which threshold decides](#which-threshold-decides)
+has the full rule.
 
 The `pf_log_*` procedures drive one process-wide **default logger**, so code deep in a call tree can
 log without a logger being threaded through every signature. Declare your own `type(pf_logger)` when
@@ -83,7 +95,8 @@ when `level >= threshold` — and there is more than one threshold in play, so s
 An arbitrary integer is accepted too — `call lg%log(25, "...")` is legal and filters numerically,
 rendering as `Level 25`. `pf_log_level_from_name` converts `"info"`, `"INFO"` or `"20"`, reporting
 an unrecognised name through an optional `ok` instead of aborting, which is what reading a
-configuration file needs.
+configuration file needs. `pf_log_level_name` goes the other way, rendering a level as its name or
+as `Level <n>` for one that is not a constant — give it at least 12 characters.
 
 **Check before building an expensive message.** `%enabled` is one integer comparison:
 
@@ -117,14 +130,17 @@ call lg%set_format("{level}: {message}", sink = s_err)
   distinction is invisible until a second sink exists; see
   [Which threshold decides](#which-threshold-decides).
 - **`%add_console([stream], [level], [format], [color], [only_rank], [sink])`**. A second console
-  sink on the same stream would double every line, so it is refused.
+  sink on the same stream would double every line, so it is refused. One logger holds at most
+  `PF_LOG_MAX_SINKS` (8) sinks of any kind; a ninth aborts.
 - **`%add_file(path, [level], [format], [append], [flush_level], [only_rank], [sink])`**. `append`
   defaults to `.true.`, so a restarted program does not destroy the log of the run that just
   failed; pass `append = .false.` to truncate. A file that cannot be opened aborts, naming the path.
   `flush_level` is described under [When records reach the disk](#when-records-reach-the-disk).
 - **`%add_unit(unit, ...)`** attaches a unit you opened and still own — the logger never closes it.
   This is how a test captures output into a scratch file it can read back, and how a program that
-  already manages its own output file adds logging to it.
+  already manages its own output file adds logging to it. The unit is checked when you attach it:
+  one that is not connected, not writable, or not a formatted unit aborts naming the unit number,
+  rather than failing later at the first record.
 - **`%set_level(level, [sink], [name])`** sets the logger threshold, one sink's, or a per-name
   override. Passing both `sink` and `name` is refused rather than guessed at.
 - **`%set_name(name)` / `%get_name(name)`** set and read the logger's own base name, and
@@ -271,7 +287,10 @@ and `PF_LOG_FMT_FULL` (date, level, name, thread and context — the file defaul
 ## Colour
 
 Per sink: `PF_LOG_COLOR_AUTO` (the default), `_NEVER`, `_ALWAYS`. `AUTO` colours a console sink
-only, and only when `NO_COLOR` is unset and `TERM` is set to something other than `dumb`. A file
+only, and only when `NO_COLOR` is unset and `TERM` is set to something other than `dumb`. **Note
+what `AUTO` does not test: Fortran has no standard `isatty`, so a redirected stream still counts as
+a console** — `./prog > out.txt` puts escape sequences in `out.txt`. Set `NO_COLOR`, or give that
+sink `PF_LOG_COLOR_NEVER`, when the destination may not be a terminal. A file
 sink under `AUTO` never colours, so a log file holds no escape sequences — **including any you
 embedded yourself**, which a sink that does not colour removes on the way out. See
 [Colouring message text yourself](#colouring-message-text-yourself).
@@ -367,6 +386,12 @@ call lg%log      (level, text, [name], [context], [once], [every])
 | `once` | `logical` | `.true.` emits this record once per process and never again |
 | `every` | `integer` | emit only every n-th occurrence of this record |
 
+**Two more emission procedures sit outside that table.** `%fatal(text)` emits at
+`PF_LEVEL_CRITICAL`, flushes every sink and then **`error stop`s** — it is the "log this and stop"
+call, not a flushing variant of `%critical`, and it is the only procedure here that ends the
+process. `%blank([n])` writes `n` blank lines (default 1) to every sink, for separating phases of a
+run in a long log; blank lines obey a sink's rank filter like any other record.
+
 **Every optional argument is best passed by keyword.** `name` and `context` are both
 `character(len=*)` in adjacent positions, so a positional second argument is a `name` whether or not
 that is what was meant — `call pf_log_trace(msg, "deep")` sets the name, and there is no way for the
@@ -425,7 +450,9 @@ of the program stays quiet, and that subprogram needs to know nothing about it.
   dynamic scope belongs on the stack.
 - **One segment per push, and an over-long name aborts.** A frame containing a dot is refused, and
   a composed name longer than `PF_LOG_MAX_NAME` (64) aborts rather than being truncated: a
-  shortened name would silently change which override matches.
+  shortened name would silently change which override matches. The stack itself holds at most
+  `PF_LOG_MAX_NAME_DEPTH` (8) frames, and a ninth push aborts — unlike the context stack, which
+  saturates instead.
 - **An explicit per-call `name=` replaces the stack rather than composing with it**, the same rule
   `context=` follows.
 - **`%get_name(name)`** reports the logger's own base — what `%set_name` set, without the calling
@@ -498,6 +525,8 @@ call pf_log_pop_context()
 ```
 
 Passing `context = ""` renders no context at all, which is how a record opts out of an ambient one.
+`pf_log_context_depth()` reports the calling thread's current depth, for asserting that pushes and
+pops balance — the counterpart of `pf_log_name_depth()`.
 
 ### `once` and `every`
 
@@ -573,7 +602,8 @@ call lg%flush()                                   ! AFTER the region, from one t
 
 That post-region `%flush()` is **required** — without it, whatever is still buffered is not written.
 It recovers every thread's records, not just the calling thread's. `slot_bytes` sizes the per-thread
-buffer, which is worth setting on a machine with hundreds of threads.
+buffer, which is worth setting on a machine with hundreds of threads; it has a floor of
+`PF_LOG_MIN_BUFFER_BYTES` (4096) and a smaller value aborts rather than being rounded up.
 
 **The mode is sticky, and `%flush` does not clear it.** A flush drains what is buffered at that
 moment; the logger stays in buffered mode afterwards, so every later record — including an ordinary
@@ -605,7 +635,7 @@ through the `pf_log_*` default logger, is seen by every logger in the process:
 | the base context | `pf_log_set_context` | whole process |
 | the `once=` / `every=` table | any record carrying either; `pf_log_reset_dedup` | whole process |
 | the buffered-mode collector | `%set_thread_mode(PF_LOG_THREAD_BUFFERED, [slot_bytes])`, `%flush` | whole process |
-| the `{elapsed}` origin | the first `%init` or `%add_*` anywhere | whole process |
+| the `{elapsed}` origin | the first `%init` or `%add_*` anywhere, or the first `pf_log_elapsed()` | whole process |
 
 So `call pf_log_push_name("io")` composes `.io` onto the name of records from *your* logger, the
 default logger and every other logger alike, until it is popped. That is the intended behaviour —
@@ -680,11 +710,15 @@ call pf_log_configure_from_env("MYAPP_LOG_")           ! MYAPP_LOG_LEVEL, ...
 | `<prefix>LEVEL` | the default logger's threshold, as a name or a number |
 | `<prefix>FILE` | adds a file sink at that path |
 | `<prefix>FORMAT` | sets the layout of every current sink, `<prefix>FILE`'s included |
-| `<prefix>COLOR` | `auto`, `always` or `never` |
+| `<prefix>COLOR` | `auto`, `always` or `never` — `1`/`yes` and `0`/`no` are accepted too, in either case |
 
 `prefix` is the whole literal prefix including its trailing separator, so a doubled separator cannot
 arise. Reading is **additive and never destructive**: an unset variable changes nothing, a
 set-but-empty one is ignored, and `<prefix>FILE` adds a sink beside whatever is already attached.
+A variable that *is* set to something unusable **aborts**, naming the variable and the value — a
+`<prefix>LEVEL` that is not a level, a `<prefix>COLOR` that is not one of the words above, or a
+`<prefix>FILE` that cannot be opened. A typo in the environment stops the program rather than
+quietly leaving the logging you asked for unconfigured.
 `<prefix>FILE` is applied before `<prefix>FORMAT`, so setting both gives the new file sink the
 layout you asked for rather than the default one.
 It is never applied implicitly — these are `PF_LOG_*` variables, not `PARQUET_FORTRAN_*` ones, and

@@ -5,11 +5,13 @@ title: Error handling
 This library reports failures through two distinct mechanisms, neither of which can be caught or
 recovered from once it fires. The reader, writer and schema surface has no status or `ierr` return
 code anywhere, so check inputs (file existence, column names, array bounds) before calling into it
-if you need to avoid aborting. **The `parquet_table` layer is the exception**: thirteen of its
-type-bound generics — `%get`, `%set`, `%col`, `%column`, `%get_slice`, `%set_slice`, `%get_element`,
-`%set_element`, `%get_valid_mask`, `%set_null`, `%clear_null`, `%materialize` and `%prefetch` — take
-an optional `found=`, and passing it turns what would abort into a reported miss. See
-[Whole tables in memory](../tables/table.html).
+if you need to avoid aborting. **The `parquet_table` layer is the exception**: every one of its
+type-bound procedures that looks an existing column up by name takes an optional `found=`, and
+passing it turns what would abort into a reported miss. That covers the readers (`%get`, `%col`,
+`%get_slice`, `%get_element`), the mutators (`%set`, `%set_null`, `%drop_column`, `%cast` and the
+rest) and the metadata queries (`%kind`, `%width`, `%unit`, `%has_nulls`) alike. See
+[Asking about a column by position instead of by name](../tables/table.html#asking-about-a-column-by-position-instead-of-by-name)
+for the full list and for the three name-taking calls deliberately outside the rule.
 
 ## The two failure classes
 
@@ -28,7 +30,8 @@ message after it, which is the library's.
 This is the class used for precondition and validation failures this library's own Fortran code
 detects directly: a missing file, invalid MAML, an unknown column name, calling a reader/writer
 procedure before it's open, a declared vector column's size not matching what was requested at the
-schema level, and so on.
+schema level, asking to write a container column whose payload is itself a container (which this
+library reads but does not write), and so on.
 
 **Messages from the `parquet_table` layer carry a second prefix of their own**, so a real one reads
 `parquet_table: <procedure>: <message>` after whatever your compiler puts in front. That is worth
@@ -51,7 +54,8 @@ This is the class used where the failing check happens on the C++/Arrow side of 
   [Limitations](../../index.html#limitations));
 - reading a column containing a genuine Parquet Null without `null_value=`/`is_valid=` (see
   [Null values](../types/supported-data-types.html#null-values));
-- exceeding the `col_size`/table-column-count/`chunk_size` int32 ceilings (see
+- exceeding the `col_size`/table-column-count/`chunk_size` int32 ceilings, and the matching ceiling
+  on the entries of one `MAP` column, which Arrow has no wider offset buffer to hold (see
   [Limitations](../../index.html#limitations));
 - the [concurrency guard](thread-safety.html#the-concurrency-guard) firing when a shared
   `reader`/`writer` is called from two threads at once.
@@ -143,9 +147,9 @@ doing nothing.
 ## Asking instead of aborting: `found=`
 
 The reader, writer and schema surface has no way to say "tell me rather than stopping". The
-`parquet_table` layer does: pass `found=` to any of the thirteen generics listed at the top of this
-page and a miss is reported instead of aborting. It applies to a missing column name and to an
-out-of-range column position alike.
+`parquet_table` layer does: pass `found=` to any call that looks an existing column up by name, as
+described at the top of this page, and a miss is reported instead of aborting. It applies to a
+missing column name and to an out-of-range column position alike.
 
 ```fortran
 program found_or_abort

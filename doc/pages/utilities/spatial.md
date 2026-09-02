@@ -533,8 +533,16 @@ processors actually available, and serial when the call is already inside a para
 `threads=` on the call itself still wins, so the setting is a default rather than a ceiling. See
 [Settings](../operating/settings.html).
 
-An index is safe to **share for reading** across threads once built. Building, `%rebuild` and
-`%rebuild_for` mutate it and must not run concurrently with anything else on the same object.
+An index is safe to **share across threads for single queries** once built — `%within`,
+`%count_within`, `%nearest` and their kin take it as read-only and never re-tune it.
+
+**A bulk query is not read-only, and that is the one easy mistake here.** It may re-tune the index
+before it sweeps (see [Keeping an index current](#keeping-an-index-current) above), so two threads
+calling `%all_within`, `%pairs_within` or `%count_all_within` on the *same* index at once can both
+decide to rebuild and race on the same arrays — a corrupted heap rather than a wrong number, and
+nothing detects it. Call a bulk form from one thread at a time; it threads internally anyway, which
+is where its parallelism is meant to come from. Building, `%rebuild` and `%rebuild_for` mutate the
+index for the same reason and must likewise not run concurrently with anything else on it.
 
 `bench/benchmark_spatial.sh` measures build, single-query and bulk throughput, the tuner's accuracy
 against a swept optimum, and thread scaling, if you want numbers for your own machine and data.

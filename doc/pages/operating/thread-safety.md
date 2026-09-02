@@ -145,7 +145,9 @@ splits are alternatives — a read is divided by column when there is more than 
 row group otherwise — and both need the same two things: more than one thread, and a file to open a
 second reader on. **Neither is refused by a `filter=` or a `sort=`**; see the table below for why.
 The row-group split additionally needs **more than one row group**, **enough work to pay for opening
-the extra readers** (a column of a few hundred kilobytes or less stays serial), and a **non-string**
+the extra readers** — the same **131072**-element floor (rows times width) the rewrite group uses,
+which is more than a team spawn here because each thread also opens its own reader and parses the
+file footer — and a **non-string**
 column: a string column's packed variable-length store has no fixed row slots to write row groups
 into, so it keeps the ordinary whole-column read.
 
@@ -289,7 +291,7 @@ procedure is for the case where you are managing the readers yourself.
 
 `parquet_random` is the one part of this library with nothing to say in this page's terms. It has no
 shared state to protect, so there is nothing to lock, nothing to give one instance per thread, and
-no ordering to preserve: every value is a pure function of `(seed, i [, draw])`, computed from those
+no ordering to preserve: every value is a pure function of `(seed, i, [draw])`, computed from those
 arguments and nothing else. Call it from any number of threads at once, on any schedule.
 
 That is stronger than thread *safety*, and the difference matters. A conventional generator can be

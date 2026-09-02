@@ -98,17 +98,17 @@ Each setting documents its own capture point, because they genuinely differ and 
 the others wrong. `parquet_set_arrow_threads` resizes a pool everyone already shares, so it takes
 effect **immediately**, for readers and writers opened before the call as well as after.
 
-**Four settings are mirrored to the library's C++ half, and reach it when a reader or writer is
+**Five settings are mirrored to the library's C++ half, and reach it when a reader or writer is
 opened — not at the moment you set them.** They are `verbosity`, `message_stream`,
-`target_row_group_bytes` and `statistics_prescreen`. Setting one and then opening a reader works
-exactly as you would expect; changing one *while a reader is already open* leaves that reader using
-the value that was current when it was opened, for the rest of its life. Open the reader after
-setting the knob, which is what the advice above already asks for.
+`target_row_group_bytes`, `statistics_prescreen` and `file_date`. Setting one and then opening a
+reader works exactly as you would expect; changing one *while a reader is already open* leaves that
+reader using the value that was current when it was opened, for the rest of its life. Open the
+reader after setting the knob, which is what the advice above already asks for.
 
 For the two output knobs, that delay only affects what the **C++ half** prints — three warnings and
 the `print_stat` report — because everything the Fortran half prints reads them per message. For
-`target_row_group_bytes` and `statistics_prescreen` it is the whole story, since both act only
-inside C++.
+`target_row_group_bytes`, `statistics_prescreen` and `file_date` it is the whole story, since all
+three act only inside C++.
 
 The two sort knobs have a C++ mirror too and are deliberately **not** in that list: the sort engine
 is Fortran and reads them on every sort, so they take effect immediately (see [Tuning the
@@ -142,27 +142,27 @@ threads it wants while keeping parquet reads and writes to a smaller share.
 `n` must be at least 1; anything lower aborts. There is no "auto" value — Arrow's own starting
 capacity is hardware-derived, and `parquet_reset_settings` is how you get it back.
 
-## All six thread counts at once
+## Every thread count at once
 
-`parquet_set_threads(n)` sets Arrow's pool and all five per-area caps together — sorting, the table
-prefetch, the table rewrite, one string column's bulk work and the bulk random draws — for the
-common case of "give this library `n` threads and no more".
+`parquet_set_threads(n)` sets Arrow's pool and every per-area cap together — sorting, the table
+prefetch, the table rewrite, one string column's bulk work, the bulk random draws and the bulk
+spatial queries — for the common case of "give this library `n` threads and no more".
 
 ```fortran
-call parquet_set_threads(4)          ! all six
+call parquet_set_threads(4)          ! every one of them
 call parquet_set_sort_threads(1)     ! ...then keep sorting serial
 ```
 
-It holds no state of its own: read the six back individually or with `parquet_print_settings`, and
+It holds no state of its own: read them back individually or with `parquet_print_settings`, and
 set any one afterwards to override just that one, as above.
 
-**`n` must be at least 1.** `0` means "automatic" to the five per-area caps, but Arrow's pool has no
+**`n` must be at least 1.** `0` means "automatic" to a per-area cap, but Arrow's pool has no
 automatic value — its starting capacity is hardware-derived — so rather than let one argument mean
 two things, this takes a real thread count only. Use the individual setters for automatic behaviour,
 or `parquet_reset_settings()` to put everything back.
 
-**The six do not take effect at the same moment.** Arrow's pool is resized immediately and is
-shared, so readers and writers you have already opened are affected too; the five per-area caps are
+**They do not all take effect at the same moment.** Arrow's pool is resized immediately and is
+shared, so readers and writers you have already opened are affected too; the per-area caps are
 read per call and so apply to work started afterwards. Setting them together does not make them
 simultaneous.
 
@@ -172,6 +172,12 @@ simultaneous.
 `threads=`. It covers every sort in the library at once — `pf_sort`/`pf_argsort` and friends, a
 read-time `parquet_open_reader(..., sort_by=)`, and `parquet_table%sort_by` — because all three run
 on one engine and ask one question.
+
+**It also governs the threaded statistics**, which is why there is no `stats_threads` beside it.
+`parquet_stats` resolves its thread count through the same engine rather than carrying a knob of
+its own, deliberately: a second setter would be a second answer to a question this one already
+answers. Its work floor is its own, because a statistic's inner loop is compute-bound where a
+sort's is a copy.
 
 ```fortran
 call parquet_set_sort_threads(4)     ! sorting uses at most 4 threads
@@ -335,10 +341,12 @@ settings.
 cap rather than a request, read per call, with `0` meaning automatic and `1` forcing serial, and an
 explicit `threads=` on the call itself still wins.
 
-**The answer does not depend on the thread count.** The index is read-only for the whole of a query
-and each thread writes its own disjoint slice of the result, so the serial and threaded answers are
-identical row for row — which is what makes threading admissible here as a setting rather than as
-something that would have to be a call argument.
+**The answer does not depend on the thread count.** Any re-tuning happens before the team opens, so
+the index is read-only for the whole of the sweep and each thread writes its own disjoint slice of
+the result; the serial and threaded answers are identical row for row — which is what makes
+threading admissible here as a setting rather than as something that would have to be a call
+argument. (That ordering is also why two threads must not call a bulk query on the *same* index at
+once — see [Threading and settings](../utilities/spatial.html#threading-and-settings).)
 
 `parquet_set_spatial_rebuild_warning(flag)` governs whether an index says so when it rebuilds
 itself. A bulk query whose radius disagrees badly with the `radius=` the index was built for
@@ -622,7 +630,7 @@ One variable per knob, named `PARQUET_FORTRAN_` plus the knob's name in capitals
 
 | variable | accepts |
 |---|---|
-| `PARQUET_FORTRAN_THREADS` | integer >= 1 — sets the six below at once |
+| `PARQUET_FORTRAN_THREADS` | integer >= 1 — sets the seven below at once |
 | `PARQUET_FORTRAN_ARROW_THREADS` | integer >= 1 |
 | `PARQUET_FORTRAN_SORT_THREADS` | integer >= 0 (`0` = automatic) |
 | `PARQUET_FORTRAN_PREFETCH_THREADS` | integer >= 0 (`0` = automatic) |
@@ -644,10 +652,11 @@ One variable per knob, named `PARQUET_FORTRAN_` plus the knob's name in capitals
 | `PARQUET_FORTRAN_MESSAGE_STREAM` | `stdout`/`stderr` |
 | `PARQUET_FORTRAN_FILE_DATE` | `YYYY-MM-DDTHH:MM:SS` |
 
-`PARQUET_FORTRAN_THREADS` is `parquet_set_threads` and is applied **before** the other six, so a
-specific variable always overrides it — `PARQUET_FORTRAN_THREADS=8 PARQUET_FORTRAN_SORT_THREADS=2`
-gives eight threads to Arrow, the prefetch, the table, the string column and the random draws, and
-two to sorting, whichever order the two appear in your shell.
+`PARQUET_FORTRAN_THREADS` is `parquet_set_threads` and is applied **before** the seven specific
+thread variables, so a specific variable always overrides it —
+`PARQUET_FORTRAN_THREADS=8 PARQUET_FORTRAN_SORT_THREADS=2` gives eight threads to Arrow, the
+prefetch, the table, the string column, the random draws and the spatial queries, and two to
+sorting, whichever order the two appear in your shell.
 
 ```bash
 export PARQUET_FORTRAN_THREADS=4

@@ -6,8 +6,10 @@ Symptoms and fixes for the things most likely to go wrong when you build a progr
 library: a build that cannot find Arrow, a link that cannot resolve it, a program that builds but
 will not start, and one compiler bug that looks like a data problem. The last section says what to
 include in a bug report. See [Environment variables](../../index.html#environment-variables) in the
-README for the full variable list, and [Prerequisites](../../index.html#prerequisites) for the
-versions this library needs.
+README for the full list of the **build-time** variables named below, and
+[Prerequisites](../../index.html#prerequisites) for the versions this library needs. The library's
+own **run-time** variables are a separate family, `PARQUET_FORTRAN_*`, listed under
+[Setting from the environment](settings.html#setting-from-the-environment).
 
 ## Build and compile errors
 
@@ -61,9 +63,11 @@ versions this library needs.
   that directory to `DYLD_LIBRARY_PATH` (macOS) or `LD_LIBRARY_PATH` (Linux), in addition to the
   `LIBRARY_PATH` used at build time.
 - **The program aborts instead of returning a status code** — this is expected. There are two
-  distinct forms: a Fortran `ERROR STOP <message>`, and a single line reading
-  `parquet-fortran: <procedure>: <message>` with no backtrace. They exit with **1** and **134**
-  respectively. The message text (typically naming a missing column or file) indicates the failing
+  distinct forms: your compiler's `ERROR STOP` line carrying the library's message, and a single
+  line reading `parquet-fortran: <procedure>: <message>` with no backtrace. The second exits with
+  exactly **134**; the first exits nonzero with whatever status your compiler chose for
+  `ERROR STOP`, which the Fortran standard leaves processor-dependent — so test for 134, not for
+  the other one. The message text (typically naming a missing column or file) indicates the failing
   precondition. See [Error handling](error-handling.html#the-two-failure-classes) for how to tell
   them apart, and for the `found=` argument that reports a miss instead of aborting.
 - **A spurious "column not found" abort at runtime, with a plausible-looking column name that

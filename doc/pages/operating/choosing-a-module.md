@@ -72,15 +72,17 @@ Parquet C++ versions are a different question with a different answer: `parquet_
 in `parquet_settings` (and so in `parquet_io`, `parquet_tables` and `parquet`), because reading them
 means calling into the C++ half.
 
-**`parquet_tables` costs all but a handful of `parquet`'s files**, so importing it instead of the
+**`parquet_tables` costs most of `parquet`'s files**, so importing it instead of the
 facade buys little beyond a narrower namespace. The table layer sits on the reader, the column
 container and the sorting engine, which between them are almost the whole library; what it leaves
-behind is the two facades themselves, `parquet_sampling`, `parquet_spatial` and `parquet_version`.
+behind is the two facades themselves and the utility tiers nothing in the table layer reaches —
+`parquet_sampling`, `parquet_spatial`, `parquet_healpix`, `parquet_stats`, `parquet_logging`,
+`parquet_utils` and `parquet_version`.
 
 **`parquet_io` is the one real saving on the Arrow side** — see the table above for the two
-counts: it drops the entire table layer, the sampling and spatial modules, `parquet_version` and the
-outer facade. Reach for it when your program opens files, moves columns in and out, and never builds
-a `parquet_table`.
+counts: it drops the entire table layer, the outer facade, and every utility tier — the seven
+modules listed just above. Reach for it when your program opens files, moves columns in and out,
+and never builds a `parquet_table`.
 
 It does **not** drop `parquet_random`, and the three files it keeps that belong to none of the
 reader/writer machinery are that generator's: `parquet_open_reader(..., sample_fraction=)` picks its
@@ -91,9 +93,9 @@ which import nothing but `iso_fortran_env` — so the graph cannot grow further 
 **`parquet_settings` is the cheapest import that reaches Arrow**, at three files, and that is the
 point of listing it: what naming it costs you is not compile time, it is the C++ boundary. Those
 three are the knob state, this module, and `parquet_bindings` — which it imports because it is the
-module that mirrors `verbosity`, `message_stream` and the four performance knobs across to the C++
-half. Everything below explains why the Arrow-free tiers cannot import it, and re-export the knobs
-they read instead.
+module that mirrors `verbosity`, `message_stream`, the four performance knobs and `file_date` across
+to the C++ half. Everything below explains why the Arrow-free tiers cannot import it, and re-export
+the knobs they read instead.
 
 ## Why the numbers jump the way they do
 
@@ -128,13 +130,15 @@ anything else.
 | `parquet_columns` | none — it reads none |
 | `parquet_list` | none — it reads none |
 | `parquet_struct` | `verbosity` and `message_stream` |
+| `parquet_map` | `verbosity` and `message_stream` |
+| `parquet_logging` | none — deliberately. It is not the library's own messaging system and reads neither knob; `pf_log_configure_from_env` is its own configuration route |
 | `parquet_strings` | `string_threads`, plus `verbosity` and `message_stream` |
 | `parquet_sampling` | `random_threads`, `random_parallel_min_elements` |
 | `parquet_spatial` | `spatial_threads`, `spatial_rebuild_warning`, the four sorting knobs, plus `verbosity` and `message_stream` |
-| `parquet_healpix` | `verbosity` and `message_stream` -- it can warn from a thread clamp |
+| `parquet_healpix` | `verbosity` and `message_stream` — it can warn from a thread clamp |
 | `parquet_argsort` | `sort_threads`, `sort_radix_path`, `sort_counting_path`, `sort_counting_bucket_limit`, plus `verbosity` and `message_stream` |
 | `parquet_sorting` | the same six as `parquet_argsort` |
-| `parquet_stats` | `verbosity` and `message_stream` -- `pf_stats%print` writes solicited output |
+| `parquet_stats` | `verbosity` and `message_stream` — `pf_stats%print` writes solicited output |
 | `parquet_settings`, and so `parquet_io`, `parquet_tables`, `parquet` | all of them |
 
 The output pair (`verbosity`, `message_stream`) appears wherever a module can print something: a
@@ -150,9 +154,9 @@ module. See the note under [The entry modules](#the-entry-modules).
 
 `parquet_settings` remains available and is what `use parquet` gives you; naming it directly is
 only a problem for a build that is deliberately staying clear of Arrow. See
-[Settings](settings.html) for what every knob does, and note in particular that six of them reach
-the C++ half when a reader or writer is **opened** rather than when you set them — which is exactly
-what makes this per-module re-export possible.
+[Settings](settings.html) for what every knob does, and note in particular that the knobs the C++
+half mirrors reach it when a reader or writer is **opened** rather than when you set them — which is
+exactly what makes this per-module re-export possible.
 
 ## Which module do I import?
 
@@ -168,8 +172,8 @@ what makes this per-module re-export possible.
   `parquet_io` is its supported face.
 
 A narrow import is an ordinary program — there is nothing to configure and no facade to go through.
-This one compiles six of this library's Fortran files and reaches no reader, no writer and no
-`parquet_table`:
+This one compiles four of this library's Fortran files — the count the table above gives for
+`parquet_argsort` — and reaches no reader, no writer and no `parquet_table`:
 
 ```fortran
 program narrow_import

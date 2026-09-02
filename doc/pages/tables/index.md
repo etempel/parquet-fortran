@@ -14,8 +14,8 @@ it can equally be built from scratch in memory and written back out through an o
 
 - [Whole tables in memory: the basics](table.html) — opening a table and reaching a column with
   `%get` or `%col`, nulls, laziness and what it costs, what a table can tell you about itself, the
-  row and column handles, row selections, string columns, changing a column's type, and the
-  current limitations.
+  row and column handles, row selections, string and container columns, changing a column's type,
+  and the current limitations and memory cost.
 - [Opening a table: slices, filters and renaming](table-open.html) — reading part of a file (the
   slice regime), filtering, sorting and qc-checking rows as they are read, renaming columns and
   carrying units through a read-in MAML, finding which file row a row came from, and what a table

@@ -26,13 +26,16 @@ build that will not link, a program that aborts, threading that does nothing.
 - [Troubleshooting](troubleshooting.html) — build, link and runtime symptoms with their fixes,
   and what to put in a bug report.
 - [Thread safety](thread-safety.html) — the complete concurrency rules: per-thread readers and
-  writers, what a shared `parquet_table` allows, transform sharing, thread-pool tuning, and the
-  guard that detects a shared reader or writer and stops the process rather than corrupting it.
-  `parquet_random` is the one part of the library with no rules at all.
+  writers, what a shared `parquet_table` allows, transform sharing, logging from several threads,
+  the Arrow-free tiers — where a bulk spatial query is the one operation that can corrupt a shared
+  object with nothing to detect it — thread-pool tuning, and the guard that does detect a shared
+  reader or writer and stops the process rather than corrupting it. `parquet_random` is the one
+  part of the library with no rules at all.
 - [Performance and memory](performance.html) — what reads and writes cost in memory, how to reach a
   table's values without paying a name lookup per cell, and the OpenMP thread placement that
   silently collapses threading.
 - [Settings](settings.html) — every process-global knob and when each takes effect: the thread
   caps, the writer's default codec, the sort engine's fast paths, row-group sizing, row-group
-  pruning, verbosity and streams — plus the environment variables that set them, and the read-only
-  limits on filter rules, sort keys and MAML lines.
+  pruning, the pinned file date for reproducible output, verbosity and streams — plus the
+  environment variables that set them, and the read-only limits on filter rules, sort keys and
+  MAML lines.

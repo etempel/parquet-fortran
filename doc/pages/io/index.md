@@ -6,8 +6,9 @@ ordered_subpage: writing.md
 ---
 
 The two things every user of this library does: read a parquet file's columns into Fortran
-arrays, and write Fortran arrays out as a parquet file — plus the reference for choosing which
-rows a read returns and in what order (filtering, sorted order, random downsampling).
+arrays and write Fortran arrays out as a parquet file — with, between them, the reference for
+choosing which rows a read returns and in what order (filtering, sorted order, random
+downsampling).
 
 **Parquet in, parquet out.** This library reads and writes parquet and no other format; any
 conversion — FITS, CSV, HDF5, anything else — happens outside it, before the library is called or
@@ -16,14 +17,15 @@ full under [Important behavior](../../index.html#important-behavior) in the READ
 
 - [Reading parquet files from your Fortran code](reading.html) — open a file, read whole columns,
   random access by row or element, shape/type/size queries, reading a list, map or struct column,
-  prefetching, reading a file's table metadata, and chunked reads.
+  prefetching, reading a file's table metadata, checking values against declared qc bounds,
+  printing a reader-activity summary on close, and chunked reads.
 - [Filtering, sorting and sampling rows](filter-sort-sample.html) — `filter=`, `sort_by=` and
   `sample_fraction=`: the rule grammar, three-valued Null logic, row-group pruning, and how the
   three compose.
 - [Writing parquet files from your Fortran code](writing.html) — open a writer, write columns,
-  declare the file's contents with a MAML schema, writing a list, map or struct column, writer
-  options and compression, row groups and chunked writes, and dropping rows on the way out with a
-  row mask.
+  declare the file's contents with a MAML schema and save that schema beside the output, writing a
+  large scalar string column, writing a list, map or struct column, writer options and compression,
+  row groups and chunked writes, and dropping rows on the way out with a row mask.
 
 Prefer whole files over single columns? The [tables group](../tables/index.html) is the shortcut:
 one `parquet_open_table` call presents the whole file as a `parquet_table`, with every column

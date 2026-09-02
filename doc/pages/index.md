@@ -15,19 +15,20 @@ type/function/subroutine under `use parquet`), see the [modules](../lists/module
 
 **One `use parquet` brings in the whole library** — readers and writers, schemas and MAML, the
 `parquet_table` container, the `parquet_column` foundation and its `PK_*` kind constants, compact
-string columns, the date/time/timestamp types, sorting, random numbers and sampling, spatial
-neighbour search, sphere pixelisation, logging for your own program, text and path helpers, and the process-global settings. Every page below assumes that single import. The
-individual modules (`parquet_io`, `parquet_tables`, `parquet_columns`, `parquet_list`,
-`parquet_struct`, `parquet_map`, `parquet_strings`, `parquet_temporal`, `parquet_sorting`, `parquet_argsort`,
-`parquet_stats`,
-`parquet_sampling`, `parquet_spatial`, `parquet_healpix`, `parquet_random`, `parquet_logging`,
-`parquet_utils`,
-`parquet_settings`, `parquet_version`,
-`parquet_maml_base`)
-are still there and
-can be named directly when you want a narrower import — see [Choosing a module](operating/choosing-a-module.html) for what each one costs
-to compile against and which of them are covered by the library's API stability promise.
-`parquet_core` is the exception in the other direction: it is internal and is covered by no promise.
+string columns, the list/struct/map container columns, the date/time/timestamp types, sorting,
+array statistics, random numbers and sampling, spatial neighbour search, sphere pixelisation,
+logging for your own program, text and path helpers, and the process-global settings. Every page
+below assumes that single import.
+
+The individual modules (`parquet_io`, `parquet_tables`, `parquet_columns`, `parquet_list`,
+`parquet_struct`, `parquet_map`, `parquet_strings`, `parquet_temporal`, `parquet_sorting`,
+`parquet_argsort`, `parquet_stats`, `parquet_sampling`, `parquet_spatial`, `parquet_healpix`,
+`parquet_random`, `parquet_logging`, `parquet_utils`, `parquet_settings`, `parquet_version`,
+`parquet_maml_base`) can be named directly when you want a narrower import — see
+[Choosing a module](operating/choosing-a-module.html) for what each one costs to compile against
+and which of them are covered by the library's API stability promise. `parquet_core` is the
+exception in the other direction: it is internal and is covered by no promise.
+
 Because `parquet` re-exports rather than defines, the generated
 [procedures](../lists/procedures.html) and [types](../lists/types.html) listings are the reliable
 place to look a name up, rather than the `parquet` module's own page.
@@ -43,17 +44,18 @@ point in the library.
 
 - [Reading and writing files](io/index.html) — read columns into arrays, write arrays out, and
   choose which rows a read returns and in what order (filter, sort, random sample).
-- [Data types](types/index.html) — what a column can hold: the supported types, date/time/
-  timestamp elements, and compact string columns.
+- [Data types](types/index.html) — what a column can hold: the supported types, date/time/timestamp
+  elements, compact string columns, and the list, struct and map container columns.
 - [Schemas, metadata and quality control](schema/index.html) — declare a file's contents in MAML
   or in code, with qc bounds; and declare how a file is *read* — which columns are renamed, which
   rows are kept and in what order they come back. Ends on two worked examples.
 - [Whole tables in memory](tables/index.html) — the high-level `parquet_table` layer: a whole
   file as one object, columns by name as ordinary arrays or zero-copy pointers, read only when
   touched — or built in memory and written out.
-- [Utilities and code generation](utilities/index.html) — sorting for arrays and columns,
-  reproducible random numbers and the sampling built on them, text and path helpers, generated
-  table types, and embedding your own MAML schemas.
+- [Utilities and code generation](utilities/index.html) — sorting for arrays and columns, array
+  statistics, reproducible random numbers and the sampling built on them, spatial neighbour search,
+  sphere pixelisation, logging for your own program, text and path helpers, generated table types,
+  and embedding your own MAML schemas.
 - [Operating the library](operating/index.html) — the cross-cutting concerns you reach for when
   something is wrong or has to be tuned: which module to import, what an abort means, why a build
   or read fails, what may run concurrently, what memory and speed to expect, and the process-global

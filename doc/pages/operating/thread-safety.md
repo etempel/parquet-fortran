@@ -338,8 +338,9 @@ concurrently" has one answer rather than five.
   payload, so a write can move the whole thing — the same rule the table above states for a string
   column, and it applies to a bare `parquet_string_column` too. Reading a column nobody is writing
   is unrestricted, and its bulk rebuilds thread internally.
-- **`parquet_random` needs no rules at all** — see the section below, which is the one part of this
-  library with nothing to say in this page's terms.
+- **`parquet_random` needs no rules at all** — see
+  [Random numbers need no rules at all](#random-numbers-need-no-rules-at-all) above, which is the
+  one part of this library with nothing to say in this page's terms.
 
 The pattern across all of them: **internal threading stands down inside your parallel region**, so
 you never nest teams by accident; and the only object that is unsafe to share is one an operation

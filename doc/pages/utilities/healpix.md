@@ -1,5 +1,5 @@
 ---
-title: Sphere pixelisation with `parquet_healpix`
+title: Sphere pixelisation with parquet_healpix
 ---
 
 HEALPix divides the sphere into `12*nside**2` pixels of exactly equal area, arranged on rings of

@@ -25,8 +25,9 @@ container columns.
   and threading inside a single column.
 - [Variable-length list columns with `parquet_list_column`](list-columns.html) — rows that hold
   different numbers of values, the offsets-plus-payload layout, the difference between a null row
-  and a null element, the `parquet_list_row` handle, and how a list column is adopted into a
-  `parquet_column`, and how one is read from and written to a Parquet file.
+  and a null element, the `parquet_list_row` handle, how a list column is adopted into a
+  `parquet_column`, how one is read from and written to a Parquet file, and what nesting a
+  container inside another does and does not support.
 - [Struct columns with `parquet_struct_column`](struct-columns.html) — one value per declared
   field per row, the field set fixed at `%init`, the difference between an absent struct instance
   and a present one whose fields are null, the `parquet_struct_row` handle and its two read forms,

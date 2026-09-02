@@ -2908,8 +2908,20 @@ def check_landing_page_names_every_entry_module():
     text = doc.read_text()
     # The orientation prose only: everything before the group entries. A module named further down
     # (in a group description, say) does not make it discoverable as an import.
-    cut = text.find("\nThe guide is organised into six groups")
-    orientation = text[:cut] if cut > 0 else text
+    #
+    # The anchor is REQUIRED, not best-effort. Falling back to the whole page on a miss is the
+    # silent-widening failure CLAUDE.md records under "A static check that enumerates names goes
+    # stale silently": measured on the page as it stands, the orientation is 2254 characters and
+    # the whole page 6708, so a reworded sentence would triple the search area and defeat the very
+    # restriction the comment above states, with no message and exit 0. Note the anchor deliberately
+    # stops before the group count, which is the word most likely to change.
+    cut = text.find("\nThe guide is organised into")
+    if cut <= 0:
+        return ["doc/pages/index.md: the orientation ends at the sentence beginning \"The guide is "
+                "organised into\", and that sentence is gone -- this check cannot tell the "
+                "orientation from the group descriptions any more and would silently start "
+                "accepting a module named anywhere on the page; re-anchor it deliberately"]
+    orientation = text[:cut]
     for mod in modules:
         if "`%s`" % mod not in orientation:
             problems.append(
@@ -2932,13 +2944,21 @@ def check_page_titles_match_their_list_entries():
     2. a group-index bullet carries a one-line description after the dash, so a shorter label is
        legitimate there, as long as it is an initial prefix of the title.
 
-    Settled at row 29 of feature_doc.md's guide review after being parked twice. Before it, six flat
-    entries said more than their page's own `<h1>` did -- `utilities/random.md` was titled "Random
+    Settled while reviewing `doc/pages/utilities/random.md`, after being parked twice. Before it,
+    six flat entries said more than their page's own `<h1>` did -- that page was titled "Random
     numbers" while its list entry said "Random numbers and sampling with pf_random_at", for a page
-    half about sampling. The fix was to lengthen the titles, not to shorten the entries.
+    half about sampling. The fix was to lengthen the titles, not to shorten the entries. (Cite the
+    page and the decision, never a row number in a git-ignored campaign document: this docstring
+    said "row 29 of feature_doc.md" for months, and by the time anyone read it that campaign was
+    over and a later one's row 29 was a different page entirely.)
 
-    Backticks are ignored on both sides: no frontmatter `title:` in the guide carries one, which is
-    itself a settled convention.
+    **Backticks are ignored when comparing, and forbidden in a title.** A list entry legitimately
+    carries them -- the flat list says "Compact string columns with `parquet_string_column`" for a
+    page titled without them -- so the comparison strips them from both sides. The title itself may
+    not: a `<title>` element is plain text, so a backtick reaches the browser tab literally. The
+    convention was stated as fact in CLAUDE.md and in this docstring while nothing enforced it, and
+    it had drifted -- `doc/pages/utilities/healpix.md` carried one, alone among the guide's pages,
+    invisible to this check precisely because the comparison strips them first.
     """
     problems = []
     pages = REPO_ROOT / "doc" / "pages"
@@ -2964,6 +2984,12 @@ def check_page_titles_match_their_list_entries():
             if title_m is None:
                 problems.append("%s: no frontmatter title:" % rel)
                 continue
+            if "`" in title_m.group(1):
+                problems.append(
+                    "%s: its frontmatter title: carries a backtick -- FORD puts the title in the "
+                    "browser tab's plain-text <title>, where it shows literally. Write the name "
+                    "bare; the list entries may keep their backticks, since the comparison below "
+                    "strips them from both sides" % rel)
             title = norm(title_m.group(1))
             html = page.name[: -len(".md")] + ".html"
             flat_m = re.search(r"- \[([^\]]+)\]\(%s/%s\)"

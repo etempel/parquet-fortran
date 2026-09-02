@@ -353,7 +353,10 @@ contains
         nr = size(radii)
         if (nr /= 1 .and. int(nr, kind=int64) /= n) error stop &
             "pf_spatial_index: radius must be one value or one per point"
-        if (any(radii < 0.0_real64)) error stop "pf_spatial_index: every radius must be >= 0"
+        ! `.not. all(>= 0)` rather than `any(< 0)`: a NaN answers .false. to both comparisons, so
+        ! the `any` form let a NaN radius through -- to `minval`/`maxval` below and to the tuner,
+        ! where it traps under a compiler with the IEEE traps unmasked. Same fix as %build's.
+        if (.not. all(radii >= 0.0_real64)) error stop "pf_spatial_index: every radius must be >= 0"
         if (present(nri)) nri = 0
         if (present(radii_inner)) then
             nin = size(radii_inner)
@@ -362,7 +365,7 @@ contains
             if (present(nri)) nri = nin
             if (nin /= 1 .and. int(nin, kind=int64) /= n) error stop &
                 "pf_spatial_index: the inner radius must be one value or one per point"
-            if (any(radii_inner < 0.0_real64)) error stop &
+            if (.not. all(radii_inner >= 0.0_real64)) error stop &
                 "pf_spatial_index: every inner radius must be >= 0"
             ! Compared against whichever shape the outer radii came in: a scalar inner radius has
             ! to clear the SMALLEST outer one, and a scalar outer radius has to be cleared by the

@@ -793,8 +793,8 @@ contains
         character(len=*), intent(in) :: name !! numeric column name.
         real(real32), intent(in) :: values(:) !! flattened column values, in their own kind.
         logical, intent(in), optional :: is_valid_flat(:) !! flattened validity mask; absent = every element counts.
-        logical :: have_min, have_max, any_valid, ok, use_mask
-        real(real64) :: min_bound, max_bound, data_min, data_max, v
+        logical :: have_min, have_max, any_valid, ok, use_mask, saw_nan, any_range
+        real(real64) :: min_bound, max_bound, data_min, data_max, v, nanv
         character(len=:), allocatable :: min_op, max_op
         integer(int64) :: i, n_valid, n_violate
 
@@ -802,6 +802,8 @@ contains
 
         use_mask = present(is_valid_flat)
         any_valid = .false.
+        any_range = .false.
+        saw_nan = .false.
         n_valid = 0_int64
         n_violate = 0_int64
         data_min = 0.0_real64
@@ -812,10 +814,24 @@ contains
             end if
             v = real(values(i), kind=real64)
             n_valid = n_valid + 1
-            if (.not. any_valid) then
+            any_valid = .true.
+            ! **A NaN never enters the observed range, and the reason is a trap.** It is
+            ! already counted as a violation -- every comparison against a NaN is false, which is
+            ! what `parquet_qc_numeric_satisfies` answers -- but it is still not a number this
+            ! range can order, and `min`/`max` over one compile to x86 `minsd`/`maxsd`, which
+            ! raise IEEE_INVALID for a QUIET-NaN operand. nagfor unmasks the IEEE traps by
+            ! default (`-ieee=stop`), so reporting the violation would kill the process instead of
+            ! naming the column, in an optimised build only. Same rule as
+            ! `parquet_float_is_integral` above, one line further down the same path.
+            if (v /= v) then
+                if (.not. saw_nan) then
+                    nanv = v
+                    saw_nan = .true.
+                end if
+            else if (.not. any_range) then
                 data_min = v
                 data_max = v
-                any_valid = .true.
+                any_range = .true.
             else
                 data_min = min(data_min, v)
                 data_max = max(data_max, v)
@@ -826,6 +842,12 @@ contains
             if (have_max) ok = ok .and. parquet_qc_numeric_satisfies(v, max_bound, max_op)
             if (.not. ok) n_violate = n_violate + 1
         end do
+        ! Every valid element was a NaN, so the range is one: reported as such rather than as
+        ! the zero the accumulators still hold, which would read as a real observed range.
+        if (.not. any_range .and. saw_nan) then
+            data_min = nanv
+            data_max = nanv
+        end if
         if (.not. any_valid .or. n_violate == 0) return
         call qc_numeric_report(writer, name, have_min, min_bound, min_op, have_max, max_bound, max_op, &
             data_min, data_max, n_violate, n_valid)
@@ -836,8 +858,8 @@ contains
         character(len=*), intent(in) :: name !! numeric column name.
         real(real64), intent(in) :: values(:) !! flattened column values, in their own kind.
         logical, intent(in), optional :: is_valid_flat(:) !! flattened validity mask; absent = every element counts.
-        logical :: have_min, have_max, any_valid, ok, use_mask
-        real(real64) :: min_bound, max_bound, data_min, data_max, v
+        logical :: have_min, have_max, any_valid, ok, use_mask, saw_nan, any_range
+        real(real64) :: min_bound, max_bound, data_min, data_max, v, nanv
         character(len=:), allocatable :: min_op, max_op
         integer(int64) :: i, n_valid, n_violate
 
@@ -845,6 +867,8 @@ contains
 
         use_mask = present(is_valid_flat)
         any_valid = .false.
+        any_range = .false.
+        saw_nan = .false.
         n_valid = 0_int64
         n_violate = 0_int64
         data_min = 0.0_real64
@@ -855,10 +879,24 @@ contains
             end if
             v = values(i)
             n_valid = n_valid + 1
-            if (.not. any_valid) then
+            any_valid = .true.
+            ! **A NaN never enters the observed range, and the reason is a trap.** It is
+            ! already counted as a violation -- every comparison against a NaN is false, which is
+            ! what `parquet_qc_numeric_satisfies` answers -- but it is still not a number this
+            ! range can order, and `min`/`max` over one compile to x86 `minsd`/`maxsd`, which
+            ! raise IEEE_INVALID for a QUIET-NaN operand. nagfor unmasks the IEEE traps by
+            ! default (`-ieee=stop`), so reporting the violation would kill the process instead of
+            ! naming the column, in an optimised build only. Same rule as
+            ! `parquet_float_is_integral` above, one line further down the same path.
+            if (v /= v) then
+                if (.not. saw_nan) then
+                    nanv = v
+                    saw_nan = .true.
+                end if
+            else if (.not. any_range) then
                 data_min = v
                 data_max = v
-                any_valid = .true.
+                any_range = .true.
             else
                 data_min = min(data_min, v)
                 data_max = max(data_max, v)
@@ -869,6 +907,12 @@ contains
             if (have_max) ok = ok .and. parquet_qc_numeric_satisfies(v, max_bound, max_op)
             if (.not. ok) n_violate = n_violate + 1
         end do
+        ! Every valid element was a NaN, so the range is one: reported as such rather than as
+        ! the zero the accumulators still hold, which would read as a real observed range.
+        if (.not. any_range .and. saw_nan) then
+            data_min = nanv
+            data_max = nanv
+        end if
         if (.not. any_valid .or. n_violate == 0) return
         call qc_numeric_report(writer, name, have_min, min_bound, min_op, have_max, max_bound, max_op, &
             data_min, data_max, n_violate, n_valid)

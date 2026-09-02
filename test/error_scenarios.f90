@@ -1163,6 +1163,8 @@ program error_scenarios
         call scenario_qc_int64_bound_exact_via_real()
     case ("qc_warning_float64")
         call scenario_qc_warning_float64()
+    case ("qc_warning_float64_nan")
+        call scenario_qc_warning_float64_nan()
     case ("qc_warning_string")
         call scenario_qc_warning_string()
     case ("qc_min_max_ignored_for_boolean")
@@ -2133,6 +2135,8 @@ program error_scenarios
         call scenario_table_bind_kind_refused()
     case ("table_drop_predefined")
         call scenario_table_drop_predefined()
+    case ("table_print_stat_nan")
+        call scenario_table_print_stat_nan()
     case ("codegen_row_index_out_of_range")
         call scenario_codegen_row_index_out_of_range()
     case ("codegen_range_out_of_range")
@@ -2153,6 +2157,30 @@ program error_scenarios
         call scenario_spatial_query_before_build()
     case ("spatial_length_mismatch")
         call scenario_spatial_length_mismatch()
+    case ("spatial_build_nan_coord")
+        call scenario_spatial_build_nan_coord()
+    case ("spatial_build_inf_coord")
+        call scenario_spatial_build_inf_coord()
+    case ("spatial_build_nan_radius")
+        call scenario_spatial_build_nan_radius()
+    case ("spatial_build_sky_nan_ra")
+        call scenario_spatial_build_sky_nan_ra()
+    case ("spatial_rebuild_nan_coord")
+        call scenario_spatial_rebuild_nan_coord()
+    case ("spatial_query_nan_point")
+        call scenario_spatial_query_nan_point()
+    case ("spatial_segment_nan_endpoint")
+        call scenario_spatial_segment_nan_endpoint()
+    case ("spatial_nearest_nan_point")
+        call scenario_spatial_nearest_nan_point()
+    case ("spatial_sky_query_nan_dec")
+        call scenario_spatial_sky_query_nan_dec()
+    case ("spatial_bulk_nan_radius")
+        call scenario_spatial_bulk_nan_radius()
+    case ("spatial_bulk_nan_inner_radius")
+        call scenario_spatial_bulk_nan_inner_radius()
+    case ("spatial_rebuild_for_nan_radius")
+        call scenario_spatial_rebuild_for_nan_radius()
     case ("spatial_radius_not_positive")
         call scenario_spatial_radius_not_positive()
     case ("spatial_box_needs_both")
@@ -9778,6 +9806,54 @@ contains
         call parquet_close_writer(writer)
     end subroutine scenario_qc_warning_float64
 
+    !> The same write-time float64 qc check, over data holding a NaN.
+    !!
+    !! **A NaN is a violation and must be REPORTED, and reporting it means ordering the data.**
+    !! `qc_numeric_r64` accumulates the observed range with `min`/`max`, which compile to x86
+    !! `minsd`/`maxsd` -- and those raise IEEE_INVALID for a quiet-NaN operand, so under nagfor's
+    !! default `-ieee=stop` the writer died on the way to the warning instead of naming the column.
+    !! Only an optimised build reaches it (`fpm test --profile release`); at `-O0` the clamp stays
+    !! a pair of branches.
+    !!
+    !! Two columns, because the two arms differ: `f64` has a NaN beside real values, so the range
+    !! is over the survivors, and `f64_all_nan` has nothing else, so the range is the NaN itself
+    !! rather than the zero the accumulators would otherwise still hold.
+    subroutine scenario_qc_warning_float64_nan()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        real(real64) :: nan64, f64(3), f64_all_nan(3)
+
+        nan64 = ieee_value(1.0_real64, ieee_quiet_nan)
+        ! The NaN is in the middle again: it is neither the element that seeds the range nor the
+        ! last one, so a screen covering only the first element would still trap.
+        f64 = [2.0_real64, nan64, 9.0_real64]
+        f64_all_nan = [nan64, nan64, nan64]
+
+        schema%maml%name = "qc_warning_float64_nan.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: qc_table", &
+            "fields:", &
+            "- name: f64", &
+            "  data_type: float64", &
+            "  qc:", &
+            "    min: 1", &
+            "    max: 10", &
+            "- name: f64_all_nan", &
+            "  data_type: float64", &
+            "  qc:", &
+            "    min: 1", &
+            "    max: 10" ]
+
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_qc_warning_float64_nan.parquet", &
+            schema, qc=.true.)
+        call parquet_write_column(writer, "f64", f64)
+        call parquet_write_column(writer, "f64_all_nan", f64_all_nan)
+        call parquet_close_writer(writer)
+    end subroutine scenario_qc_warning_float64_nan
+
     subroutine scenario_qc_warning_string()
         type(parquet_schema) :: schema
         type(parquet_writer) :: writer
@@ -15570,6 +15646,49 @@ contains
         print '(a,i0)', "unexpectedly dropped a predefined column, ncols=", t%ncols()
     end subroutine scenario_table_drop_predefined
 
+    !> %print_stat over float columns holding a NaN: it must print, not die, and the NaN must not
+    !! enter the min/max.
+    !!
+    !! **Out of process because it prints, and an in-process assertion could not see the defect
+    !! anyway.** `min`/`max` over a NaN compile to x86 `minsd`/`maxsd`, which raise IEEE_INVALID
+    !! for a quiet-NaN operand -- so under nagfor's default `-ieee=stop` this scenario aborted with
+    !! "Arithmetic exception: Floating invalid operation" before printing a single row, and only in
+    !! an optimised build (`fpm test --profile release`). Every other compiler in the fleet masks
+    !! the traps and answers a processor-dependent value instead, which is the second half of the
+    !! bug: the wrong answer is what the assertions below pin.
+    !!
+    !! All four float specifics are exercised -- scalar and vector, float32 and float64 -- because
+    !! each is generated separately by tools/generate_parquet_tables.py and a fix applied to one
+    !! template arm and not the other would leave three of them trapping.
+    subroutine scenario_table_print_stat_nan()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(parquet_table) :: t
+        real(real64) :: nan64, f64(3), f64v(2, 3), allnan(3)
+        real(real32) :: nan32, f32(3), f32v(2, 3)
+
+        nan64 = ieee_value(1.0_real64, ieee_quiet_nan)
+        nan32 = ieee_value(1.0_real32, ieee_quiet_nan)
+        ! The NaN sits in the MIDDLE, so it is neither the value that seeds the range nor the last
+        ! one seen: a screen that only skipped the first element would still trap here.
+        f64 = [1.0_real64, nan64, 3.0_real64]
+        f32 = [11.0_real32, nan32, 13.0_real32]
+        f64v(:, 1) = [21.0_real64, 22.0_real64]
+        f64v(:, 2) = [nan64, 24.0_real64]
+        f64v(:, 3) = [25.0_real64, 26.0_real64]
+        f32v(:, 1) = [31.0_real32, 32.0_real32]
+        f32v(:, 2) = [nan32, 34.0_real32]
+        f32v(:, 3) = [35.0_real32, 36.0_real32]
+        allnan = [nan64, nan64, nan64]
+
+        call parquet_new_table(t)
+        call t%add_column("d", f64)
+        call t%add_column("s", f32)
+        call t%add_column("dv", f64v)
+        call t%add_column("sv", f32v)
+        call t%add_column("allnan", allnan)
+        call t%print_stat()
+    end subroutine scenario_table_print_stat_nan
+
     !> Writes the fixture the generated-table scenarios open, matching table_types/maml_example4.maml's
     !! file columns. Kept minimal: these scenarios are about the guards, not the data.
     subroutine write_codegen_scenario_fixture(fname, crd_float64)
@@ -17772,6 +17891,199 @@ contains
         call sx%build(x, y, z, radius=0.0_real64)   ! -> aborts
         print '(a)', "unexpectedly accepted radius= 0"
     end subroutine scenario_spatial_radius_not_positive
+
+    !
+    ! ---- Non-finite coordinates, points and radii ----
+    !
+    ! Eight scenarios for one rule: nothing the grid has to PLACE may be a NaN or an infinity.
+    ! The index computes a cell as `int((v - lo) * inv)` and clamps its walk with `min`/`max`, and
+    ! both `cvttsd2si` and `minsd`/`maxsd` signal on a quiet NaN -- so under nagfor's default
+    ! `-ieee=stop` every one of these aborted with "Arithmetic exception: Floating invalid
+    ! operation", naming neither the entry point nor the argument, and only in an optimised build.
+    ! Every other compiler in the fleet masks the traps and answers from a garbage cell index.
+    !
+    ! There is one check (`spatial_check_finite`) and eight call sites, which is why there are
+    ! eight scenarios: the realistic future defect is a dropped call site, not a broken check.
+    ! Their NEGATIVE CONTROL is the whole `spatial` suite -- 74 tests that build, rebuild and
+    ! query with finite data -- so a check that fired unconditionally could not reach here.
+
+    !> %build with a NaN coordinate.
+    subroutine scenario_spatial_build_nan_coord()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+
+        call spatial_cloud(64, x, y, z)
+        x(7) = ieee_value(1.0_real64, ieee_quiet_nan)
+        call sx%build(x, y, z, radius=0.2_real64)   ! -> aborts
+        print '(a)', "unexpectedly built an index over a NaN coordinate"
+    end subroutine scenario_spatial_build_nan_coord
+
+    !> %build with an INFINITE coordinate: the same check, the other half of "finite".
+    subroutine scenario_spatial_build_inf_coord()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_positive_inf
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+
+        call spatial_cloud(64, x, y, z)
+        z(11) = ieee_value(1.0_real64, ieee_positive_inf)
+        call sx%build(x, y, z, radius=0.2_real64)   ! -> aborts
+        print '(a)', "unexpectedly built an index over an infinite coordinate"
+    end subroutine scenario_spatial_build_inf_coord
+
+    !> A NaN `radius=`. Distinct from scenario_spatial_radius_not_positive above: the check used to
+    !! be `any(radii <= 0)`, and a NaN answers .false. to that comparison as it does to every
+    !! other, so this input walked straight past the guard that exists to catch it.
+    subroutine scenario_spatial_build_nan_radius()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=ieee_value(1.0_real64, ieee_quiet_nan))   ! -> aborts
+        print '(a)', "unexpectedly accepted a NaN radius="
+    end subroutine scenario_spatial_build_nan_radius
+
+    !> %build_sky with a NaN `ra`. `dec` was already screened by its [-90, 90] range test; `ra` has
+    !! no range to be in, so it needs a check of its own -- and it cannot be left to the walk,
+    !! because an infinite `ra` raises inside `cos` before any of this reaches the grid.
+    subroutine scenario_spatial_build_sky_nan_ra()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(pf_spatial_index) :: sx
+        real(real64) :: ra(32), dec(32)
+        integer :: i
+
+        do i = 1, 32
+            ra(i) = real(i, real64) * 5.0_real64
+            dec(i) = real(i, real64) * 0.5_real64
+        end do
+        ra(9) = ieee_value(1.0_real64, ieee_quiet_nan)
+        call sx%build_sky(ra, dec, radius_deg=1.5_real64)   ! -> aborts
+        print '(a)', "unexpectedly built a sky index over a NaN ra"
+    end subroutine scenario_spatial_build_sky_nan_ra
+
+    !> %rebuild with a NaN coordinate: the same data reaching the same grid by the other door.
+    subroutine scenario_spatial_rebuild_nan_coord()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64)
+        y(4) = ieee_value(1.0_real64, ieee_quiet_nan)
+        call sx%rebuild(x, y, z)   ! -> aborts
+        print '(a)', "unexpectedly rebuilt an index over a NaN coordinate"
+    end subroutine scenario_spatial_rebuild_nan_coord
+
+    !> %within with a NaN query point.
+    subroutine scenario_spatial_query_nan_point()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+        real(real64) :: nan
+        integer(int64) :: got(8), m
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64)
+        nan = ieee_value(1.0_real64, ieee_quiet_nan)
+        m = sx%within([nan, 0.5_real64, 0.5_real64], 0.2_real64, got)   ! -> aborts
+        print '(a,i0)', "unexpectedly searched about a NaN point, m=", m
+    end subroutine scenario_spatial_query_nan_point
+
+    !> %within_segment with a NaN axis endpoint: the axis-shaped queries have their own choke
+    !! point, so a check on the ball search's would not cover them.
+    subroutine scenario_spatial_segment_nan_endpoint()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+        real(real64) :: nan
+        integer(int64) :: got(8), m
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64)
+        nan = ieee_value(1.0_real64, ieee_quiet_nan)
+        m = sx%within_segment([0.1_real64, 0.1_real64, 0.1_real64], &
+            [0.9_real64, 0.9_real64, nan], 0.2_real64, got)   ! -> aborts
+        print '(a,i0)', "unexpectedly searched about a NaN axis endpoint, m=", m
+    end subroutine scenario_spatial_segment_nan_endpoint
+
+    !> %nearest with a NaN query point: the expanding-ball search is the third choke point.
+    subroutine scenario_spatial_nearest_nan_point()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+        real(real64) :: nan
+        integer(int64) :: got(4), m
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64)
+        nan = ieee_value(1.0_real64, ieee_quiet_nan)
+        m = sx%nearest([0.5_real64, nan, 0.5_real64], 3_int64, got)   ! -> aborts
+        print '(a,i0)', "unexpectedly found nearest neighbours of a NaN point, m=", m
+    end subroutine scenario_spatial_nearest_nan_point
+
+    !> %within_sky with a NaN dec. Screened at the entry point rather than on the vector it builds,
+    !! because an infinite argument raises inside the conversion itself.
+    subroutine scenario_spatial_sky_query_nan_dec()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(pf_spatial_index) :: sx
+        real(real64) :: ra(32), dec(32)
+        integer(int64) :: got(8), m
+        integer :: i
+
+        do i = 1, 32
+            ra(i) = real(i, real64) * 5.0_real64
+            dec(i) = real(i, real64) * 0.5_real64
+        end do
+        call sx%build_sky(ra, dec, radius_deg=1.5_real64)
+        m = sx%within_sky(10.0_real64, ieee_value(1.0_real64, ieee_quiet_nan), 1.5_real64, got)
+        print '(a,i0)', "unexpectedly searched about a NaN dec, m=", m
+    end subroutine scenario_spatial_sky_query_nan_dec
+
+    !> A NaN in a per-point `radius=` array for a BULK query. The bulk path has its own radius
+    !! guard, written `any(radii < 0)`, which a NaN walks past exactly as %build's did -- and the
+    !! very next statements are `minval(radii)` and the tuner, both of which trap on one.
+    subroutine scenario_spatial_bulk_nan_radius()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:), radii(:)
+        integer(int64), allocatable :: counts(:)
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64)
+        allocate(radii(64))
+        radii = 0.2_real64
+        radii(5) = ieee_value(1.0_real64, ieee_quiet_nan)
+        call sx%count_all_within(radii, counts)   ! -> aborts
+        print '(a)', "unexpectedly ran a bulk query with a NaN radius"
+    end subroutine scenario_spatial_bulk_nan_radius
+
+    !> A NaN in a bulk query's INNER radius. Its own guard, one statement below the outer one and
+    !! of the same shape, so it went the same way; the message names it separately.
+    subroutine scenario_spatial_bulk_nan_inner_radius()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+        integer(int64), allocatable :: counts(:)
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64)
+        call sx%count_all_within(0.2_real64, counts, &
+            r_inner=ieee_value(1.0_real64, ieee_quiet_nan))   ! -> aborts
+        print '(a)', "unexpectedly ran a bulk query with a NaN inner radius"
+    end subroutine scenario_spatial_bulk_nan_inner_radius
+
+    !> A NaN radius handed to %rebuild_for, whose guard had the same shape.
+    subroutine scenario_spatial_rebuild_for_nan_radius()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: x(:), y(:), z(:)
+
+        call spatial_cloud(64, x, y, z)
+        call sx%build(x, y, z, radius=0.2_real64)
+        call sx%rebuild_for(ieee_value(1.0_real64, ieee_quiet_nan))   ! -> aborts
+        print '(a)', "unexpectedly retuned for a NaN radius"
+    end subroutine scenario_spatial_rebuild_for_nan_radius
 
     !> Half a periodic box. Periodicity is a property of the box, so it needs both corners.
     subroutine scenario_spatial_box_needs_both()

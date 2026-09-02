@@ -272,6 +272,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   process-global `std::string` on every open, so two threads freed the same buffer; the process
   then aborted elsewhere with glibc's `malloc(): unaligned tcache chunk detected`. Every mirrored
   setting is now atomic or mutex-guarded.
+- **A NaN is left out of a float column's reported minimum and maximum.** `%print_stat` and a
+  write-time `qc: min:`/`max:` violation warning both report the range over the values that can be
+  ordered, and a column whose every value is a NaN reports `NaN`. Either previously gave a
+  processor-dependent answer, and aborted under a compiler running with the IEEE traps unmasked.
 - Many other minor fixes and improvements.
 
 ## [2.0.0] - 2026-08-24

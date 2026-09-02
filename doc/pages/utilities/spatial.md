@@ -49,6 +49,20 @@ runs.
 Pass `cell=` to override it entirely — the probe is then skipped and your value is used, subject to
 one clamp described under [limitations](#limitations).
 
+### Every coordinate, radius and query point must be finite
+
+**A NaN or an infinity is refused, wherever it enters**, with a message naming the entry point and
+the argument — `%build`, `%build_sky` (`ra`; `dec` is already covered by its `[-90, 90]` test) and
+`%rebuild` check the coordinates, `%rebuild_for` and every bulk query check the radii, and
+`%within`, `%within_segment`, `%within_cylinder`, `%within_cone`, `%nearest`, `%within_sky` and
+`%nearest_sky` check the point they are given.
+
+This is a refusal rather than a quiet answer because there is nothing to answer: a cell index is
+`int((v - lo) * inv)`, and neither that conversion nor the `min`/`max` that clamp a walk to the
+grid has a meaning for a NaN. Under a compiler running with the IEEE traps unmasked — nagfor's
+default — reaching either one terminates the process with a bare arithmetic exception instead;
+under the rest, the search silently answers from a garbage cell.
+
 ### Borrowing the caller's arrays
 
 By default the index copies the coordinates, so you may do anything you like with the originals

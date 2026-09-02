@@ -226,6 +226,12 @@ WARNING: qc violation for column 'ra': declared min >= 0, max < 360, data range 
 That is one column of 1000 rows declaring `min: '>= 0'`, `max: '< 360'` and an empty `miss:`, holding
 two Nulls and three values below zero. The Null count is over all 1000 rows; the range count is over
 the 998 that hold a value.
+**A NaN is a violation, and it is left out of the reported range.** Every comparison against a NaN
+is false, so it satisfies no bound however the bound is written, and it is counted among the
+elements out of range. It plays no part in the `data range [...]` the message quotes, which is over
+the values that can be ordered; a column whose every valid element is a NaN reports
+`data range [NaN, NaN]`.
+
 This only applies when writing against a schema (`parquet_open_writer(..., schema, ...)`) — one
 loaded from a `.maml` file and one built in code with `%init`/`%add_field` behave identically; the
 range check only fires for columns that actually declare `qc: min:`/`max:`, and the miss check only

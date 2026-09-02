@@ -5377,6 +5377,15 @@ def stat_impl(k):
 
     A vector kind's statistic is over ALL of its elements, flattened -- the same convention the
     reader's own print_stat uses for a vector column's null count.
+
+    **A float kind excludes a NaN from the ordering, and the reason is a trap rather than taste.**
+    `min`/`max` over a NaN is not merely processor-dependent in Fortran, it is a fatal signal: both
+    compile to x86 `minsd`/`maxsd`, which raise IEEE_INVALID for a QUIET-NaN operand, and nagfor
+    unmasks the IEEE traps by default (`-ieee=stop`) -- so `%print_info` on a column holding a NaN
+    killed the process there, in an optimised build only. Screening the NaN out is also the answer
+    `pf_minmax` gives (`skipnan` defaults to excluding it) and the one Parquet's own column
+    statistics record, so the three now agree. A column whose every value is NaN reports NaN rather
+    than "-", which is reserved for a column with no value to report at all.
     """
     tag, pk, decl, comp, rank, cat = k
     if cat == "num" and tag.startswith("bool"):
@@ -5417,48 +5426,93 @@ def stat_impl(k):
     end subroutine stat_{tag}
 """
     if cat == "num":
-        fmt = NUMFMT[tag.replace("v", "") if tag.endswith("v") else tag]
-        if rank == 1:
-            body = """                if (first) then
-                    mn = p(i)
-                    mx = p(i)
-                    first = .false.
-                else
-                    mn = min(mn, p(i))
-                    mx = max(mx, p(i))
-                end if"""
+        base = tag[:-1] if tag.endswith("v") else tag
+        fmt = NUMFMT[base]
+        # A float kind screens the NaN out before it can reach `min`/`max`; see this function's
+        # own docstring for why that is a trap and not a preference. An integer kind cannot hold
+        # one, so it keeps the shorter body and gains neither the test nor the two extra locals.
+        isreal = base in ("f32", "f64")
+        elem = "p(i)" if rank == 1 else "p(e, i)"
+        if isreal:
+            core = f"""v = {elem}
+if (v /= v) then
+    if (.not. saw_nan) then
+        nanv = v
+        saw_nan = .true.
+    end if
+else if (first) then
+    mn = v
+    mx = v
+    first = .false.
+else
+    mn = min(mn, v)
+    mx = max(mx, v)
+end if"""
         else:
-            body = """                do e = 1, size(p, 1)
-                    if (first) then
-                        mn = p(e, i)
-                        mx = p(e, i)
-                        first = .false.
-                    else
-                        mn = min(mn, p(e, i))
-                        mx = max(mx, p(e, i))
-                    end if
-                end do"""
+            core = f"""if (first) then
+    mn = {elem}
+    mx = {elem}
+    first = .false.
+else
+    mn = min(mn, {elem})
+    mx = max(mx, {elem})
+end if"""
+        # A rank-2 kind runs the same core once per element, one indent level deeper.
+        pad = " " * (16 if rank == 1 else 20)
+        core = "\n".join(pad + ln for ln in core.split("\n"))
+        if rank == 1:
+            body = core
+        else:
+            body = ("                do e = 1, size(p, 1)\n"
+                    + core + "\n"
+                    + "                end do")
         edecl = "        integer :: e\n" if rank == 2 else ""
-        return f"""    !> {pk}: smallest and largest value, over the rows that hold one.
+        nan_decl = f"        {decl} :: v, nanv\n" if isreal else ""
+        nan_init = "        saw_nan = .false.\n" if isreal else ""
+        nan_flag = ", saw_nan" if isreal else ""
+        # Two FORD rules shape the float kinds' doc-comment, and each was learned by breaking it:
+        # a continuation line is `!!`, never a second `!>` (FORD starts a new doc-comment at every
+        # `!>` and parses its first line for metadata), and the first line of a MULTI-line comment
+        # must not open with a bare `word:` -- so the float arm says "Smallest and largest
+        # PK_FLOAT32 value" where the single-line kinds keep "PK_INT32: smallest and largest
+        # value". `ford docs.md` reports "Ignoring unknown Ford metadata", once per kind, if either
+        # is reverted. See CLAUDE.md's "FORD doc-comment conventions".
+        nan_note = ("\n    !!\n    !! A NaN never enters the ordering. It is excluded, as "
+                    "`pf_minmax` excludes it and as\n    !! Parquet's own statistics do, and a "
+                    "column whose every value is NaN reports NaN.") if isreal else ""
+        headline = ("Smallest and largest %s value, over the rows that hold one." % pk) if isreal \
+            else ("%s: smallest and largest value, over the rows that hold one." % pk)
+        if isreal:
+            tail = """        if (first) then
+            ! "-" is reserved for a column with nothing to report. Values that are all NaN are
+            ! values, so they report NaN -- and `nanv` carries one of the column's own rather
+            ! than building a fresh one, which nagfor would trap on (`0.0/0.0` raises).
+            if (.not. saw_nan) return
+            mn = nanv
+            mx = nanv
+        end if"""
+        else:
+            tail = "        if (first) return"
+        return f"""    !> {headline}{nan_note}
     subroutine stat_{tag}(values, min_s, max_s)
         type(parquet_column), intent(in) :: values             !! the column.
         character(len=:), allocatable, intent(out) :: min_s    !! smallest value, or "-".
         character(len=:), allocatable, intent(out) :: max_s    !! largest value, or "-".
         {decl}, pointer :: p{dims(rank)}
         {decl} :: mn, mx
-        integer(int64) :: i
-{edecl}        logical :: first
+{nan_decl}        integer(int64) :: i
+{edecl}        logical :: first{nan_flag}
         character(len=32) :: buf
         !
         min_s = "-"
         max_s = "-"
         first = .true.
-        call values%data_ptr(p)
+{nan_init}        call values%data_ptr(p)
         do i = 1_int64, values%length()
             if (values%is_null(i)) cycle
 {body}
         end do
-        if (first) return
+{tail}
         write(buf, "{fmt}") mn
         min_s = trim(adjustl(buf))
         write(buf, "{fmt}") mx

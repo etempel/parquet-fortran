@@ -525,66 +525,102 @@ contains
         max_s = trim(adjustl(buf))
     end subroutine stat_i64
 
-    !> PK_FLOAT32: smallest and largest value, over the rows that hold one.
+    !> Smallest and largest PK_FLOAT32 value, over the rows that hold one.
+    !!
+    !! A NaN never enters the ordering. It is excluded, as `pf_minmax` excludes it and as
+    !! Parquet's own statistics do, and a column whose every value is NaN reports NaN.
     subroutine stat_f32(values, min_s, max_s)
         type(parquet_column), intent(in) :: values             !! the column.
         character(len=:), allocatable, intent(out) :: min_s    !! smallest value, or "-".
         character(len=:), allocatable, intent(out) :: max_s    !! largest value, or "-".
         real(real32), pointer :: p(:)
         real(real32) :: mn, mx
+        real(real32) :: v, nanv
         integer(int64) :: i
-        logical :: first
+        logical :: first, saw_nan
         character(len=32) :: buf
         !
         min_s = "-"
         max_s = "-"
         first = .true.
+        saw_nan = .false.
         call values%data_ptr(p)
         do i = 1_int64, values%length()
             if (values%is_null(i)) cycle
-                if (first) then
-                    mn = p(i)
-                    mx = p(i)
+                v = p(i)
+                if (v /= v) then
+                    if (.not. saw_nan) then
+                        nanv = v
+                        saw_nan = .true.
+                    end if
+                else if (first) then
+                    mn = v
+                    mx = v
                     first = .false.
                 else
-                    mn = min(mn, p(i))
-                    mx = max(mx, p(i))
+                    mn = min(mn, v)
+                    mx = max(mx, v)
                 end if
         end do
-        if (first) return
+        if (first) then
+            ! "-" is reserved for a column with nothing to report. Values that are all NaN are
+            ! values, so they report NaN -- and `nanv` carries one of the column's own rather
+            ! than building a fresh one, which nagfor would trap on (`0.0/0.0` raises).
+            if (.not. saw_nan) return
+            mn = nanv
+            mx = nanv
+        end if
         write(buf, "(G0.6)") mn
         min_s = trim(adjustl(buf))
         write(buf, "(G0.6)") mx
         max_s = trim(adjustl(buf))
     end subroutine stat_f32
 
-    !> PK_FLOAT64: smallest and largest value, over the rows that hold one.
+    !> Smallest and largest PK_FLOAT64 value, over the rows that hold one.
+    !!
+    !! A NaN never enters the ordering. It is excluded, as `pf_minmax` excludes it and as
+    !! Parquet's own statistics do, and a column whose every value is NaN reports NaN.
     subroutine stat_f64(values, min_s, max_s)
         type(parquet_column), intent(in) :: values             !! the column.
         character(len=:), allocatable, intent(out) :: min_s    !! smallest value, or "-".
         character(len=:), allocatable, intent(out) :: max_s    !! largest value, or "-".
         real(real64), pointer :: p(:)
         real(real64) :: mn, mx
+        real(real64) :: v, nanv
         integer(int64) :: i
-        logical :: first
+        logical :: first, saw_nan
         character(len=32) :: buf
         !
         min_s = "-"
         max_s = "-"
         first = .true.
+        saw_nan = .false.
         call values%data_ptr(p)
         do i = 1_int64, values%length()
             if (values%is_null(i)) cycle
-                if (first) then
-                    mn = p(i)
-                    mx = p(i)
+                v = p(i)
+                if (v /= v) then
+                    if (.not. saw_nan) then
+                        nanv = v
+                        saw_nan = .true.
+                    end if
+                else if (first) then
+                    mn = v
+                    mx = v
                     first = .false.
                 else
-                    mn = min(mn, p(i))
-                    mx = max(mx, p(i))
+                    mn = min(mn, v)
+                    mx = max(mx, v)
                 end if
         end do
-        if (first) return
+        if (first) then
+            ! "-" is reserved for a column with nothing to report. Values that are all NaN are
+            ! values, so they report NaN -- and `nanv` carries one of the column's own rather
+            ! than building a fresh one, which nagfor would trap on (`0.0/0.0` raises).
+            if (.not. saw_nan) return
+            mn = nanv
+            mx = nanv
+        end if
         write(buf, "(G0.6)") mn
         min_s = trim(adjustl(buf))
         write(buf, "(G0.6)") mx
@@ -823,72 +859,108 @@ contains
         max_s = trim(adjustl(buf))
     end subroutine stat_i64v
 
-    !> PK_FLOAT32_VEC: smallest and largest value, over the rows that hold one.
+    !> Smallest and largest PK_FLOAT32_VEC value, over the rows that hold one.
+    !!
+    !! A NaN never enters the ordering. It is excluded, as `pf_minmax` excludes it and as
+    !! Parquet's own statistics do, and a column whose every value is NaN reports NaN.
     subroutine stat_f32v(values, min_s, max_s)
         type(parquet_column), intent(in) :: values             !! the column.
         character(len=:), allocatable, intent(out) :: min_s    !! smallest value, or "-".
         character(len=:), allocatable, intent(out) :: max_s    !! largest value, or "-".
         real(real32), pointer :: p(:,:)
         real(real32) :: mn, mx
+        real(real32) :: v, nanv
         integer(int64) :: i
         integer :: e
-        logical :: first
+        logical :: first, saw_nan
         character(len=32) :: buf
         !
         min_s = "-"
         max_s = "-"
         first = .true.
+        saw_nan = .false.
         call values%data_ptr(p)
         do i = 1_int64, values%length()
             if (values%is_null(i)) cycle
                 do e = 1, size(p, 1)
-                    if (first) then
-                        mn = p(e, i)
-                        mx = p(e, i)
+                    v = p(e, i)
+                    if (v /= v) then
+                        if (.not. saw_nan) then
+                            nanv = v
+                            saw_nan = .true.
+                        end if
+                    else if (first) then
+                        mn = v
+                        mx = v
                         first = .false.
                     else
-                        mn = min(mn, p(e, i))
-                        mx = max(mx, p(e, i))
+                        mn = min(mn, v)
+                        mx = max(mx, v)
                     end if
                 end do
         end do
-        if (first) return
+        if (first) then
+            ! "-" is reserved for a column with nothing to report. Values that are all NaN are
+            ! values, so they report NaN -- and `nanv` carries one of the column's own rather
+            ! than building a fresh one, which nagfor would trap on (`0.0/0.0` raises).
+            if (.not. saw_nan) return
+            mn = nanv
+            mx = nanv
+        end if
         write(buf, "(G0.6)") mn
         min_s = trim(adjustl(buf))
         write(buf, "(G0.6)") mx
         max_s = trim(adjustl(buf))
     end subroutine stat_f32v
 
-    !> PK_FLOAT64_VEC: smallest and largest value, over the rows that hold one.
+    !> Smallest and largest PK_FLOAT64_VEC value, over the rows that hold one.
+    !!
+    !! A NaN never enters the ordering. It is excluded, as `pf_minmax` excludes it and as
+    !! Parquet's own statistics do, and a column whose every value is NaN reports NaN.
     subroutine stat_f64v(values, min_s, max_s)
         type(parquet_column), intent(in) :: values             !! the column.
         character(len=:), allocatable, intent(out) :: min_s    !! smallest value, or "-".
         character(len=:), allocatable, intent(out) :: max_s    !! largest value, or "-".
         real(real64), pointer :: p(:,:)
         real(real64) :: mn, mx
+        real(real64) :: v, nanv
         integer(int64) :: i
         integer :: e
-        logical :: first
+        logical :: first, saw_nan
         character(len=32) :: buf
         !
         min_s = "-"
         max_s = "-"
         first = .true.
+        saw_nan = .false.
         call values%data_ptr(p)
         do i = 1_int64, values%length()
             if (values%is_null(i)) cycle
                 do e = 1, size(p, 1)
-                    if (first) then
-                        mn = p(e, i)
-                        mx = p(e, i)
+                    v = p(e, i)
+                    if (v /= v) then
+                        if (.not. saw_nan) then
+                            nanv = v
+                            saw_nan = .true.
+                        end if
+                    else if (first) then
+                        mn = v
+                        mx = v
                         first = .false.
                     else
-                        mn = min(mn, p(e, i))
-                        mx = max(mx, p(e, i))
+                        mn = min(mn, v)
+                        mx = max(mx, v)
                     end if
                 end do
         end do
-        if (first) return
+        if (first) then
+            ! "-" is reserved for a column with nothing to report. Values that are all NaN are
+            ! values, so they report NaN -- and `nanv` carries one of the column's own rather
+            ! than building a fresh one, which nagfor would trap on (`0.0/0.0` raises).
+            if (.not. saw_nan) return
+            mn = nanv
+            mx = nanv
+        end if
         write(buf, "(G0.6)") mn
         min_s = trim(adjustl(buf))
         write(buf, "(G0.6)") mx

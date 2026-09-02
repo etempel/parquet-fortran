@@ -2801,6 +2801,47 @@ Compiler-independent rules. Anything specific to one compiler is in its own sect
   reference's own error. See `test_max_pixrad_high_precision` (`test/test_healpix_reference.f90`)
   for both halves.
 
+- **`min`/`max` over a value that could be a NaN is a TRAP, where an ordinary comparison is not.**
+  `min(a, b)`, `max(a, b)`, `minval`/`maxval`, and the clamp idiom `if (r > 1.0) r = 1.0` all
+  compile to x86 `minsd`/`maxsd` (or their packed forms) from `-O1` upward — measured on nagfor at
+  `-O2`, `-O3`, `-O4` and on gfortran at `-O2`. Those instructions raise IEEE_INVALID for a **quiet**
+  NaN operand, which `<`, `<=`, `>`, `>=` compiled as `ucomisd` do not. So under nagfor's default
+  `-ieee=stop` a NaN reaching one kills the process with "Arithmetic exception: Floating invalid
+  operation", naming nothing — **and only in an optimised build**, so a plain `fpm test` on any
+  compiler cannot see it and `fpm test --profile release` under nagfor is what finds it.
+  **The answer is wrong even where it does not trap**: Fortran leaves `MIN`/`MAX` with a NaN
+  argument processor-dependent, and a `min` loop over `[1 … 8]` with a NaN at position 5 returned
+  **6.0** rather than 1.0 under an unoptimised build, silently. Both halves have shipped here —
+  `pf_corr`'s `[-1, 1]` clamp, `%print_stat`'s per-column min/max, the write-time qc range, and
+  every `pf_spatial_index` grid walk.
+
+  **The fix is always to screen the NaN FIRST, as its own statement** (Fortran does not
+  short-circuit, so `.not. isnan(v) .and. v < mn` still evaluates both), after which `min`/`max` is
+  safe and stays. Where the value is a caller's *input* rather than a computed intermediate, prefer
+  refusing it: `pf_spatial_index` validates every coordinate, radius and query point, because
+  nothing downstream can place a NaN anyway.
+
+  **Two shapes to recognise while reviewing.** A guard written `any(x <= 0)` does NOT reject a NaN
+  (every comparison against one is false) while `.not. all(x > 0)` does — the first form let a NaN
+  radius through to a `maxval` in three places here. And a clamp written as two `if` statements
+  reads as branches but is not one: the compiler if-converts it, which is why the hazard is
+  invisible in the source.
+
+  **The one-command census, which is the audit rather than a grep** — source-level searching cannot
+  tell a legitimate clamp of a finite value from a hazard, and it misses if-converted ones entirely:
+
+  ```
+  for o in build/<hash>/parquet-fortran/src_*.o; do objdump -d "$o" | awk -v O="$o" \
+    '/^[0-9a-f]+ <.*>:/ { s=$2; gsub(/[<>:]/,"",s) } /(minsd|maxsd|minpd|maxpd)/ { print s }'; \
+  done | sort | uniq -c | sort -rn
+  ```
+
+  Every procedure it names either screens the NaN before the instruction or takes only values a
+  validating entry point has already refused a NaN for; a new name in that list needs one of the
+  two. The healpix `pure elemental` conversions are the deliberate exception, and their guide page
+  says so: they validate nothing by design, and a NaN argument is documented as outside the
+  module's no-floating-point-exception promise.
+
 - **`sign(1.0, x)` is NOT a portable test for a NEGATIVE ZERO — use the sign bit.** F2018 16.9.180
   makes `SIGN(A, B)` with a zero `B` **processor-dependent**: a processor that does not distinguish
   negative zero returns `|A|`, so `sign(1.0_real64, -0.0_real64)` is entitled to be `+1.0`. gfortran

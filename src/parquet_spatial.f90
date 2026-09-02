@@ -423,6 +423,32 @@ module parquet_spatial
     !> Expansion rounds accumulated by every shell search since the counters were reset.
     integer(int64), save :: dbg_shell_rounds = 0_int64
 
+    ! ---- Shared argument checks (parquet_spatial_build.f90) ----
+
+    interface
+        !> Aborts unless every element of `a` is a finite number.
+        !!
+        !! **A non-finite coordinate is refused rather than carried, and the reason is not
+        !! tidiness.** Nothing downstream can place one: the grid index is `int((v - lo) * inv)`,
+        !! and `int()` of a NaN raises IEEE_INVALID, as do the `min`/`max` this module uses to
+        !! clamp a walk to the grid -- both compile to instructions (`cvttsd2si`,
+        !! `minsd`/`maxsd`) that signal on a quiet NaN. nagfor unmasks the IEEE traps by default
+        !! (`-ieee=stop`), so before this check a NaN coordinate killed the process with
+        !! "Arithmetic exception" naming nothing at all, and every other compiler in the fleet
+        !! silently returned an answer computed from a garbage cell index. The module already
+        !! refuses a NaN radius, a NaN `dec` and a NaN HEALPix disc centre; this closes the same
+        !! gap for the coordinates and the query point.
+        !!
+        !! `abs(a) <= huge(...)` rather than `ieee_is_finite`: it is quiet on a NaN (an ordinary
+        !! comparison, not a `min`), it rejects both infinities in the same test, and it is the
+        !! idiom the rest of the library already screens infinities with.
+        module subroutine spatial_check_finite(a, what, argname)
+            real(real64), intent(in) :: a(:) !! the values to check; may be empty.
+            character(len=*), intent(in) :: what !! the entry point's name, for the message.
+            character(len=*), intent(in) :: argname !! what the values are, for the message.
+        end subroutine spatial_check_finite
+    end interface
+
     ! ---- Build, rebuild and the grid itself (parquet_spatial_build.f90) ----
 
     interface
@@ -1265,6 +1291,7 @@ contains
         if (rsky_deg > spatial_max_sky_deg) error stop "pf_spatial_index%" // what // &
             ": an angular radius above 90 degrees is not a neighbour " // &
             "search; the ball then covers most of the sky and the grid has nothing to prune"
+        call spatial_check_finite([ra, dec], "pf_spatial_index%" // what, "query ra/dec")
         p = sky_vector(ra, dec)
         if (present(r_inner_deg)) then
             if (.not. (r_inner_deg >= 0.0_real64)) error stop "pf_spatial_index%" // what // &
@@ -1797,6 +1824,10 @@ contains
         if (k < 1_int64) error stop "pf_spatial_index%nearest: k must be >= 1"
         if (present(out32) .and. self%npts > int(huge(0_int32), kind=int64)) error stop &
             "pf_spatial_index%nearest: this index holds more rows than an int32 buffer can name; use an int64 one"
+        ! The expanding ball reaches the same clamped grid walk `%within` does, so the point needs
+        ! the same screen -- this is the third and last choke point a caller-supplied point enters
+        ! through, beside spatial_scan and spatial_scan_axis.
+        call spatial_check_finite(p, "pf_spatial_index%nearest", "query point coordinate")
         m = min(k, self%npts)
         if (m == 0_int64) return
         rseed = -1.0_real64
@@ -1886,6 +1917,9 @@ contains
             "pf_spatial_index%nearest_sky: this index has not been built; call %build_sky first"
         if (self%metric_id /= PF_METRIC_SKY) error stop &
             "pf_spatial_index%nearest_sky: this index was built with %build, not %build_sky; use %nearest"
+        ! Screened before the conversion rather than after it: `cos(Inf)` raises IEEE_INVALID on
+        ! the spot, so a check on the resulting vector would come too late under nagfor.
+        call spatial_check_finite([ra, dec], "pf_spatial_index%nearest_sky", "query ra/dec")
         v = sky_vector(ra, dec)
         call near_scan(self, v, k, m, out32=out32, out64=out64, dist=dist_deg)
         if (.not. present(dist_deg)) return

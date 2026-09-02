@@ -335,10 +335,15 @@ that is the reason this module exists rather than a dependency on a library that
 square root takes an argument made non-negative by construction, every inverse cosine takes a
 clamped one, and the one division is guarded by the branch above it.
 
-The single exception is the one the previous section describes: feeding a NaN angle to a
-non-validating conversion propagates it into a floating-point-to-integer conversion, which may
-raise `IEEE_INVALID`. Garbage in is outside the promise; the validating entry points reject a NaN
-before it can get that far.
+The single exception is the one the previous section describes, and it is about the ARGUMENT
+rather than about the arithmetic: feeding a NaN angle or a NaN vector to a non-validating
+conversion raises `IEEE_INVALID` — at a floating-point-to-integer conversion, or earlier, at one of
+the `min`/`max` clamps, which on x86 signal for a quiet NaN where an ordinary comparison does not.
+Garbage in is outside the promise; the validating entry points reject a NaN before it can get that
+far, and `pf_angdist` returns a NaN quietly rather than raising at all.
+
+So the promise holds for every finite argument, on every entry point, and a program that may hold
+a NaN should either screen it or use `pf_query_disc`, which names the offending argument instead.
 
 ## Thread safety
 

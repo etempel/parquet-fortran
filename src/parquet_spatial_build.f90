@@ -341,6 +341,14 @@ contains
         call spatial_bucket(self)
     end procedure spatial_retune
 
+    !> Aborts unless every element of `a` is a finite number -- see the interface in
+    !! parquet_spatial.f90 for why a non-finite coordinate cannot be carried.
+    module procedure spatial_check_finite
+        if (size(a, kind=int64) == 0_int64) return
+        if (all(abs(a) <= huge(0.0_real64))) return
+        error stop what // ": every " // argname // " must be a finite number (no NaN, no infinity)"
+    end procedure spatial_check_finite
+
     !> Builds `self` over the caller's coordinates.
     module procedure spatial_build_worker
         integer(int64) :: n, ns
@@ -355,7 +363,13 @@ contains
             if (size(z, kind=int64) /= n) error stop "pf_spatial_index%build: x and z must be the same length"
         end if
         if (size(radii) < 1) error stop "pf_spatial_index%build: radius= must name at least one radius"
-        if (any(radii <= 0.0_real64)) error stop "pf_spatial_index%build: every radius= must be > 0"
+        ! `.not. all(> 0)` rather than `any(<= 0)`: a NaN answers .false. to BOTH comparisons, so
+        ! the `any` form let a NaN radius through -- to `maxval(radii)` and the tuner, where it
+        ! traps under nagfor. %build_sky's own per-radius check was already written this way.
+        if (.not. all(radii > 0.0_real64)) error stop "pf_spatial_index%build: every radius= must be > 0"
+        call spatial_check_finite(x, "pf_spatial_index%build", "x coordinate")
+        call spatial_check_finite(y, "pf_spatial_index%build", "y coordinate")
+        if (present(z)) call spatial_check_finite(z, "pf_spatial_index%build", "z coordinate")
         if (present(cell)) then
             if (.not. (cell > 0.0_real64)) error stop "pf_spatial_index%build: cell= must be > 0"
         end if
@@ -529,6 +543,10 @@ contains
             if (.not. (abs(dec(i)) <= 90.0_real64)) error stop &
                 "pf_spatial_index%build_sky: every dec must lie in [-90, 90] degrees and not be NaN"
         end do
+        ! `dec` is screened by the range test above; `ra` has no range to be in -- any value is
+        ! folded into one turn -- so it needs its own. It cannot be left to the walk either:
+        ! `cos(Inf)` raises IEEE_INVALID on the spot, and a NaN `ra` reaches the bounds scan below.
+        call spatial_check_finite(ra, "pf_spatial_index%build_sky", "ra")
 
         allocate (vx(n), vy(n), vz(n))
         do i = 1_int64, n
@@ -606,6 +624,9 @@ contains
         if (present(z)) then
             if (size(z, kind=int64) /= n) error stop "pf_spatial_index%rebuild: x and z must be the same length"
         end if
+        call spatial_check_finite(x, "pf_spatial_index%rebuild", "x coordinate")
+        call spatial_check_finite(y, "pf_spatial_index%rebuild", "y coordinate")
+        if (present(z)) call spatial_check_finite(z, "pf_spatial_index%rebuild", "z coordinate")
         self%npts = n
         if (allocated(self%idx)) deallocate (self%idx)
         if (allocated(self%xs)) deallocate (self%xs)
@@ -637,7 +658,9 @@ contains
         if (.not. self%built_ok) error stop &
             "pf_spatial_index%rebuild_for: this index has not been built; call %build first"
         if (size(radii) < 1) error stop "pf_spatial_index%rebuild_for: name at least one radius"
-        if (any(radii <= 0.0_real64)) error stop "pf_spatial_index%rebuild_for: every radius must be > 0"
+        ! `.not. all(...)` rather than `any(...)`: a NaN answers .false. to both comparisons,
+        ! so the `any` form let one through to the tuner's own min/max. See %build's copy.
+        if (.not. all(radii > 0.0_real64)) error stop "pf_spatial_index%rebuild_for: every radius must be > 0"
         call spatial_fold_radii(self, radii, union)
         call spatial_retune(self)
     end procedure spatial_rebuild_for_worker

@@ -241,6 +241,10 @@ contains
             "pf_spatial_index: this index has not been built; call %build first"
         if (.not. (r >= 0.0_real64)) error stop &
             "pf_spatial_index: the search radius must be >= 0 and not NaN"
+        ! The radius was already screened; the POINT was not, and it reaches the same arithmetic.
+        ! One check here covers %within, %count_within and both sky forms, which arrive as a
+        ! vector built from their own (ra, dec).
+        call spatial_check_finite(p, "pf_spatial_index", "query point coordinate")
         if (self%npts == 0_int64) return
         has32 = present(out32)
         has64 = present(out64)
@@ -525,6 +529,10 @@ contains
             ": an axis-shaped query is not supported on a periodic index; only %within is"
         if (.not. (r1 >= 0.0_real64) .or. .not. (r2 >= 0.0_real64)) error stop &
             "pf_spatial_index%" // what // ": every radius must be >= 0 and not NaN"
+        ! Both ends, for the same reason %within screens its centre: the axis is divided by its
+        ! own squared length and the parameter is then clamped into [0, 1] with `min`/`max`.
+        call spatial_check_finite(p1, "pf_spatial_index%" // what, "axis endpoint coordinate")
+        call spatial_check_finite(p2, "pf_spatial_index%" // what, "axis endpoint coordinate")
         if (self%npts == 0_int64) return
         has32 = present(out32)
         has64 = present(out64)

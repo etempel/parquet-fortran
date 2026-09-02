@@ -1250,6 +1250,12 @@ contains
                 test_table_bind_kind_refused_aborts), &
             new_unittest("dropping a predefined column without force= aborts", &
                 test_table_drop_predefined_aborts), &
+            new_unittest("%print_stat over a NaN-bearing float column prints rather than aborting", &
+                test_table_print_stat_nan_survives), &
+            new_unittest("%print_stat leaves a NaN out of a float column's min and max", &
+                test_table_print_stat_nan_excluded), &
+            new_unittest("a NaN stays out of a write-time qc violation's reported data range", &
+                test_qc_warning_float64_nan), &
             new_unittest("a generated accessor's out-of-range row index aborts", &
                 test_codegen_row_index_out_of_range_aborts), &
             new_unittest("a generated accessor's out-of-range row range aborts", &
@@ -1500,6 +1506,30 @@ contains
             new_unittest("querying an unbuilt spatial index aborts", test_spatial_query_before_build_aborts), &
             new_unittest("mismatched coordinate lengths abort", test_spatial_length_mismatch_aborts), &
             new_unittest("a radius hint of zero aborts", test_spatial_radius_not_positive_aborts), &
+            new_unittest("a NaN coordinate is refused by %build", &
+                test_spatial_build_nan_coord_aborts), &
+            new_unittest("an infinite coordinate is refused by %build", &
+                test_spatial_build_inf_coord_aborts), &
+            new_unittest("a NaN radius= is refused by %build", &
+                test_spatial_build_nan_radius_aborts), &
+            new_unittest("a NaN ra is refused by %build_sky", &
+                test_spatial_build_sky_nan_ra_aborts), &
+            new_unittest("a NaN coordinate is refused by %rebuild", &
+                test_spatial_rebuild_nan_coord_aborts), &
+            new_unittest("a NaN query point is refused by %within", &
+                test_spatial_query_nan_point_aborts), &
+            new_unittest("a NaN axis endpoint is refused by %within_segment", &
+                test_spatial_segment_nan_endpoint_aborts), &
+            new_unittest("a NaN query point is refused by %nearest", &
+                test_spatial_nearest_nan_point_aborts), &
+            new_unittest("a NaN dec is refused by %within_sky", &
+                test_spatial_sky_query_nan_dec_aborts), &
+            new_unittest("a NaN in a per-point radius array is refused", &
+                test_spatial_bulk_nan_radius_aborts), &
+            new_unittest("a NaN inner radius is refused by a bulk query", &
+                test_spatial_bulk_nan_inner_radius_aborts), &
+            new_unittest("a NaN radius is refused by %rebuild_for", &
+                test_spatial_rebuild_for_nan_radius_aborts), &
             new_unittest("box_lo= without box_hi= aborts", test_spatial_box_needs_both_aborts), &
             new_unittest("a periodic radius above half the box aborts", test_spatial_half_box_aborts), &
             new_unittest("querying a 2D index with a 3D point aborts", test_spatial_query_rank_aborts), &
@@ -3330,6 +3360,63 @@ contains
             required_stderr="this is a predefined column")
     end subroutine test_table_drop_predefined_aborts
 
+    !> %print_stat over a float column holding a NaN must PRINT, not abort.
+    !!
+    !! The failure this pins is invisible to every compiler but one: `min`/`max` over a NaN compile
+    !! to x86 `minsd`/`maxsd`, which raise IEEE_INVALID for a quiet-NaN operand, and nagfor unmasks
+    !! the IEEE traps by default (`-ieee=stop`). Reverting the screen in
+    !! tools/generate_parquet_tables.py takes this scenario from exit 0 to exit 134 under
+    !! `--profile release`, with the report's header printed and not one column row -- which is
+    !! also why the sibling test below, asserting the printed values, has teeth of its own.
+    subroutine test_table_print_stat_nan_survives(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status(error, "table_print_stat_nan", expect_abort=.false., &
+            failure_message="%print_stat on a float column holding a NaN must print rather than abort")
+    end subroutine test_table_print_stat_nan_survives
+
+    !> ... and the NaN must stay out of the min/max, in all four float specifics.
+    !!
+    !! Each value asserted here is one the ordering can only reach with the NaN excluded: the
+    !! scalar float64 column is `[1, NaN, 3]`, and a NaN admitted to the comparison takes the
+    !! answer to a processor-dependent value rather than to 3. The all-NaN column is the other
+    !! half of the rule -- it reports NaN rather than the "-" that means "nothing to report".
+    subroutine test_table_print_stat_nan_excluded(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_streams(error, "table_print_stat_nan", "3.00000", expect_on="stdout", &
+            failure_message="the float64 column's max should be 3, with the NaN left out")
+        if (allocated(error)) return
+        call check_scenario_streams(error, "table_print_stat_nan", "36.0000", expect_on="stdout", &
+            failure_message="the float32 VECTOR column's max should be 36, with the NaN left out")
+        if (allocated(error)) return
+        call check_scenario_streams(error, "table_print_stat_nan", "NaN", expect_on="stdout", &
+            failure_message="a column whose every value is NaN should report NaN, not ""-""")
+    end subroutine test_table_print_stat_nan_excluded
+
+    !> A NaN is a write-time qc violation, and reporting it must not require ordering it.
+    !!
+    !! `qc_numeric_r64` accumulates the observed data range with `min`/`max`, which compile to x86
+    !! `minsd`/`maxsd` and raise IEEE_INVALID for a quiet-NaN operand -- so under nagfor's default
+    !! `-ieee=stop` the writer aborted on the way to the warning rather than naming the column.
+    !! Reverting the screen in src/parquet_write_numeric.f90 takes this scenario from exit 0 to
+    !! exit 134 under `--profile release`, with no warning printed at all.
+    !!
+    !! The two ranges are the assertion: `[2, 9]` can only be reached with the NaN left out of the
+    !! ordering, and `[NaN, NaN]` is the all-NaN column reporting what it holds instead of the
+    !! zero the accumulators start at -- which would read as a real observed range of [0, 0].
+    subroutine test_qc_warning_float64_nan(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status(error, "qc_warning_float64_nan", expect_abort=.false., &
+            failure_message="a qc violation on float64 data holding a NaN must warn rather than abort")
+        if (allocated(error)) return
+        call check_scenario_streams(error, "qc_warning_float64_nan", "data range [2, 9]", &
+            expect_on="stdout", &
+            failure_message="the reported range should be over the non-NaN values")
+        if (allocated(error)) return
+        call check_scenario_streams(error, "qc_warning_float64_nan", "data range [NaN, NaN]", &
+            expect_on="stdout", &
+            failure_message="an all-NaN column should report NaN as its range, not [0, 0]")
+    end subroutine test_qc_warning_float64_nan
+
     subroutine test_codegen_row_index_out_of_range_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "codegen_row_index_out_of_range", expect_abort=.true., &
@@ -3657,6 +3744,107 @@ contains
             failure_message="a bulk call with a (2, n) vec array was expected to abort", &
             required_stderr="vec must be shaped (3, n)")
     end subroutine test_healpix_bulk_vec_shape_aborts
+
+    !
+    ! ---- Non-finite coordinates, points and radii (pf_spatial_index) ----
+    !
+    ! One check, `spatial_check_finite`, and eight call sites; a ninth test covers the separate
+    ! `radius=` fix. The realistic future defect is a DROPPED CALL SITE rather than a broken check,
+    ! which is why each entry point gets its own test and each asserts the message names it.
+    !
+    ! What these replace is worth stating, because it is why they are worth nine tests: before the
+    ! check, every one of these inputs reached `int()` of a NaN or a `min`/`max` over one -- both
+    ! instructions signal on a quiet NaN -- so under nagfor's default `-ieee=stop` the process died
+    ! with "Arithmetic exception: Floating invalid operation", naming neither the entry point nor
+    ! the argument, and only in an optimised build. Under every other compiler in the fleet the
+    ! traps are masked and the search silently answered from a garbage cell index.
+    !
+    ! Their negative control is the `spatial` suite itself: 74 tests that build, rebuild and query
+    ! with finite data, none of which a check that fired unconditionally could survive.
+
+    subroutine test_spatial_build_nan_coord_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_build_nan_coord", expect_abort=.true., &
+            failure_message="a NaN coordinate was expected to be refused by %build", &
+            required_stderr="%build: every x coordinate must be a finite number")
+    end subroutine test_spatial_build_nan_coord_aborts
+
+    subroutine test_spatial_build_inf_coord_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_build_inf_coord", expect_abort=.true., &
+            failure_message="an infinite coordinate was expected to be refused by %build", &
+            required_stderr="%build: every z coordinate must be a finite number")
+    end subroutine test_spatial_build_inf_coord_aborts
+
+    subroutine test_spatial_build_nan_radius_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_build_nan_radius", expect_abort=.true., &
+            failure_message="a NaN radius= was expected to be refused", &
+            required_stderr="every radius= must be > 0")
+    end subroutine test_spatial_build_nan_radius_aborts
+
+    subroutine test_spatial_build_sky_nan_ra_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_build_sky_nan_ra", expect_abort=.true., &
+            failure_message="a NaN ra was expected to be refused by %build_sky", &
+            required_stderr="%build_sky: every ra must be a finite number")
+    end subroutine test_spatial_build_sky_nan_ra_aborts
+
+    subroutine test_spatial_rebuild_nan_coord_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_rebuild_nan_coord", expect_abort=.true., &
+            failure_message="a NaN coordinate was expected to be refused by %rebuild", &
+            required_stderr="%rebuild: every y coordinate must be a finite number")
+    end subroutine test_spatial_rebuild_nan_coord_aborts
+
+    subroutine test_spatial_query_nan_point_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_query_nan_point", expect_abort=.true., &
+            failure_message="a NaN query point was expected to be refused by %within", &
+            required_stderr="every query point coordinate must be a finite number")
+    end subroutine test_spatial_query_nan_point_aborts
+
+    subroutine test_spatial_segment_nan_endpoint_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_segment_nan_endpoint", expect_abort=.true., &
+            failure_message="a NaN axis endpoint was expected to be refused by %within_segment", &
+            required_stderr="%within_segment: every axis endpoint coordinate must be a finite number")
+    end subroutine test_spatial_segment_nan_endpoint_aborts
+
+    subroutine test_spatial_nearest_nan_point_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_nearest_nan_point", expect_abort=.true., &
+            failure_message="a NaN query point was expected to be refused by %nearest", &
+            required_stderr="%nearest: every query point coordinate must be a finite number")
+    end subroutine test_spatial_nearest_nan_point_aborts
+
+    subroutine test_spatial_sky_query_nan_dec_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_sky_query_nan_dec", expect_abort=.true., &
+            failure_message="a NaN dec was expected to be refused by %within_sky", &
+            required_stderr="%within_sky: every query ra/dec must be a finite number")
+    end subroutine test_spatial_sky_query_nan_dec_aborts
+
+    subroutine test_spatial_bulk_nan_radius_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_bulk_nan_radius", expect_abort=.true., &
+            failure_message="a NaN in a per-point radius array was expected to be refused", &
+            required_stderr="every radius must be >= 0")
+    end subroutine test_spatial_bulk_nan_radius_aborts
+
+    subroutine test_spatial_bulk_nan_inner_radius_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_bulk_nan_inner_radius", expect_abort=.true., &
+            failure_message="a NaN inner radius was expected to be refused", &
+            required_stderr="every inner radius must be >= 0")
+    end subroutine test_spatial_bulk_nan_inner_radius_aborts
+
+    subroutine test_spatial_rebuild_for_nan_radius_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_rebuild_for_nan_radius", expect_abort=.true., &
+            failure_message="a NaN radius handed to %rebuild_for was expected to be refused", &
+            required_stderr="%rebuild_for: every radius must be > 0")
+    end subroutine test_spatial_rebuild_for_nan_radius_aborts
 
     subroutine test_spatial_radius_not_positive_aborts(error)
         type(error_type), allocatable, intent(out) :: error

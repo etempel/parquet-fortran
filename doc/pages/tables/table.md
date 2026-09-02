@@ -906,6 +906,9 @@ Four things worth knowing:
 - **A `logical` column reports `T:<n>`/`F:<n>`** instead of an ordering, and a **vector** column's
   statistic is over all of its elements, flattened. An all-null column has no min or max and
   prints `-`.
+- **A NaN is left out of a float column's min and max**, as `pf_minmax` leaves it out and as
+  Parquet's own column statistics do. A column whose every value is a NaN prints `NaN` rather than
+  `-`, which is reserved for a column with no value to report at all.
 - **These are statistics of what is in memory**, computed by a plain scan here — not the file's
   own footer statistics, and the only ones available for a column built with `%add_column`, which
   has no footer at all.

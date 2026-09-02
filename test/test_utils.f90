@@ -446,9 +446,17 @@ contains
         if (allocated(error)) return
 
         ! Cause 2, and by far the commonest: a PERFECTLY VALID format whose field is too narrow.
-        ! Fortran fills the field with asterisks itself and reports success, so the iostat check
-        ! above never fires. Unlike the rejected-fmt case, the count here IS assertable: the
-        ! standard fixes it at the field width, so every conforming compiler gives the same text.
+        ! Fortran fills the field with asterisks itself and reports success. Unlike the
+        ! rejected-fmt case, the count here IS assertable: the standard fixes it at the field
+        ! width, so every conforming compiler gives the same text.
+        !
+        ! **This pair only fails under `--profile debug`, so a plain `fpm test` cannot see it.**
+        ! ifx's `-check output_conversion` (inside `-check all`) reports `iostat = 63` for the
+        ! overflow the standard calls success, while still rendering the asterisks; taking that
+        ! iostat at face value returned `bad_format_result`'s three asterisks instead of the
+        ! field's two, i.e. a diagnostic build changing what the library returns. `rendered_ok`
+        ! in src/parquet_utils.f90 is what keeps the two builds agreeing, and these two lines are
+        ! its regression test -- run them with `--profile debug` or they assert nothing new.
         call pf_to_str(12345_int32, got, fmt='(i2)')
         call check(error, got == "**", "a field too narrow must give exactly its own width in asterisks")
         if (allocated(error)) return

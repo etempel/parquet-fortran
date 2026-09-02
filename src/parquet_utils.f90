@@ -309,6 +309,33 @@ contains
         res = repeat("*", 3)
     end subroutine bad_format_result
 
+    !> Whether a `write` left usable text in `buf`, whatever its `iostat` said.
+    !!
+    !! **A nonzero `iostat` does not always mean the format was rejected.** A value too wide for
+    !! its edit descriptor is not an error in the standard -- the runtime fills the field with
+    !! asterisks and reports success -- but ifx's `-check output_conversion`, which `-check all`
+    !! and so `--profile debug` turn on, reports `iostat = 63` for exactly that case. The text is
+    !! rendered either way. Taking the `iostat` alone would therefore make a diagnostic build
+    !! return a different string from a plain one: `pf_to_str(12345, s, fmt='(i2)')` gives `**`
+    !! normally and, without this, `bad_format_result`'s `***` under `-check all`.
+    !!
+    !! The discriminator is the buffer, not the code number, because the code numbers are
+    !! per-compiler (ifx 63 for the conversion and 62 for a rejected format, gfortran 5006) and
+    !! nothing portable distinguishes them. Measured on ifx 2026.1 and gfortran 15.2: a rejected
+    !! format renders NOTHING on both, while an overflowing field renders its asterisks on both.
+    !! So text in the buffer means the runtime got far enough to produce a result, and that result
+    !! is what a build without the check would have returned.
+    !!
+    !! **Callers must blank `buf` before the write.** It is an uninitialised local otherwise, and
+    !! this would read whatever the stack held.
+    pure logical function rendered_ok(ios, buf) result(ok)
+        integer, intent(in) :: ios !! the `iostat` the write reported.
+        character(len=*), intent(in) :: buf !! the buffer it wrote into, blanked beforehand.
+
+        ok = ios == 0
+        if (.not. ok) ok = len_trim(buf) > 0
+    end function rendered_ok
+
     !> Applies the optional `min_width`/`pad` tail to already-rendered text.
     !!
     !! Factored out because all five specifics share it exactly; `min_width` absent or `<= 0` and
@@ -345,12 +372,13 @@ contains
         character(len=TO_STR_BUF) :: buf
         integer :: ios
 
+        buf = ''
         if (present(fmt)) then
             write (buf, fmt, iostat=ios) value
         else
             write (buf, '(i0)', iostat=ios) value
         end if
-        if (ios /= 0) then
+        if (.not. rendered_ok(ios, buf)) then
             call bad_format_result(res)
             return
         end if
@@ -367,12 +395,13 @@ contains
         character(len=TO_STR_BUF) :: buf
         integer :: ios
 
+        buf = ''
         if (present(fmt)) then
             write (buf, fmt, iostat=ios) value
         else
             write (buf, '(i0)', iostat=ios) value
         end if
-        if (ios /= 0) then
+        if (.not. rendered_ok(ios, buf)) then
             call bad_format_result(res)
             return
         end if
@@ -390,12 +419,13 @@ contains
         character(len=TO_STR_BUF) :: buf
         integer :: ios
 
+        buf = ''
         if (present(fmt)) then
             write (buf, fmt, iostat=ios) value
         else
             write (buf, '(g0)', iostat=ios) value
         end if
-        if (ios /= 0) then
+        if (.not. rendered_ok(ios, buf)) then
             call bad_format_result(res)
             return
         end if
@@ -413,12 +443,13 @@ contains
         character(len=TO_STR_BUF) :: buf
         integer :: ios
 
+        buf = ''
         if (present(fmt)) then
             write (buf, fmt, iostat=ios) value
         else
             write (buf, '(g0)', iostat=ios) value
         end if
-        if (ios /= 0) then
+        if (.not. rendered_ok(ios, buf)) then
             call bad_format_result(res)
             return
         end if
@@ -437,8 +468,9 @@ contains
         integer :: ios
 
         if (present(fmt)) then
+            buf = ''
             write (buf, fmt, iostat=ios) value
-            if (ios /= 0) then
+            if (.not. rendered_ok(ios, buf)) then
                 call bad_format_result(res)
                 return
             end if

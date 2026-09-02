@@ -261,6 +261,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`pf_to_str` returns the same text in a `-check all` build as in a plain one.** A value too
+  wide for its edit descriptor is filled with asterisks by the runtime and is not an error, but
+  ifx's `-check output_conversion` reports one; `pf_to_str(12345, s, fmt='(i2)')` gave `***`
+  instead of `**` under `--profile debug`.
 - **`%fatal`/`pf_log_fatal` aborts exactly once when several threads reach it together.** The
   procedure is serialised, so a concurrent fatal now emits one record rather than one per thread and
   performs a single `ERROR STOP`. The process exit status was previously nondeterministic under ifx

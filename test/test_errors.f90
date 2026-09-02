@@ -1751,6 +1751,8 @@ contains
             new_unittest("a write to a closed sink aborts, naming the path", &
                 test_logging_write_to_closed_sink_aborts), &
             new_unittest("pf_log_fatal aborts after flushing", test_logging_fatal_aborts), &
+            new_unittest("concurrent pf_log_fatal aborts exactly once", &
+                         test_logging_fatal_omp_aborts_once), &
             new_unittest("an over-long log path is refused, not truncated", &
                 test_logging_path_too_long_aborts), &
             new_unittest("a log file that cannot be opened aborts", &
@@ -4217,6 +4219,53 @@ contains
             failure_message="pf_log_fatal was expected to abort", &
             required_stderr="the run cannot continue")
     end subroutine test_logging_fatal_aborts
+
+    !> Eight threads call pf_log_fatal at once and the process still aborts ONCE.
+    !>
+    !> `ERROR STOP` is `exit()`, and two threads calling `exit()` at once is undefined behaviour.
+    !> Under ifx it leaves the exit status nondeterministic -- measured at 50 runs in 300 exiting
+    !> **0** for a run that had plainly aborted, which is a fatal error reporting success to
+    !> whatever spawned it. gfortran is deterministic here, so this cannot be caught by a
+    !> gfortran-only CI and needs its own test.
+    !>
+    !> The status assertion states the defect but cannot alone be trusted, since an unfixed build
+    !> fails it only intermittently. The record count is the deterministic half: serialised,
+    !> the losing threads block before they can emit, so stdout carries exactly ONE fatal record;
+    !> unserialised, every thread emits its own copy first. One run separates the two.
+    subroutine test_logging_fatal_omp_aborts_once(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: out_file, err_file
+        character(len=32) :: num
+        integer :: exitstat, cmdstat, nrec
+        logical :: on_err
+
+        call run_error_scenario("logging_fatal_omp", exitstat, cmdstat, out_file, err_file)
+
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat /= 97, &
+            "scenario name not recognized by error_scenarios.f90 (typo?): logging_fatal_omp")
+        if (allocated(error)) return
+        ! A concurrent abort can wedge rather than exit; see check_scenario_exit_status on why 124
+        ! and 137 have to be told apart from a genuine abort before the status is read as one.
+        call check(error, exitstat /= 124 .and. exitstat /= 137, &
+            "scenario TIMED OUT and was killed (neither finished nor aborted): logging_fatal_omp")
+        if (allocated(error)) return
+
+        call check(error, exitstat /= 0, &
+            "a concurrent pf_log_fatal was expected to abort, but the process exited 0")
+        if (allocated(error)) return
+
+        call file_contains(err_file, "the parallel run cannot continue", on_err)
+        call check(error, on_err, "the abort did not carry the message it was given")
+        if (allocated(error)) return
+
+        call file_count_containing(out_file, "the parallel run cannot continue", nrec)
+        write(num,'(i0)') nrec
+        call check(error, nrec == 1, &
+            "eight concurrent pf_log_fatal calls must leave exactly one fatal record, not " &
+            // trim(num) // " -- the abort is not serialised")
+    end subroutine test_logging_fatal_omp_aborts_once
 
     !> A path over PF_LOG_MAX_PATH is refused rather than truncated -- truncation would open a
     !> different file from the one the caller named, and log to it silently.
@@ -10223,6 +10272,26 @@ contains
         end do
         close(unit)
     end subroutine file_contains
+
+    !> How many lines of `path` contain `text`. A missing file counts as zero, so a scenario that
+    !> wrote nothing to one stream reads as an absence rather than as a test error -- the same
+    !> convention file_contains uses.
+    subroutine file_count_containing(path, text, n)
+        character(len=*), intent(in) :: path, text
+        integer, intent(out) :: n
+        character(len=1024) :: line
+        integer :: unit, ios
+
+        n = 0
+        open(newunit=unit, file=path, status="old", action="read", iostat=ios)
+        if (ios /= 0) return
+        do
+            read(unit, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            if (index(line, text) > 0) n = n + 1
+        end do
+        close(unit)
+    end subroutine file_count_containing
 
     !> Like check_scenario_exit_status_and_stderr, but asserts `forbidden_text`
     !> is ABSENT from the captured (combined stdout+stderr) output instead of

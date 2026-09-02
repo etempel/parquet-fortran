@@ -357,6 +357,15 @@ per record, inside a region; configuration happens once, before one.
   write goes through one named critical section, so two threads cannot interleave halves of a
   line. `once=` and `every=` are decided inside that same section, so a `once=` record concurrent
   across a whole team emits exactly one line rather than one per thread.
+- **`%fatal`/`pf_log_fatal` is safe to reach from several threads at once, and aborts exactly
+  once.** A guard inside a parallel loop fires for every element that offends it, so more than one
+  thread arriving at the same fatal is the ordinary case. The whole procedure is serialised, and
+  only the first thread to arrive returns from that critical section — the rest block on a lock the
+  aborting thread never releases. Two consequences follow, both wanted: the log carries **one**
+  fatal record instead of one per thread, and the process performs **one** `ERROR STOP`. The second
+  is the load-bearing one. `ERROR STOP` is `exit()`, concurrent `exit()` calls are undefined
+  behaviour, and on at least one compiler they leave the process exit status nondeterministic —
+  including `0`, which would tell a calling script that a run which aborted had succeeded.
 - **Configuring is not** — `%init`, `%add_console`, `%add_file`, `%add_unit`, `%set_level`,
   `%set_format`, `%set_color`, `%set_name`, `%set_rank`, `%set_thread_mode` and `%close` all
   mutate the logger without a lock. Call them before entering a parallel region. This is the same

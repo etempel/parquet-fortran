@@ -255,6 +255,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`%fatal`/`pf_log_fatal` aborts exactly once when several threads reach it together.** The
+  procedure is serialised, so a concurrent fatal now emits one record rather than one per thread and
+  performs a single `ERROR STOP`. The process exit status was previously nondeterministic under ifx
+  — including `0`, reporting success for a run that had aborted.
 - **`parquet_get_column_total_elements` reports a variable-length `list` column's element count** —
   the sum of its rows' own lengths — rather than its row count.
 - **`parquet_get_col_size` and `parquet_get_column_total_elements` see through an Arrow encoding

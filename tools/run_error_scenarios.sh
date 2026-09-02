@@ -1236,6 +1236,7 @@ scenarios=(
     "logging_pop_context_token_mismatch:1"
     "logging_unknown_level_name:1"
     "logging_fatal:1"
+    "logging_fatal_omp:1"
     "logging_write_to_closed_sink:1"
     "logging_path_too_long:1"
     "logging_file_cannot_open:1"

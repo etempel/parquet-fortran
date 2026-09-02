@@ -2041,13 +2041,36 @@ contains
     !!
     !! The flush before the abort is the point: without it an unflushed file loses exactly the
     !! records describing the failure.
+    !!
+    !! **The whole body is serialised, and only the first thread to arrive ever returns from the
+    !! critical -- the rest block on a lock that is never released.** That is the intent, not an
+    !! oversight. `ERROR STOP` is `exit()`, and two threads calling `exit()` at once is undefined
+    !! behaviour in C; under ifx it leaves the process exit status nondeterministic, so a run that
+    !! aborted can report **success** to whatever spawned it. Measured on ifx 2026.1 with two
+    !! threads of an `!$omp parallel do` each executing `ERROR STOP`: 13 runs in 200 exited 0
+    !! instead of the abort status, and 50 in 300 through this procedure. gfortran 15 is
+    !! deterministic, so the defect is invisible to a gfortran-only CI. A single abort inside a
+    !! parallel region is safe -- 200 runs in 200 correct -- so serialising is the whole fix.
+    !!
+    !! Two threads reaching a fatal at once is the normal case, not a contrived one: a guard
+    !! inside a parallel loop fires for every offending element, on whichever threads hold them.
+    !!
+    !! Serialising the emit as well as the abort is what makes the diagnostic legible: the losing
+    !! threads stop before they can write, so the log carries **one** fatal record rather than N
+    !! interleaved copies of it.
+    !!
+    !! The lock order is `pf_log_fatal` then `pf_log_output` (taken inside `emit_core`). Nothing
+    !! takes them the other way round -- no `error stop` in this module sits inside a
+    !! `pf_log_output` critical -- so the nesting cannot deadlock.
     subroutine logger_fatal(self, text)
         class(pf_logger), intent(inout) :: self  !! The logger.
         character(len=*), intent(in) :: text     !! The message.
 
+        !$omp critical (pf_log_fatal)
         call emit_core(self, PF_LEVEL_CRITICAL, text, .false.)
         call logger_flush(self)
         error stop "pf_logger%fatal: " // text
+        !$omp end critical (pf_log_fatal)
     end subroutine logger_fatal
 
     !> Whether a record at `level` would reach any sink.

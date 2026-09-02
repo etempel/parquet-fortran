@@ -2339,6 +2339,8 @@ program error_scenarios
         call scenario_logging_unknown_level_name()
     case ("logging_fatal")
         call scenario_logging_fatal()
+    case ("logging_fatal_omp")
+        call scenario_logging_fatal_omp()
     case ("logging_write_to_closed_sink")
         call scenario_logging_write_to_closed_sink()
     case ("logging_path_too_long")
@@ -20406,6 +20408,33 @@ contains
         call pf_log_fatal("the run cannot continue")
         print '(a)', "unexpectedly returned from pf_log_fatal"
     end subroutine scenario_logging_fatal
+
+    !> Several threads reach a fatal at once -- what a guard inside a parallel loop does whenever
+    !> more than one element offends. The abort must still be ONE abort: `ERROR STOP` is `exit()`,
+    !> and concurrent `exit()` calls are undefined behaviour that leave ifx reporting a
+    !> nondeterministic process status, including 0 for a run that plainly aborted.
+    !>
+    !> Two things are observable from outside, and the test asserts both. The status must be
+    !> nonzero -- the defect itself, which an unfixed build only fails intermittently. And the
+    !> fatal record must appear EXACTLY ONCE, which is the deterministic half: unserialised, every
+    !> thread emits its own copy before dying, so the count alone separates a fixed build from a
+    !> broken one on a single run.
+    !>
+    !> The message goes to the console rather than a file so that the captured output carries it.
+    !> Built without OpenMP the loop is serial and the first iteration aborts, which is the same
+    !> one record and the same nonzero status -- the scenario degrades to the plain fatal case
+    !> rather than becoming vacuous.
+    subroutine scenario_logging_fatal_omp()
+        integer :: i
+
+        call pf_log_init(console=.true., format="{message}")
+        !$omp parallel do default(shared) private(i) num_threads(8)
+        do i = 1, 8
+            call pf_log_fatal("the parallel run cannot continue")
+        end do
+        !$omp end parallel do
+        print '(a)', "unexpectedly returned from a concurrent pf_log_fatal"
+    end subroutine scenario_logging_fatal_omp
 
     !> A logger is copyable -- that is what `firstprivate` does -- so two copies name the same
     !> unit and closing one closes the file the other is still writing to. Ownership cannot be

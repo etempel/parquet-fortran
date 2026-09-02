@@ -389,7 +389,10 @@ call lg%log      (level, text, [name], [context], [once], [every])
 **Two more emission procedures sit outside that table.** `%fatal(text)` emits at
 `PF_LEVEL_CRITICAL`, flushes every sink and then **`error stop`s** — it is the "log this and stop"
 call, not a flushing variant of `%critical`, and it is the only procedure here that ends the
-process. `%blank([n])` writes `n` blank lines (default 1) to every sink, for separating phases of a
+process. Reached from several threads at once — what a guard inside a parallel loop does whenever
+more than one element offends it — it still emits one record and performs one abort; see
+[Logging from several threads](../operating/thread-safety.html#logging-from-several-threads).
+`%blank([n])` writes `n` blank lines (default 1) to every sink, for separating phases of a
 run in a long log; blank lines obey a sink's rank filter like any other record.
 
 **Every optional argument is best passed by keyword.** `name` and `context` are both

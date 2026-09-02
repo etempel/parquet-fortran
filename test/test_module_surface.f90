@@ -958,6 +958,66 @@ contains
 
 end module test_module_surface_utils
 
+!> `parquet_logging` alone: configure a logger, emit through it, and ask what is enabled.
+!!
+!! **One library import, and it must stay that way.** This module's row in the entry-module table
+!! makes two claims nothing else checks: that `use parquet_logging` compiles ONE Fortran file, and
+!! that it re-exports no setting -- it is not the library's own messaging system and reads neither
+!! `verbosity` nor `message_stream`, configuring itself through `pf_log_configure_from_env`
+!! instead. The first claim is the footprint tool's; this asserts the second half of the pair --
+!! that the whole surface really is reachable from the single `use`, which is what breaks at BUILD
+!! time if a re-export is ever dropped.
+!!
+!! Emitting goes to a `PF_LOG_STDERR` console sink rather than a file, so the test needs no fixture
+!! path -- which matters here because suites run concurrently and two tests sharing a path is a
+!! documented source of intermittent failure.
+module test_module_surface_logging
+    use parquet_logging                ! THE ONLY library import.
+    implicit none
+    private
+    public :: check_logging_surface
+
+contains
+
+    !> Exercises one entry point from each family through `use parquet_logging` alone.
+    subroutine check_logging_surface(what)
+        character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
+        type(pf_logger) :: lg
+        ! Fixed-length buffers, not deferred-length allocatables: both of these procedures take a
+        ! `character(len=*), intent(out)` and blank-pad it, so an unallocated allocatable would
+        ! arrive with length zero and silently receive nothing.
+        character(len=PF_LOG_MAX_NAME) :: nm
+        integer :: lvl
+        logical :: ok
+
+        what = ""
+        call lg%init(level=PF_LEVEL_WARNING)
+        call lg%add_console(PF_LOG_STDERR)
+        call lg%set_name("surface")
+        ! The level gate is the one behaviour worth asserting rather than merely calling: it proves
+        ! the threshold set above is the one being read, not that the call linked.
+        if (lg%enabled(PF_LEVEL_ERROR) .neqv. .true.) what = "enabled(ERROR) at WARNING"
+        if (what == "" .and. lg%enabled(PF_LEVEL_DEBUG)) what = "enabled(DEBUG) at WARNING"
+        if (what == "") then
+            call lg%warning("reachable through one import")
+            call pf_log_push_name("inner")
+            call lg%get_full_name(nm)
+            if (trim(nm) /= "surface.inner") what = "push_name/get_full_name"
+            call pf_log_pop_name()
+        end if
+        if (what == "") then
+            call pf_log_level_name(PF_LEVEL_WARNING, nm)
+            if (trim(nm) /= "WARNING") what = "pf_log_level_name"
+        end if
+        if (what == "") then
+            call pf_log_level_from_name("info", lvl, ok)
+            if (.not. ok .or. lvl /= PF_LEVEL_INFO) what = "pf_log_level_from_name"
+        end if
+        call lg%close()
+    end subroutine check_logging_surface
+
+end module test_module_surface_logging
+
 module test_module_surface
     use test_module_surface_io, only : check_io_surface
     use test_module_surface_argsort, only : check_argsort_surface
@@ -967,6 +1027,7 @@ module test_module_surface
     use test_module_surface_sampling, only : check_sampling_surface
     use test_module_surface_version, only : check_version_surface
     use test_module_surface_utils, only : check_utils_surface
+    use test_module_surface_logging, only : check_logging_surface
     use test_module_surface_spatial, only : check_spatial_surface
     use test_module_surface_healpix, only : check_healpix_surface
     use test_module_surface_columns, only : check_columns_surface
@@ -1080,6 +1141,8 @@ contains
                          test_healpix_surface), &
             new_unittest("parquet_utils alone folds text and takes a path apart", &
                          test_utils_surface), &
+            new_unittest("parquet_logging alone configures a logger and emits through it", &
+                         test_logging_surface), &
             new_unittest("parquet_version alone reports the library version", &
                 test_version_surface), &
             new_unittest("parquet_io alone reaches every layer of the read/write API", &
@@ -1179,6 +1242,15 @@ contains
         call check_utils_surface(what)
         call check(error, what == "", "the helpers were not usable through `use parquet_utils` alone: " // what)
     end subroutine test_utils_surface
+
+    !> The test-drive wrapper over check_logging_surface.
+    subroutine test_logging_surface(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: what
+
+        call check_logging_surface(what)
+        call check(error, what == "", "the logger was not usable through `use parquet_logging` alone: " // what)
+    end subroutine test_logging_surface
 
     !> The test-drive wrapper over check_version_surface.
     subroutine test_version_surface(error)

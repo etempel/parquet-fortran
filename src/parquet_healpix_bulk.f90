@@ -68,6 +68,29 @@ contains
         nmin = hpx_min_elements_per_thread * int(nt, int64)
     end function hpx_parallel_min_elements
 
+    !> The cap the automatic path hands to `parquet_auto_thread_count`: this tier's measured
+    !! ceiling, lowered by `healpix_threads` when the user has set one.
+    !!
+    !! **The `min` is what makes the knob a cap rather than a request.** Taking the user's value
+    !! outright would let `parquet_set_healpix_threads(1024)` raise the ceiling that
+    !! `hpx_max_auto_threads` exists to impose, which is the opposite of what every other per-area
+    !! cap in this library does. A caller who genuinely wants more passes `threads=` on the call,
+    !! which bypasses this path entirely.
+    pure function hpx_auto_cap() result(cap)
+        integer :: cap !! cap to pass on; always >= 1.
+
+        cap = hpx_max_auto_threads
+        if (cfg_healpix_threads > 0 .and. cfg_healpix_threads < cap) cap = cfg_healpix_threads
+    end function hpx_auto_cap
+
+    module procedure pf_healpix_threads
+        ! A pass-through onto the one resolver, deliberately: a second copy of the rule here could
+        ! answer differently from what a bulk call actually does, which is the one thing this
+        ! procedure exists to rule out. `what` is only ever used for the explicit-request abort,
+        ! which this path cannot reach because it passes no request.
+        nt = hpx_threads(n=n, what="pf_healpix_threads")
+    end procedure pf_healpix_threads
+
     module procedure hpx_threads
         integer :: n_req
         integer(int64) :: nt_work
@@ -84,7 +107,12 @@ contains
         ! inside somebody else's parallel region serial rather than nested; the cap is this tier's
         ! own and is passed through the same helper rather than applied afterwards, so that the
         ! affinity clamp still has the last word.
-        n_req = parquet_auto_thread_count(hpx_max_auto_threads, "healpix")
+        !
+        ! The cap is the SMALLER of this tier's measured ceiling and the user's `healpix_threads`,
+        ! which is what makes the knob a cap rather than a request: it can only lower the automatic
+        ! answer. `cfg_healpix_threads == 0` means automatic and leaves the ceiling alone. Asking
+        ! for more than the ceiling is done with an explicit `threads=`, handled above.
+        n_req = parquet_auto_thread_count(hpx_auto_cap(), "healpix")
         ! Bound the team by the work available. Asking for one thread per full block of
         ! `hpx_min_elements_per_thread` is the same statement as requiring at least
         ! `hpx_parallel_min_elements(nt)` elements before a team of `nt` is opened, and it

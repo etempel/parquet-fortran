@@ -135,7 +135,7 @@ anything else.
 | `parquet_strings` | `string_threads`, plus `verbosity` and `message_stream` |
 | `parquet_sampling` | `random_threads`, `random_parallel_min_elements` |
 | `parquet_spatial` | `spatial_threads`, `spatial_rebuild_warning`, the four sorting knobs, plus `verbosity` and `message_stream` |
-| `parquet_healpix` | `verbosity` and `message_stream` — it can warn from a thread clamp |
+| `parquet_healpix` | `healpix_threads`, plus `verbosity` and `message_stream` — it can warn from a thread clamp |
 | `parquet_argsort` | `sort_threads`, `sort_radix_path`, `sort_counting_path`, `sort_counting_bucket_limit`, plus `verbosity` and `message_stream` |
 | `parquet_sorting` | the same six as `parquet_argsort` |
 | `parquet_stats` | `verbosity` and `message_stream` — `pf_stats%print` writes solicited output |

@@ -205,3 +205,26 @@ same question for the string paths.
 inside a bound process: the OpenMP place list is intersected with the affinity mask too, so
 `omp_get_num_places()` and `omp_get_place_num_procs()` report the mask rather than the hardware. The
 environment is the only place this can be corrected.
+
+## Where else performance is discussed
+
+This page is about the reader, the writer and `parquet_table`. The library's other tiers each carry
+their own performance notes, on their own pages, next to the tool that measures them — pointers
+rather than a second copy, because a figure repeated in two places is a figure that will disagree
+with itself:
+
+- **[Sorting](../utilities/sorting.html)** — which of the sort engine's paths runs and when, and the
+  one asymptotic surprise: `pf_nth_element` orders the array rather than selecting, so asking for one
+  order statistic costs about what asking for all of them costs.
+- **[Array statistics](../utilities/statistics.html)** — what threads, what the work floor is, and
+  the exclusion policy's cost. The thread cap is the sort's; there is no separate `stats_threads`.
+- **[Spatial indexing](../utilities/spatial.html)** — cell sizing and the tuner, the cost of a badly
+  chosen build `radius=`, and the rebuild that a bulk query can trigger silently.
+- **[HEALPix](../utilities/healpix.html)** — the bulk forms, the team a bulk call opens and why it is
+  derived from the work rather than from the machine.
+- **[String columns](../types/string-columns.html)** and
+  **[Settings](settings.html#threads-inside-one-string-column)** — one column's bulk rebuilds, which
+  are the one thread cap that lowers a deliberately conservative default rather than the machine's.
+
+The knobs that move any of these are on [Settings](settings.html); the concurrency rules that go
+with them are on [Thread safety](thread-safety.html#the-arrow-free-tiers).

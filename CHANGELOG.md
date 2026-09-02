@@ -105,7 +105,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pf_ring2z`), angular separation between two directions (`pf_angdist`) or between two RA/Dec
   positions in degrees (`pf_angdist_deg`), and the squared-chord pair that replaces it in a
   comparison (`pf_chord2_from_angle`/`pf_angle_from_chord2`). Every conversion also has a `_bulk`
-  form over whole arrays with an optional `threads=`. Every integer argument takes
+  form over whole arrays with an optional `threads=`, capped process-wide by
+  `parquet_set_healpix_threads` and reported by `pf_healpix_threads`. Every integer argument takes
   `integer(int32)` or `integer(int64)`; the scalar conversions are `pure elemental`, so they
   accept whole arrays. No floating-point exception is raised on valid input, so a program running
   under `-ffpe-trap` needs no guard around a call. `pf_healpix_grid` carries an `nside`, a scheme

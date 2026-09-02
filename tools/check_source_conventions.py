@@ -1218,6 +1218,71 @@ def check_env_covers_every_setting():
     return problems
 
 
+def _quoted_args_of_calls(text, name):
+    """Every quoted argument of every `name(...)` call in `text`, across nested parentheses.
+
+    A plain `name\\s*\\([^)]*?"([^"]+)"` regex is the obvious way to do this and is WRONG in the
+    direction that keeps a check green: `[^)]` stops at the first `)`, so a call whose earlier
+    argument is itself a call -- `parquet_auto_thread_count(parquet_get_sort_threads(), "sorting")`
+    -- never matches at all. Written that way this check found five of the seven area names and
+    passed, missing `sorting` and `random draws`, the two most likely to appear in a warning. Scan
+    with a depth counter instead.
+    """
+    found = set()
+    pat = re.compile(r"\b" + re.escape(name) + r"\s*\(")
+    for m in pat.finditer(text):
+        depth, i, n = 1, m.end(), len(text)
+        while i < n and depth > 0:
+            c = text[i]
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+            elif c == "!" and depth == 1:
+                break
+            i += 1
+        found |= set(re.findall(r'"([^"]+)"', text[m.end():i]))
+    return found
+
+
+def check_affinity_areas_documented():
+    """Every subsystem the affinity clamp can name must appear on the performance page.
+
+    `parquet_clamp_to_affinity(n, area)` lowers a resolved thread count to what this process's CPU
+    affinity allows and warns once per process when it bites, and the FIRST WORD of that warning is
+    the `area` string its caller passed. `doc/pages/operating/performance.md` enumerates those
+    strings so a reader who sees the warning can tell which subsystem noticed it.
+
+    That enumeration is exactly the shape CLAUDE.md warns about -- a list written in one place
+    describing a set owned by another -- and it went stale in the direction that keeps passing: the
+    page named four areas while the source passed seven, and every check in this repository stayed
+    green, because nothing compared the two. The clamp's own doc-comment already says the call sites
+    are the authoritative list and that an enumeration written elsewhere has gone stale before.
+
+    Matching by SHAPE rather than from a list here, so a subsystem added later is picked up with no
+    edit to this check. An empty match is a failure, not a pass: it means the call shape moved and
+    this check has gone blind.
+    """
+    problems = []
+    areas = set()
+    for path in sorted(SRC.glob("*.f90")):
+        for name in ("parquet_clamp_to_affinity", "parquet_auto_thread_count"):
+            areas |= _quoted_args_of_calls(path.read_text(), name)
+    if not areas:
+        return ["src/: no parquet_clamp_to_affinity/parquet_auto_thread_count call passing a "
+                "quoted area was found -- the call shape has moved and this check has gone blind"]
+    page = REPO_ROOT / "doc" / "pages" / "operating" / "performance.md"
+    text = page.read_text()
+    for area in sorted(areas):
+        if "`%s`" % area not in text:
+            problems.append(
+                "doc/pages/operating/performance.md: the affinity clamp can report the subsystem "
+                "`%s`, but the page never names it -- a reader who sees that warning has no way to "
+                "tell which subsystem noticed. Add it to the list of area names (re-derive the set "
+                "with `grep -rn parquet_clamp_to_affinity src/`)." % area)
+    return problems
+
+
 def check_env_table_matches_the_source():
     """The guide's environment-variable table and `parquet_settings_from_env` must name the same set.
 
@@ -4278,6 +4343,7 @@ CHECKS = (
     ("noinline directives carry both spellings", check_noinline_directives_are_paired),
     ("CONTRIBUTING.md names each tool once, in its index", check_contributing_is_an_index),
     ("no statement exceeds 255 continuation lines", check_statement_continuation_lines),
+    ("the affinity clamp's area names are documented", check_affinity_areas_documented),
     ("every %view call site declares its column target",
      check_view_call_sites_declare_target),
 )

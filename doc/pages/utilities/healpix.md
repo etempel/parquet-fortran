@@ -561,12 +561,14 @@ ten-thousand-element array, entirely in libgomp's fork and join, while 64 thread
 noise of the best figure at every size measured. An explicit `threads=` overrides all of it,
 including the ceiling, on the rule that an explicit argument always wins.
 
-**There is no process-wide default to set, and that is deliberate.** The team is derived from the
-work in front of it rather than from a configured number, so a caller who wants a different one says
-so at the call site. `parquet_spatial` does expose `parquet_set_spatial_threads`, and the difference
-is not an oversight: its automatic count starts from what the environment asked for rather than from
-the size of the job, so a process-wide cap is the only lever it has. Here the work already is the
-lever.
+**The process-wide cap is `parquet_set_healpix_threads(n)`, and it lowers that ceiling rather than
+replacing the rule.** The team is still derived from the work in front of it — one thread per
+thousand elements — and this bounds the result, so it can take the ceiling below 64 and never above
+it. Its purpose is that `parquet_set_threads(n)`, the "give this library `n` threads and no more"
+convenience, actually reaches this tier; without it a program that capped the library at four
+threads still got up to 64 here. A caller who wants *more* than the ceiling says so at the call site
+with `threads=`, which is not capped by either. See
+[Settings](../operating/settings.html#threads-for-a-bulk-healpix-conversion).
 
 Note the spelling: this module's array-with-threads forms end in `_bulk`, where `parquet_random`'s
 array forms are spelled `pf_random_fill_*`. Two tiers, two conventions, and neither is going to

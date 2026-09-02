@@ -76,7 +76,7 @@ module parquet_settings_base
     public :: cfg_random_threads, cfg_random_parallel_min_elements
     public :: cfg_sort_threads, cfg_sort_counting_path, cfg_sort_radix_path
     public :: cfg_sort_counting_bucket_limit, cfg_message_stream
-    public :: cfg_spatial_threads, cfg_spatial_rebuild_warning
+    public :: cfg_spatial_threads, cfg_spatial_rebuild_warning, cfg_healpix_threads
     !
     ! ---- The settings API for the Arrow-free modules: state, getter AND setter ----
     public :: parquet_set_sort_threads, parquet_get_sort_threads
@@ -86,6 +86,7 @@ module parquet_settings_base
     public :: parquet_set_string_threads
     public :: parquet_set_random_threads, parquet_set_random_parallel_min_elements
     public :: parquet_set_spatial_threads, parquet_get_spatial_threads
+    public :: parquet_set_healpix_threads, parquet_get_healpix_threads
     public :: parquet_set_spatial_rebuild_warning, parquet_get_spatial_rebuild_warning
     public :: parquet_set_verbosity, parquet_get_verbosity
     public :: parquet_set_message_stream, parquet_get_message_stream
@@ -155,6 +156,18 @@ module parquet_settings_base
     !! `spatial_threads` (src/parquet_spatial_bulk.f90), for the same single-reader reason as
     !! cfg_sort_threads and cfg_string_threads (feature_risks.md Risk-40).
     integer, save :: cfg_spatial_threads = 0
+    !> Cap on the threads one bulk HEALPix conversion may use internally. `0` means "auto", which
+    !! for this tier is NOT simply "as many as OpenMP offers": the automatic answer is additionally
+    !! bounded by `hpx_max_auto_threads`, a measured ceiling of its own
+    !! (src/parquet_healpix_bulk.f90). Written by `parquet_set_healpix_threads` below; read only by
+    !! `hpx_threads` (same file), for the same single-reader reason as cfg_sort_threads and
+    !! cfg_string_threads (feature_risks.md Risk-40).
+    !!
+    !! **This knob exists so that `parquet_set_threads` means what it says.** Before it, the bulk
+    !! HEALPix forms were the one threading area that read no setting at all, so a program that
+    !! asked the library for four threads still got up to `min(omp_get_max_threads(), 64)` of them
+    !! here -- silently, which is the failure that convenience exists to prevent.
+    integer, save :: cfg_healpix_threads = 0
     !> Whether a `pf_spatial_index` says so when a query radius disagrees badly enough with the one
     !! it was built for that it rebuilds itself.
     !!
@@ -497,6 +510,34 @@ contains
 
         n = cfg_spatial_threads
     end function parquet_get_spatial_threads
+    !
+    !> Caps the threads one bulk HEALPix conversion (`pf_ang2pix_ring_bulk` and its siblings) may
+    !> use when the call itself does not name a `threads=`. `0` restores automatic behaviour.
+    !>
+    !> **It is a cap, not a request, and it does not lift this tier's own ceiling.** The automatic
+    !> answer is the smaller of what OpenMP offers and a measured internal ceiling, and this lowers
+    !> that further; it never raises it, never overrides the rule that an unqualified bulk call
+    !> inside an OpenMP parallel region runs serially, and never overrides an explicit `threads=`.
+    !> To ask for more than the internal ceiling, pass `threads=` on the call.
+    !>
+    !> **Threading a HEALPix conversion changes how fast it answers and never what it answers.**
+    !> Every element is a pure function of its own inputs and each thread writes its own disjoint
+    !> slice of the output, so the serial and threaded results are bit-identical -- which is what
+    !> makes this admissible as a setting at all.
+    subroutine parquet_set_healpix_threads(n)
+        integer, intent(in) :: n !! thread cap, or 0 for automatic; must be >= 0.
+
+        if (n < 0) error stop "parquet_set_healpix_threads: n must be >= 0 (0 means automatic)"
+        cfg_healpix_threads = n
+    end subroutine parquet_set_healpix_threads
+    !
+    !> The configured HEALPix thread cap, as set. `0` means automatic and is NOT the resolved
+    !> count -- the automatic answer is bounded by this tier's own ceiling and by the work
+    !> available, so read this only to find out what was asked for.
+    integer function parquet_get_healpix_threads() result(n)
+
+        n = cfg_healpix_threads
+    end function parquet_get_healpix_threads
     !
     !> Turns the spatial index's automatic-rebuild warning on or off.
     !>

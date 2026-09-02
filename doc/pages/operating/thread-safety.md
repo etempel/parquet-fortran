@@ -17,6 +17,10 @@ Concurrent use (e.g. from an OpenMP parallel region) is supported.
   [Reading a table from several threads](#reading-a-table-from-several-threads).
 - A `pf_logger` may be **emitted through** from many threads at once; **configuring** one may not.
   See [Logging from several threads](#logging-from-several-threads) below.
+- The Arrow-free tiers — sorting, statistics, strings, spatial, HEALPix — have their own short
+  rules, and one of them matters: a **bulk** `pf_spatial_index` query may rebuild the index, so it
+  must not run on a shared index from two threads. See
+  [The Arrow-free tiers](#the-arrow-free-tiers) below.
 
 ## What a `parquet_table` allows concurrently
 
@@ -304,6 +308,43 @@ The single exception is `pf_random_seed()`, which by design is not a pure functi
 produce a value that has never been produced before. It increments a process-wide counter with a
 lock-free atomic fetch-and-add, so concurrent calls return different seeds; that is its only
 interaction with other threads, and it is handled internally.
+
+## The Arrow-free tiers
+
+Everything above is about the reader, the writer and `parquet_table`. The tiers that never touch a
+Parquet file — sorting, statistics, strings, spatial indexing and HEALPix — have their own rules,
+and they are short. **One of them has teeth**; the rest are here so that "what may I do
+concurrently" has one answer rather than five.
+
+- **`pf_spatial_index`: a BULK query is not read-only.** Single queries (`%within`, `%count_within`,
+  `%nearest`) take the index as read-only, so any number of threads may share one. A bulk form
+  (`%all_within`, `%pairs_within`, `%count_all_within`) may **re-tune the index** before it sweeps
+  when the radius you ask for disagrees badly with the one it was built for — reallocating its cell
+  arrays. Two threads calling a bulk form on the *same* index can therefore both decide to rebuild
+  and race, which corrupts the heap rather than returning a wrong number, and **nothing detects
+  it**: unlike a shared reader, there is no guard here. Call a bulk form from one thread at a time.
+  It threads internally anyway, which is where its parallelism is meant to come from. Building,
+  `%rebuild` and `%rebuild_for` mutate the index for the same reason. See
+  [Threading and settings](../utilities/spatial.html#threading-and-settings).
+- **Sorting and statistics have no shared state at all.** `pf_sort`, `pf_argsort` and the `pf_*`
+  reductions work on the arrays you hand them and keep nothing between calls, so any number of
+  threads may sort or reduce different arrays at once. Both thread internally, and both **stand
+  down to serial inside your own parallel region** rather than nesting a team inside yours. A
+  `pf_stats` accumulator is an ordinary variable: one per thread, or one shared and updated inside
+  your own critical section.
+- **HEALPix is the same story.** Every scalar conversion is `pure` and shares nothing; the `_bulk`
+  forms thread internally and stand down inside your region.
+- **One `parquet_string_column` may not be written from two threads.** Its rows share one packed
+  payload, so a write can move the whole thing — the same rule the table above states for a string
+  column, and it applies to a bare `parquet_string_column` too. Reading a column nobody is writing
+  is unrestricted, and its bulk rebuilds thread internally.
+- **`parquet_random` needs no rules at all** — see the section below, which is the one part of this
+  library with nothing to say in this page's terms.
+
+The pattern across all of them: **internal threading stands down inside your parallel region**, so
+you never nest teams by accident; and the only object that is unsafe to share is one an operation
+can *mutate*, which for these tiers means a spatial index under a bulk query and a string column
+under a write.
 
 ## Logging from several threads
 

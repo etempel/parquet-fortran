@@ -42,7 +42,8 @@ module parquet_healpix
     use, intrinsic :: ieee_arithmetic, only: ieee_is_nan, ieee_is_finite
     use parquet_settings_base, only: parquet_set_verbosity, parquet_get_verbosity, &
         parquet_set_message_stream, parquet_get_message_stream, &
-        parquet_clamp_to_affinity, parquet_auto_thread_count
+        parquet_clamp_to_affinity, parquet_auto_thread_count, &
+        parquet_set_healpix_threads, parquet_get_healpix_threads, cfg_healpix_threads
     implicit none
     private
 
@@ -89,6 +90,18 @@ module parquet_healpix
     !! C++ boundary, and with it Arrow, back into an otherwise Arrow-free build.
     public :: parquet_set_verbosity, parquet_get_verbosity
     public :: parquet_set_message_stream, parquet_get_message_stream
+    !
+    !> The thread cap this tier's bulk forms read, on the same argument: a program whose only import
+    !! is `use parquet_healpix` must be able to bound what a bulk conversion opens without naming
+    !! `parquet_settings`. Note it LOWERS the automatic answer and cannot raise it above this tier's
+    !! own measured ceiling -- pass `threads=` on the call for that.
+    public :: parquet_set_healpix_threads, parquet_get_healpix_threads
+    !
+    !> The resolved count, as `pf_sort_threads` and `parquet_string_threads` report theirs for their
+    !! own tiers. It is what makes `healpix_threads` observable: the setting is a cap on an answer
+    !! this tier derives from the work, so reading the cap back tells you what was asked for and
+    !! only this tells you what would happen.
+    public :: pf_healpix_threads
 
     ! ---- Scheme selectors ----
 
@@ -1796,6 +1809,19 @@ module parquet_healpix
             real(real64), intent(out) :: phi(:) !! each direction's longitude, radians.
             integer, intent(in), optional :: threads !! threads to open; absent resolves automatically.
         end subroutine hpx_vec2ang_bulk
+
+        !> Threads a bulk call over `n` elements would open, after every rule and the affinity clamp.
+        !>
+        !> The whole resolution in one call: this tier's work rule (one thread per thousand
+        !> elements), the `healpix_threads` cap, the measured ceiling, the CPU affinity mask, and the
+        !> rule that a call already inside an OpenMP parallel region runs serially. `1` means serial.
+        !>
+        !> **It answers for the context you ask from**, so calling it inside a parallel region
+        !> correctly reports 1. A build without OpenMP always reports 1.
+        module function pf_healpix_threads(n) result(nt)
+            integer(int64), intent(in) :: n !! elements the bulk call would process.
+            integer :: nt !! threads that call would open; 1 means serially.
+        end function pf_healpix_threads
 
         !> Threads to open for a bulk call of `n` elements, after every rule and the affinity clamp.
         module function hpx_threads(threads, n, what) result(nt)

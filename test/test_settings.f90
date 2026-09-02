@@ -63,7 +63,7 @@ module test_settings
     use iso_fortran_env, only : output_unit, int32, int64, real64
     use iso_c_binding, only : c_null_char, c_int
 #ifdef _OPENMP
-    use omp_lib, only : omp_get_max_threads, omp_get_num_procs
+    use omp_lib, only : omp_get_max_threads, omp_get_num_procs, omp_set_num_threads
 #endif
     use testdrive, only : new_unittest, unittest_type, error_type, check
     !
@@ -102,6 +102,8 @@ contains
                 test_random_threads_effect), &
             new_unittest("spatial_threads caps what a bulk spatial query resolves to", &
                 test_spatial_threads_effect), &
+            new_unittest("healpix_threads caps what a bulk HEALPix conversion resolves to", &
+                test_healpix_threads_effect), &
             new_unittest("random_parallel_min_elements decides whether a bulk permutation threads", &
                 test_random_parallel_min_effect), &
             new_unittest("the random work floor lowers the thread count before it forces serial", &
@@ -146,6 +148,8 @@ contains
             new_unittest("set_threads moves every thread count", test_set_threads), &
             new_unittest("file_date pins the creation timestamp, making two writes byte-identical", &
                 test_file_date_pins_output), &
+            new_unittest("file_date is captured when the writer opens, not when it closes", &
+                test_file_date_capture_point), &
             new_unittest("a pinned file_date survives concurrent opens", &
                 test_file_date_survives_concurrent_opens), &
             new_unittest("PARQUET_FORTRAN_THREADS is overridden by the specific variables", &
@@ -292,6 +296,8 @@ contains
         call check(error, parquet_get_random_threads() == 0, "random_threads defaults to 0 (automatic)")
         if (allocated(error)) return
         call check(error, parquet_get_spatial_threads() == 0, "spatial_threads defaults to 0 (automatic)")
+        if (.not. allocated(error)) call check(error, parquet_get_healpix_threads() == 0, &
+            "healpix_threads defaults to 0 (automatic)")
         if (allocated(error)) return
         call check(error, parquet_get_spatial_rebuild_warning(), "spatial_rebuild_warning defaults to .true.")
         if (allocated(error)) return
@@ -357,6 +363,7 @@ contains
         call parquet_set_string_threads(3)
         call parquet_set_random_threads(4)
         call parquet_set_spatial_threads(5)
+        call parquet_set_healpix_threads(5)
         call parquet_set_spatial_rebuild_warning(.false.)
         call parquet_set_random_parallel_min_elements(77_int64)
         call parquet_set_default_compression("gzip")
@@ -379,6 +386,8 @@ contains
         call check(error, parquet_get_random_threads() == 0, "reset restores random_threads")
         if (allocated(error)) return
         call check(error, parquet_get_spatial_threads() == 0, "reset restores spatial_threads")
+        if (.not. allocated(error)) call check(error, parquet_get_healpix_threads() == 0, &
+            "reset restores healpix_threads")
         if (allocated(error)) return
         call check(error, parquet_get_spatial_rebuild_warning(), "reset restores spatial_rebuild_warning")
         if (allocated(error)) return
@@ -469,6 +478,63 @@ contains
         call check(error, got_d /= pinned .and. len(got_d) == len(pinned), &
             "an unpinned write must stamp a real clock reading of the same width, not the pinned text")
     end subroutine test_file_date_pins_output
+
+    !> `file_date` is captured **at writer open**, so changing it afterwards cannot reach a writer
+    !> that is already open.
+    !>
+    !> This is the one property of the C++-mirrored settings that the guide states and nothing
+    !> asserted. It follows structurally -- `parquet_push_settings_to_cpp` runs at the top of every
+    !> `parquet_open_writer` and nowhere else -- but "follows structurally" is exactly the kind of
+    !> claim that stops being true when somebody moves a push, and moving it would break no other
+    !> test here.
+    !>
+    !> **The negative control is the second arm**, and without it the first would pass against an
+    !> implementation that ignored `parquet_set_file_date` entirely: setting the same value BEFORE
+    !> the open must put it in the file, so the first arm's `/=` is evidence about the capture
+    !> point rather than about the setting being inert.
+    subroutine test_file_date_capture_point(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: at_open = "2020-01-02T03:04:05"
+        character(len=*), parameter :: after_open = "2021-06-07T08:09:10"
+        character(len=*), parameter :: f_late = "test_run/settings_file_date_late.parquet"
+        character(len=*), parameter :: f_early = "test_run/settings_file_date_early.parquet"
+        character(len=:), allocatable :: got_late, got_early
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int32) :: k(8)
+        integer :: i
+
+        do i = 1, size(k)
+            k(i) = i
+        end do
+        !
+        ! Arm 1: pin one value, open, pin a DIFFERENT value, then write and close.
+        call parquet_set_file_date(at_open)
+        call schema%init(table="file_date_capture")
+        call schema%add_field("k", "int32", unit="count")
+        call parquet_open_writer(writer, f_late, schema, overwrite=.true.)
+        call parquet_set_file_date(after_open)
+        call parquet_write_column(writer, "k", k)
+        call parquet_close_writer(writer)
+        call read_file_date(f_late, got_late)
+        !
+        ! Arm 2, the negative control: the same later value, set BEFORE the open, must arrive.
+        call parquet_set_file_date(after_open)
+        call parquet_open_writer(writer, f_early, schema, overwrite=.true.)
+        call parquet_write_column(writer, "k", k)
+        call parquet_close_writer(writer)
+        call read_file_date(f_early, got_early)
+        call parquet_set_file_date("")
+        !
+        call check(error, got_late == at_open, &
+            "the DATE key must hold the value pinned when the writer was OPENED")
+        if (allocated(error)) return
+        call check(error, got_late /= after_open, &
+            "a file_date set after the open must not reach a writer already open")
+        if (allocated(error)) return
+        call check(error, got_early == after_open, &
+            "negative control: the same value set BEFORE the open must reach the file")
+    end subroutine test_file_date_capture_point
 
     !> Opening many readers at once while a file date is pinned must not corrupt the heap.
     !!
@@ -1538,6 +1604,8 @@ contains
             "set_threads must set the string-column cap")
         if (.not. allocated(error)) call check(error, parquet_get_spatial_threads() == 3, &
             "set_threads must set the spatial cap")
+        if (.not. allocated(error)) call check(error, parquet_get_healpix_threads() == 3, &
+            "set_threads must set the healpix cap")
         ! A later individual setter overrides just its own knob, which is what makes the convenience
         ! composable rather than a mode you have to leave.
         if (.not. allocated(error)) then
@@ -2422,6 +2490,91 @@ contains
         call parquet_reset_settings()
         call parquet_debug_reset_spatial_counters()
     end subroutine test_spatial_threads_effect
+
+    !> The observed effect of `healpix_threads`, WITH its negative control.
+    !>
+    !> `pf_healpix_threads(n)` is the observable: this tier derives its team from the WORK, so the
+    !> cap's whole job is to bound an answer the caller cannot otherwise predict, and reading the
+    !> cap back with `parquet_get_healpix_threads` would pass against a value that is stored and
+    !> never read. `n` is chosen well above the tier's own ceiling of 64 threads' worth of work, so
+    !> the automatic answer is limited by the machine rather than by the array -- otherwise the
+    !> comparison below would be measuring the work rule instead of the cap.
+    !>
+    !> The `avail > 1` guard is the single-core limitation: on such a machine the capped and the
+    !> automatic answers are both 1 and every comparison here is vacuously true.
+    subroutine test_healpix_threads_effect(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int64), parameter :: big = 10000000_int64
+        integer, parameter :: wide = 200
+        integer :: auto_n, capped_n, avail, was_omp, wide_auto
+        !
+        avail = 1
+#ifdef _OPENMP
+        avail = min(omp_get_max_threads(), omp_get_num_procs())
+#endif
+        call parquet_reset_settings()
+        call check(error, parquet_get_healpix_threads() == 0, "healpix_threads defaults to 0 (automatic)")
+        if (allocated(error)) return
+        !
+        auto_n = pf_healpix_threads(big)
+        call check(error, auto_n >= 1, "the automatic answer is always at least one thread")
+        if (allocated(error)) return
+        call check(error, auto_n <= avail, &
+            "the automatic answer never exceeds what OpenMP and the affinity mask allow")
+        if (allocated(error)) return
+        call check(error, auto_n <= 64, "the automatic answer never exceeds this tier's own ceiling")
+        if (allocated(error)) return
+        !
+        call parquet_set_healpix_threads(1)
+        call check(error, parquet_get_healpix_threads() == 1, "healpix_threads round-trips")
+        if (allocated(error)) return
+        capped_n = pf_healpix_threads(big)
+        call check(error, capped_n == 1, "a healpix cap of 1 forces one thread")
+        if (allocated(error)) return
+        if (avail > 1) then
+            call check(error, auto_n > capped_n, &
+                "negative control: with threads available the automatic answer must EXCEED the cap")
+            if (allocated(error)) return
+        end if
+        !
+        ! The cap LOWERS this tier's own ceiling and may not raise it -- what makes it a cap rather
+        ! than a request, and the one way this knob differs from its siblings.
+        !
+        ! **This needs a machine wider than the ceiling, so it is SIMULATED rather than skipped.**
+        ! The ceiling is 64 and an ordinary machine offers far fewer, so at the counts above it never
+        ! binds and the assertion would hold against a knob that ignored the ceiling entirely --
+        ! vacuous, not passing. Raising the OpenMP ICV above the processor count and overriding what
+        ! the affinity clamp believes is the only way to reach the state from a test; both are
+        ! restored below. Verified by mutation: taking the user's value outright instead of the
+        ! smaller of the two survives every other assertion here and fails this one.
+#ifdef _OPENMP
+        if (avail >= 1) then
+            was_omp = omp_get_max_threads()
+            call omp_set_num_threads(wide)
+            call parquet_debug_set_affinity_procs(wide)
+            call parquet_set_healpix_threads(0)
+            wide_auto = pf_healpix_threads(big)
+            call check(error, wide_auto == 64, &
+                "on a machine wider than the ceiling, the automatic answer IS the ceiling")
+            if (.not. allocated(error)) then
+                call parquet_set_healpix_threads(100000)
+                call check(error, pf_healpix_threads(big) == wide_auto, &
+                    "a healpix cap above the tier's ceiling must not raise the automatic answer")
+            end if
+            if (.not. allocated(error)) then
+                call parquet_set_healpix_threads(8)
+                call check(error, pf_healpix_threads(big) == 8, &
+                    "a healpix cap below the ceiling lowers the automatic answer to it")
+            end if
+            call parquet_debug_set_affinity_procs(0)
+            call omp_set_num_threads(was_omp)
+            if (allocated(error)) return
+        end if
+#endif
+        !
+        call parquet_reset_settings()
+        call check(error, parquet_get_healpix_threads() == 0, "reset restores healpix_threads")
+    end subroutine test_healpix_threads_effect
 
     !> The observed effect of the work floor: it decides whether a bulk permutation threads at all.
     !>

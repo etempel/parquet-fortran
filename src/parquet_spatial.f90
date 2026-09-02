@@ -14,9 +14,9 @@
 !! enough points, which is exact for the reason `spatial_shell_search` sets out.
 !!
 !! **This module is Arrow-free by construction and that is the point of its tier.** It reaches
-!! `parquet_argsort` and `parquet_settings_base` and nothing else, so `use parquet_spatial` in a
-!! downstream project compiles five Fortran files rather than the sixty-odd the reader/writer stack
-!! costs. `check_parquet_spatial_stays_arrow_free` (tools/check_source_conventions.py) and
+!! `parquet_argsort`, `parquet_healpix` and `parquet_settings_base` and nothing else, so
+!! `use parquet_spatial` in a downstream project compiles fifteen Fortran files rather than the
+!! fifty-odd `use parquet_io` costs. `check_parquet_spatial_stays_arrow_free` (tools/check_source_conventions.py) and
 !! `tools/module_footprints.txt` are what keep that true -- a `use` line added here can silently
 !! multiply what every consumer compiles, and no test can see it happen.
 !!
@@ -99,7 +99,7 @@ module parquet_spatial
     !!
     !! **A module procedure rather than a type-bound one, and it lives here despite having no
     !! spatial content at all.** A union-find over an edge list is pure graph work; it is in this
-    !! module because `use parquet_spatial` costs nine Fortran files against `parquet_sorting`'s
+    !! module because `use parquet_spatial` costs fifteen Fortran files against `parquet_sorting`'s
     !! twenty-one, so a caller who wants only connected components pays less here than anywhere
     !! else it could sensibly go -- and because a group finder then needs one `use` rather than two.
     interface pf_connected_components
@@ -316,6 +316,7 @@ module parquet_spatial
         procedure, private :: bind_sky_i64 !! %within_sky into an int64 buffer.
         !> Points within `rsky_deg` degrees of `(ra, dec)`. Sky indexes only.
         generic :: within_sky => bind_sky_i32, bind_sky_i64
+        procedure :: count_within_sky => bind_count_sky !! How many points lie within `rsky_deg` of `(ra, dec)`.
         procedure, private :: bind_seg_i32 !! %within_segment into an int32 buffer.
         procedure, private :: bind_seg_i64 !! %within_segment into an int64 buffer.
         !> Points within `r` of the SEGMENT `p1`-`p2`: a capsule, round ends included.
@@ -438,7 +439,7 @@ module parquet_spatial
             real(real64), intent(in), optional :: box_lo(:) !! periodic box corner; with box_hi turns wrapping on.
             real(real64), intent(in), optional :: box_hi(:) !! the opposite periodic box corner.
             logical, intent(in), optional :: copy !! .false. points at the caller's arrays instead of copying.
-            integer, intent(in), optional :: threads !! team size for the bucketing sort.
+            integer, intent(in), optional :: threads !! passed to the bucketing sort; that path is serial, so it has no effect.
             !> `PF_SKY_GRID3D` (default) or `PF_SKY_HEALPIX`. Passed only by
             !! `spatial_build_sky_worker`: `%build` takes no `backend=` at all, a Euclidean cloud
             !! having no sphere to pixelate. It arrives here rather than being set afterwards
@@ -475,7 +476,7 @@ module parquet_spatial
             real(real64), intent(in) :: dec(:) !! declination of every point, in degrees.
             real(real64), intent(in) :: radii_deg(:) !! the angular radii later queries will use.
             real(real64), intent(in), optional :: cell !! forced cell side, in unit-vector space.
-            integer, intent(in), optional :: threads !! team size for the bucketing sort.
+            integer, intent(in), optional :: threads !! passed to the bucketing sort; that path is serial, so it has no effect.
             integer, intent(in), optional :: backend !! PF_SKY_GRID3D (default) or PF_SKY_HEALPIX.
             integer(int64), intent(in), optional :: nside !! forced HEALPix resolution; disables tuning.
         end subroutine spatial_build_sky_worker
@@ -526,7 +527,7 @@ module parquet_spatial
         !> Buckets the stored points into the current grid, filling `start` and `idx`.
         module subroutine spatial_bucket(self, threads)
             type(pf_spatial_index), intent(inout), target :: self !! the index to bucket.
-            integer, intent(in), optional :: threads !! team size for `pf_argsort`.
+            integer, intent(in), optional :: threads !! forwarded to `pf_argsort`; its grouped path is serial, so it has no effect.
         end subroutine spatial_bucket
 
         !> Aims three local pointers at wherever the coordinates actually live.
@@ -852,7 +853,7 @@ contains
         real(real64), intent(in), optional :: box_lo(:) !! periodic box corner; with box_hi turns wrapping on.
         real(real64), intent(in), optional :: box_hi(:) !! the opposite periodic box corner.
         logical, intent(in), optional :: copy !! .false. points at the caller's arrays; default .true.
-        integer, intent(in), optional :: threads !! team size for the bucketing sort.
+        integer, intent(in), optional :: threads !! passed to the bucketing sort; that path is serial, so it has no effect.
 
         call spatial_build_worker(self, x, y, z, [radius], cell, box_lo, box_hi, copy, threads)
     end subroutine bind_build_r0
@@ -868,7 +869,7 @@ contains
         real(real64), intent(in), optional :: box_lo(:) !! periodic box corner; with box_hi turns wrapping on.
         real(real64), intent(in), optional :: box_hi(:) !! the opposite periodic box corner.
         logical, intent(in), optional :: copy !! .false. points at the caller's arrays; default .true.
-        integer, intent(in), optional :: threads !! team size for the bucketing sort.
+        integer, intent(in), optional :: threads !! passed to the bucketing sort; that path is serial, so it has no effect.
 
         call spatial_build_worker(self, x, y, z, radius, cell, box_lo, box_hi, copy, threads)
     end subroutine bind_build_r1
@@ -894,7 +895,7 @@ contains
         real(real64), intent(in) :: dec(:) !! declination of every point, in degrees; |dec| <= 90.
         real(real64), intent(in) :: radius_deg !! the angular radius later queries will use.
         real(real64), intent(in), optional :: cell !! forced cell side, in unit-vector space.
-        integer, intent(in), optional :: threads !! team size for the bucketing sort.
+        integer, intent(in), optional :: threads !! passed to the bucketing sort; that path is serial, so it has no effect.
         integer, intent(in), optional :: backend !! PF_SKY_GRID3D (default) or PF_SKY_HEALPIX.
         integer(int64), intent(in), optional :: nside !! forced HEALPix resolution; disables tuning.
 
@@ -908,7 +909,7 @@ contains
         real(real64), intent(in) :: dec(:) !! declination of every point, in degrees; |dec| <= 90.
         real(real64), intent(in) :: radius_deg(:) !! the angular radii later queries will use.
         real(real64), intent(in), optional :: cell !! forced cell side, in unit-vector space.
-        integer, intent(in), optional :: threads !! team size for the bucketing sort.
+        integer, intent(in), optional :: threads !! passed to the bucketing sort; that path is serial, so it has no effect.
         integer, intent(in), optional :: backend !! PF_SKY_GRID3D (default) or PF_SKY_HEALPIX.
         integer(int64), intent(in), optional :: nside !! forced HEALPix resolution; disables tuning.
 
@@ -947,27 +948,42 @@ contains
 
     !> `%rebuild_for` with a single radius: re-tunes over the points already stored.
     !>
-    !> **On a SKY index the radius is a CHORD in unit-vector space, not degrees.** It joins the
-    !> same accumulator `%build_sky` folded its converted radii into, and pairs with `cell=` and
-    !> `%cell_size()`, which are in that space for the same reason; `%effective_radius()` is the
-    !> one that converts back to degrees. `2*sin(0.5*theta)` is the conversion, exactly.
+    !> **On a SKY index the radius is in DEGREES**, exactly as `%build_sky`'s `radius_deg=` is, and
+    !> subject to the same 90-degree ceiling. The conversion to the chord the index tunes on happens
+    !> here rather than in the caller -- which is what makes "angles in, angles out" true of every
+    !> sky entry point without exception. `%effective_radius()` answers in degrees too, so a value
+    !> read from one may be handed straight back to the other.
     !>
     !> It re-tunes whichever backend the index has -- a cell side for `PF_SKY_GRID3D`, a HEALPix
     !> resolution for `PF_SKY_HEALPIX` -- and never changes which one that is. A caller wanting
     !> the other backend calls `%build_sky` again.
     subroutine bind_rebuild_for_r0(self, radius)
         class(pf_spatial_index), intent(inout), target :: self !! the index to re-tune.
-        real(real64), intent(in) :: radius !! the radius to tune for; must be > 0. A CHORD on a sky index.
+        real(real64), intent(in) :: radius !! the radius to tune for; must be > 0. DEGREES on a sky index.
 
-        call spatial_rebuild_for_worker(self, [radius], .false.)
+        ! The branch is on the METRIC and it is here rather than in the worker so that `sky_chords`
+        ! -- which validates, refuses above 90 degrees and converts -- is reached directly instead
+        ! of by host association from a submodule. An UNBUILT index has metric_id defaulting to
+        ! PF_METRIC_EUCLIDEAN, so it takes the second arm and still aborts with "has not been
+        ! built" rather than with a units message.
+        if (self%metric_id == PF_METRIC_SKY) then
+            call spatial_rebuild_for_worker(self, sky_chords([radius], "rebuild_for"), .false.)
+        else
+            call spatial_rebuild_for_worker(self, [radius], .false.)
+        end if
     end subroutine bind_rebuild_for_r0
 
     !> `%rebuild_for` with a list of radii.
     subroutine bind_rebuild_for_r1(self, radius)
         class(pf_spatial_index), intent(inout), target :: self !! the index to re-tune.
-        real(real64), intent(in) :: radius(:) !! the radii to tune for; all must be > 0.
+        real(real64), intent(in) :: radius(:) !! the radii to tune for; all > 0. DEGREES on a sky index.
 
-        call spatial_rebuild_for_worker(self, radius, .false.)
+        ! Same metric branch as the scalar form; see `bind_rebuild_for_r0` for why it is here.
+        if (self%metric_id == PF_METRIC_SKY) then
+            call spatial_rebuild_for_worker(self, sky_chords(radius, "rebuild_for"), .false.)
+        else
+            call spatial_rebuild_for_worker(self, radius, .false.)
+        end if
     end subroutine bind_rebuild_for_r1
 
     ! ---- Lifecycle and metadata ----
@@ -1189,7 +1205,7 @@ contains
         real(real64), intent(in), optional :: r_inner_deg !! an inner angular radius; gives an annulus.
         logical, intent(in), optional :: sorted !! .true. orders the result by increasing separation.
 
-        call sky_scan(self, ra, dec, rsky_deg, m, out32=out, dist_deg=dist_deg, &
+        call sky_scan(self, ra, dec, rsky_deg, m, "within_sky", out32=out, dist_deg=dist_deg, &
             r_inner_deg=r_inner_deg, sorted=sorted)
     end function bind_sky_i32
 
@@ -1204,20 +1220,41 @@ contains
         real(real64), intent(in), optional :: r_inner_deg !! an inner angular radius; gives an annulus.
         logical, intent(in), optional :: sorted !! .true. orders the result by increasing separation.
 
-        call sky_scan(self, ra, dec, rsky_deg, m, out64=out, dist_deg=dist_deg, &
+        call sky_scan(self, ra, dec, rsky_deg, m, "within_sky", out64=out, dist_deg=dist_deg, &
             r_inner_deg=r_inner_deg, sorted=sorted)
     end function bind_sky_i64
+
+    !> `%count_within_sky`: how many points lie within `rsky_deg` degrees of `(ra, dec)`.
+    !>
+    !> The sky twin of `%count_within`, and the same trade: no buffer, so nothing is written and
+    !> nothing can truncate -- useful for a local surface density at one position, or for sizing a
+    !> buffer before asking for the rows. `%within_sky` returns the same number, so this exists for
+    !> the caller who does not want the rows at all rather than to answer anything new.
+    !>
+    !> Every guard, the degrees-to-chord conversion and the annulus rule come from the shared
+    !> `sky_scan` rather than from a second copy, which is what keeps this and `%within_sky` from
+    !> ever disagreeing about what "within" means.
+    integer(int64) function bind_count_sky(self, ra, dec, rsky_deg, r_inner_deg) result(m)
+        class(pf_spatial_index), intent(in), target :: self !! the sky index to search.
+        real(real64), intent(in) :: ra !! right ascension of the query point, in degrees.
+        real(real64), intent(in) :: dec !! declination of the query point, in degrees.
+        real(real64), intent(in) :: rsky_deg !! the angular search radius, in degrees.
+        real(real64), intent(in), optional :: r_inner_deg !! an inner angular radius; counts an annulus.
+
+        call sky_scan(self, ra, dec, rsky_deg, m, "count_within_sky", r_inner_deg=r_inner_deg)
+    end function bind_count_sky
 
     !> The shared body of both `%within_sky` forms: guard, convert, scan, convert back.
     !>
     !> **Sorting happens on CHORDS and needs no undoing**, because the chord is strictly
     !> increasing in the angle -- so ordering by chord and ordering by degrees are the same order.
-    subroutine sky_scan(self, ra, dec, rsky_deg, m, out32, out64, dist_deg, r_inner_deg, sorted)
+    subroutine sky_scan(self, ra, dec, rsky_deg, m, what, out32, out64, dist_deg, r_inner_deg, sorted)
         type(pf_spatial_index), intent(in), target :: self !! the sky index to search.
         real(real64), intent(in) :: ra !! right ascension of the query point, in degrees.
         real(real64), intent(in) :: dec !! declination of the query point, in degrees.
         real(real64), intent(in) :: rsky_deg !! the angular search radius, in degrees.
         integer(int64), intent(out) :: m !! how many points qualify, whatever the buffer holds.
+        character(len=*), intent(in) :: what !! the calling binding, so a message names it and not this helper.
         integer(int32), intent(inout), optional :: out32(:) !! int32 output buffer.
         integer(int64), intent(inout), optional :: out64(:) !! int64 output buffer.
         real(real64), intent(out), optional :: dist_deg(:) !! angular separation, in degrees.
@@ -1226,21 +1263,21 @@ contains
         real(real64) :: p(3), half, chord_in
         integer(int64) :: k, nfill
 
-        if (.not. self%built_ok) error stop &
-            "pf_spatial_index%within_sky: this index has not been built; call %build_sky first"
-        if (self%metric_id /= PF_METRIC_SKY) error stop &
-            "pf_spatial_index%within_sky: this index was built with %build, not %build_sky; use %within"
-        if (.not. (rsky_deg >= 0.0_real64)) error stop &
-            "pf_spatial_index%within_sky: the angular radius must be >= 0 and not NaN"
-        if (rsky_deg > spatial_max_sky_deg) error stop &
-            "pf_spatial_index%within_sky: an angular radius above 90 degrees is not a neighbour " // &
+        if (.not. self%built_ok) error stop "pf_spatial_index%" // what // &
+            ": this index has not been built; call %build_sky first"
+        if (self%metric_id /= PF_METRIC_SKY) error stop "pf_spatial_index%" // what // &
+            ": this index was built with %build, not %build_sky; use %within"
+        if (.not. (rsky_deg >= 0.0_real64)) error stop "pf_spatial_index%" // what // &
+            ": the angular radius must be >= 0 and not NaN"
+        if (rsky_deg > spatial_max_sky_deg) error stop "pf_spatial_index%" // what // &
+            ": an angular radius above 90 degrees is not a neighbour " // &
             "search; the ball then covers most of the sky and the grid has nothing to prune"
         p = sky_vector(ra, dec)
         if (present(r_inner_deg)) then
-            if (.not. (r_inner_deg >= 0.0_real64)) error stop &
-                "pf_spatial_index%within_sky: the inner angular radius must be >= 0 and not NaN"
-            if (r_inner_deg > rsky_deg) error stop &
-                "pf_spatial_index%within_sky: the inner angular radius must not exceed the outer one"
+            if (.not. (r_inner_deg >= 0.0_real64)) error stop "pf_spatial_index%" // what // &
+                ": the inner angular radius must be >= 0 and not NaN"
+            if (r_inner_deg > rsky_deg) error stop "pf_spatial_index%" // what // &
+                ": the inner angular radius must not exceed the outer one"
             chord_in = sky_chord(r_inner_deg)
             call spatial_scan(self, p, sky_chord(rsky_deg), m, out32=out32, out64=out64, &
                 dist=dist_deg, r_inner=chord_in, sorted=sorted)

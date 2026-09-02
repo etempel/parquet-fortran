@@ -1545,6 +1545,8 @@ contains
             new_unittest("a sky bulk sweep on a Euclidean index aborts", test_spatial_sky_bulk_euclidean_aborts), &
             new_unittest("a sky radius past a hemisphere aborts", test_spatial_sky_rsky_aborts), &
             new_unittest("a declination outside [-90, 90] aborts", test_spatial_sky_dec_aborts), &
+            new_unittest("rebuild_for past a hemisphere aborts", &
+                         test_spatial_rebuild_for_sky_too_large_aborts), &
             new_unittest("rebuilding a sky index aborts", test_spatial_sky_rebuild_aborts), &
             new_unittest("an unknown backend= aborts rather than defaulting", &
                          test_spatial_sky_bad_backend_aborts), &
@@ -3704,6 +3706,13 @@ contains
             failure_message="an angular radius past a hemisphere was expected to abort", &
             required_stderr="above 90 degrees is not a neighbour search")
     end subroutine test_spatial_sky_rsky_aborts
+
+    subroutine test_spatial_rebuild_for_sky_too_large_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "spatial_rebuild_for_sky_too_large", expect_abort=.true., &
+            failure_message="a %rebuild_for radius past a hemisphere was expected to abort", &
+            required_stderr="above 90 degrees is not a neighbour search")
+    end subroutine test_spatial_rebuild_for_sky_too_large_aborts
 
     subroutine test_spatial_sky_dec_aborts(error)
         type(error_type), allocatable, intent(out) :: error

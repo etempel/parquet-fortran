@@ -8,8 +8,11 @@ its search region can reach. Building is roughly one pass over the data, and a q
 something close to the number of points it actually returns rather than the size of the catalogue.
 
 Everything here is reachable from `use parquet`. The narrow import is `use parquet_spatial`, which
-compiles fifteen Fortran files and never reaches this library's C++ bindings — so it pulls in neither
-Arrow nor Parquet, and a program that only wants neighbour search need not have them.
+compiles fifteen Fortran files and never reaches this library's C++ bindings. That is a statement
+about the *Fortran* graph and not about linking: `link` is a package-level key in `fpm.toml`, so
+every import of this package still compiles the C++ wrapper and still links `-larrow`. See
+[Choosing a module](../operating/choosing-a-module.html) for the per-module file counts and what the
+guarantee does and does not cover.
 
 Signatures below are written with optional arguments in **square brackets** —
 `%build(x, y, [z,] radius=, [cell=])` means `z` and `cell=` may be omitted. Runnable examples never
@@ -17,8 +20,11 @@ use brackets.
 
 ## Building an index
 
-`radius=` is mandatory, and it is not a limit on what you may later ask for — it is the hint the
-cell size is chosen from. Give the radius your queries will actually use, or a list of them.
+`radius=` is mandatory, must be greater than zero, and is not a limit on what you may later ask
+for — it is the hint the cell size is chosen from. Give the radius your queries will actually use,
+or a list of them. Querying at a very different radius is still answered correctly, but a bulk
+query re-tunes the index before sweeping and says so once; see
+[Keeping an index current](#keeping-an-index-current).
 
 ```fortran
 use parquet
@@ -38,7 +44,7 @@ it back with `%effective_radius()`.
 deterministic probe then counts, for a handful of candidate cell sizes, how many cells a
 representative query would visit and how many points it would distance-test. The candidate with the
 least predicted work wins. The probe costs a fraction of the build it is part of, so it always
-runs; you can see how many candidates it evaluated with `parquet_debug_spatial_probe_count()`.
+runs.
 
 Pass `cell=` to override it entirely — the probe is then skipped and your value is used, subject to
 one clamp described under [limitations](#limitations).
@@ -94,6 +100,10 @@ m = sx%within(p, 0.05_real64, found, dist=d)     ! distances too
 m = sx%count_within(p, 0.05_real64)              ! no buffer at all
 ```
 
+`%count_within` is the form to reach for when you want a local density and not the rows themselves;
+on the sky it is `%count_within_sky(ra, dec, radius_deg, [r_inner_deg])`. Both take `r_inner=` /
+`r_inner_deg=` and answer exactly what the buffer-filling form would have returned.
+
 The query point is a 2- or 3-element array and must match the rank the index was built with. The
 output buffer may be `integer(int32)` or `integer(int64)`; the indices are rows of the arrays you
 built from, in the caller's own order, whether or not the index copied them.
@@ -112,7 +122,8 @@ m = sx%count_within(p, 0.05_real64, r_inner=0.02_real64)
 
 **Both bounds are inclusive.** A point sitting exactly on the inner surface therefore belongs to
 the annulus and to the inner ball alike, so "annulus = outer ball minus inner ball" holds
-everywhere except on that surface itself. `r_inner = 0` is exactly the plain ball.
+everywhere except on that surface itself. `r_inner = 0` is exactly the plain ball, and an
+`r_inner` larger than the outer radius is refused rather than returning nothing.
 
 It is available on every form that takes a radius — the bulk sweeps, and the sky queries as
 `r_inner_deg=`. The one restriction is on `%pairs_within` and `%pairs_within_sky`, where it must be
@@ -153,7 +164,8 @@ call sx%all_within(link_length, offsets, neighbours)    ! link_length(n): one pe
 ```
 
 `%all_within` reports a point as its own neighbour; `%pairs_within` does not, since a point is not
-a pair with itself.
+a pair with itself. (A positive `r_inner=` excludes the point from its own list too — its distance
+to itself is zero, which is below any inner radius.)
 
 All three take `r_inner=` and the two list-producing ones take `sorted=`:
 
@@ -293,10 +305,14 @@ directions. That guard is the reason the metric is stored at build time instead 
 per call: `%all_within(0.02)` on a sky index would otherwise be answered in chords to someone who
 meant degrees, and 0.02 chords is about 1.15 degrees — a plausible number, wrong by a factor of 57.
 
-Two further notes. `%effective_radius()` comes back in **degrees**, because that is what you gave
-it, while `%cell_size()` and `cell=` are both in unit-vector space — they are a matched pair, so a
-value read from one can be fed back into the other. And `%build_sky` has no `copy=`: the stored
-coordinates are unit vectors it computes, so there is nothing of yours to borrow.
+Two further notes. **Every entry point on a sky index takes and returns degrees, without
+exception** — `%rebuild_for` included, and it is subject to the same 90-degree ceiling as
+`%build_sky`. So `%effective_radius()` and `%rebuild_for` are a matched pair: a radius read from
+one can be handed straight back to the other. The only values in unit-vector space are
+`%cell_size()` and `cell=`, which are a matched pair of their own for the same reason.
+
+And `%build_sky` has no `copy=`: the stored coordinates are unit vectors it computes, so there is
+nothing of yours to borrow.
 
 ### Choosing a backend
 
@@ -424,7 +440,9 @@ call pf_connected_components(i, j, sx%size(), labels, ncomp=ncomp, sizes=sizes, 
 ```
 
 - `i`, `j` are the edge list. Neither direction nor `i < j` is required, and duplicate edges and
-  self-loops are harmless.
+  self-loops are harmless. Every endpoint must name a vertex in `1..nvert`, though — one outside
+  that range is an error rather than an ignored edge, since it almost always means `nvert` and the
+  edge list came from different catalogues.
 - **`nvert` is required and must not be derived from the edge list.** An isolated vertex never
   appears in an edge list, so taking the vertex count from `maxval` would silently drop every
   trailing isolated point and return a `labels` array shorter than the catalogue.
@@ -489,13 +507,21 @@ element by element, and returns without doing anything when they are identical; 
 `rebuilt=` tells you which happened. The comparison is exact and never a checksum, because a
 collision would mean silently answering about the old positions.
 
+**`%rebuild` is Euclidean-only.** A sky index stores the unit vectors it computed rather than the
+`(ra, dec)` you passed, so there is nothing for it to compare your arrays against; calling
+`%rebuild` on one is refused, and the way to rebuild it is to call `%build_sky` again.
+`%rebuild_for`, which re-tunes without looking at coordinates at all, works on both.
+
 A bulk query also **re-tunes itself** when the radius it has been given would choose a very
 different cell from the one the index was built with, and says so once per index. Silence it with
 `parquet_set_spatial_rebuild_warning(.false.)`.
 
 ## Threading and settings
 
-Every bulk form threads internally; single queries do not.
+Every bulk form threads internally. Single queries do not, and **neither does building**: `%build`
+and `%build_sky` accept a `threads=` that is forwarded to their bucketing sort, but the sort reaches
+that grid through a grouped path which never opens a team, so the argument is accepted and has no
+effect. Do not size a build around it.
 
 ```fortran
 call sx%all_within(0.05_real64, offsets, neighbours, threads=8)
@@ -503,7 +529,8 @@ call sx%all_within(0.05_real64, offsets, neighbours, threads=8)
 
 Omitting `threads=` resolves automatically: the process thread count, clamped to the number of
 processors actually available, and serial when the call is already inside a parallel region.
-`parquet_set_spatial_threads(n)` sets a process-wide cap; see
+`parquet_set_spatial_threads(n)` lowers that automatic answer process-wide — but an explicit
+`threads=` on the call itself still wins, so the setting is a default rather than a ceiling. See
 [Settings](../operating/settings.html).
 
 An index is safe to **share for reading** across threads once built. Building, `%rebuild` and
@@ -526,7 +553,8 @@ against a swept optimum, and thread scaling, if you want numbers for your own ma
   180, but past a hemisphere the ball covers most of the catalogue and the grid has nothing left to
   prune — that is not a neighbour search, and refusing says so where returning everything slowly
   would not.
-- **The number of cells is capped** at a fraction of the number of points. A very small `cell=` is
+- **The number of cells is capped** at 0.3 per point — the figure the coarsening warning names when
+  it fires. A very small `cell=` is
   coarsened to stay under it, with a warning: below that ceiling the bucketing keeps a fast path
   that a finer grid would lose, which costs more than the finer cells save. **The same cap applies
   to a HEALPix sky index as a pixel count**, so `nside` is bounded by the catalogue size and an

@@ -2233,6 +2233,8 @@ program error_scenarios
         call scenario_spatial_sky_rsky_too_large()
     case ("spatial_sky_dec_out_of_range")
         call scenario_spatial_sky_dec_out_of_range()
+    case ("spatial_rebuild_for_sky_too_large")
+        call scenario_spatial_rebuild_for_sky_too_large()
     case ("spatial_sky_bad_backend")
         call scenario_spatial_sky_bad_backend()
     case ("spatial_sky_cell_with_healpix")
@@ -18118,6 +18120,21 @@ contains
         m = sx%within_sky(10.0_real64, 20.0_real64, 120.0_real64, got)   ! -> aborts
         print '(a,i0)', "unexpectedly accepted a 120-degree sky radius, m=", m
     end subroutine scenario_spatial_sky_rsky_too_large
+
+    !> `%rebuild_for` on a sky index takes DEGREES, so it inherits the 90-degree ceiling.
+    !>
+    !> The ceiling arrives with the shared conversion rather than being restated here, which is the
+    !> point of doing the conversion in the binding: a re-tune radius past a hemisphere is as
+    !> meaningless as a build radius past one, and nothing had to be written twice to say so.
+    subroutine scenario_spatial_rebuild_for_sky_too_large()
+        type(pf_spatial_index) :: sx
+        real(real64), allocatable :: ra(:), dec(:)
+
+        call spatial_sky_cloud(64, ra, dec)
+        call sx%build_sky(ra, dec, radius_deg=1.0_real64)
+        call sx%rebuild_for(120.0_real64)   ! -> aborts
+        print '(a,f0.3)', "unexpectedly re-tuned for a 120-degree radius, eff=", sx%effective_radius()
+    end subroutine scenario_spatial_rebuild_for_sky_too_large
 
     !> `backend=` naming neither of the two constants is refused rather than defaulted.
     subroutine scenario_spatial_sky_bad_backend()

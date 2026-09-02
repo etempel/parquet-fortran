@@ -1184,6 +1184,7 @@ scenarios=(
     "spatial_sky_rsky_too_large:1"
     "spatial_sky_dec_out_of_range:1"
     "spatial_sky_rebuild_refused:1"
+    "spatial_rebuild_for_sky_too_large:1"
     "spatial_axis_on_periodic:1"
     "spatial_axis_before_build:1"
     "spatial_axis_radius_negative:1"

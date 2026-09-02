@@ -159,7 +159,13 @@ contains
             new_unittest("duplicated sky positions tie-break identically on both backends", &
                          test_healpix_duplicate_positions), &
             new_unittest("a disc outgrowing the walk's run buffer still answers identically", &
-                         test_healpix_run_buffer_overflow) &
+                         test_healpix_run_buffer_overflow), &
+            new_unittest("rebuild_for takes degrees on a sky index, not chords", &
+                         test_sky_rebuild_for_takes_degrees), &
+            new_unittest("count_within_sky agrees with within_sky's own count", &
+                         test_count_within_sky), &
+            new_unittest("build's answers do not depend on threads=", &
+                         test_build_threads_do_not_change_answers) &
             ]
     end subroutine collect_tests_parquet_spatial
 
@@ -3327,18 +3333,15 @@ contains
         type(pf_spatial_index) :: sx, s3
         integer(int64), allocatable :: oh(:), o3(:)
         integer(int64) :: n, fine, coarse, mh, m3
-        real(real64) :: big_chord
-        real(real64), parameter :: deg2rad = 3.141592653589793238462643_real64 / 180.0_real64
 
         n = 20000_int64
         call make_sky(n, ra, dec)
         call sx%build_sky(ra, dec, radius_deg=0.05_real64, backend=PF_SKY_HEALPIX)
         fine = sx%nside()
-        ! **A CHORD, not degrees.** `%rebuild_for` folds its argument into the same accumulator
-        ! `%build_sky` folded its converted radii into, so a sky index re-tunes in unit-vector
-        ! space -- the same space `cell=` and `%cell_size()` live in.
-        big_chord = 2.0_real64 * sin(0.5_real64 * 20.0_real64 * deg2rad)
-        call sx%rebuild_for(big_chord)
+        ! **DEGREES, exactly as `%build_sky`'s radius_deg= is.** `%rebuild_for` converts to the
+        ! chord the index tunes on itself; see `test_sky_rebuild_for_takes_degrees`, which is what
+        ! pins that and would fail if the conversion were removed.
+        call sx%rebuild_for(20.0_real64)
         coarse = sx%nside()
         call check(error, sx%backend() == PF_SKY_HEALPIX, "%rebuild_for must not change the backend")
         if (allocated(error)) return
@@ -3463,5 +3466,138 @@ contains
             if (allocated(error)) return
         end do
     end subroutine test_healpix_duplicate_positions
+
+    !> `%rebuild_for` takes DEGREES on a sky index, exactly as `%build_sky`'s `radius_deg=` does.
+    !>
+    !> **This test was inverted rather than written from scratch, and that is worth knowing.** Until
+    !> 2026-09-02 `%rebuild_for` folded its argument in unconverted, so a sky index re-tuned on a
+    !> CHORD -- and `call sky%rebuild_for(20.0_real64)` meaning 20 degrees silently re-tuned for 180.
+    !> The review that found it proposed a test pinning the chord contract and said in as many words
+    !> that if the maintainer chose to convert instead, "this test inverts rather than disappearing".
+    !> It did: the degree arm is now the one that must land on 20, and the chord arm the one that
+    !> must not. If `%rebuild_for` is ever changed again, this is the test that has to be rewritten.
+    !>
+    !> **The observable is `%effective_radius()`**, which reports in degrees on a sky index and is
+    !> dominated by the far larger re-tune radius once folded, so it reads back what was asked for.
+    !> The chord arm is the negative control: 2*sin(10 deg) = 0.347, which as DEGREES is 0.347 -- so
+    !> an implementation that had kept the old behaviour would answer 20 there and fail.
+    subroutine test_sky_rebuild_for_takes_degrees(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:)
+        type(pf_spatial_index) :: deg_arm, chord_arm
+        integer(int64) :: n
+        real(real64) :: chord20
+        real(real64), parameter :: d2r = 3.141592653589793238462643_real64 / 180.0_real64
+
+        n = 2000_int64
+        call make_sky(n, ra, dec)
+        chord20 = 2.0_real64 * sin(0.5_real64 * 20.0_real64 * d2r)
+        !
+        call deg_arm%build_sky(ra, dec, radius_deg=0.05_real64)
+        call check(error, abs(deg_arm%effective_radius() - 0.05_real64) < 1.0e-9_real64, &
+            "a freshly built sky index must report the radius_deg it was given")
+        if (allocated(error)) return
+        call deg_arm%rebuild_for(20.0_real64)
+        call check(error, abs(deg_arm%effective_radius() - 20.0_real64) < 1.0e-6_real64, &
+            "%rebuild_for(20.0) on a sky index must re-tune for 20 DEGREES, so %effective_radius() reads 20")
+        if (allocated(error)) return
+        !
+        ! Negative control: the old chord spelling must no longer mean 20 degrees. It is now read as
+        ! 0.347 degrees, which is what makes the two arms distinguishable at all -- without this the
+        ! assertion above would pass just as happily against the pre-fix behaviour.
+        call chord_arm%build_sky(ra, dec, radius_deg=0.05_real64)
+        call chord_arm%rebuild_for(chord20)
+        call check(error, abs(chord_arm%effective_radius() - chord20) < 1.0e-6_real64, &
+            "negative control: a chord passed to %rebuild_for is now taken as that many DEGREES")
+        if (allocated(error)) return
+        call check(error, chord_arm%effective_radius() < 1.0_real64, &
+            "negative control: the chord arm must NOT come back at 20 degrees, or the conversion was skipped")
+        if (allocated(error)) return
+        !
+        ! And the index still answers correctly after the re-tune, which a re-bucketing can break.
+        call check(error, deg_arm%is_built() .and. deg_arm%metric() == PF_METRIC_SKY, &
+            "a re-tuned sky index must still be a built sky index")
+    end subroutine test_sky_rebuild_for_takes_degrees
+
+    !> `%count_within_sky` answers exactly what `%within_sky` reports as its true count.
+    !>
+    !> The oracle is `%within_sky` itself rather than a brute-force scan, deliberately: the two
+    !> share `sky_scan`, so what this pins is not the geometry -- `test_sky_matches_haversine`
+    !> already does that -- but that the buffer-free form reaches the same walk with the same
+    !> guards, including the annulus. A brute-force oracle here would re-test the geometry and
+    !> leave the actual risk, a second code path drifting, untouched.
+    subroutine test_count_within_sky(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: ra(:), dec(:)
+        type(pf_spatial_index) :: sky
+        integer(int64), allocatable :: found(:)
+        integer(int64) :: n, k, m_ref, m_cnt
+        real(real64) :: rr
+        integer :: t
+
+        n = 3000_int64
+        call make_sky(n, ra, dec)
+        call sky%build_sky(ra, dec, radius_deg=1.0_real64)
+        allocate (found(n))
+        do t = 1, 4
+            rr = 0.25_real64 * real(t, kind=real64)
+            do k = 1_int64, 5_int64
+                m_ref = sky%within_sky(ra(k), dec(k), rr, found)
+                m_cnt = sky%count_within_sky(ra(k), dec(k), rr)
+                call check(error, m_cnt, m_ref, "%count_within_sky must equal %within_sky's true count")
+                if (allocated(error)) return
+            end do
+        end do
+        ! The annulus reaches the buffer-free form too.
+        m_ref = sky%within_sky(ra(3), dec(3), 1.0_real64, found, r_inner_deg=0.4_real64)
+        m_cnt = sky%count_within_sky(ra(3), dec(3), 1.0_real64, r_inner_deg=0.4_real64)
+        call check(error, m_cnt, m_ref, "%count_within_sky must honour r_inner_deg= as %within_sky does")
+        if (allocated(error)) return
+        ! Both extremes, so the agreement above is not an accident of one populated radius.
+        call check(error, sky%count_within_sky(ra(1), dec(1), 0.0_real64) >= 1_int64, &
+            "a zero radius still finds the point itself, which sits at separation zero")
+        if (allocated(error)) return
+        call check(error, sky%count_within_sky(ra(1), dec(1), 90.0_real64) > 0_int64, &
+            "a hemisphere-wide radius must count something rather than nothing")
+    end subroutine test_count_within_sky
+
+    !> `%build`'s answers do not depend on `threads=` — which today is trivially true, and says so.
+    !>
+    !> **This is NOT the test the review proposed, and the difference matters.** `feature_doc_spatial.md`
+    !> D2 asked for a test pinning that `%build(threads=n)` opens a team of `n` in the bucketing
+    !> sort. Writing it established that it cannot: `spatial_bucket` always calls `pf_argsort` with
+    !> `group_offsets=`, which routes through `engine_build_runs` to `sort_build_runs_permutation`
+    !> and thence to `sort_build_permutation` — the SERIAL entry point. The resolved thread count is
+    !> used only by the test-only C++ oracle, so on the shipped path `threads=` on `%build` is
+    !> accepted and discarded. There is no team to assert, and a test claiming otherwise would have
+    !> been asserting a behaviour the library does not have.
+    !>
+    !> **What is asserted instead is the property that has to survive if that ever changes**: the
+    !> permutation, and so every later answer, must not depend on the thread count. That is vacuous
+    !> today — both arms run identical serial code — and it is written down as vacuous rather than
+    !> dressed up, because the day the grouped path learns to thread this is the test that catches a
+    !> reordering, and a reader needs to know it was not guarding anything before then.
+    subroutine test_build_threads_do_not_change_answers(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:)
+        type(pf_spatial_index) :: one, many
+        integer(int64), allocatable :: o1(:), n1(:), o8(:), n8(:)
+
+        call make_cloud(4000_int64, 1.0_real64, .false., x, y, z)
+        call one%build(x, y, z, radius=0.05_real64, threads=1)
+        call many%build(x, y, z, radius=0.05_real64, threads=8)
+        call check(error, one%size(), many%size(), "threads= must not change how many points an index holds")
+        if (allocated(error)) return
+        call check(error, one%cells(), many%cells(), "threads= must not change the grid the tuner chose")
+        if (allocated(error)) return
+        call one%all_within(0.05_real64, o1, n1)
+        call many%all_within(0.05_real64, o8, n8)
+        call check(error, size(n1, kind=int64), size(n8, kind=int64), &
+            "threads= on %build must not change how many neighbours the index later reports")
+        if (allocated(error)) return
+        call check(error, all(o1 == o8), "threads= on %build must not change the CSR offsets")
+        if (allocated(error)) return
+        call check(error, all(n1 == n8), "threads= on %build must not change the neighbour lists")
+    end subroutine test_build_threads_do_not_change_answers
 
 end module test_spatial

@@ -13,9 +13,10 @@ with `parquet_write_column`, whole or one row group at a time — see
 [Writing a map column to a file](#writing-a-map-column-to-a-file) below.
 
 The module is Arrow-free: `use parquet_map` compiles eleven Fortran files and reaches no C++
-binding, so a program that builds map-shaped data in memory and never touches a file pays for none
-of the reader or writer. It is also re-exported by `use parquet`, so a program that does touch
-files needs no second import.
+binding (the *package* still links Arrow; see
+[Choosing a module](../operating/choosing-a-module.html)), so a program that builds map-shaped data
+in memory and never touches a file pays for none of the reader or writer. It is also re-exported by
+`use parquet`, so a program that does touch files needs no second import.
 
 Signatures below are written with **optional arguments in square brackets** — `%get(key, value,
 [is_valid], [occurrence], [warn], [found])` means only `key` and `value` are required. The brackets

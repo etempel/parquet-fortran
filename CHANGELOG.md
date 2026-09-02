@@ -120,9 +120,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   count-only forms, all threaded; `k`-nearest search (`%nearest`) and every point's `k`-th
   neighbour distance at once (`%kth_distance`); segment, cylinder and truncated-cone searches
   around an axis, reporting where on the axis each point sits (`axis_point=`/`axis_t=`);
-  search on the sky by angular radius (`%build_sky`/`%within_sky`/`%nearest_sky`/
-  `%kth_distance_sky` plus the three bulk forms `%all_within_sky`/`%pairs_within_sky`/
-  `%count_all_within_sky`, degrees in and degrees out), backed by either a 3D grid or the HEALPix
+  search on the sky by angular radius (`%build_sky`/`%within_sky`/`%count_within_sky`/
+  `%nearest_sky`/`%kth_distance_sky` plus the three bulk forms `%all_within_sky`/
+  `%pairs_within_sky`/`%count_all_within_sky`, degrees in and degrees out everywhere,
+  `%rebuild_for` included), backed by either a 3D grid or the HEALPix
   pixelisation of the sphere (`backend=PF_SKY_GRID3D`, the default, or `backend=PF_SKY_HEALPIX`,
   with `nside=`, `%backend()`, `%nside()` and `%npix()`); two or three dimensions; optional periodic
   boundaries with the minimum-image convention; and an automatically chosen cell size. Every

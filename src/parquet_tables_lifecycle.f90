@@ -20,7 +20,7 @@ contains
     !
     module procedure open_table_full
         call open_table_impl(table, filename, .false., 0_int64, 0_int64, maml, filter, sort, qc, &
-            qc_soft, use_threads, sample_fraction, sample_seed, list_columns)
+            qc_soft, use_threads, sample_fraction, sample_seed, list_columns, bounded)
     end procedure open_table_full
     !
     ! Both slice specifics pass no `sort` at all -- there is no argument to pass, which is how the
@@ -28,20 +28,22 @@ contains
     module procedure open_table_slice_i32
         call open_table_impl(table, filename, .true., int(row_lo, int64), int(row_hi, int64), maml, &
             filter, qc=qc, qc_soft=qc_soft, use_threads=use_threads, &
-            sample_fraction=sample_fraction, sample_seed=sample_seed, list_columns=list_columns)
+            sample_fraction=sample_fraction, sample_seed=sample_seed, list_columns=list_columns, &
+            bounded=bounded)
     end procedure open_table_slice_i32
     !
     module procedure open_table_slice_i64
         call open_table_impl(table, filename, .true., row_lo, row_hi, maml, &
             filter, qc=qc, qc_soft=qc_soft, use_threads=use_threads, &
-            sample_fraction=sample_fraction, sample_seed=sample_seed, list_columns=list_columns)
+            sample_fraction=sample_fraction, sample_seed=sample_seed, list_columns=list_columns, &
+            bounded=bounded)
     end procedure open_table_slice_i64
     !
     !> The one open path: both regimes differ only in which rows the table claims, and both
     !! classify without reading. Shared rather than duplicated so the slice regime cannot drift
     !! from the full one on anything but its row scope.
     subroutine open_table_impl(table, filename, sliced, row_lo, row_hi, maml, filter, sort, qc, &
-            qc_soft, use_threads, sample_fraction, sample_seed, list_columns)
+            qc_soft, use_threads, sample_fraction, sample_seed, list_columns, bounded)
         type(parquet_table), intent(out) :: table !! the table to fill.
         character(len=*), intent(in) :: filename  !! parquet file to open.
         logical, intent(in) :: sliced             !! .true. for the slice regime.
@@ -56,9 +58,10 @@ contains
         real(real64), intent(in), optional :: sample_fraction !! keep each row with this probability.
         integer(int64), intent(in), optional :: sample_seed !! seed for that draw; `42_int64`, not `42`.
         character(len=*), intent(in), optional :: list_columns !! `"auto"` (default) or `"container"`.
+        logical, intent(in), optional :: bounded !! read one row group at a time; see parquet_open_table.
         integer :: i, j, ncol, n_remap, n_qc, n_units
         integer(int64) :: file_rows
-        logical :: masked
+        logical :: masked, want_bounded
         character(len=:), allocatable :: names(:)
         character(len=:), allocatable :: remap_internal(:), remap_physical(:)
         character(len=:), allocatable :: unit_cols(:), unit_vals(:)
@@ -111,6 +114,34 @@ contains
         if (present(qc_soft)) table%cache%read_qc_soft = qc_soft
         if (comp_filter%n > 0) table%cache%read_filter = comp_filter
         if (comp_sort%n > 0) table%cache%read_sort = comp_sort
+        ! BOUNDED READS. Stored before the reader opens, because table_open_reader_with_transform
+        ! is what reads it -- and stored as `bounded .and. .not. sliced` so that every later reader
+        ! of the flag can test it ALONE. A slice already assembles each column from row-group
+        ! chunks, filtered or not, so `bounded=` there is accepted and inert rather than a second
+        ! spelling of the slice regime; keying the open helper on "bounded and not masked" instead
+        ! would be a different condition wearing the same words, since an UNFILTERED slice is also
+        ! "not masked" (table_slice_is_masked) and the helper receives only the cache, which has no
+        ! regime to consult.
+        want_bounded = .false.
+        if (present(bounded)) want_bounded = bounded
+        table%cache%bounded_read = want_bounded .and. .not. sliced
+        ! Refused HERE, right after both sources of a sort have been merged into comp_sort and
+        ! stored, and before `allocate(table%cache%reader)`: the table is then obviously unusable
+        ! rather than half-built, and no live Arrow object is in scope -- the same reason
+        ! compose_read_transform runs before the file is opened at all. Both spellings of a sort
+        ! reach this point (the `sort` argument and a read-in MAML's own `extra: sort:` list), so
+        ! one test covers both.
+        !
+        ! A sort is a row PERMUTATION, and every row-group-scoped read refuses one outright
+        ! (check_reader_no_sort, parquet_read.f90): sorted row 5 can come from any row group, so
+        ! there is no chunk to assemble it from. The message names the remedy rather than only the
+        ! refusal, because the remedy is two ordinary calls.
+        if (table%cache%bounded_read .and. allocated(table%cache%read_sort)) then
+            error stop EP // "parquet_open_table: bounded=.true. cannot be combined with a sort " // &
+                "(a sorted row can come from any row group, so no column can be assembled one " // &
+                "row group at a time); open without sort=, then call %materialize_all() and " // &
+                "%sort_by() (file '" // trim(filename) // "')"
+        end if
         if (n_qc > 0) table%cache%read_qc_schema = comp_qc
         if (present(sample_fraction)) table%cache%read_sample_fraction = sample_fraction
         if (present(sample_seed)) table%cache%read_sample_seed = sample_seed
@@ -441,13 +472,47 @@ contains
         end if
         !
         ! On the masked path the filter is attached after the open instead, because only
-        ! parquet_reader_set_filter can carry the slice's row range with it -- see below.
-        if (allocated(cache%read_filter) .and. .not. masked) pass_filter = cache%read_filter
+        ! parquet_reader_set_filter can carry the slice's row range with it -- see below. A BOUNDED
+        ! whole-file table skips the constructor argument for a different reason with the same
+        ! shape: passing filter= here selects the CACHING engine, and the whole point of the flag
+        ! is to take the row-group-scoped one instead (attached just below).
+        if (allocated(cache%read_filter) .and. .not. masked .and. .not. cache%bounded_read) then
+            pass_filter = cache%read_filter
+        end if
         if (allocated(cache%read_sort)) pass_sort = cache%read_sort
         call parquet_open_reader(r, filename, filter=pass_filter, &
             sort_by=pass_sort, schema=pass_schema, qc_soft=pass_qc_soft, use_threads=use_threads, &
             sample_fraction=cache%read_sample_fraction, &
             sample_seed=cache%read_sample_seed)
+        ! BOUNDED WHOLE-FILE TABLE. The mirror of the masked-slice branch below, and deliberately
+        ! written beside it: both skip the constructor filter and attach it afterwards, and both
+        ! rely on the same property of parquet_reader_set_filter -- that the PRESENCE of the
+        ! row-group arguments picks the memory-bounded engine, while their VALUE picks the row
+        ! groups. `0, 0` is "every row group" (parquet_core.f90's own wording: "0 for all of them,
+        ! in which case row_group_hi is ignored"), which is exactly a whole-file table's scope, so
+        ! the row-BOUNDED form the slice needs is not wanted here -- a whole-file table has no row
+        ! range to fold in.
+        !
+        ! `bounded_read` is set only for a whole-file open (open_table_impl), so this branch and
+        ! the masked one below are mutually exclusive by construction rather than by their order.
+        !
+        ! A SAMPLE-ONLY bounded table needs no call at all: parquet_open_reader installed the
+        ! sample's own mask above, and chunked reads already work under one. Installing a
+        ! rule-less filter on top would be legal and would achieve nothing.
+        !
+        ! `cache%rg_bounds` is deliberately NOT built here, unlike on the masked path.
+        ! materialize_slice builds its own bounds from whichever reader it drives when the cache
+        ! carries none, which keeps "rg_bounds is allocated" meaning "this is a slice" for every
+        ! procedure that branches on it -- %row_group_bounds, resolve_width_row_groups,
+        ! capture_row_geometry and slot_has_nulls all read it, and materialize_column_parallel's
+        ! own doc-comment records that filling it in for a whole-file table would change a public
+        ! answer as a side effect of an internal optimisation.
+        if (cache%bounded_read) then
+            if (allocated(cache%read_filter)) then
+                call parquet_reader_set_filter(r, cache%read_filter, 0_int64, 0_int64)
+            end if
+            return
+        end if
         if (.not. masked) return
         !
         ! The slice's own row range becomes part of the reader's mask, so that everything the

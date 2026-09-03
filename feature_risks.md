@@ -2597,6 +2597,15 @@ Two are easy to break by accident and are only checked by dedicated tests:
 duplicate: a new operation that skips a row group silently breaks the completeness check, and that
 check is the only thing standing between "skipped" and "read and empty".
 
+**The TABLE layer is outside the first invariant, and that is not an exemption to be widened.**
+`parquet_reader_check_complete` runs only when a caller passes `check_complete=.true.` to
+`parquet_close_reader`, and `parquet_table` never does — so the two places the table layer skips a
+row group whose filter left it empty (`materialize_slice` and `materialize_column_parallel`, both
+`if (rows_rg > 0)`) cannot break it. They are a cost decision: `get_row_group_chunk_array` decodes
+the whole row group before applying its mask segment, so reading an emptied one costs a full decode
+and answers nothing. Anything that DOES chunk-read on a reader whose caller may ask for the
+completeness check is still bound by the rule above.
+
 ### Risk-30 — A filtered slice does NOT address physical file rows
 
 - **An unfiltered, unsampled slice addresses physical file rows** and is trimmed out of its covering

@@ -1299,6 +1299,19 @@ scenarios=(
     "pool_free_never_issued:1"
     "pool_free_zero:1"
     "pool_control:0"
+    # bounded=.true. -- the memory-bounded whole-file read. The first three are a PAIR plus its
+    # control and must stay together: the two exit-0 entries assert that a bounded open takes no
+    # whole-column read, and default_filter_reads_whole_column proves the hook they rely on does
+    # fire on the engine they avoid. Without that third entry the first two would pass just as
+    # happily against a hook that had quietly stopped working.
+    "bounded_table_no_whole_column_read:0"
+    "bounded_clone_no_whole_column_read:0"
+    "default_filter_reads_whole_column:1"
+    "bounded_with_sort_refused:1"
+    "bounded_with_maml_sort_refused:1"
+    "bounded_qc_hard_at_first_touch:1"
+    "bounded_qc_soft_warns:0"
+    "bounded_arrow_pool:0"
 )
 
 # writer_guard_sequential_handoff is the negative control for the two racy

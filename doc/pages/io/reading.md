@@ -798,7 +798,9 @@ is why the figure comes from the pool counter.) The one bounded exception is rea
 that path pins the current chunk's buffers until the next chunk is read or the reader is closed, so
 exactly one chunk stays alive. Bounded, not accumulating.
 
-**Memory-bounded filtering with a row-group scope.** Applying a filter has two engines, and
+### Memory-bounded filtering with a row-group scope
+
+Applying a filter has two engines, and
 **which one runs is decided by whether you name row groups at all, not by which rows you name**:
 
 | call | engine | filter columns afterwards |
@@ -815,6 +817,10 @@ those columns. With them, the expression is evaluated one row group at a time ov
 1-based range, each chunk being released before the next is read, so peak memory is one row group's
 worth of the filter columns rather than the whole file; rows outside the range never match, and
 nothing is left cached, so a filter column read afterwards is read again.
+
+A `parquet_table` reaches the same engine through
+[`parquet_open_table(..., bounded=.true.)`](../tables/table-open.html#reading-a-file-larger-than-memory-bounded),
+which installs the filter this way and then assembles every column from per-row-group chunks.
 
 `row_group_lo = 0` means **every** row group — the bounded-memory engine over the whole file,
 without having to ask `parquet_get_num_row_groups` how many there are first. `row_group_hi` is

@@ -35,6 +35,33 @@
 #   writes from the store with no copy -- so parity in that output means the table path is
 #   genuinely no more expensive.
 #
+# read_filtered -- what a FILTERED table costs, on both filter engines, and it needs its own
+#   fixture. The default engine installs a filter by decoding every filter column over the whole
+#   file in one batched pass, then reads each payload column whole and filters it; both are
+#   proportional to the file however few rows survive. bounded=.true. evaluates the filter one row
+#   group at a time and assembles each column from per-row-group chunks instead. The two arms are
+#   run as SEPARATE PROCESSES, like read_raw and read_table and for the same reason.
+#
+#   IT NEEDS A --scatter FIXTURE, and a run without one measures the opposite of what it looks
+#   like. Every c<n> column this program writes is monotone in the row number, so a threshold on
+#   one of them is exactly the case the row-group statistics screen prunes almost entirely -- both
+#   engines are then cheap because most of the file is never read, which says nothing about either.
+#   write_fixture --scatter=<n> adds an int32 `key` column CYCLING 0..n-1, so every row group holds
+#   the whole key range, the screen can rule nothing out, and the survivors are spread over every
+#   row group. That is the case a bounded read exists for. The run prints `pruned row groups`, and
+#   a figure other than 0 there means the fixture or the --scatter value was wrong.
+#
+#   It also needs enough ROW GROUPS to be meaningful: the writer's auto-sizing gives a few very
+#   large ones, so FILTER_CHUNK forces a row-group size. With two row groups "one row group at a
+#   time" is half the file.
+#
+#   Read the TIME as the regression guard for the default engine -- it is the only run here that
+#   covers a filtered table at all. Read RSS as the memory result: the Arrow pool figures printed
+#   beside it are what is RESIDENT when they are read, not the peak, and parquet_open_table
+#   releases every column it cached before it returns, so the two engines' pool figures are much
+#   closer than their peaks are. For the peak, wrap the run in /usr/bin/time (-l on macOS, -v on
+#   Linux), one arm per process.
+#
 # write_nulls -- the counterpart to write. write measures the null-free path, where a column with
 #   no nulls is handed to the writer with no validity mask at all; write_nulls measures the case
 #   that shortcut cannot help, and splits it three ways: parquet_write_table, a hand-written loop
@@ -143,6 +170,13 @@
 #   TOUCH=2                   Columns the lazy-read mode actually reads, out of NCOLS.
 #   SLICES=4                  Equal row slices to divide the file into for the slice mode.
 #   NULLFRAC=0.1              Fraction of rows the write_nulls run marks null (0 < f < 1).
+#   FILTER_SELECT=0.01        Fraction of rows the read_filtered run's filter keeps.
+#   FILTER_SCATTER=1000       Period of that run's fixture `key` column. The filter threshold is
+#                             sized from it, and its whole job is that every row group holds the
+#                             full 0..n-1 range so the statistics screen prunes nothing.
+#   FILTER_CHUNK=50000        Rows per row group in that run's fixture. Auto-sizing gives a
+#                             handful of huge row groups, which makes "one row group at a time"
+#                             mean almost nothing.
 #   SORT_SIZE_GB=1            Size of the IN-MEMORY table the sort run builds. That run needs no
 #                              file fixture, so it is sized independently of TARGET_FILE_SIZE_GB --
 #                              the cost it measures grows with rows AND with columns, and the
@@ -201,6 +235,9 @@ NCOLS="${NCOLS:-8}"
 TOUCH="${TOUCH:-2}"
 SLICES="${SLICES:-4}"
 NULLFRAC="${NULLFRAC:-0.1}"
+FILTER_SELECT="${FILTER_SELECT:-0.01}"
+FILTER_SCATTER="${FILTER_SCATTER:-1000}"
+FILTER_CHUNK="${FILTER_CHUNK:-50000}"
 SORT_SIZE_GB="${SORT_SIZE_GB:-1}"
 ARGSORT_NROWS="${ARGSORT_NROWS:-1000000 20000000}"
 ARGSORT_THREADS="${ARGSORT_THREADS:-1 2 4 8}"
@@ -246,6 +283,22 @@ echo
 
 fpm run benchmark_table --profile release -- --mode=access --file="$TEST_FILE"
 echo
+
+# The filtered read, on both engines. Its own fixture, because it needs a column the row-group
+# statistics screen cannot prune on (see this script's header) and enough row groups for "one row
+# group at a time" to differ from "the whole column"; and its own process per arm, because peak
+# memory is what separates them.
+FILTER_FILE="${TEST_FILE%.parquet}_filtered.parquet"
+fpm run benchmark_table --profile release -- \
+    --mode=write_fixture --file="$FILTER_FILE" --size="$TARGET_FILE_SIZE_GB" --ncols="$NCOLS" \
+    --scatter="$FILTER_SCATTER" --chunk="$FILTER_CHUNK"
+echo
+
+for b in 0 1; do
+    fpm run benchmark_table --profile release -- --mode=read_filtered --file="$FILTER_FILE" \
+        --scatter="$FILTER_SCATTER" --select="$FILTER_SELECT" --bounded="$b"
+    echo
+done
 
 fpm run benchmark_table --profile release -- --mode=write --file="$TEST_FILE"
 echo

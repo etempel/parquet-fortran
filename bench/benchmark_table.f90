@@ -31,7 +31,7 @@
 program benchmark_table
     use parquet
     use parquet_tables
-    use iso_fortran_env, only : int8, int64, real64, error_unit, output_unit
+    use iso_fortran_env, only : int8, int32, int64, real64, error_unit, output_unit
     use iso_c_binding, only : c_int64_t, c_int
     implicit none
 
@@ -67,18 +67,30 @@ program benchmark_table
             import :: c_int
             integer(c_int) :: res !! 1 or 0 as resolved; -1 if nothing has been opened.
         end function parquet_debug_get_last_use_threads
+        !> How many row groups the most recent filter install's statistics screen ruled out.
+        !!
+        !! Used by `--mode=read_filtered` to report what the screen did, because that decides
+        !! which case the run measured: a filter the screen can prune is cheap on BOTH engines
+        !! and says nothing about the bounded one. A run that prints 0 here is the scattered
+        !! case the bounded engine exists for. Same local-declaration convention as above.
+        function parquet_debug_get_row_groups_pruned() &
+                bind(C, name="parquet_debug_get_row_groups_pruned") result(res)
+            import :: c_int64_t
+            integer(c_int64_t) :: res !! pruned row-group count of the last screen.
+        end function parquet_debug_get_row_groups_pruned
     end interface
 
     character(len=:), allocatable :: mode, file
-    real(real64) :: size_gb, nullfrac
-    integer :: ncols, touch, slices, threads
+    real(real64) :: size_gb, nullfrac, select_frac
+    integer :: ncols, touch, slices, threads, scatter, chunk, bounded
     integer(int64) :: nrows_arg
 
-    call parse_arguments(mode, size_gb, file, ncols, touch, slices, nullfrac, threads, nrows_arg)
+    call parse_arguments(mode, size_gb, file, ncols, touch, slices, nullfrac, threads, nrows_arg, &
+        select_frac, scatter, chunk, bounded)
 
     select case (mode)
     case ("write_fixture")
-        call write_fixture(file, size_gb, ncols)
+        call write_fixture(file, size_gb, ncols, scatter, chunk)
     case ("read_raw")
         call bench_read_raw(file)
     case ("read_table")
@@ -87,6 +99,8 @@ program benchmark_table
         call bench_read_lazy(file, touch)
     case ("read_slice")
         call bench_read_slice(file, slices)
+    case ("read_filtered")
+        call bench_read_filtered(file, select_frac, scatter, bounded /= 0)
     case ("access")
         call bench_access(file)
     case ("write")
@@ -118,6 +132,7 @@ contains
         write(output_unit, '(a)') "  --mode=read_table     time a table open+materialize, and report RSS"
         write(output_unit, '(a)') "  --mode=read_lazy      open, then read only --touch=<n> columns"
         write(output_unit, '(a)') "  --mode=read_slice     open one of --slices=<n> equal row slices"
+        write(output_unit, '(a)') "  --mode=read_filtered  open with filter= and materialize; needs --scatter"
         write(output_unit, '(a)') "  --mode=access         time %get vs. %col, and arithmetic through each"
         write(output_unit, '(a)') "  --mode=write          time parquet_write_table vs. a hand-written loop"
         write(output_unit, '(a)') "  --mode=write_nulls    the same, on a table with nulls (three ways)"
@@ -134,9 +149,21 @@ contains
         write(output_unit, '(a)') "  --touch=<n>           columns to read in read_lazy (default 2)"
         write(output_unit, '(a)') "  --slices=<n>          equal slices to divide the file into (default 4)"
         write(output_unit, '(a)') "  --nullfrac=<f>        fraction of rows to null in write_nulls (default 0.1)"
+        write(output_unit, '(a)') "  --scatter=<n>         write_fixture: add an int32 'key' column cycling"
+        write(output_unit, '(a)') "                        0..n-1, so no row group's key range excludes any"
+        write(output_unit, '(a)') "                        filter value and the statistics screen prunes"
+        write(output_unit, '(a)') "                        nothing (0, the default, writes no key column);"
+        write(output_unit, '(a)') "                        read_filtered: the same n, to size its threshold"
+        write(output_unit, '(a)') "  --select=<f>          fraction of rows read_filtered's filter keeps"
+        write(output_unit, '(a)') "                        (default 0.01)"
+        write(output_unit, '(a)') "  --chunk=<n>           write_fixture: rows per row group (0, the default,"
+        write(output_unit, '(a)') "                        leaves the writer's own auto-sizing alone)"
+        write(output_unit, '(a)') "  --bounded=<0|1>       read_filtered: open with bounded=.true. (default 0);"
+        write(output_unit, '(a)') "                        run each arm in its OWN process, never both here"
     end subroutine print_usage
 
-    subroutine parse_arguments(mode, size_gb, file, ncols, touch, slices, nullfrac, threads, nrows_arg)
+    subroutine parse_arguments(mode, size_gb, file, ncols, touch, slices, nullfrac, threads, nrows_arg, &
+            select_frac, scatter, chunk, bounded)
         character(len=:), allocatable, intent(out) :: mode !! which measurement to run.
         real(real64), intent(out) :: size_gb               !! target fixture size in GB.
         character(len=:), allocatable, intent(out) :: file !! fixture path.
@@ -146,6 +173,10 @@ contains
         real(real64), intent(out) :: nullfrac              !! fraction of rows to null in write_nulls.
         integer, intent(out) :: threads                    !! sort threads in argsort mode.
         integer(int64), intent(out) :: nrows_arg           !! rows in argsort mode.
+        real(real64), intent(out) :: select_frac           !! fraction of rows read_filtered keeps.
+        integer, intent(out) :: scatter                    !! scattered key column's period; 0 = none.
+        integer, intent(out) :: chunk                      !! explicit row-group size; 0 = auto.
+        integer, intent(out) :: bounded                    !! 1 = open read_filtered with bounded=.true.
 
         integer :: i, nargs, eq_pos, ios
         character(len=512) :: arg, key, val
@@ -159,6 +190,10 @@ contains
         nullfrac = 0.1_real64
         threads = 1
         nrows_arg = 20000000_int64
+        select_frac = 0.01_real64
+        scatter = 0
+        chunk = 0
+        bounded = 0
 
         nargs = command_argument_count()
         if (nargs == 0) then
@@ -220,6 +255,30 @@ contains
                 read(val, *, iostat=ios) nrows_arg
                 if (ios /= 0) then
                     write(error_unit, '(a)') "benchmark_table: --nrows must be an integer"
+                    error stop 1
+                end if
+            case ("--select")
+                read(val, *, iostat=ios) select_frac
+                if (ios /= 0) then
+                    write(error_unit, '(a)') "benchmark_table: --select must be a number"
+                    error stop 1
+                end if
+            case ("--scatter")
+                read(val, *, iostat=ios) scatter
+                if (ios /= 0) then
+                    write(error_unit, '(a)') "benchmark_table: --scatter must be an integer"
+                    error stop 1
+                end if
+            case ("--chunk")
+                read(val, *, iostat=ios) chunk
+                if (ios /= 0) then
+                    write(error_unit, '(a)') "benchmark_table: --chunk must be an integer"
+                    error stop 1
+                end if
+            case ("--bounded")
+                read(val, *, iostat=ios) bounded
+                if (ios /= 0) then
+                    write(error_unit, '(a)') "benchmark_table: --bounded must be 0 or 1"
                     error stop 1
                 end if
             case default
@@ -285,12 +344,15 @@ contains
         t = real(c, real64) / real(r, real64)
     end function now
 
-    subroutine write_fixture(file, size_gb, ncols)
+    subroutine write_fixture(file, size_gb, ncols, scatter, chunk)
         character(len=*), intent(in) :: file !! output path.
         real(real64), intent(in) :: size_gb  !! approximate uncompressed size.
         integer, intent(in) :: ncols         !! float64 columns to write.
+        integer, intent(in) :: scatter       !! period of the scattered int32 key column; 0 = none.
+        integer, intent(in) :: chunk         !! rows per row group; 0 leaves auto-sizing alone.
         type(parquet_writer) :: w
         real(real64), allocatable :: v(:)
+        integer(int32), allocatable :: key(:)
         integer(int64) :: nrows
         integer :: c, i
         character(len=32) :: cname
@@ -299,7 +361,32 @@ contains
         if (nrows < 1) nrows = 1
         write(output_unit, '(a,i0,a,i0,a)') "writing fixture: ", nrows, " rows x ", ncols, " float64 columns"
         allocate(v(nrows))
-        call parquet_open_writer(w, file)
+        ! Auto-sizing picks a row-group size from the target byte budget, which on a file of a few
+        ! GB is a handful of very large row groups -- fine for every other mode, and useless for
+        ! --mode=read_filtered, whose whole subject is per-row-group memory. An explicit --chunk is
+        ! how that mode gets a file with enough row groups for "one row group at a time" to differ
+        ! from "the whole column".
+        if (chunk > 0) then
+            write(output_unit, '(a,i0,a)') "  ... row groups of ", chunk, " rows (explicit chunk_size)"
+            call parquet_open_writer(w, file, chunk_size=chunk)
+        else
+            call parquet_open_writer(w, file)
+        end if
+        ! The key column exists for --mode=read_filtered and nothing else, which is why it is
+        ! off by default: adding a column would change every other mode's figures. Its values
+        ! CYCLE rather than increase, so every row group holds the whole 0..scatter-1 range and
+        ! the row-group statistics screen can prune nothing -- the scattered-survivor case a
+        ! bounded read exists for. A monotone column (which is what every c<n> column here is)
+        ! would let the screen prune almost everything and measure the opposite case.
+        if (scatter > 0) then
+            write(output_unit, '(a,i0)') "  ... plus an int32 'key' column cycling 0..", scatter - 1
+            allocate(key(nrows))
+            do i = 1, int(nrows)
+                key(i) = int(mod(i - 1, scatter), int32)
+            end do
+            call parquet_write_column(w, "key", key)
+            deallocate(key)
+        end if
         do c = 1, ncols
             do i = 1, int(nrows)
                 v(i) = real(i, real64) * real(c, real64)
@@ -534,6 +621,111 @@ contains
             write(output_unit, '(a)') "smaller chunk_size to see the saving."
         end if
     end subroutine bench_read_slice
+
+    !> The FILTERED read: what `parquet_open_table(filter=)` plus `%materialize_all` costs in
+    !! time and in Arrow memory, on a filter the row-group statistics screen cannot help with.
+    !!
+    !! **Needs a fixture written with `--scatter=<n>`** (see `write_fixture`), because the
+    !! measurement is worthless without one: every other column this program writes is monotone
+    !! in the row number, so a threshold on one of them is exactly the case the screen prunes
+    !! almost entirely, and both filter engines are then cheap for a reason that has nothing to
+    !! do with either. The scattered `key` column cycles `0..n-1`, so every row group's key range
+    !! is the whole range, the screen can rule nothing out, and the survivors are spread over
+    !! every row group -- the case a bounded read exists for. `pruned row groups` is printed for
+    !! exactly this reason: a run reporting anything but 0 there did not measure that case.
+    !!
+    !! Two figures matter and they answer different questions. The TIME is the regression guard
+    !! for the default engine. The ARROW POOL AFTER OPEN is the filter install's own footprint --
+    !! on the default (caching) engine that is a full copy of the filter column's live rows, left
+    !! decoded for a later read; a bounded open leaves nothing but the mask there.
+    subroutine bench_read_filtered(file, select_frac, scatter, bounded)
+        character(len=*), intent(in) :: file       !! fixture to read; must carry a `key` column.
+        real(real64), intent(in) :: select_frac    !! fraction of rows the filter should keep.
+        integer, intent(in) :: scatter             !! the key column's period, as written.
+        logical, intent(in) :: bounded             !! open with bounded=.true.
+        type(parquet_table) :: t
+        type(parquet_filter) :: filt
+        integer(int64), allocatable :: bounds(:,:)
+        integer(int64) :: nrows_file, pruned
+        real(real64) :: t0, t_open, t_mat, arrow_open, arrow_after, rss_after, checksum
+        real(real64), allocatable :: g(:)
+        integer :: threshold
+        character(len=32) :: thr_s
+        character(len=:), allocatable :: names(:)
+
+        if (scatter <= 0) then
+            write(error_unit, '(a)') "benchmark_table: --mode=read_filtered needs --scatter=<n>, " // &
+                "matching the value the fixture was written with"
+            error stop 1
+        end if
+        ! The threshold, not the fraction, is what the filter can express -- and it is rounded
+        ! rather than truncated so that a fraction below one key step still keeps something.
+        threshold = max(1, nint(select_frac * real(scatter, real64)))
+        write(thr_s, '(i0)') threshold
+        call parquet_table_row_group_bounds(file, bounds)
+        nrows_file = bounds(2, size(bounds, 2))
+        call filt%add("key < " // trim(thr_s))
+
+        ! Timed separately, because they are two different costs: the open pays for the filter
+        ! install (which engine matters here), and the materialize pays for the payload columns.
+        t0 = now()
+        if (bounded) then
+            call parquet_open_table(t, file, filter=filt, bounded=.true.)
+        else
+            call parquet_open_table(t, file, filter=filt)
+        end if
+        t_open = now() - t0
+        pruned = parquet_debug_get_row_groups_pruned()
+        arrow_open = real(parquet_get_arrow_bytes_allocated(), real64) / 1048576.0_real64
+        call t%column_names(names)
+        t0 = now()
+        call t%materialize_all()
+        t_mat = now() - t0
+        arrow_after = real(parquet_get_arrow_bytes_allocated(), real64) / 1048576.0_real64
+        rss_after = rss_mib()
+        ! The LAST column, never the first: the first is the int32 `key` the filter names, and
+        ! %get into a real64 array is a kind mismatch rather than a conversion.
+        call t%get(trim(names(size(names))), g)
+        checksum = sum(g)
+
+        write(output_unit, '(a)') "--- read: filtered table (open with filter= + materialize) ---"
+        if (bounded) then
+            write(output_unit, '(a)') "engine: BOUNDED (bounded=.true.: scoped install, chunked assembly)"
+        else
+            write(output_unit, '(a)') "engine: default (caching whole-file install, whole-column reads)"
+        end if
+        write(output_unit, '(a,i0,a,i0)') "file rows: ", nrows_file, "   row groups: ", size(bounds, 2)
+        write(output_unit, '(a,a,a,i0)') "filter: key < ", trim(thr_s), "   of key period ", scatter
+        write(output_unit, '(a,i0,a,f8.4)') "survivors: ", t%nrows(), "   selectivity: ", &
+            real(t%nrows(), real64) / real(max(nrows_file, 1_int64), real64)
+        write(output_unit, '(a,i0,a)') "pruned row groups: ", pruned, "   (0 = the screen could not help)"
+        write(output_unit, '(a,f10.3,a)') "open (installs the filter)  : ", t_open, " s"
+        write(output_unit, '(a,f10.3,a)') "materialize_all             : ", t_mat, " s"
+        write(output_unit, '(a,f10.3,a)') "open + materialize          : ", t_open + t_mat, " s"
+        write(output_unit, '(a,f10.1,a)') "Arrow pool after open       : ", arrow_open, " MiB"
+        write(output_unit, '(a,f10.1,a)') "Arrow pool after materialize: ", arrow_after, " MiB"
+        write(output_unit, '(a,f10.1,a)') "RSS                         : ", rss_after, " MiB"
+        write(output_unit, '(a,es12.4)')  "checksum (keeps reads live) : ", checksum
+        if (pruned > 0_int64) then
+            write(output_unit, '(a)') "NOTE: the screen pruned row groups, so this run did NOT measure"
+            write(output_unit, '(a)') "the scattered case. Check the fixture was written --scatter=<n>"
+            write(output_unit, '(a)') "with the same n passed here."
+        end if
+        write(output_unit, '(a)') "The open figure is the filter install. On the default engine it"
+        write(output_unit, '(a)') "reads every filter column over the live row groups in one batched"
+        write(output_unit, '(a)') "pass; the materialize then reads each payload column whole and"
+        write(output_unit, '(a)') "filters it. Both peak proportionally to the FILE, not to the"
+        write(output_unit, '(a)') "survivor count above. Under bounded= the filter is evaluated one"
+        write(output_unit, '(a)') "row group at a time and each column is assembled from per-row-"
+        write(output_unit, '(a)') "group chunks, so both peaks are one row group's worth instead."
+        write(output_unit, '(a)') ""
+        write(output_unit, '(a)') "The Arrow figures here are what is RESIDENT when they are read,"
+        write(output_unit, '(a)') "not the peak, and they are close to equal on the two engines:"
+        write(output_unit, '(a)') "parquet_open_table releases every column it cached before it"
+        write(output_unit, '(a)') "returns, and each engine's transient peak is inside a call. Read"
+        write(output_unit, '(a)') "the peak with /usr/bin/time -l (macOS) or -v (Linux) around the"
+        write(output_unit, '(a)') "whole run, one arm per process."
+    end subroutine bench_read_filtered
 
     !> Access cost on WARM columns: what the first touch costs, what `%get` and `%col` cost once
     !! the data is resident, and -- the reason the mode exists -- the same elementwise expression

@@ -3,10 +3,10 @@ title: Opening a table: slices, filters and renaming
 ---
 
 `parquet_open_table(t, filename)` has options beyond the plain open: reading only part of the
-file (the slice regime), filtering, sorting and checking rows as they are read, and renaming the
-file's columns through a read-in MAML. This page collects them, together with what the table can
-and cannot read. Working with the open table itself is covered in
-[Whole tables in memory: the basics](table.html).
+file (the slice regime), filtering, sorting and checking rows as they are read, reading a filtered
+file larger than memory one row group at a time, and renaming the file's columns through a read-in
+MAML. This page collects them, together with what the table can and cannot read. Working with the
+open table itself is covered in [Whole tables in memory: the basics](table.html).
 
 ## Reading part of a file: the slice regime
 
@@ -211,6 +211,79 @@ Three consequences worth stating plainly:
 
 A **slice** takes all of this too, applied within its own row range, with `sort=` the one
 exception — see [A slice with a filter, a sample or qc](#a-slice-with-a-filter-a-sample-or-qc).
+
+### Reading a file larger than memory: `bounded=`
+
+A filter can cut a huge file down to a handful of rows, but by default getting there is not cheap
+in memory: installing the filter decodes every column the filter names, over the whole file, in
+one pass; and each column you then read is decoded whole and filtered afterwards. Both are
+proportional to the **file**, however few rows survive. On a file that fits in memory that is the
+right trade, and it is what `parquet_open_table` keeps doing.
+
+`bounded=.true.` asks for the other one:
+
+```fortran
+type(parquet_filter) :: filt
+type(parquet_table)  :: t
+
+call filt%add("quality > 0.9")
+call parquet_open_table(t, "huge.parquet", filter=filt, bounded=.true.)
+call t%materialize_all()
+```
+
+The filter is evaluated one row group at a time, and every column is assembled from per-row-group
+chunks, so the peak is one row group's worth of one column instead of one whole column.
+
+**It is opt-in, and it is not free.** Nothing is cached and the filter is evaluated per row group,
+so a filter column you go on to read is read a second time, and on a file that fits in memory it is
+never faster than the default and is often slower. The library cannot know how much memory your
+program has, so it never chooses this for you.
+
+**What is bounded, and what is not.** The parts that scale with the file rather than with the
+answer are worth knowing before you rely on this:
+
+- **Bounded:** the filter install, and each column's assembly — one row group at a time. The
+  internally-parallel read gives each thread its own row group, so the peak there is that many at
+  once; `parquet_set_table_threads` caps it (see
+  [Settings](../operating/settings.html)).
+- **Not bounded:** the row mask itself. One bit per row of every row group the row-group
+  statistics could not rule out, held for as long as the table's reader is open — around a
+  hundred megabytes at a billion rows, and roughly eight times that transiently while the filter is
+  being installed. That is the floor of the whole approach, and it grows with the file's row count
+  rather than with the number of rows that survive.
+- **Not bounded:** a variable-length `LIST` column from a foreign writer whose width has to be
+  measured from the data. Under a filter that measurement still reads the column whole. Open with
+  `list_columns="container"` to skip it — see
+  [`list_columns=`: keep a `LIST` column as a list](#list_columns-keep-a-list-column-as-a-list).
+
+**`sort=` is refused with it.** A sort reorders rows across the whole file, so a sorted row
+belongs to no row group and no column can be assembled one row group at a time. Open without it,
+then sort the table you have:
+
+```fortran
+call parquet_open_table(t, "huge.parquet", filter=filt, bounded=.true.)
+call t%materialize_all()
+call t%sort_by(["mass"], descending=[.true.])
+```
+
+**Everything else behaves as it always did.** `sample_fraction=`, `qc=`, `list_columns=`, a
+read-in MAML's remapping, `parquet_row_index`, `%clone` (which stays bounded), `%reload` and the
+row-structural mutations all mean exactly what they mean without it. One difference is worth
+naming: a `qc=` bound declared on a column the filter *names* is checked when that column is
+read, not at the open. That is the same rule every other column already follows — see
+[qc is checked on first touch, not at open](#qc-is-checked-on-first-touch-not-at-open) — but under
+the default engine such a column happens to be checked at the open as a side effect of being
+cached, so a bound violated only there is reported later under `bounded=` than without it. Call
+`%validate_qc()` if you want every declared bound checked up front; it is chunked too.
+
+On the **slice** forms `bounded=` is accepted and does nothing: a slice already reads only the row
+groups it covers, and assembles each column from them one at a time. Passing it is harmless, so
+one caller can hand the same arguments to either form.
+
+If your filter happens to match rows that sit together — a column the file is already ordered by,
+say — the default engine may already be cheap, because whole row groups are ruled out from the
+file's own statistics before anything is read. `bounded=` is for the case where the survivors are
+scattered and nothing can be ruled out.
 
 ### Column names: yours, not the file's
 

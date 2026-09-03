@@ -172,7 +172,9 @@ contains
             new_unittest("concurrent clear_null and value writes keep every clear when rows share a block", &
                 test_concurrent_clear_null_shares_block), &
             new_unittest("has_nulls still reports a null a concurrent writer set on a date column", &
-                test_has_nulls_survives_concurrent_null) &
+                test_has_nulls_survives_concurrent_null), &
+            new_unittest("bounded= reads correctly through both parallel paths", &
+                test_bounded_parallel_paths) &
             ]
     end subroutine collect_tests_table_parallel
     !
@@ -1111,6 +1113,104 @@ contains
     end subroutine test_colread_sampled_agrees
     !
     !> The single-column counterpart of `check_prefetch_really_parallel`.
+    !
+    !> `bounded=` through BOTH parallel read paths, against the same filter on the default engine.
+    !!
+    !! Both paths are already chunked, so `bounded=` does not change what they do -- what this
+    !! pins is that routing the serial arms through the chunked assembler did not break either of
+    !! them, and that the answers still agree with the default engine's when several threads and
+    !! several readers are involved.
+    !!
+    !!   * `materialize_column_parallel` splits ONE column across its row groups, one reader per
+    !!     thread. Its work floor is judged on the rows the read will actually materialize --
+    !!     SURVIVORS times width -- so an aggressive filter puts a test-sized fixture under it and
+    !!     the split silently declines. The floor is therefore lowered here rather than the fixture
+    !!     grown, exactly as the sampled test above does, and
+    !!     `parquet_debug_get_colread_threads_used` is what proves the split really happened: an
+    !!     A/B whose parallel arm ran serially would agree for the wrong reason.
+    !!   * `materialize_marked_parallel` splits the COLUMNS across threads, each with its own
+    !!     reader adopting the table's mask. `parquet_debug_get_prefetch_threads_used` is its
+    !!     counterpart observation.
+    subroutine test_bounded_parallel_paths(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: f1 = "test_run/tblpar_bounded_colread.parquet"
+        character(len=*), parameter :: f2 = "test_run/tblpar_bounded_wide.parquet"
+        type(parquet_table) :: plain, bnd
+        type(parquet_filter) :: filt, filt_wide
+        real(real64), allocatable :: a(:), b(:)
+        integer :: used_col, used_pref, avail
+        character(len=1), parameter :: names(5) = ["a", "b", "c", "d", "e"]
+        integer :: c
+        !
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it neither parallel read path exists, so " // &
+            "both arms of the A/B below would run the same serial code and agree for the wrong " // &
+            "reason, and the thread-count assertions would have nothing to observe")
+        return
+#endif
+        !
+        ! Read the ONE way that compiles without OpenMP too: the skip above is a runtime
+        ! decision, so every line below it still has to build in a serial configuration.
+        avail = 1
+#ifdef _OPENMP
+        avail = omp_get_max_threads()
+#endif
+        !
+        ! ---- one column, split across its row groups ----
+        call write_rowgroup_fixture(f1)
+        call parquet_reset_settings()
+        ! The fixture's value is 1.5*row, so this keeps the second half of the file: four of the
+        ! eight row groups survive whole and four are pruned by the statistics screen, which is
+        ! the case a parallel chunked read has to step over. The 100000 survivors are below the
+        ! real single-column work floor -- the gate measures what it will MATERIALIZE, not what
+        ! the file holds -- so the floor is lowered rather than the fixture grown.
+        call filt%add("v > 150000")
+        call parquet_debug_set_colread_min_elements(1000_c_int64_t)
+        call parquet_debug_set_colread_threads_used(0_c_int64_t)
+        call parquet_open_table(bnd, f1, filter=filt, bounded=.true.)
+        call bnd%get("v", b)
+        used_col = int(parquet_debug_get_colread_threads_used())
+        call parquet_debug_set_colread_min_elements(0_c_int64_t)
+        call check_colread_really_parallel(error, used_col, "a bounded single-column read")
+        if (allocated(error)) return
+        call parquet_open_table(plain, f1, filter=filt)
+        call plain%get("v", a)
+        call check(error, size(a) == size(b), &
+            "a bounded split read should return as many rows as the default engine")
+        if (allocated(error)) return
+        call check(error, all(abs(a - b) < 1.0e-9_real64), &
+            "a bounded split read should return the same values as the default engine")
+        if (allocated(error)) return
+        !
+        ! ---- several columns, split across threads ----
+        ! Its own filter: the wide fixture's columns are a..e, so the one above names nothing
+        ! here. Column `a` holds the row number, so this keeps the same second half.
+        call write_wide_fixture(f2)
+        call filt_wide%add("a > 100000")
+        call parquet_debug_set_prefetch_threads_used(0_c_int64_t)
+        call parquet_open_table(bnd, f2, filter=filt_wide, bounded=.true.)
+        call bnd%materialize_all()
+        used_pref = int(parquet_debug_get_prefetch_threads_used())
+        call check(error, used_pref > 1 .or. avail <= 1, &
+            "a bounded materialize_all must split its columns across threads here, or the " // &
+            "comparison below tests the serial path against itself")
+        if (allocated(error)) return
+        call parquet_open_table(plain, f2, filter=filt_wide)
+        call plain%materialize_all()
+        call check(error, bnd%nrows() == plain%nrows(), &
+            "a bounded parallel materialize should hold the same rows as the default engine")
+        if (allocated(error)) return
+        do c = 1, 5
+            call plain%get(names(c), a)
+            call bnd%get(names(c), b)
+            call check(error, size(a) == size(b), &
+                "a bounded parallel materialize should return as many rows per column")
+            if (allocated(error)) return
+            call check(error, all(abs(a - b) < 1.0e-9_real64), &
+                "a bounded parallel materialize should return the same values per column")
+            if (allocated(error)) return
+        end do
+    end subroutine test_bounded_parallel_paths
     subroutine check_colread_really_parallel(error, used, what)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
         integer, intent(in) :: used                         !! threads the read reported.

@@ -168,6 +168,25 @@ module parquet_tables
     !! It governs the plain-`LIST` case and nothing else: a `FIXED_SIZE_LIST` column -- which is
     !! what every column this library writes is -- carries its width in the schema and is a vector
     !! column under both tokens.
+    !!
+    !! **`bounded=.true.` reads a file larger than memory.** By default a `filter=` is installed by
+    !! decoding every filter column over the whole file at once, and each payload column is then
+    !! decoded whole and filtered -- both proportional to the FILE, however few rows survive. Under
+    !! `bounded=.true.` the filter is evaluated one row group at a time and every column is
+    !! assembled from per-row-group chunks, so the peak is one row group's worth of one column
+    !! rather than one column. Three things to know:
+    !!
+    !! - **It is opt-in and never automatic.** Nothing is cached and the filter is evaluated per
+    !!   row group, so on a file that fits in memory it is never faster than the default and is
+    !!   often slower. The library cannot know how much memory the caller has, so it does not guess.
+    !! - **`sort=` is refused with it**, because a sort reorders rows across the whole file and no
+    !!   row-group-scoped read can be assembled under one. Open without `sort=`, then
+    !!   `%materialize_all` and `%sort_by`.
+    !! - **It is accepted and does nothing on the two slice forms**, which assemble their columns
+    !!   from row-group chunks already.
+    !!
+    !! What is NOT bounded by it: the filter's own row mask, one bit per row of every row group the
+    !! statistics screen did not prune, held for as long as the table's reader is open.
     interface parquet_open_table
         module procedure open_table_full
         module procedure open_table_slice_i32
@@ -411,6 +430,23 @@ module parquet_tables
         !! Unallocated is read as `"auto"` everywhere, so a cache built by `parquet_new_table` --
         !! which has no file and classifies nothing -- needs no initialiser and no special case.
         character(len=:), allocatable :: list_columns
+        !> .true. when this table was opened with `bounded=.true.` over the WHOLE file: its filter
+        !! was installed with the row-group-scoped engine and every column is assembled from
+        !! per-row-group chunks instead of read whole.
+        !!
+        !! **Set only for a whole-file open** (`bounded .and. .not. sliced`), which is what lets
+        !! every reader of this flag test it alone. A slice is chunked already -- that is what the
+        !! slice regime IS -- so `bounded=` on a slice form is accepted and changes nothing rather
+        !! than being a second spelling of the same thing.
+        !!
+        !! On the cache rather than on `parquet_table` for the reason the block above gives at
+        !! length: `parquet_table` is finalizable, and this project has three confirmed compiler
+        !! bugs in the machinery that walks such a type's components.
+        !!
+        !! It travels with a `%clone` (`parquet_tables_clone.f90`), because a clone reopens the
+        !! file through the same helper and would otherwise silently reattach through the caching
+        !! engine.
+        logical :: bounded_read = .false.
     end type parquet_table_cache
     !
     !> Which rows to pick out of a column: `1:`, `1:10`, `1:10:2` or an explicit list.
@@ -1363,7 +1399,7 @@ module parquet_tables
         !! reader is opened. A MAML's own `extra: filter:`/`extra: sort:`/`fields: qc:` are in FILE
         !! names, because a read-in MAML describes the physical file and travels with it.
         module subroutine open_table_full(table, filename, maml, filter, sort, qc, qc_soft, use_threads, &
-                sample_fraction, sample_seed, list_columns)
+                sample_fraction, sample_seed, list_columns, bounded)
             type(parquet_table), intent(out) :: table !! the table to fill.
             character(len=*), intent(in) :: filename  !! parquet file to open.
             character(len=*), intent(in), optional :: maml !! read-in (Role-B) MAML file describing `filename`.
@@ -1376,12 +1412,14 @@ module parquet_tables
             integer(int64), intent(in), optional :: sample_seed !! seed for that draw; omitted = nondeterministic.
             !! `integer(int64)` only, as everywhere in this library: a literal is `42_int64`.
             character(len=*), intent(in), optional :: list_columns !! `"auto"` (default) or `"container"`.
+            logical, intent(in), optional :: bounded !! read one row group at a time; default .false.
+            !! See the `parquet_open_table` generic above for what it does and what it refuses.
         end subroutine open_table_full
         !> Slice-regime open, int32 row bounds -- see the `parquet_open_table` generic above, which
         !! also explains why there is no `sort` argument here and what `filter=`/`sample_fraction=`
         !! do to the slice's row count.
         module subroutine open_table_slice_i32(table, filename, row_lo, row_hi, maml, filter, qc, &
-                qc_soft, use_threads, sample_fraction, sample_seed, list_columns)
+                qc_soft, use_threads, sample_fraction, sample_seed, list_columns, bounded)
             type(parquet_table), intent(out) :: table !! the table to fill.
             character(len=*), intent(in) :: filename  !! parquet file to open.
             integer(int32), intent(in) :: row_lo      !! first file row to cover (1-based).
@@ -1395,10 +1433,11 @@ module parquet_tables
             integer(int64), intent(in), optional :: sample_seed !! seed for that draw; omitted = nondeterministic.
             !! `integer(int64)` only, as everywhere in this library: a literal is `42_int64`.
             character(len=*), intent(in), optional :: list_columns !! `"auto"` (default) or `"container"`.
+            logical, intent(in), optional :: bounded !! accepted and inert: a slice is chunked already.
         end subroutine open_table_slice_i32
         !> Slice-regime open, int64 row bounds -- see the `parquet_open_table` generic above.
         module subroutine open_table_slice_i64(table, filename, row_lo, row_hi, maml, filter, qc, &
-                qc_soft, use_threads, sample_fraction, sample_seed, list_columns)
+                qc_soft, use_threads, sample_fraction, sample_seed, list_columns, bounded)
             type(parquet_table), intent(out) :: table !! the table to fill.
             character(len=*), intent(in) :: filename  !! parquet file to open.
             integer(int64), intent(in) :: row_lo      !! first file row to cover (1-based).
@@ -1412,6 +1451,7 @@ module parquet_tables
             integer(int64), intent(in), optional :: sample_seed !! seed for that draw; omitted = nondeterministic.
             !! `integer(int64)` only, as everywhere in this library: a literal is `42_int64`.
             character(len=*), intent(in), optional :: list_columns !! `"auto"` (default) or `"container"`.
+            logical, intent(in), optional :: bounded !! accepted and inert: a slice is chunked already.
         end subroutine open_table_slice_i64
         !> Opens a reader on `filename` with whatever read-time transform the table carries in its
         !! `read_*` components already attached -- `cache%reader` itself, or, when `rdr` is given,
@@ -1438,6 +1478,15 @@ module parquet_tables
         !! empty: an unallocated allocatable actual makes an optional dummy absent (F2018
         !! 15.5.2.12), so one unconditional call covers every combination -- and a table with no
         !! transform at all reaches parquet_open_reader with exactly the arguments it always did.
+        !!
+        !! **A BOUNDED whole-file table is the second case where the filter is not a constructor
+        !! argument**, for a different reason with the same shape: passing `filter=` to
+        !! `parquet_open_reader` selects the CACHING whole-file engine, and `bounded=.true.` asks
+        !! for the row-group-scoped one, so the filter is attached afterwards with
+        !! `parquet_reader_set_filter(r, filter, 0, 0)` -- `0, 0` being "every row group", which is
+        !! a whole-file table's scope. Unlike the masked slice it leaves `cache%rg_bounds`
+        !! UNALLOCATED: those bounds are a slice-regime object that `%row_group_bounds` and
+        !! `resolve_width_row_groups` branch on, so `materialize_slice` builds its own instead.
         !!
         !! **A masked slice is the one case where the filter is NOT a constructor argument**: it
         !! carries the slice's own row range, which only `parquet_reader_set_filter` can express,

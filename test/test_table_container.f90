@@ -65,6 +65,8 @@ contains
             new_unittest("%add_column takes all three container types", test_add_container_columns), &
             new_unittest("a container column survives the slice regime, row group by row group", &
                 test_container_slice), &
+            new_unittest("a container column assembles under bounded=, including emptied row groups", &
+                test_container_bounded), &
             new_unittest("row-structural mutations keep a container column ALIGNED", &
                 test_container_row_alignment), &
             new_unittest("%append concatenates two tables' container columns", test_container_append), &
@@ -348,6 +350,73 @@ contains
         end do
         call check(error, same, "every slice row matches the same row of the whole-file read")
     end subroutine test_container_slice
+
+    !> A container column under `bounded=.true.`, including the case a chunked assembly is most
+    !! likely to get wrong: a covering row group the filter empties ENTIRELY.
+    !!
+    !! A container takes the third assembly shape -- the first covering row group is moved in whole
+    !! and settles the payload kind, the rest are appended -- so an emptied row group anywhere in
+    !! the file exercises a case the paste and append shapes do not. The FIRST row group being the
+    !! emptied one is the sharpest of these, because that is where the column is built: it works
+    !! because the list read fixes the payload kind from the file schema before appending any row,
+    !! so a zero-row chunk is a TYPED empty container rather than an untyped one.
+    !!
+    !! The oracle is the whole-file read of the same rows through the default engine, which is the
+    !! only one that catches a row group being dropped, doubled or mis-trimmed.
+    subroutine test_container_bounded(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        type(parquet_table) :: whole
+        type(parquet_list_column), pointer :: pw
+        !
+        ! The fixture is 4 row groups of 4 rows; `scalar` runs 0..15 and `ragged`'s lengths cycle
+        ! 1,2,3,4 with the row index, so the survivors' own scalar values say which file rows they
+        ! were and what length each must have.
+        call parquet_open_table(whole, LIST_FIXTURE, list_columns="container")
+        call whole%col("ragged", pw)
+        !
+        call one_bounded_container_case(error, "scalar >= 4", "first row group emptied")
+        if (allocated(error)) return
+        call one_bounded_container_case(error, "scalar < 4 or scalar >= 8", "middle row group emptied")
+        if (allocated(error)) return
+        call one_bounded_container_case(error, "scalar < 12", "last row group emptied")
+        if (allocated(error)) return
+        call one_bounded_container_case(error, "scalar >= 8", "first two row groups emptied")
+        if (allocated(error)) return
+        call one_bounded_container_case(error, "scalar == 5", "all but one row emptied")
+    end subroutine test_container_bounded
+
+    !> One filter of `test_container_bounded`, checked against the default engine on the same
+    !! filter -- so a disagreement is the bounded assembly's, not the filter's.
+    subroutine one_bounded_container_case(error, rule, what)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        character(len=*), intent(in) :: rule !! filter rule to apply.
+        character(len=*), intent(in) :: what !! what this case is, for the failure message.
+        type(parquet_table) :: plain, bnd
+        type(parquet_filter) :: filt
+        type(parquet_list_column), pointer :: pp, pb
+        integer(int64) :: k
+        logical :: same
+        !
+        call filt%add(rule)
+        call parquet_open_table(plain, LIST_FIXTURE, filter=filt, list_columns="container")
+        call parquet_open_table(bnd, LIST_FIXTURE, filter=filt, list_columns="container", &
+            bounded=.true.)
+        call check(error, bnd%nrows() == plain%nrows(), &
+            "a bounded container table should hold the same rows as the default engine (" // what // ")")
+        if (allocated(error)) return
+        call plain%col("ragged", pp)
+        call bnd%col("ragged", pb)
+        call check(error, pb%nrows() == pp%nrows(), &
+            "a bounded container column should hold the same row count (" // what // ")")
+        if (allocated(error)) return
+        same = .true.
+        do k = 1_int64, pp%nrows()
+            if (pb%length(k) /= pp%length(k)) same = .false.
+            if (pb%is_null(k) .neqv. pp%is_null(k)) same = .false.
+        end do
+        call check(error, same, &
+            "every bounded container row should match the default engine's (" // what // ")")
+    end subroutine one_bounded_container_case
 
     !> **The alignment test.** Every row-structural mutation must rebuild a container column along
     !! with every other one, and asserting the ROW COUNT cannot see it when they do not.

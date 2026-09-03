@@ -17,9 +17,9 @@ it can equally be built from scratch in memory and written back out through an o
   row and column handles, row selections, string and container columns, changing a column's type,
   and the current limitations and memory cost.
 - [Opening a table: slices, filters and renaming](table-open.html) — reading part of a file (the
-  slice regime), filtering, sorting and qc-checking rows as they are read, renaming columns and
-  carrying units through a read-in MAML, finding which file row a row came from, and what a table
-  can and cannot read.
+  slice regime), filtering, sorting and qc-checking rows as they are read, reading a filtered file
+  larger than memory one row group at a time, renaming columns and carrying units through a
+  read-in MAML, finding which file row a row came from, and what a table can and cannot read.
 - [Building a table and writing it out](table-write.html) — `parquet_new_table` and `%add_column`,
   then `parquet_write_table` with a schema or without one, its writer options, and carrying the
   source file's metadata into the output.

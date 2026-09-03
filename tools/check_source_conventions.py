@@ -4307,6 +4307,93 @@ def _procedure_scopes(lines):
     return scopes
 
 
+def check_open_table_arguments_are_forwarded():
+    """A generated table type's `%init` forwards every `parquet_open_table` argument it promises.
+
+    `tools/generate_user_table_code.py` emits a `%init`/`%init_slice` wrapper whose own doc-comment
+    says *"Every optional argument is forwarded to parquet_open_table unchanged, except `exact`"*.
+    It forwards them BY NAME, in a hard-coded call, so an argument added to `parquet_open_table` is
+    not a compile error there -- the wrapper keeps building, silently stops offering the new
+    argument, and the promise quietly becomes false. `list_columns=` reached a release that way.
+
+    **Matched by SHAPE in both directions, from two files the repository already keeps in step.**
+    The expected set is read from `parquet_open_table`'s own interface bodies in
+    `src/parquet_tables.f90`, so the day the library gains an argument is the day this fails. The
+    actual set is read from `src/parquet_table_example.f90` -- the generator's committed OUTPUT,
+    which `generate_user_table_code.py --check` (lint stage) already proves is what the generator
+    emits today. Reading the emitted Fortran rather than the emitting Python is deliberate: the
+    call is assembled there from several adjacent string literals, and a regex over that is a
+    second thing to get wrong.
+
+    `table`/`filename` (and a slice's `row_lo`/`row_hi`) are excluded because the wrapper supplies
+    them itself. `exact` is not a `parquet_open_table` argument at all, so it never appears here.
+    """
+    spec = SRC / "parquet_tables.f90"
+    emitted = SRC / "parquet_table_example.f90"
+    missing = [p for p in (spec, emitted) if not p.is_file()]
+    if missing:
+        return ["tools/check_source_conventions.py: %s not found -- this check has gone stale and "
+                "is silently testing nothing" % ", ".join(m.name for m in missing)]
+    spec_text = spec.read_text(encoding="utf-8", errors="replace")
+
+    def arg_list(text, start):
+        """The comma-separated argument names of the call/declaration opening at `start`."""
+        depth, out = 1, []
+        for ch in text[start:]:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            out.append(ch)
+        raw = "".join(out).replace("&", " ").replace("\n", " ")
+        return [a.strip() for a in raw.split(",") if a.strip()]
+
+    def declared(proc):
+        m = re.search(r"^\s*module subroutine %s\(" % re.escape(proc), spec_text, re.M)
+        return arg_list(spec_text, m.end()) if m else None
+
+    # The generated wrapper's own forwarding calls: the whole-file one takes `filename` next, a
+    # slice one takes `row_lo`. Both are matched by shape rather than by which procedure encloses
+    # them, so renaming the generated type changes nothing here.
+    emitted_text = emitted.read_text(encoding="utf-8", errors="replace")
+    full_calls, slice_calls = [], []
+    for m in re.finditer(r"call parquet_open_table\(self%parquet_table,", emitted_text):
+        args = arg_list(emitted_text, emitted_text.index("(", m.start()) + 1)
+        if len(args) > 2 and args[2] in ("row_lo",):
+            slice_calls.append(args)
+        else:
+            full_calls.append(args)
+    if not full_calls or not slice_calls:
+        return ["expected both a whole-file and a slice `call parquet_open_table(self%%parquet_table, "
+                "...)` in src/parquet_table_example.f90, found %d and %d -- the generated wrapper "
+                "has been restructured and this check no longer sees it"
+                % (len(full_calls), len(slice_calls))]
+
+    problems = []
+    for proc, supplied, calls, label in (
+            ("open_table_full", {"table", "filename"}, full_calls, "%init"),
+            ("open_table_slice_i32", {"table", "filename", "row_lo", "row_hi"}, slice_calls,
+             "%init_slice")):
+        args = declared(proc)
+        if not args:
+            problems.append(
+                "could not read %s's dummy arguments from src/parquet_tables.f90 -- the interface "
+                "body has moved or been renamed, so this check is testing nothing" % proc)
+            continue
+        want = [a for a in args if a not in supplied]
+        for call in calls:
+            for a in want:
+                if a not in call:
+                    problems.append(
+                        "src/parquet_table_example.f90: %s does not forward `%s` to "
+                        "parquet_open_table, which declares it -- generate_user_table_code.py's "
+                        "wrapper promises every optional argument is forwarded, so a caller of a "
+                        "generated table type cannot reach it" % (label, a))
+    return problems
+
+
 def check_view_call_sites_declare_target():
     """CLAUDE.md -- a `%view` call site must declare its column `target`.
 
@@ -4530,6 +4617,8 @@ def check_test_runner_partition():
 
 CHECKS = (
     ("threads= is forwarded to every callee that takes it", check_threads_are_forwarded),
+    ("generated table types forward every parquet_open_table argument",
+     check_open_table_arguments_are_forwarded),
     ("omp_* references are guarded by #ifdef _OPENMP", check_openmp_calls_are_guarded),
     ("benchmark build-tree names carry the compiler", check_build_tree_names_carry_the_compiler),
     ("parquet_table has no allocatable component", check_no_allocatable_component),

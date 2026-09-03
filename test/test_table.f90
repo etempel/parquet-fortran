@@ -87,7 +87,7 @@ contains
         ! each entry's allocatable name string at run time ("Invalid deallocation of size N:
         ! block was already deallocated"), aborting the suite. Both traps are invisible under
         ! gfortran, so keep this shape: assign each part, then concatenate once.
-        type(unittest_type), allocatable :: p1(:), p2(:)
+        type(unittest_type), allocatable :: p1(:), p2(:), p3(:)
         p1 = [ &
             new_unittest("open reports rows, columns and names in file order", test_open_basics), &
             new_unittest("scalar numeric kinds round-trip through get/col/set/write", &
@@ -450,7 +450,30 @@ contains
             new_unittest("a slice answers has_nulls and row_group_bounds in its own scope", &
                 test_slice_has_nulls_and_bounds) &
             ]
-        testsuite = [p1, p2]
+        ! A THIRD part rather than more entries in p2: a single array constructor may carry at
+        ! most 255 continuation lines (F2008 C1003) and only nagfor enforces it, so a part that
+        ! fills up is grown by adding another rather than by pushing the existing one closer to a
+        ! cap nothing else in the fleet reports. See this subroutine's own comment above.
+        p3 = [ &
+            new_unittest("a bounded table returns every kind exactly as the default engine does", &
+                test_bounded_kind_matrix), &
+            new_unittest("row groups a filter empties at the start, middle and end assemble correctly", &
+                test_bounded_empty_row_groups), &
+            new_unittest("bounded handles a filter matching nothing, everything, and no filter at all", &
+                test_bounded_degenerate_filters), &
+            new_unittest("a bounded sample_fraction= keeps the same seeded rows as the default", &
+                test_bounded_sample), &
+            new_unittest("%reload re-assembles a bounded column through the bounded path", &
+                test_bounded_reload), &
+            new_unittest("a clone of a bounded table is itself bounded", test_bounded_clone), &
+            new_unittest("a bounded table answers row_group_bounds in both coordinate systems", &
+                test_bounded_row_group_bounds), &
+            new_unittest("parquet_row_index under bounded names the same physical rows", &
+                test_bounded_row_index), &
+            new_unittest("bounded= on a slice is accepted and changes nothing", &
+                test_bounded_on_slice_is_inert) &
+            ]
+        testsuite = [p1, p2, p3]
     end subroutine collect_tests_parquet_table
     !
     !> Writes the shared numeric/string fixture used by most tests below.
@@ -10166,6 +10189,491 @@ contains
     !> Three plain columns over several row groups, with no nulls anywhere: the slice-regime
     !! transform tests below are about which ROWS come back, so every expectation should be
     !! readable off the row number alone.
+    !
+    ! ================= bounded=.true.: the memory-bounded whole-file read =================
+    !
+    ! Every test below is an A/B against the DEFAULT engine on the same fixture and the same
+    ! filter, because "the answers are the same" is the whole contract -- `bounded=` changes how
+    ! much memory a read takes and nothing else. An A/B alone would pass just as happily against a
+    ! flag that did nothing at all, so the pair that proves the bounded path was really taken is
+    ! the error-scenario pair in test/error_scenarios.f90 (`bounded_table_no_whole_column_read`
+    ! and its control `default_filter_reads_whole_column`), which arms the whole-column read hook
+    ! and asserts that the default engine trips it and the bounded one does not. That hook is
+    ! process-global, so it cannot live in this suite.
+    !
+    !> Every one of the 18 kinds through the bounded path, against the same filter on the default
+    !! engine -- values AND per-row validity, since a chunked assembly places each row group's
+    !! validity separately and a bitmap that lands one row out is invisible in the values alone.
+    subroutine test_bounded_kind_matrix(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: plain, bnd
+        type(parquet_filter) :: filt
+        integer, parameter :: N = 20, CH = 7
+        integer(int32), allocatable :: a_i32(:), b_i32(:), av_i32(:,:), bv_i32(:,:)
+        integer(int64), allocatable :: a_i64(:), b_i64(:)
+        real(real32), allocatable :: a_f32(:), b_f32(:)
+        real(real64), allocatable :: a_f64(:), b_f64(:), av_f64(:,:), bv_f64(:,:)
+        logical, allocatable :: a_bool(:), b_bool(:)
+        character(len=:), allocatable :: a_str(:), b_str(:), av_str(:,:), bv_str(:,:)
+        type(parquet_date), allocatable :: a_date(:), b_date(:)
+        type(parquet_time), allocatable :: a_time(:), b_time(:)
+        type(parquet_timestamp), allocatable :: a_ts(:), b_ts(:)
+        integer(int64), allocatable :: a_secs(:), b_secs(:)
+        integer(int32), allocatable :: a_nanos(:), b_nanos(:)
+        character(len=*), parameter :: f = "test_run/table_bounded_matrix.parquet"
+        integer :: i
+        !
+        call write_slice_fixture(f, N, CH)
+        ! Keeps a scattered subset -- deliberately NOT a contiguous head or tail, so every row
+        ! group contributes some rows and none is emptied. The emptied cases are the next test.
+        call filt%add("s_i32 >= 4")
+        call parquet_open_table(plain, f, filter=filt)
+        call parquet_open_table(bnd, f, filter=filt, bounded=.true.)
+        !
+        call check(error, bnd%nrows() == plain%nrows(), &
+            "a bounded table should hold the same number of surviving rows as the default engine")
+        if (allocated(error)) return
+        call check(error, bnd%nrows() > 0_int64 .and. bnd%nrows() < int(N, int64), &
+            "this fixture's filter should keep some rows and drop some, or the A/B proves little")
+        if (allocated(error)) return
+        call check(error, bnd%ncols() == plain%ncols(), &
+            "a bounded table should hold the same columns as the default engine")
+        if (allocated(error)) return
+        !
+        call plain%get("s_i32", a_i32); call bnd%get("s_i32", b_i32)
+        call check(error, all(a_i32 == b_i32), "s_i32 should be identical under bounded=")
+        if (allocated(error)) return
+        call plain%get("s_i64", a_i64); call bnd%get("s_i64", b_i64)
+        call check(error, all(a_i64 == b_i64), "s_i64 should be identical under bounded=")
+        if (allocated(error)) return
+        call plain%get("s_f32", a_f32); call bnd%get("s_f32", b_f32)
+        call check(error, all(abs(a_f32 - b_f32) < 1.0e-6_real32), &
+            "s_f32 should be identical under bounded=")
+        if (allocated(error)) return
+        call plain%get("s_f64", a_f64); call bnd%get("s_f64", b_f64)
+        call check(error, all(abs(a_f64 - b_f64) < 1.0e-12_real64), &
+            "s_f64 should be identical under bounded=")
+        if (allocated(error)) return
+        call plain%get("s_bool", a_bool); call bnd%get("s_bool", b_bool)
+        call check(error, all(a_bool .eqv. b_bool), "s_bool should be identical under bounded=")
+        if (allocated(error)) return
+        call plain%get("s_str", a_str); call bnd%get("s_str", b_str)
+        call check(error, size(a_str) == size(b_str), &
+            "s_str should have the same length under bounded=")
+        if (allocated(error)) return
+        do i = 1, size(a_str)
+            call check(error, trim(a_str(i)) == trim(b_str(i)), &
+                "s_str element should be identical under bounded=")
+            if (allocated(error)) return
+        end do
+        call plain%get("s_date", a_date); call bnd%get("s_date", b_date)
+        call check(error, all(a_date%raw() == b_date%raw()), &
+            "s_date should be identical under bounded=")
+        if (allocated(error)) return
+        call plain%get("s_time", a_time); call bnd%get("s_time", b_time)
+        call check(error, all(a_time%raw() == b_time%raw()), &
+            "s_time should be identical under bounded=")
+        if (allocated(error)) return
+        call plain%get("s_ts", a_ts); call bnd%get("s_ts", b_ts)
+        call check(error, size(a_ts) == size(b_ts), &
+            "s_ts should have the same length under bounded=")
+        if (allocated(error)) return
+        ! A timestamp has no %raw(); its raw (seconds, nanoseconds) pair is the interop form, and
+        ! it is elemental and never aborts on a null element -- which is what makes it usable over
+        ! a column the fixture deliberately puts a null in.
+        allocate(a_secs(size(a_ts)), b_secs(size(b_ts)), a_nanos(size(a_ts)), b_nanos(size(b_ts)))
+        call a_ts%get_raw(a_secs, a_nanos)
+        call b_ts%get_raw(b_secs, b_nanos)
+        call check(error, all(a_secs == b_secs) .and. all(a_nanos == b_nanos), &
+            "s_ts should be identical under bounded=")
+        if (allocated(error)) return
+        ! The vector kinds go through a different assembly width, so at least one numeric, one
+        ! float and one string vector column is checked rather than trusting the scalar result.
+        call plain%get("v_i32", av_i32); call bnd%get("v_i32", bv_i32)
+        call check(error, all(av_i32 == bv_i32), "v_i32 should be identical under bounded=")
+        if (allocated(error)) return
+        call plain%get("v_f64", av_f64); call bnd%get("v_f64", bv_f64)
+        call check(error, all(abs(av_f64 - bv_f64) < 1.0e-12_real64), &
+            "v_f64 should be identical under bounded=")
+        if (allocated(error)) return
+        call plain%get("v_str", av_str); call bnd%get("v_str", bv_str)
+        call check(error, all(shape(av_str) == shape(bv_str)), &
+            "v_str should have the same shape under bounded=")
+        if (allocated(error)) return
+        !
+        ! VALIDITY, per row and per kind class. The fixture puts one null in the middle of every
+        ! column, so a chunked assembly that placed a row group's validity at the wrong offset
+        ! shows up here and in nothing above.
+        do i = 1, int(bnd%nrows())
+            call check(error, bnd%is_null("s_i32", int(i, int64)) .eqv. &
+                plain%is_null("s_i32", int(i, int64)), &
+                "bitmap-kind validity should be identical under bounded=")
+            if (allocated(error)) return
+            call check(error, bnd%is_null("s_str", int(i, int64)) .eqv. &
+                plain%is_null("s_str", int(i, int64)), &
+                "string-kind validity should be identical under bounded=")
+            if (allocated(error)) return
+            call check(error, bnd%is_null("s_date", int(i, int64)) .eqv. &
+                plain%is_null("s_date", int(i, int64)), &
+                "temporal-kind validity should be identical under bounded=")
+            if (allocated(error)) return
+        end do
+        ! Widths and units are descriptor state settled at open, so they must not depend on the
+        ! engine either.
+        call check(error, bnd%width("v_i32") == plain%width("v_i32"), &
+            "a vector column's width should not depend on the read engine")
+        if (allocated(error)) return
+        call check(error, bnd%kind("s_ts") == plain%kind("s_ts"), &
+            "a column's kind should not depend on the read engine")
+    end subroutine test_bounded_kind_matrix
+    !
+    !> A row group a filter empties entirely, at the START, in the MIDDLE and at the END of the
+    !! file -- the case a chunked assembly has to step over rather than paste a zero-row chunk in.
+    !!
+    !! Asserted under `bounded=` AND on a masked slice, because both reach the same assembly loop
+    !! and nothing in the suite pinned the property for either before this test: an interior empty
+    !! row group is an empty range that overlaps the scope on both sides, so it falls through the
+    !! loop's end-of-scope skip and is stepped over by the `rows_rg <= 0` test instead.
+    subroutine test_bounded_empty_row_groups(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer, parameter :: N = 16, CH = 4
+        character(len=*), parameter :: f = "test_run/table_bounded_empty_rg.parquet"
+        !
+        call write_slice_xform_fixture(f, N, CH)
+        ! Four row groups of four rows: k = 1..4, 5..8, 9..12, 13..16.
+        call one_empty_case(error, f, "k > 4", "first row group empty")
+        if (allocated(error)) return
+        call one_empty_case(error, f, "k <= 4 or k > 8", "middle row group empty")
+        if (allocated(error)) return
+        call one_empty_case(error, f, "k <= 12", "last row group empty")
+        if (allocated(error)) return
+        call one_empty_case(error, f, "k > 8", "first two row groups empty")
+        if (allocated(error)) return
+        call one_empty_case(error, f, "k == 5", "all but one row empty")
+    end subroutine test_bounded_empty_row_groups
+    !
+    !> One filter of `test_bounded_empty_row_groups`, checked three ways: the default engine, a
+    !! bounded whole-file table, and a masked slice covering the whole file. All three must agree
+    !! on values, on string values and on the row count.
+    subroutine one_empty_case(error, f, rule, what)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), intent(in) :: f    !! fixture path.
+        character(len=*), intent(in) :: rule !! filter rule to apply.
+        character(len=*), intent(in) :: what !! what this case is, for the failure message.
+        type(parquet_table) :: plain, bnd, sl
+        type(parquet_filter) :: filt
+        integer(int32), allocatable :: a_k(:), b_k(:), s_k(:)
+        real(real64), allocatable :: a_x(:), b_x(:)
+        character(len=:), allocatable :: a_s(:), b_s(:)
+        integer :: i
+        !
+        call filt%add(rule)
+        call parquet_open_table(plain, f, filter=filt)
+        call parquet_open_table(bnd, f, filter=filt, bounded=.true.)
+        ! A masked slice over the WHOLE file: same assembly loop, reached the other way.
+        call parquet_open_table(sl, f, 1_int64, 16_int64, filter=filt)
+        !
+        call check(error, bnd%nrows() == plain%nrows(), &
+            "bounded row count should match the default engine (" // what // ")")
+        if (allocated(error)) return
+        call check(error, sl%nrows() == plain%nrows(), &
+            "masked-slice row count should match the default engine (" // what // ")")
+        if (allocated(error)) return
+        call plain%get("k", a_k); call bnd%get("k", b_k); call sl%get("k", s_k)
+        call check(error, all(a_k == b_k), "bounded k should match the default engine (" // what // ")")
+        if (allocated(error)) return
+        call check(error, all(a_k == s_k), &
+            "masked-slice k should match the default engine (" // what // ")")
+        if (allocated(error)) return
+        call plain%get("x", a_x); call bnd%get("x", b_x)
+        call check(error, all(abs(a_x - b_x) < 1.0e-12_real64), &
+            "bounded x should match the default engine (" // what // ")")
+        if (allocated(error)) return
+        ! The string kinds take the grow-and-append assembly shape rather than the paste one, so
+        ! they are the arm an empty chunk could break differently.
+        call plain%get("s", a_s); call bnd%get("s", b_s)
+        call check(error, size(a_s) == size(b_s), &
+            "bounded s should have the same length as the default engine (" // what // ")")
+        if (allocated(error)) return
+        do i = 1, size(a_s)
+            call check(error, trim(a_s(i)) == trim(b_s(i)), &
+                "bounded s element should match the default engine (" // what // ")")
+            if (allocated(error)) return
+        end do
+    end subroutine one_empty_case
+    !
+    !> The three degenerate transforms: a filter matching NOTHING, one matching EVERYTHING, and
+    !! `bounded=.true.` with no filter at all -- which is allowed and still assembles in chunks.
+    subroutine test_bounded_degenerate_filters(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, plain
+        type(parquet_filter) :: none_filt, all_filt
+        integer, parameter :: N = 16, CH = 4
+        integer(int32), allocatable :: k(:), pk(:)
+        character(len=:), allocatable :: s(:)
+        character(len=*), parameter :: f = "test_run/table_bounded_degenerate.parquet"
+        !
+        call write_slice_xform_fixture(f, N, CH)
+        !
+        ! Nothing survives: every column is resident and empty, not absent.
+        call none_filt%add("k > 1000")
+        call parquet_open_table(t, f, filter=none_filt, bounded=.true.)
+        call check(error, t%nrows() == 0_int64, "a bounded filter matching nothing should hold no rows")
+        if (allocated(error)) return
+        call t%get("k", k)
+        call check(error, size(k) == 0, "a bounded empty table's column should read back empty")
+        if (allocated(error)) return
+        call t%get("s", s)
+        call check(error, size(s) == 0, "a bounded empty table's string column should read back empty")
+        if (allocated(error)) return
+        !
+        ! Everything survives: bounded must not narrow anything by itself.
+        call all_filt%add("k >= 1")
+        call parquet_open_table(t, f, filter=all_filt, bounded=.true.)
+        call check(error, t%nrows() == int(N, int64), &
+            "a bounded filter matching everything should keep every row")
+        if (allocated(error)) return
+        call t%get("k", k)
+        call check(error, size(k) == N, "a bounded all-matching table should read every row back")
+        if (allocated(error)) return
+        !
+        ! No transform at all. Allowed deliberately: the assembly is still chunked, so the
+        ! per-column peak is one row group, and the result is simply the whole file.
+        call parquet_open_table(t, f, bounded=.true.)
+        call parquet_open_table(plain, f)
+        call check(error, t%nrows() == plain%nrows(), &
+            "bounded= with no filter should still cover the whole file")
+        if (allocated(error)) return
+        call t%get("k", k); call plain%get("k", pk)
+        call check(error, all(k == pk), "bounded= with no filter should return the file's own rows")
+        if (allocated(error)) return
+        call check(error, .not. t%is_detached(), &
+            "a bounded table that was never mutated should not report itself detached")
+    end subroutine test_bounded_degenerate_filters
+    !
+    !> `sample_fraction=` under `bounded`, seeded, with and without a filter beside it. A sample is
+    !! installed at open on both engines, so what this pins is that the bounded install FOLDS the
+    !! already-drawn sample into its own mask rather than replacing or re-drawing it.
+    subroutine test_bounded_sample(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: plain, bnd
+        type(parquet_filter) :: filt
+        integer, parameter :: N = 200, CH = 40
+        integer(int32), allocatable :: a_k(:), b_k(:)
+        character(len=*), parameter :: f = "test_run/table_bounded_sample.parquet"
+        !
+        call write_slice_xform_fixture(f, N, CH)
+        ! Sample only.
+        call parquet_open_table(plain, f, sample_fraction=0.5_real64, sample_seed=12345_int64)
+        call parquet_open_table(bnd, f, sample_fraction=0.5_real64, sample_seed=12345_int64, &
+            bounded=.true.)
+        call check(error, bnd%nrows() == plain%nrows(), &
+            "a bounded seeded sample should keep the same number of rows as the default engine")
+        if (allocated(error)) return
+        call check(error, bnd%nrows() > 0_int64 .and. bnd%nrows() < int(N, int64), &
+            "this sample should keep some rows and drop some, or the comparison proves little")
+        if (allocated(error)) return
+        call plain%get("k", a_k); call bnd%get("k", b_k)
+        call check(error, all(a_k == b_k), &
+            "a bounded seeded sample should keep the same ROWS as the default engine")
+        if (allocated(error)) return
+        ! Sample AND filter: the scoped install has to fold the open-time sample mask into the
+        ! filter's own result, which is the case that would silently double-apply or drop one.
+        call filt%add("k > 50")
+        call parquet_open_table(plain, f, filter=filt, sample_fraction=0.5_real64, &
+            sample_seed=999_int64)
+        call parquet_open_table(bnd, f, filter=filt, sample_fraction=0.5_real64, &
+            sample_seed=999_int64, bounded=.true.)
+        call check(error, bnd%nrows() == plain%nrows(), &
+            "a bounded sample+filter should keep the same number of rows as the default engine")
+        if (allocated(error)) return
+        call plain%get("k", a_k); call bnd%get("k", b_k)
+        call check(error, all(a_k == b_k), &
+            "a bounded sample+filter should keep the same rows as the default engine")
+        if (allocated(error)) return
+        call check(error, all(a_k > 50_int32), &
+            "a bounded sample+filter should still honour the filter")
+    end subroutine test_bounded_sample
+    !
+    !
+    !> `%reload` on a bounded table re-assembles through the bounded path, not through a
+    !! whole-column read: it drops the column and takes the first-touch path again, which is
+    !! `table_materialize` and therefore the same branch the first read took.
+    subroutine test_bounded_reload(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_filter) :: filt
+        integer, parameter :: N = 16, CH = 4
+        integer(int32), allocatable :: k(:), k2(:)
+        character(len=*), parameter :: f = "test_run/table_bounded_reload.parquet"
+        integer :: i
+        !
+        call write_slice_xform_fixture(f, N, CH)
+        call filt%add("k > 4")
+        call parquet_open_table(t, f, filter=filt, bounded=.true.)
+        call t%get("k", k)
+        ! Overwrite the resident copy, then reload: what comes back must be the file's own values
+        ! again, assembled the same way.
+        call t%set("k", [(0_int32, i = 1, int(t%nrows()))])
+        call t%reload("k", force=.true.)
+        call t%get("k", k2)
+        call check(error, all(k == k2), &
+            "%reload on a bounded table should re-read the same rows it first assembled")
+    end subroutine test_bounded_reload
+    !
+    !> A clone of a bounded table is itself bounded. `%clone` reopens the file through the same
+    !! helper `parquet_open_table` uses, and that helper reads `bounded_read` off the cache to
+    !! decide which filter engine to install -- so a flag left behind would silently give the
+    !! clone the caching whole-file engine, with correct answers and no memory bound.
+    !!
+    !! What is asserted here is the observable half (same rows, same values, and the flag really
+    !! copied); the mechanism half -- that the clone's own first touch takes no whole-column read
+    !! -- is `bounded_clone_no_whole_column_read` in test/error_scenarios.f90, since it needs the
+    !! process-global hook.
+    subroutine test_bounded_clone(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, c
+        type(parquet_filter) :: filt
+        integer, parameter :: N = 16, CH = 4
+        integer(int32), allocatable :: a(:), b(:)
+        character(len=:), allocatable :: sa(:), sb(:)
+        character(len=*), parameter :: f = "test_run/table_bounded_clone.parquet"
+        integer :: i
+        !
+        call write_slice_xform_fixture(f, N, CH)
+        call filt%add("k > 6")
+        call parquet_open_table(t, f, filter=filt, bounded=.true.)
+        ! Cloned BEFORE anything is read, so the clone's columns are still lazy and its own first
+        ! touch is what has to take the bounded path.
+        call t%clone(c)
+        call check(error, c%nrows() == t%nrows(), "a clone should hold the source's row count")
+        if (allocated(error)) return
+        call t%get("k", a); call c%get("k", b)
+        call check(error, all(a == b), "a bounded table's clone should read back the same rows")
+        if (allocated(error)) return
+        call t%get("s", sa); call c%get("s", sb)
+        call check(error, size(sa) == size(sb), &
+            "a bounded table's clone should hold the same string column length")
+        if (allocated(error)) return
+        do i = 1, size(sa)
+            call check(error, trim(sa(i)) == trim(sb(i)), &
+                "a bounded table's clone should read back the same string values")
+            if (allocated(error)) return
+        end do
+    end subroutine test_bounded_clone
+    !
+    !> `%row_group_bounds` on a bounded table, in both coordinate systems.
+    !!
+    !! The default form answers in the TABLE's own numbering (surviving rows) and the
+    !! `physical=.true.` form in the FILE's. A bounded table leaves `cache%rg_bounds` unallocated
+    !! deliberately -- those bounds are a slice-regime object -- so both answers come from the same
+    !! places they come from for a filtered whole-file table on the default engine, and the point
+    !! of this test is that choosing the read engine did not change either one.
+    subroutine test_bounded_row_group_bounds(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: plain, bnd
+        type(parquet_filter) :: filt
+        integer, parameter :: N = 16, CH = 4
+        integer(int64), allocatable :: pb(:,:), bb(:,:), pp(:,:), bp(:,:), fb(:,:)
+        character(len=*), parameter :: f = "test_run/table_bounded_rgbounds.parquet"
+        !
+        call write_slice_xform_fixture(f, N, CH)
+        call filt%add("k > 4")
+        call parquet_open_table(plain, f, filter=filt)
+        call parquet_open_table(bnd, f, filter=filt, bounded=.true.)
+        !
+        call plain%row_group_bounds(pb)
+        call bnd%row_group_bounds(bb)
+        call check(error, all(shape(pb) == shape(bb)), &
+            "a bounded table should report the same number of row groups as the default engine")
+        if (allocated(error)) return
+        call check(error, all(pb == bb), &
+            "a bounded table's table-coordinate row-group bounds should match the default engine")
+        if (allocated(error)) return
+        ! The first row group is emptied by this filter, so it must come back as an EMPTY range
+        ! rather than be dropped -- the two arrays are index-aligned per physical row group.
+        call check(error, bb(1, 1) > bb(2, 1), &
+            "a row group the filter emptied should be an empty range, not a dropped entry")
+        if (allocated(error)) return
+        !
+        call plain%row_group_bounds(pp, physical=.true.)
+        call bnd%row_group_bounds(bp, physical=.true.)
+        call parquet_table_row_group_bounds(f, fb)
+        call check(error, all(bp == fb), &
+            "a bounded table should report the file's own row groups under physical=.true.")
+        if (allocated(error)) return
+        call check(error, all(pp == bp), &
+            "physical=.true. should not depend on which read engine was chosen")
+    end subroutine test_bounded_row_group_bounds
+    !
+    !> The automatic `parquet_row_index` column under `bounded`: it is answered from the reader's
+    !! own mask rather than from anything the assembly does, so it must name the same physical
+    !! file rows the default engine names.
+    subroutine test_bounded_row_index(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: plain, bnd
+        type(parquet_filter) :: filt
+        integer, parameter :: N = 16, CH = 4
+        integer(int64), allocatable :: a(:), b(:)
+        integer(int32), allocatable :: k(:)
+        character(len=*), parameter :: f = "test_run/table_bounded_rowindex.parquet"
+        !
+        call write_slice_xform_fixture(f, N, CH)
+        call filt%add("k > 9")
+        call parquet_open_table(plain, f, filter=filt)
+        call parquet_open_table(bnd, f, filter=filt, bounded=.true.)
+        call plain%get(PARQUET_ROW_INDEX, a)
+        call bnd%get(PARQUET_ROW_INDEX, b)
+        call check(error, size(a) == size(b), &
+            "parquet_row_index should have the same length under bounded=")
+        if (allocated(error)) return
+        call check(error, all(a == b), &
+            "parquet_row_index should name the same physical rows under bounded=")
+        if (allocated(error)) return
+        ! And it really is the FILE's numbering, not a 1..n counter over the survivors: the
+        ! fixture's k column is the row number, so the two must agree.
+        call bnd%get("k", k)
+        call check(error, all(int(k, int64) == b), &
+            "parquet_row_index under bounded= should be the file's own row numbers")
+    end subroutine test_bounded_row_index
+    !
+    !> `bounded=` on the two slice forms is accepted and inert.
+    !!
+    !! A slice assembles every column from row-group chunks already, filtered or not, so there is
+    !! nothing for the flag to switch on: it is stored as `bounded .and. .not. sliced`, which is
+    !! what lets every reader of the flag test it alone rather than re-deriving "is this a slice"
+    !! from the cache. Accepting it rather than refusing it is what lets one caller pass the same
+    !! argument list to either form.
+    subroutine test_bounded_on_slice_is_inert(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: plain, bnd
+        type(parquet_filter) :: filt
+        integer, parameter :: N = 16, CH = 4
+        integer(int32), allocatable :: a(:), b(:)
+        character(len=*), parameter :: f = "test_run/table_bounded_slice_inert.parquet"
+        !
+        call write_slice_xform_fixture(f, N, CH)
+        ! An unfiltered slice: the fast path, which addresses physical file rows and installs no
+        ! mask at all. bounded= must not turn it into something else.
+        call parquet_open_table(plain, f, 5_int64, 12_int64)
+        call parquet_open_table(bnd, f, 5_int64, 12_int64, bounded=.true.)
+        call check(error, bnd%nrows() == plain%nrows(), &
+            "bounded= on an unfiltered slice should not change its row count")
+        if (allocated(error)) return
+        call plain%get("k", a); call bnd%get("k", b)
+        call check(error, all(a == b), "bounded= on an unfiltered slice should not change its rows")
+        if (allocated(error)) return
+        ! And a masked slice, which is the path that already installs the scoped engine.
+        call filt%add("k > 6")
+        call parquet_open_table(plain, f, 5_int64, 12_int64, filter=filt)
+        call parquet_open_table(bnd, f, 5_int64, 12_int64, filter=filt, bounded=.true.)
+        call check(error, bnd%nrows() == plain%nrows(), &
+            "bounded= on a filtered slice should not change its row count")
+        if (allocated(error)) return
+        call plain%get("k", a); call bnd%get("k", b)
+        call check(error, all(a == b), "bounded= on a filtered slice should not change its rows")
+    end subroutine test_bounded_on_slice_is_inert
+    !
     subroutine write_slice_xform_fixture(fname, n, chunk)
         character(len=*), intent(in) :: fname !! file to write (one per test).
         integer, intent(in) :: n              !! rows to write.

@@ -2466,6 +2466,22 @@ program error_scenarios
         call scenario_pool_free_zero()
     case ("pool_control")
         call scenario_pool_control()
+    case ("bounded_table_no_whole_column_read")
+        call scenario_bounded_table_no_whole_column_read()
+    case ("bounded_clone_no_whole_column_read")
+        call scenario_bounded_clone_no_whole_column_read()
+    case ("default_filter_reads_whole_column")
+        call scenario_default_filter_reads_whole_column()
+    case ("bounded_with_sort_refused")
+        call scenario_bounded_with_sort_refused()
+    case ("bounded_with_maml_sort_refused")
+        call scenario_bounded_with_maml_sort_refused()
+    case ("bounded_qc_hard_at_first_touch")
+        call scenario_bounded_qc_hard_at_first_touch()
+    case ("bounded_qc_soft_warns")
+        call scenario_bounded_qc_soft_warns()
+    case ("bounded_arrow_pool")
+        call scenario_bounded_arrow_pool()
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -21396,5 +21412,292 @@ contains
         if (p%get_max_index() /= 0_int64) error stop "control: compact should empty the pool"
         print '(a)', "pool control finished"
     end subroutine scenario_pool_control
+
+    ! ============ bounded=.true.: the memory-bounded whole-file read ============
+    !
+    ! The two scenarios below are a PAIR, and neither means anything alone. Every in-suite test of
+    ! this feature (test/test_table.f90) is an A/B against the default engine, which passes just as
+    ! happily against a `bounded=` that did nothing at all -- so what proves the bounded path was
+    ! actually taken is that the whole-column read hook fires on the default engine and not on the
+    ! bounded one. That hook is a process-global C++ flag, so it can only live out here.
+
+    !> Writes the fixture the bounded scenarios read: `key` cycling 0..3 so that no row group's
+    !! statistics can rule any value out (the row-group screen must prune NOTHING, or the scenario
+    !! measures the pruned case instead), plus one float and one string payload column.
+    subroutine write_bounded_scenario_fixture(fname, n, chunk)
+        character(len=*), intent(in) :: fname !! file to write.
+        integer, intent(in) :: n              !! rows.
+        integer, intent(in) :: chunk          !! rows per row group.
+        type(parquet_writer) :: w
+        integer(int32), allocatable :: key(:), idx(:)
+        real(real64), allocatable :: x(:)
+        character(len=8), allocatable :: s(:)
+        integer :: i
+
+        allocate(key(n), idx(n), x(n), s(n))
+        do i = 1, n
+            key(i) = int(mod(i - 1, 4), int32)
+            idx(i) = int(i, int32)
+            x(i) = real(i, real64) * 1.5_real64
+            write(s(i), '(a,i0)') "r", i
+        end do
+        s(1) = "a"
+        call parquet_open_writer(w, fname, chunk_size=chunk)
+        call parquet_write_column(w, "key", key)
+        call parquet_write_column(w, "idx", idx)
+        call parquet_write_column(w, "x", x)
+        call parquet_write_column(w, "s", s)
+        call parquet_close_writer(w)
+    end subroutine write_bounded_scenario_fixture
+
+    !> A bounded table never takes a whole-column read: not to install its filter, and not to
+    !! materialize any column.
+    !!
+    !! The hook is armed BEFORE the table is opened, so an open-time whole-column read would trip
+    !! it too, and the scenario finishing at all is the assertion. Its control is
+    !! `default_filter_reads_whole_column` below, which proves the hook does fire on the engine
+    !! this one avoids -- without that pair, a hook that had quietly stopped working would make
+    !! this scenario pass for the wrong reason.
+    subroutine scenario_bounded_table_no_whole_column_read()
+        interface
+            subroutine parquet_debug_set_force_whole_column_read_error(enable) &
+                bind(C, name="parquet_debug_set_force_whole_column_read_error")
+                use iso_c_binding, only : c_int
+                integer(c_int), value :: enable !! nonzero forces the next whole-column read to abort; 0 restores.
+            end subroutine parquet_debug_set_force_whole_column_read_error
+        end interface
+
+        type(parquet_table) :: t
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: f = "test_run/es_bounded_no_whole_read.parquet"
+        integer(int32), allocatable :: idx(:)
+        character(len=:), allocatable :: sv(:)
+
+        call write_bounded_scenario_fixture(f, 32, 4)
+        call filt%add("key < 1")
+        call parquet_debug_set_force_whole_column_read_error(1)
+        call parquet_open_table(t, f, filter=filt, bounded=.true.)
+        ! Every assembly shape: the paste arm (a numeric column), and the grow-and-append arm
+        ! (a string column). materialize_all covers the rest.
+        call t%get("idx", idx)
+        call t%get("s", sv)
+        call t%materialize_all()
+        call parquet_debug_set_force_whole_column_read_error(0)
+        if (t%nrows() /= 8_int64) error stop "bounded scenario: expected 8 surviving rows"
+        if (size(idx) /= 8) error stop "bounded scenario: expected 8 values in idx"
+        print '(a)', "a bounded table installed its filter and read every column without a whole-column read"
+    end subroutine scenario_bounded_table_no_whole_column_read
+
+    !> A CLONE of a bounded table is bounded too -- the mechanism half of test_bounded_clone.
+    !!
+    !! `%clone` reopens the file through the same helper `parquet_open_table` uses, and that helper
+    !! reads the flag off the cache to pick the filter engine. Left behind, the clone would reattach
+    !! through the caching whole-file engine: same answers, no memory bound, nothing to announce it.
+    !! The hook is armed across the clone's own open AND its first touch, which is where a dropped
+    !! flag would show.
+    subroutine scenario_bounded_clone_no_whole_column_read()
+        interface
+            subroutine parquet_debug_set_force_whole_column_read_error(enable) &
+                bind(C, name="parquet_debug_set_force_whole_column_read_error")
+                use iso_c_binding, only : c_int
+                integer(c_int), value :: enable !! nonzero forces the next whole-column read to abort; 0 restores.
+            end subroutine parquet_debug_set_force_whole_column_read_error
+        end interface
+
+        type(parquet_table) :: t, c
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: f = "test_run/es_bounded_clone_no_whole_read.parquet"
+        integer(int32), allocatable :: idx(:)
+
+        call write_bounded_scenario_fixture(f, 32, 4)
+        call filt%add("key < 1")
+        call parquet_debug_set_force_whole_column_read_error(1)
+        call parquet_open_table(t, f, filter=filt, bounded=.true.)
+        ! Cloned before anything is read, so every column of the clone is still lazy and its own
+        ! first touch is what has to stay bounded.
+        call t%clone(c)
+        call c%materialize_all()
+        call c%get("idx", idx)
+        call parquet_debug_set_force_whole_column_read_error(0)
+        if (size(idx) /= 8) error stop "bounded clone scenario: expected 8 values in idx"
+        print '(a)', "a bounded table's clone read every column without a whole-column read"
+    end subroutine scenario_bounded_clone_no_whole_column_read
+
+    !> The CONTROL for the two scenarios above: the DEFAULT engine does take a whole-column read to
+    !! install a filter, so with the hook armed it must abort.
+    !!
+    !! This is what makes their exit-0 meaningful. It also pins the difference the feature exists
+    !! for: the caching install reads every filter column over the live row groups in one batched
+    !! pass, which is the read the bounded engine replaces with one row group at a time.
+    subroutine scenario_default_filter_reads_whole_column()
+        interface
+            subroutine parquet_debug_set_force_whole_column_read_error(enable) &
+                bind(C, name="parquet_debug_set_force_whole_column_read_error")
+                use iso_c_binding, only : c_int
+                integer(c_int), value :: enable !! nonzero forces the next whole-column read to abort; 0 restores.
+            end subroutine parquet_debug_set_force_whole_column_read_error
+        end interface
+
+        type(parquet_table) :: t
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: f = "test_run/es_bounded_control.parquet"
+
+        call write_bounded_scenario_fixture(f, 32, 4)
+        call filt%add("key < 1")
+        call parquet_debug_set_force_whole_column_read_error(1)
+        call parquet_open_table(t, f, filter=filt)   ! -> aborts: the caching engine reads it whole
+        print '(a,i0)', "unexpectedly installed a default filter with no whole-column read, nrows=", t%nrows()
+    end subroutine scenario_default_filter_reads_whole_column
+
+    !> `bounded=.true.` with a `sort=` is refused at open.
+    !!
+    !! A sort is a row PERMUTATION: sorted row 5 can come from any row group, so there is no chunk
+    !! to assemble it from and every row-group-scoped read refuses one outright. Refused at the
+    !! table layer instead, before any reader exists, so the message can name the remedy.
+    subroutine scenario_bounded_with_sort_refused()
+        type(parquet_table) :: t
+        type(parquet_sortkey) :: srt
+        character(len=*), parameter :: f = "test_run/es_bounded_sort.parquet"
+
+        call write_bounded_scenario_fixture(f, 16, 4)
+        call srt%add("idx desc")
+        call parquet_open_table(t, f, sort=srt, bounded=.true.)   ! -> aborts
+        print '(a,i0)', "unexpectedly opened a bounded table with a sort, nrows=", t%nrows()
+    end subroutine scenario_bounded_with_sort_refused
+
+    !> The same refusal reached through a read-in MAML's own `extra: sort:` list rather than the
+    !! `sort=` argument. Both spellings are merged into one composed sort before the refusal, which
+    !! is why one guard covers both -- and why this scenario exists to prove it does.
+    subroutine scenario_bounded_with_maml_sort_refused()
+        type(parquet_table) :: t
+        character(len=*), parameter :: f = "test_run/es_bounded_mamlsort.parquet"
+        character(len=*), parameter :: m = "test_run/es_bounded_mamlsort.maml"
+
+        call write_bounded_scenario_fixture(f, 16, 4)
+        call write_scenario_maml_file(m, [character(len=40) :: &
+            "table: bounded_sort", &
+            "extra:", &
+            "  sort:", &
+            "  - idx desc" ])
+        call parquet_open_table(t, f, maml=m, bounded=.true.)   ! -> aborts
+        print '(a,i0)', "unexpectedly opened a bounded table with a maml sort, nrows=", t%nrows()
+    end subroutine scenario_bounded_with_maml_sort_refused
+
+    !> A hard `qc=` violation under `bounded` aborts on FIRST TOUCH, not at open.
+    !!
+    !! Under the bounded engine qc runs per row group as each chunk is read (the chunk reader
+    !! applies that row group's mask segment and then checks), so a violation in a row group other
+    !! than the first still has to be caught. The bound here is violated only by rows in the LAST
+    !! row group, so an implementation that checked only the first chunk would pass silently.
+    !!
+    !! That it happens at the read rather than at the open is what the print before it establishes:
+    !! reaching that line proves the open itself did not abort.
+    subroutine scenario_bounded_qc_hard_at_first_touch()
+        type(parquet_table) :: t
+        type(parquet_read_qc) :: qc
+        integer(int32), allocatable :: idx(:)
+        character(len=*), parameter :: f = "test_run/es_bounded_qc_hard.parquet"
+
+        call write_bounded_scenario_fixture(f, 20, 4)
+        ! idx runs 1..20 in row groups of 4, so only the last row group violates this bound.
+        call qc%add("idx, >=1, <=16")
+        call parquet_open_table(t, f, qc=qc, bounded=.true.)
+        print '(a)', "bounded qc: the open itself did not abort, as expected"
+        call t%get("idx", idx)   ! -> aborts here, on the row group that violates the bound
+        print '(a,i0)', "unexpectedly read a bounded qc-violating column, n=", size(idx)
+    end subroutine scenario_bounded_qc_hard_at_first_touch
+
+    !> The SOFT half of the same qc rule: `qc_soft=.true.` warns instead of aborting, and the read
+    !! still returns every surviving row.
+    !!
+    !! Its exit status is 0, so what this scenario asserts is its own answer; the warning text is
+    !! asserted by the test-drive wrapper, which is the only side that can read the stream.
+    subroutine scenario_bounded_qc_soft_warns()
+        type(parquet_table) :: t
+        type(parquet_read_qc) :: qc
+        integer(int32), allocatable :: idx(:)
+        character(len=*), parameter :: f = "test_run/es_bounded_qc_soft.parquet"
+
+        call write_bounded_scenario_fixture(f, 20, 4)
+        call qc%add("idx, >=1, <=16")
+        call parquet_open_table(t, f, qc=qc, qc_soft=.true., bounded=.true.)
+        call t%get("idx", idx)
+        if (size(idx) /= 20) error stop "bounded soft qc: every row should still be returned"
+        if (idx(20) /= 20_int32) error stop "bounded soft qc: the last row should be unchanged"
+        print '(a)', "a bounded soft qc violation warned and returned every row"
+    end subroutine scenario_bounded_qc_soft_warns
+
+    !> What the two engines hold in Arrow's own memory pool, printed for a human and asserted where
+    !! it is not vacuous.
+    !!
+    !! **Its own process, deliberately.** The pool counter is process-global and test-drive runs a
+    !! suite's tests concurrently, so an in-suite assertion would be perturbed by its neighbours.
+    !!
+    !! **The assertion that carries the weight is the BOUNDED figure's own size**, not the gap
+    !! between the two: after a bounded open the pool must hold less than one whole column, which
+    !! it does by construction because the scoped install caches nothing. That is what makes this
+    !! non-vacuous rather than an A/B that would pass against a flag doing nothing -- a `bounded=`
+    !! that were silently ignored would leave the DEFAULT engine's figure here, and the default's
+    !! is measured above one whole column. The gap is asserted too, in the direction the design
+    !! predicts, and both figures are printed so a failure says which half moved.
+    !!
+    !! **What is NOT asserted:** the PEAK. That the bounded engine never holds more than one row
+    !! group's worth of one column is the headline property, and it is not observable from Fortran:
+    !! `parquet_get_arrow_bytes_allocated` reports what is allocated NOW, and both engines' peaks
+    !! are transient, inside a call. It is measured instead by
+    !! `bench/benchmark_table.sh --mode=read_filtered`, which reports RSS per arm in its own
+    !! process; asserting it would need `arrow::default_memory_pool()->max_memory()` as a second
+    !! maintainer hook beside this one.
+    subroutine scenario_bounded_arrow_pool()
+        interface
+            function parquet_get_arrow_bytes_allocated() &
+                    bind(C, name="parquet_get_arrow_bytes_allocated") result(bytes)
+                use iso_c_binding, only : c_int64_t
+                integer(c_int64_t) :: bytes !! bytes currently allocated from Arrow's default pool.
+            end function parquet_get_arrow_bytes_allocated
+        end interface
+
+        type(parquet_table) :: t
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: f = "test_run/es_bounded_pool.parquet"
+        integer(int64) :: after_default, after_bounded, column_bytes
+        integer(int32), allocatable :: a(:), b(:)
+        integer, parameter :: N = 4000, CH = 100
+
+        ! One int32 column's worth of rows, which is what "a whole column" costs here.
+        column_bytes = int(N, int64) * 4_int64
+        call write_bounded_scenario_fixture(f, N, CH)
+        call filt%add("key < 1")
+
+        block
+            type(parquet_table) :: d
+            call parquet_open_table(d, f, filter=filt)
+            after_default = parquet_get_arrow_bytes_allocated()
+            call d%get("idx", a)
+        end block
+        call parquet_open_table(t, f, filter=filt, bounded=.true.)
+        after_bounded = parquet_get_arrow_bytes_allocated()
+        call t%get("idx", b)
+
+        print '(a,i0,a)', "arrow pool after a default filtered open : ", after_default, " bytes"
+        print '(a,i0,a)', "arrow pool after a bounded filtered open : ", after_bounded, " bytes"
+        print '(a,i0,a)', "one whole int32 column would be           : ", column_bytes, " bytes"
+        ! THE load-bearing assertion: nothing the scoped install did is still resident, so the
+        ! figure is the mask and its bookkeeping rather than any column. A bounded= that was
+        ! silently ignored would leave the default engine's figure here, which is larger than one
+        ! whole column on every run measured.
+        if (after_bounded >= column_bytes) then
+            error stop "a bounded open left a whole column's worth of Arrow memory resident"
+        end if
+        ! And the gap, in the direction the design predicts. Measured at roughly 48x on this
+        ! fixture; asserted only as an inequality, because the default figure is Arrow's own
+        ! bookkeeping after the open's release sweep and is not a number to pin.
+        if (after_default <= after_bounded) then
+            error stop "a bounded open did not hold less Arrow memory than a default one"
+        end if
+        if (size(a) /= size(b)) error stop "the two engines disagreed on the surviving row count"
+        if (.not. all(a == b)) error stop "the two engines disagreed on the surviving rows"
+        print '(a)', "a bounded open left less than one column resident, below the default's, same rows"
+    end subroutine scenario_bounded_arrow_pool
 
 end program error_scenarios

@@ -869,8 +869,14 @@ def _continued(indent, text):
     return out
 
 
+# Every optional argument %init forwards to parquet_open_table, in the order that call takes
+# them. `exact` is deliberately absent: it belongs to the kind conversion below, not to the open.
+# check_open_table_arguments_are_forwarded (tools/check_source_conventions.py) compares the
+# forwarding calls emitted below against parquet_open_table's OWN interface bodies, so an argument
+# added to the library fails the lint stage here rather than being quietly dropped -- which is how
+# `list_columns` came to be missing from a promise this file's own doc-comment makes.
 INIT_ARGS = ("maml", "filter", "sort", "qc", "qc_soft", "use_threads", "sample_fraction",
-             "sample_seed")
+             "sample_seed", "list_columns", "bounded")
 
 INIT_DECLS = [
     '        character(len=*), intent(in), optional :: maml !! read-in (Role-B) MAML describing the file.',
@@ -881,6 +887,8 @@ INIT_DECLS = [
     '        logical, intent(in), optional :: use_threads !! forwarded to parquet_open_reader.',
     '        real(real64), intent(in), optional :: sample_fraction !! keep each row with this probability.',
     '        integer(int64), intent(in), optional :: sample_seed !! seed for that draw; `42_int64`.',
+    '        character(len=*), intent(in), optional :: list_columns !! `"auto"` (default) or `"container"`.',
+    '        logical, intent(in), optional :: bounded !! read one row group at a time; see parquet_open_table.',
     '        logical, intent(in), optional :: exact !! refuse a kind conversion that would lose a value;',
     '        !! forwarded verbatim to %cast, whose own default applies when this is absent.',
 ]
@@ -919,14 +927,14 @@ def emit_init(schema):
                                     "conversion."))
     o.append(f"    subroutine {t}_init(self, filename, maml, filter, sort, qc, qc_soft, "
              f"use_threads, &")
-    o.append("            sample_fraction, sample_seed, exact)")
+    o.append("            sample_fraction, sample_seed, list_columns, bounded, exact)")
     o.append(f"        class({t}), intent(inout) :: self !! the table to fill.")
     o.append("        character(len=*), intent(in) :: filename !! parquet file to open.")
     o.extend(INIT_DECLS)
     o.append("        !")
     o.append("        call parquet_open_table(self%parquet_table, filename, maml, filter, sort, "
              "qc, qc_soft, &")
-    o.append("            use_threads, sample_fraction, sample_seed)")
+    o.append("            use_threads, sample_fraction, sample_seed, list_columns, bounded)")
     o.extend(bind_call(schema, "        "))
     o.append("        call self%init_extra()")
     o.append(f"    end subroutine {t}_init")
@@ -942,7 +950,8 @@ def emit_init_slice(schema):
                                         f"the generic binding."))
         o.append(f"    subroutine {t}_init_slice_{suffix}(self, filename, row_lo, row_hi, maml, "
                  f"filter, qc, &")
-        o.append("            qc_soft, use_threads, sample_fraction, sample_seed, exact)")
+        o.append("            qc_soft, use_threads, sample_fraction, sample_seed, list_columns, &")
+        o.append("            bounded, exact)")
         o.append(f"        class({t}), intent(inout) :: self !! the table to fill.")
         o.append("        character(len=*), intent(in) :: filename !! parquet file to open.")
         o.append(f"        {kind}, intent(in) :: row_lo !! first file row to cover (1-based).")
@@ -951,7 +960,8 @@ def emit_init_slice(schema):
         o.append("        !")
         o.append("        call parquet_open_table(self%parquet_table, filename, row_lo, row_hi, "
                  "maml, filter, qc, &")
-        o.append("            qc_soft, use_threads, sample_fraction, sample_seed)")
+        o.append("            qc_soft, use_threads, sample_fraction, sample_seed, list_columns, &")
+        o.append("            bounded)")
         o.extend(bind_call(schema, "        "))
         o.append("        call self%init_extra()")
         o.append(f"    end subroutine {t}_init_slice_{suffix}")

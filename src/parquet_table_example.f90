@@ -183,7 +183,7 @@ contains
     !! converted to its declared kind where a conversion rule applies, and fully materialized before this returns. Every optional
     !! argument is forwarded to parquet_open_table unchanged, except `exact`, which belongs to the kind conversion.
     subroutine parquet_table_test_init(self, filename, maml, filter, sort, qc, qc_soft, use_threads, &
-            sample_fraction, sample_seed, exact)
+            sample_fraction, sample_seed, list_columns, bounded, exact)
         class(parquet_table_test), intent(inout) :: self !! the table to fill.
         character(len=*), intent(in) :: filename !! parquet file to open.
         character(len=*), intent(in), optional :: maml !! read-in (Role-B) MAML describing the file.
@@ -194,11 +194,13 @@ contains
         logical, intent(in), optional :: use_threads !! forwarded to parquet_open_reader.
         real(real64), intent(in), optional :: sample_fraction !! keep each row with this probability.
         integer(int64), intent(in), optional :: sample_seed !! seed for that draw; `42_int64`.
+        character(len=*), intent(in), optional :: list_columns !! `"auto"` (default) or `"container"`.
+        logical, intent(in), optional :: bounded !! read one row group at a time; see parquet_open_table.
         logical, intent(in), optional :: exact !! refuse a kind conversion that would lose a value;
         !! forwarded verbatim to %cast, whose own default applies when this is absent.
         !
         call parquet_open_table(self%parquet_table, filename, maml, filter, sort, qc, qc_soft, &
-            use_threads, sample_fraction, sample_seed)
+            use_threads, sample_fraction, sample_seed, list_columns, bounded)
         call self%bind_predefined( &
             [character(len=8) :: "uberid", "idx", "flag", "name", "ra", "dec", "crd", "counts", "passed", "obsdate", "obstime", &
                 "obsstamp", "tags", "flux"], &
@@ -213,7 +215,8 @@ contains
     !
     !> %init_slice specific taking i32 row bounds; see the generic binding.
     subroutine parquet_table_test_init_slice_i32(self, filename, row_lo, row_hi, maml, filter, qc, &
-            qc_soft, use_threads, sample_fraction, sample_seed, exact)
+            qc_soft, use_threads, sample_fraction, sample_seed, list_columns, &
+            bounded, exact)
         class(parquet_table_test), intent(inout) :: self !! the table to fill.
         character(len=*), intent(in) :: filename !! parquet file to open.
         integer(int32), intent(in) :: row_lo !! first file row to cover (1-based).
@@ -225,11 +228,14 @@ contains
         logical, intent(in), optional :: use_threads !! forwarded to parquet_open_reader.
         real(real64), intent(in), optional :: sample_fraction !! keep each row with this probability.
         integer(int64), intent(in), optional :: sample_seed !! seed for that draw; `42_int64`.
+        character(len=*), intent(in), optional :: list_columns !! `"auto"` (default) or `"container"`.
+        logical, intent(in), optional :: bounded !! read one row group at a time; see parquet_open_table.
         logical, intent(in), optional :: exact !! refuse a kind conversion that would lose a value;
         !! forwarded verbatim to %cast, whose own default applies when this is absent.
         !
         call parquet_open_table(self%parquet_table, filename, row_lo, row_hi, maml, filter, qc, &
-            qc_soft, use_threads, sample_fraction, sample_seed)
+            qc_soft, use_threads, sample_fraction, sample_seed, list_columns, &
+            bounded)
         call self%bind_predefined( &
             [character(len=8) :: "uberid", "idx", "flag", "name", "ra", "dec", "crd", "counts", "passed", "obsdate", "obstime", &
                 "obsstamp", "tags", "flux"], &
@@ -244,7 +250,8 @@ contains
     !
     !> %init_slice specific taking i64 row bounds; see the generic binding.
     subroutine parquet_table_test_init_slice_i64(self, filename, row_lo, row_hi, maml, filter, qc, &
-            qc_soft, use_threads, sample_fraction, sample_seed, exact)
+            qc_soft, use_threads, sample_fraction, sample_seed, list_columns, &
+            bounded, exact)
         class(parquet_table_test), intent(inout) :: self !! the table to fill.
         character(len=*), intent(in) :: filename !! parquet file to open.
         integer(int64), intent(in) :: row_lo !! first file row to cover (1-based).
@@ -256,11 +263,14 @@ contains
         logical, intent(in), optional :: use_threads !! forwarded to parquet_open_reader.
         real(real64), intent(in), optional :: sample_fraction !! keep each row with this probability.
         integer(int64), intent(in), optional :: sample_seed !! seed for that draw; `42_int64`.
+        character(len=*), intent(in), optional :: list_columns !! `"auto"` (default) or `"container"`.
+        logical, intent(in), optional :: bounded !! read one row group at a time; see parquet_open_table.
         logical, intent(in), optional :: exact !! refuse a kind conversion that would lose a value;
         !! forwarded verbatim to %cast, whose own default applies when this is absent.
         !
         call parquet_open_table(self%parquet_table, filename, row_lo, row_hi, maml, filter, qc, &
-            qc_soft, use_threads, sample_fraction, sample_seed)
+            qc_soft, use_threads, sample_fraction, sample_seed, list_columns, &
+            bounded)
         call self%bind_predefined( &
             [character(len=8) :: "uberid", "idx", "flag", "name", "ra", "dec", "crd", "counts", "passed", "obsdate", "obstime", &
                 "obsstamp", "tags", "flux"], &

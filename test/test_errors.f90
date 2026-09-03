@@ -80,7 +80,7 @@ contains
         ! check_testsuite_continuation_lines (tools/check_source_conventions.py) fails the lint
         ! stage before nagfor ever sees it.
         type(unittest_type), allocatable :: p1(:), p2(:), p3(:), p4(:), p5(:), p6(:), p7(:), &
-                                            p8(:), p9(:), p10(:), p11(:)
+                                            p8(:), p9(:), p10(:), p11(:), p12(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -1960,7 +1960,20 @@ contains
             new_unittest("every legal pf_index_pool path completes", &
                 test_pool_control_completes) &
             ]
-        testsuite = [p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11]
+        ! A TWELFTH part rather than more entries in p11: one array constructor may carry at most
+        ! 255 continuation lines and only nagfor enforces it, so a part that fills up is grown by
+        ! adding another. p4 already stands at 248.
+        p12 = [ &
+            new_unittest("a bounded table with a sort is refused at open", &
+                test_bounded_with_sort_refused), &
+            new_unittest("a bounded table with a maml sort list is refused at open", &
+                test_bounded_with_maml_sort_refused), &
+            new_unittest("a bounded qc violation aborts at first touch, not at open", &
+                test_bounded_qc_hard_at_first_touch), &
+            new_unittest("a bounded soft qc violation warns and returns every row", &
+                test_bounded_qc_soft_warns) &
+            ]
+        testsuite = [p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12]
     end subroutine collect_tests_parquet_errors
 
 
@@ -2488,6 +2501,53 @@ contains
     !
     !> The negative control: every legal call must run to completion, or a guard that fired
     !> unconditionally would satisfy every abort scenario above while breaking the library.
+    !> `bounded=.true.` and a sort are mutually exclusive, and the refusal names the remedy.
+    !!
+    !! A sort reorders rows across the whole file, so a sorted row belongs to no row group and no
+    !! column can be assembled one row group at a time. The message is asserted rather than only
+    !! the abort, because what makes this refusal acceptable is that it tells the caller what to do
+    !! instead -- only the library's own text is matched, never the runtime's `ERROR STOP` prefix,
+    !! which differs between compilers.
+    subroutine test_bounded_with_sort_refused(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "bounded_with_sort_refused", expect_abort=.true., &
+            failure_message="bounded=.true. with a sort= was expected to be refused at open", &
+            required_stderr="bounded=.true. cannot be combined with a sort")
+    end subroutine test_bounded_with_sort_refused
+
+    !> The same refusal reached through a read-in MAML's `extra: sort:` list rather than `sort=`.
+    !! Both are merged into one composed sort before the guard sees them, so this proves the single
+    !! guard really does cover both spellings.
+    subroutine test_bounded_with_maml_sort_refused(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "bounded_with_maml_sort_refused", expect_abort=.true., &
+            failure_message="bounded=.true. with a maml sort list was expected to be refused at open", &
+            required_stderr="bounded=.true. cannot be combined with a sort")
+    end subroutine test_bounded_with_maml_sort_refused
+
+    !> A hard `qc=` bound under `bounded` is enforced when the column is READ, per row group.
+    !!
+    !! The scenario prints a line after the open and before the read, so the abort message naming a
+    !! row group is what proves both halves: that the open did not enforce it, and that a violation
+    !! outside the FIRST row group is still caught -- an implementation checking only the first
+    !! chunk would pass this fixture silently.
+    subroutine test_bounded_qc_hard_at_first_touch(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "bounded_qc_hard_at_first_touch", expect_abort=.true., &
+            failure_message="a bounded qc violation in a later row group was expected to abort on first touch", &
+            required_stderr="qc violation for column 'idx [row group 5]'")
+    end subroutine test_bounded_qc_hard_at_first_touch
+
+    !> The soft counterpart: `qc_soft=.true.` under `bounded` warns rather than aborting, and the
+    !! read completes. Both halves matter -- a guard that aborted regardless would pass the hard
+    !! test alone, and one that never fired would pass neither.
+    subroutine test_bounded_qc_soft_warns(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "bounded_qc_soft_warns", expect_abort=.false., &
+            failure_message="a bounded soft qc violation was expected to warn rather than abort", &
+            required_stderr="qc violation for column 'idx [row group 5]'")
+    end subroutine test_bounded_qc_soft_warns
+
     subroutine test_pool_control_completes(error)
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "pool_control", expect_abort=.false., &

@@ -281,11 +281,30 @@ contains
                 ! so the row-group split below must not even be considered -- that is what makes
                 ! the two parallel read paths mutually exclusive by construction rather than by a
                 ! flag someone has to remember to pass.
-                call table_materialize_kind(slot%declared_kind, rdr, slot%file_name, &
-                    slot%values, sc%nrows, int(slot%width, int32), "")
+                !
+                ! A BOUNDED table takes the chunked assembler on both whole-file arms instead of
+                ! reading the column whole. It is the same procedure the slice regime uses, not a
+                ! sibling: a whole-file scope is the degenerate case of a slice scope (row_lo = 1,
+                ! row_hi = nrows), so its intersection arithmetic simply takes every chunk whole,
+                ! and the three assembly shapes it already has -- paste, append, and the container
+                ! arm where the first chunk BUILDS the column and settles its payload kind -- are
+                ! exactly what a second copy would get wrong.
+                if (cache%bounded_read) then
+                    call materialize_slice(cache, sc, idx, rdr)
+                else
+                    call table_materialize_kind(slot%declared_kind, rdr, slot%file_name, &
+                        slot%values, sc%nrows, int(slot%width, int32), "")
+                end if
             else if (.not. materialize_column_parallel(cache, sc, idx)) then
-                call table_materialize_kind(slot%declared_kind, cache%reader, slot%file_name, &
-                    slot%values, sc%nrows, int(slot%width, int32), "")
+                ! materialize_column_parallel is asked FIRST and stays enabled under `bounded`:
+                ! it is chunked already, its peak is one row group per thread, and
+                ! parquet_set_table_threads is the cap on that.
+                if (cache%bounded_read) then
+                    call materialize_slice(cache, sc, idx)
+                else
+                    call table_materialize_kind(slot%declared_kind, cache%reader, slot%file_name, &
+                        slot%values, sc%nrows, int(slot%width, int32), "")
+                end if
             end if
             if (allocated(slot%unit)) call slot%values%set_unit(slot%unit)
             slot%residency = RES_FULL
@@ -544,11 +563,21 @@ contains
         end if
     end subroutine paste_row_group_safely
     !
-    !> Assembles one column from just the row groups covering the table's slice.
+    !> Assembles one column from the row groups covering the table's SCOPE, one row group at a
+    !! time -- the slice regime always, and a whole-file table opened `bounded=.true.`
     !!
-    !! The full regime reads a column in one call; a slice cannot, because a whole-column read
-    !! would decode every row group in the file -- the very cost the slice regime exists to
-    !! avoid. So each covering row group is read on its own and placed into the slice's column.
+    !! Both callers want the same thing for different reasons. A slice cannot read its column in
+    !! one call because a whole-column read would decode every row group in the file, which is the
+    !! cost the slice regime exists to avoid; a bounded whole-file table declines the same call
+    !! because its peak memory would then be one whole column rather than one row group of one.
+    !!
+    !! **A whole-file scope is the DEGENERATE case of a slice scope, not a second case.** For a
+    !! `REGIME_FULL` table `table_scope_of` gives `row_lo = 1` and `row_hi = nrows`, so the
+    !! intersection below (`lo = max(...)`, `hi = min(...)`) simply takes every chunk whole and the
+    !! trimming arms never fire. That is why this is one procedure rather than two: the three
+    !! assembly shapes -- and in particular the container arm, where the first covering row group
+    !! BUILDS the column and settles the payload kind nothing knew before the read -- are what a
+    !! second copy would get wrong.
     !!
     !! The column is sized ONCE, up front, and each row group is pasted into its place: the row
     !! count is `sc%nrows`, which is known before any data is read. Growing it with `append`
@@ -563,7 +592,7 @@ contains
     !! they keep the grow-and-append shape -- which costs them nothing, because
     !! `parquet_string_column` grows its buffers geometrically rather than exact-fit.
     subroutine materialize_slice(cache, sc, idx, rdr)
-        type(parquet_table_cache), intent(inout) :: cache !! the column store.
+        type(parquet_table_cache), intent(inout), target :: cache !! the column store.
         type(table_scope), intent(in) :: sc               !! rows this table covers.
         integer, intent(in) :: idx                        !! slot to fill.
         type(parquet_column) :: chunk
@@ -573,8 +602,28 @@ contains
         class(parquet_container_column), pointer :: cc
         integer(int64) :: rg, rg_lo, rg_hi, lo, hi, rows_rg, cursor, take
         logical :: in_place, is_container
+        !> Row-group bounds this assembly walks, when the cache carries none of its own -- which is
+        !! the bounded whole-file case, and only that one. A footer walk (one row-group count plus
+        !! one parquet_get_chunk_size each), the same cost materialize_column_parallel already pays
+        !! per column for the same reason: cache%rg_bounds is a SLICE-regime object, and filling it
+        !! in for a whole-file table would change what %row_group_bounds answers as a side effect of
+        !! an internal choice about how the column is read.
+        integer(int64), allocatable, target :: own_bounds(:,:)
+        integer(int64), pointer :: bounds(:,:)
         !
-        associate (slot => cache%cols(idx), bounds => cache%rg_bounds)
+        if (allocated(cache%rg_bounds)) then
+            bounds => cache%rg_bounds
+        else if (present(rdr)) then
+            ! Built from the reader this call actually drives, so a per-thread reader gets its own
+            ! copy and nothing shared is written -- the same rule table_open_reader_with_transform
+            ! states for cache%rg_bounds itself.
+            call reader_row_group_bounds(rdr, own_bounds)
+            bounds => own_bounds
+        else
+            call reader_row_group_bounds(cache%reader, own_bounds)
+            bounds => own_bounds
+        end if
+        associate (slot => cache%cols(idx))
             ! THREE assembly shapes, not two. The array kinds are preallocated and %paste'd into
             ! place; the string kinds and the containers are grown by %append, because neither has
             ! fixed-width row slots for a paste to overwrite (%paste refuses both).
@@ -600,6 +649,18 @@ contains
                 rg_hi = bounds(2, rg)
                 if (rg_hi < sc%row_lo .or. rg_lo > sc%row_hi) cycle
                 rows_rg = rg_hi - rg_lo + 1_int64
+                ! A row group a filter emptied contributes nothing, and the test above catches such
+                ! a row group only at the two ENDS of the scope: an interior one is an empty range
+                ! (bounds(1) > bounds(2)) that overlaps the scope on both sides and falls through
+                ! here with rows_rg = 0. Reading it is correct and answers nothing -- every assembly
+                ! shape handles a zero-row chunk (%paste returns at count == 0, %append is a no-op,
+                ! and a container chunk is typed before it holds a row) -- but it is not free:
+                ! get_row_group_chunk_array decodes the whole row group with ReadRowGroup and
+                ! applies the mask segment AFTERWARDS, so an empty-but-live row group costs a full
+                ! row-group decode per column. Under the scattered-survivor filter a bounded read
+                ! exists for, that is most of the file. materialize_column_parallel skips them for
+                ! the same reason.
+                if (rows_rg <= 0_int64) cycle
                 if (present(rdr)) then
                     call table_materialize_chunk_kind(slot%declared_kind, rdr, &
                         slot%file_name, rg, chunk, rows_rg, int(slot%width, int32), "")

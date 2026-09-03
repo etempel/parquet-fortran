@@ -82,6 +82,12 @@ contains
         ! kinds for the same column with nothing to announce it. That is feature_risks.md Risk-152
         ! reappearing between a table and its own clone.
         if (allocated(self%cache%list_columns)) out%cache%list_columns = self%cache%list_columns
+        ! The bounded-read flag travels for the same reason the transform does, and with a sharper
+        ! consequence than a policy mismatch: clone_reopen_reader below goes through
+        ! table_open_reader_with_transform, which READS this flag to decide which filter engine to
+        ! install. Left behind, a clone of a bounded table would silently reattach through the
+        ! caching whole-file engine -- correct answers, no memory bound, and nothing to announce it.
+        out%cache%bounded_read = self%cache%bounded_read
         ! Explicit allocate-then-copy, not `out%cache%rg_bounds = self%cache%rg_bounds`: the plain
         ! assignment relies on F2003 automatic reallocation, which should be a no-op concern here
         ! since out%cache%rg_bounds is always freshly unallocated (clone_new_cache just allocated

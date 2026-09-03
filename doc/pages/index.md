@@ -23,7 +23,8 @@ below assumes that single import.
 The individual modules (`parquet_io`, `parquet_tables`, `parquet_columns`, `parquet_list`,
 `parquet_struct`, `parquet_map`, `parquet_strings`, `parquet_temporal`, `parquet_sorting`,
 `parquet_argsort`, `parquet_stats`, `parquet_sampling`, `parquet_spatial`, `parquet_healpix`,
-`parquet_random`, `parquet_logging`, `parquet_toml`, `parquet_utils`, `parquet_settings`,
+`parquet_random`, `parquet_index`, `parquet_logging`, `parquet_toml`, `parquet_utils`,
+`parquet_settings`,
 `parquet_version`,
 `parquet_maml_base`) can be named directly when you want a narrower import — see
 [Choosing a module](operating/choosing-a-module.html) for what each one costs to compile against
@@ -64,7 +65,7 @@ point in the library.
 
 ### Every page at a glance
 
-All 33 pages, in reading order. (This list, each group's own page list and the
+All 34 pages, in reading order. (This list, each group's own page list and the
 `ordered_subpage:` frontmatter are kept consistent by
 `tools/check_source_conventions.py`, which fails the CI lint stage when they drift.)
 
@@ -104,6 +105,7 @@ All 33 pages, in reading order. (This list, each group's own page list and the
 - [Random numbers and sampling with `pf_random_at`](utilities/random.html)
 - [Spatial neighbour search with `pf_spatial_index`](utilities/spatial.html)
 - [Sphere pixelisation with `parquet_healpix`](utilities/healpix.html)
+- [Key-to-index lookup with parquet_index](utilities/index-maps.html)
 - [Logging with parquet_logging](utilities/logging.html)
 - [Configuration files with parquet_toml](utilities/configuration-files.html)
 - [Text and path helpers with parquet_utils](utilities/utils.html)

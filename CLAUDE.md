@@ -1178,6 +1178,13 @@ parquet_spatial                 (module — pf_spatial_index over plain coordina
                                  + four submodules: _build, _bulk, _query, _tune)
 parquet_healpix                 (module — the HEALPix sphere pixelisation; Arrow-free, + five
                                  submodules: _core, _arith, _bulk, _grid, _query)
+parquet_index                   (module — pf_index_map / pf_index_pool: key-to-index lookup and a
+                                 recycling index allocator. Arrow-free; reaches parquet_argsort
+                                 (sorted backend), parquet_utils and settings_base only)
+├─ parquet_index_map            (submodule — lifecycle, dispatch, direct backend, the map's guard)
+├─ parquet_index_hash           (submodule — mixer, tuple combine, probing, backward-shift delete)
+├─ parquet_index_sorted         (submodule — pf_argsort build + binary search)
+└─ parquet_index_pool           (submodule — the pool, its guard, %compact's bitmap walk)
 parquet_toml                    (module — pf_toml: TOML configuration files. Arrow-free; the ONLY
                                  module reaching a third-party Fortran package (tomlf), and the
                                  only one that emits through parquet_logging)

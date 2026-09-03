@@ -5,6 +5,7 @@ ordered_subpage: statistics.md
 ordered_subpage: random.md
 ordered_subpage: spatial.md
 ordered_subpage: healpix.md
+ordered_subpage: index-maps.md
 ordered_subpage: logging.md
 ordered_subpage: configuration-files.md
 ordered_subpage: utils.md
@@ -16,6 +17,7 @@ Things beyond the file being read or written: a general-purpose sorting API over
 arrays and this library's own column types, statistical reductions over those same arrays,
 counter-based random numbers that survive a parallel loop — with the distributions and sampling
 built on them — spatial neighbour search over coordinate arrays, the HEALPix sphere pixelisation,
+fast key-to-index lookup and a recycling allocator for index values,
 leveled logging for your own program, TOML configuration files, small text and path helpers, and
 the two generators meant to be copied into your own project.
 
@@ -48,6 +50,13 @@ the two generators meant to be copied into your own project.
   arithmetic, and a `_bulk` form of every conversion that threads internally. Equal-area pixels on
   rings of constant latitude, both integer kinds, and no floating-point exception raised — so a
   program running under `-ffpe-trap` needs no guard around a disc query.
+- [Key-to-index lookup with parquet_index](index-maps.html) — `pf_index_map`: which row holds
+  this key, in a few nanoseconds, over a single integer key or a tuple of them when no one column
+  is unique. Three storage backends behind one API — an array indexed by the key, an open-addressing
+  hash table, and sorted keys plus a binary search — chosen from the keys themselves. Then
+  `pf_index_pool`, which hands out and recycles unique index values so a program managing slots in
+  its own arrays need not track which are free. Both are safe to mutate from several threads at
+  once, and lookups are lock-free.
 - [Logging with `parquet_logging`](logging.html) — leveled logging for your own program:
   several destinations at once each with its own threshold and layout, ISO timestamps, colour,
   a cheap `%enabled` check before an expensive message, per-thread context tags and a buffered

@@ -22,6 +22,7 @@ program error_scenarios
     ! src/parquet.f90 privatises it -- so naming its own module is how a caller reaches it,
     ! and this import is the documented route rather than a workaround.
     use parquet_healpix, only : pf_query_disc_runs
+    use parquet_index, only : pf_index_map, pf_index_pool, pf_index_max_components
     use parquet_table_example, only : parquet_table_test
     use parquet_tables
     use parquet_temporal, only : parquet_date, parquet_time, parquet_timestamp, &
@@ -2415,6 +2416,56 @@ program error_scenarios
         call scenario_toml_bad_severity()
     case ("toml_control")
         call scenario_toml_control()
+    case ("index_build_duplicate_direct")
+        call scenario_index_build_duplicate_direct()
+    case ("index_build_duplicate_hash")
+        call scenario_index_build_duplicate_hash()
+    case ("index_build_duplicate_sorted")
+        call scenario_index_build_duplicate_sorted()
+    case ("index_build_duplicate_tuple_direct")
+        call scenario_index_build_duplicate_tuple_direct()
+    case ("index_build_duplicate_tuple_hash")
+        call scenario_index_build_duplicate_tuple_hash()
+    case ("index_build_value_zero")
+        call scenario_index_build_value_zero()
+    case ("index_build_values_length")
+        call scenario_index_build_values_length()
+    case ("index_get_many_length")
+        call scenario_index_get_many_length()
+    case ("index_tuple_width_mismatch")
+        call scenario_index_tuple_width_mismatch()
+    case ("index_scalar_on_composite")
+        call scenario_index_scalar_on_composite()
+    case ("index_sorted_set")
+        call scenario_index_sorted_set()
+    case ("index_sorted_remove")
+        call scenario_index_sorted_remove()
+    case ("index_sorted_composite")
+        call scenario_index_sorted_composite()
+    case ("index_init_direct")
+        call scenario_index_init_direct()
+    case ("index_init_sorted")
+        call scenario_index_init_sorted()
+    case ("index_bad_method")
+        call scenario_index_bad_method()
+    case ("index_direct_set_out_of_range")
+        call scenario_index_direct_set_out_of_range()
+    case ("index_ncomp_too_large")
+        call scenario_index_ncomp_too_large()
+    case ("index_direct_range_too_wide")
+        call scenario_index_direct_range_too_wide()
+    case ("index_remove_absent")
+        call scenario_index_remove_absent()
+    case ("index_control")
+        call scenario_index_control()
+    case ("pool_double_free")
+        call scenario_pool_double_free()
+    case ("pool_free_never_issued")
+        call scenario_pool_free_never_issued()
+    case ("pool_free_zero")
+        call scenario_pool_free_zero()
+    case ("pool_control")
+        call scenario_pool_control()
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -21053,5 +21104,297 @@ contains
         call pf_toml_close(conf)
         print '(a)', "scenario_toml_control: every legal parquet_toml path completed"
     end subroutine scenario_toml_control
+
+    ! ---- parquet_index: pf_index_map ----
+    !
+    !> A duplicate key is an error rather than a policy choice, on every backend, because the
+    !> alternative is a map that silently answers for one of two rows and gives the caller no way
+    !> to find out which. Each backend detects it by its own mechanism -- the direct arm by
+    !> counting occupied slots after a scatter that may have been threaded, the hash arm on the
+    !> insert that finds the key already there, the sorted arm on an adjacency scan after the
+    !> sort -- so all three are exercised separately.
+    subroutine scenario_index_build_duplicate_direct()
+        type(pf_index_map) :: m
+
+        call m%build([1_int64, 2_int64, 3_int64, 2_int64], method="direct")
+        print '(a)', "built a direct map with a duplicate key"
+    end subroutine scenario_index_build_duplicate_direct
+    !
+    !> See `scenario_index_build_duplicate_direct`. The hash arm names the offender from its
+    !> insert loop.
+    subroutine scenario_index_build_duplicate_hash()
+        type(pf_index_map) :: m
+
+        call m%build([10_int64, 20_int64, 30_int64, 20_int64], method="hash")
+        print '(a)', "built a hash map with a duplicate key"
+    end subroutine scenario_index_build_duplicate_hash
+    !
+    !> See `scenario_index_build_duplicate_direct`. The sorted arm finds duplicates adjacent.
+    subroutine scenario_index_build_duplicate_sorted()
+        type(pf_index_map) :: m
+
+        call m%build([5_int64, 9_int64, 5_int64], method="sorted")
+        print '(a)', "built a sorted map with a duplicate key"
+    end subroutine scenario_index_build_duplicate_sorted
+    !
+    !> A duplicate TUPLE, which is the composite form of the same rule: the individual components
+    !> may repeat as much as they like, and only the whole tuple has to be unique.
+    subroutine scenario_index_build_duplicate_tuple_direct()
+        type(pf_index_map) :: m
+        integer(int64) :: pairs(3, 2)
+
+        pairs(:, 1) = [1_int64, 2_int64, 1_int64]
+        pairs(:, 2) = [7_int64, 8_int64, 7_int64]
+        call m%build(pairs, method="direct")
+        print '(a)', "built a direct composite map with a duplicate tuple"
+    end subroutine scenario_index_build_duplicate_tuple_direct
+    !
+    !> See `scenario_index_build_duplicate_tuple_direct`.
+    subroutine scenario_index_build_duplicate_tuple_hash()
+        type(pf_index_map) :: m
+        integer(int64) :: pairs(3, 2)
+
+        pairs(:, 1) = [1_int64, 2_int64, 1_int64]
+        pairs(:, 2) = [7_int64, 8_int64, 7_int64]
+        call m%build(pairs, method="hash")
+        print '(a)', "built a hash composite map with a duplicate tuple"
+    end subroutine scenario_index_build_duplicate_tuple_hash
+    !
+    !> A stored value below 1 is refused, because 0 is how every lookup reports "not found": a map
+    !> that stored 0 would answer "absent" for a key that is present, which is precisely the silent
+    !> wrong answer the whole values contract exists to make impossible.
+    subroutine scenario_index_build_value_zero()
+        type(pf_index_map) :: m
+
+        call m%build([1_int64, 2_int64], [1_int64, 0_int64])
+        print '(a)', "built a map storing the value 0"
+    end subroutine scenario_index_build_value_zero
+    !
+    !> `values=` must have exactly one element per key.
+    subroutine scenario_index_build_values_length()
+        type(pf_index_map) :: m
+
+        call m%build([1_int64, 2_int64, 3_int64], [1_int64, 2_int64])
+        print '(a)', "built a map with too few values"
+    end subroutine scenario_index_build_values_length
+    !
+    !> A bulk lookup whose answer array is the wrong length is refused rather than filling what
+    !> fits: a short array would leave the caller with answers for some keys and stale memory for
+    !> the rest, with nothing to say which.
+    subroutine scenario_index_get_many_length()
+        type(pf_index_map) :: m
+        integer(int64) :: out(2)
+
+        call m%build([1_int64, 2_int64, 3_int64])
+        call m%get_many([1_int64, 2_int64, 3_int64], out)
+        print '(a)', "a mismatched get_many was accepted"
+    end subroutine scenario_index_get_many_length
+    !
+    !> A lookup presenting the wrong number of components is refused. The check is one integer
+    !> comparison, which is why it is affordable on the hot path.
+    subroutine scenario_index_tuple_width_mismatch()
+        type(pf_index_map) :: m
+        integer(int64) :: pairs(2, 2), got
+
+        pairs(:, 1) = [1_int64, 2_int64]
+        pairs(:, 2) = [3_int64, 4_int64]
+        call m%build(pairs)
+        got = m%get([1_int64, 3_int64, 5_int64])
+        print '(a)', "a three-component lookup on a two-component map was accepted"
+    end subroutine scenario_index_tuple_width_mismatch
+    !
+    !> A scalar key on a composite map is refused rather than matching on the first component.
+    subroutine scenario_index_scalar_on_composite()
+        type(pf_index_map) :: m
+        integer(int64) :: pairs(2, 2), got
+
+        pairs(:, 1) = [1_int64, 2_int64]
+        pairs(:, 2) = [3_int64, 4_int64]
+        call m%build(pairs)
+        got = m%get(1_int64)
+        print '(a)', "a scalar lookup on a composite map was accepted"
+    end subroutine scenario_index_scalar_on_composite
+    !
+    !> A sorted map is frozen once built: keeping an exact-fit sorted array in order through an
+    !> insertion is O(n) per key, and that exact fit is what buys the backend its footprint.
+    subroutine scenario_index_sorted_set()
+        type(pf_index_map) :: m
+
+        call m%build([1_int64, 2_int64, 3_int64], method="sorted")
+        call m%set(4_int64, 4_int64)
+        print '(a)', "a sorted map accepted a new key"
+    end subroutine scenario_index_sorted_set
+    !
+    !> See `scenario_index_sorted_set`; removal is refused for the same reason.
+    subroutine scenario_index_sorted_remove()
+        type(pf_index_map) :: m
+
+        call m%build([1_int64, 2_int64, 3_int64], method="sorted")
+        call m%remove(2_int64)
+        print '(a)', "a sorted map accepted a removal"
+    end subroutine scenario_index_sorted_remove
+    !
+    !> The sorted backend is single-component in v1 and says so, rather than silently indexing on
+    !> the first component alone.
+    subroutine scenario_index_sorted_composite()
+        type(pf_index_map) :: m
+        integer(int64) :: pairs(2, 2)
+
+        pairs(:, 1) = [1_int64, 2_int64]
+        pairs(:, 2) = [3_int64, 4_int64]
+        call m%build(pairs, method="sorted")
+        print '(a)', "a composite sorted map was built"
+    end subroutine scenario_index_sorted_composite
+    !
+    !> `%init` starts an incremental map, and only the hash backend can be one: the direct backend
+    !> needs the whole key range up front to size its array.
+    subroutine scenario_index_init_direct()
+        type(pf_index_map) :: m
+
+        call m%init(method="direct")
+        print '(a)', "init accepted method=direct"
+    end subroutine scenario_index_init_direct
+    !
+    !> See `scenario_index_init_direct`; sorted is refused because it is frozen once built.
+    subroutine scenario_index_init_sorted()
+        type(pf_index_map) :: m
+
+        call m%init(method="sorted")
+        print '(a)', "init accepted method=sorted"
+    end subroutine scenario_index_init_sorted
+    !
+    !> An unknown `method=` token lists the accepted set rather than falling back to a default,
+    !> which would give a caller who mistyped one the performance of a backend they did not choose.
+    subroutine scenario_index_bad_method()
+        type(pf_index_map) :: m
+
+        call m%build([1_int64, 2_int64], method="btree")
+        print '(a)', "an unknown method token was accepted"
+    end subroutine scenario_index_bad_method
+    !
+    !> A `%set` whose key falls outside a direct map's built range is refused, and the message says
+    !> what to do about it. Silently migrating the map to the hash backend would change its memory
+    !> behaviour behind the caller's back.
+    subroutine scenario_index_direct_set_out_of_range()
+        type(pf_index_map) :: m
+
+        call m%build([10_int64, 11_int64, 12_int64], method="direct")
+        call m%set(9999_int64, 4_int64)
+        print '(a)', "a direct map accepted a key outside its range"
+    end subroutine scenario_index_direct_set_out_of_range
+    !
+    !> More components than the module's published maximum is refused at build, because the tuple
+    !> paths widen into a fixed-size stack buffer of exactly that width.
+    subroutine scenario_index_ncomp_too_large()
+        type(pf_index_map) :: m
+        integer(int64) :: wide(2, pf_index_max_components + 1)
+        integer :: j
+
+        do j = 1, pf_index_max_components + 1
+            wide(1, j) = int(j, int64)
+            wide(2, j) = int(j, int64) + 100_int64
+        end do
+        call m%build(wide)
+        print '(a)', "a key wider than pf_index_max_components was accepted"
+    end subroutine scenario_index_ncomp_too_large
+    !
+    !> An explicit `method="direct"` over a key range wider than the whole int64 domain is refused
+    !> rather than wrapped. The automatic choice can never reach this -- its whole job is to keep
+    !> the span inside a budget -- so only a caller who asked for direct by name gets here.
+    subroutine scenario_index_direct_range_too_wide()
+        type(pf_index_map) :: m
+
+        call m%build([-huge(0_int64), huge(0_int64)], method="direct")
+        print '(a)', "a direct map spanning the whole int64 domain was built"
+    end subroutine scenario_index_direct_range_too_wide
+    !
+    !> `%remove` without `found=` treats an absent key as an error, on the same reasoning as every
+    !> other mutating procedure in this library: a caller who did not ask to be told about absence
+    !> is asserting the key is there.
+    subroutine scenario_index_remove_absent()
+        type(pf_index_map) :: m
+
+        call m%build([1_int64, 2_int64], method="hash")
+        call m%remove(77_int64)
+        print '(a)', "removing an absent key was accepted"
+    end subroutine scenario_index_remove_absent
+    !
+    !> The shared negative control for every map scenario above: the same calls, made correctly,
+    !> must run to completion. Without it a guard that fired unconditionally would satisfy every
+    !> one of the abort scenarios while breaking the library outright.
+    subroutine scenario_index_control()
+        type(pf_index_map) :: m
+        integer(int64) :: pairs(2, 2), out(3)
+        logical :: found
+
+        pairs(:, 1) = [1_int64, 2_int64]
+        pairs(:, 2) = [3_int64, 4_int64]
+        call m%build([1_int64, 2_int64, 3_int64], method="direct")
+        call m%get_many([1_int64, 2_int64, 3_int64], out)
+        call m%set(2_int64, 9_int64)
+        call m%remove(2_int64)
+        call m%remove(2_int64, found)
+        call m%build([1_int64, 2_int64, 3_int64], [3_int64, 2_int64, 1_int64], method="sorted")
+        call m%build(pairs, method="hash")
+        if (m%get([1_int64, 3_int64]) /= 1_int64) error stop "control: composite lookup"
+        call m%init(method="hash")
+        call m%set(1_int64, 1_int64)
+        print '(a)', "index control finished"
+    end subroutine scenario_index_control
+
+    ! ---- parquet_index: pf_index_pool ----
+    !
+    !> Freeing an index twice is refused. Accepting it silently would put the same index on the
+    !> free list twice, so two later callers would each be handed it and each believe they owned
+    !> the slot it names -- a wrong answer with no symptom at the point of the mistake.
+    subroutine scenario_pool_double_free()
+        type(pf_index_pool) :: p
+        integer(int64) :: a
+
+        a = p%get_index()
+        call p%free_index(a)
+        call p%free_index(a)
+        print '(a)', "a double free was accepted"
+    end subroutine scenario_pool_double_free
+    !
+    !> Freeing an index the pool never handed out is refused, and carries a different message from
+    !> the double free: an index above the watermark is usually a different bug from one released
+    !> twice.
+    subroutine scenario_pool_free_never_issued()
+        type(pf_index_pool) :: p
+        integer(int64) :: a
+
+        a = p%get_index()
+        call p%free_index(a + 5_int64)
+        print '(a)', "freeing a never-issued index was accepted"
+    end subroutine scenario_pool_free_never_issued
+    !
+    !> Zero is not an index this pool ever issues, so freeing it is the never-issued case.
+    subroutine scenario_pool_free_zero()
+        type(pf_index_pool) :: p
+        integer(int64) :: a
+
+        a = p%get_index()
+        call p%free_index(0_int64)
+        print '(a)', "freeing index 0 was accepted"
+    end subroutine scenario_pool_free_zero
+    !
+    !> The negative control for the three pool guards: taking an index, giving it back, and taking
+    !> it again is legal and must stay legal. A double-free guard keyed on "has this index ever
+    !> been freed" rather than "is it free now" would pass all three scenarios above and fail here.
+    subroutine scenario_pool_control()
+        type(pf_index_pool) :: p
+        integer(int64) :: a, b
+
+        a = p%get_index()
+        b = p%get_index()
+        call p%free_index(a)
+        a = p%get_index()
+        call p%free_index(a)
+        call p%free_index(b)
+        call p%compact()
+        if (p%get_max_index() /= 0_int64) error stop "control: compact should empty the pool"
+        print '(a)', "pool control finished"
+    end subroutine scenario_pool_control
 
 end program error_scenarios

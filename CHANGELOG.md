@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`parquet_index`**: an Arrow-free entry module for fast key-to-index lookup. `pf_index_map`
+  maps a single integer key, or an N-component tuple of them, to an index value, with three storage
+  backends behind one API — an array indexed by the key, an open-addressing hash table, and sorted
+  keys plus a binary search — chosen automatically from the keys unless `method=` names one.
+  `%build` fills it in bulk, `%init` plus `%set`/`%get_or_add` fill it as you go, and `%get_many`
+  is the bulk lookup for a hot loop; `%remove`, `%keys`, `%probe_stats` and `%memory_bytes`
+  complete the surface. Stored values are integers >= 1 and a lookup answers 0 for an absent key.
+  `pf_index_pool` hands out and recycles unique index values with reuse always preceding growth,
+  and `%compact` gives back grown storage and then hands out the smallest free index first. Every
+  mutation of either type is serialized internally, so one shared map or pool may be mutated from
+  several threads at once, while map lookups are lock-free. A new `index_threads` setting
+  (`PARQUET_FORTRAN_INDEX_THREADS`) caps what a build's internally threaded key scan and scatter
+  may open.
 - **`parquet_toml`**: an Arrow-free entry module for reading and writing TOML configuration files,
   built on [toml-f](https://github.com/toml-f/toml-f) — which becomes this library's first Fortran
   package dependency, so every consumer now fetches it. `pf_toml_load`/`pf_toml_loads` parse a file

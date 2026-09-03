@@ -75,6 +75,69 @@ contains
 
 end module test_module_surface_argsort
 
+!> `parquet_index` alone: the map, the pool, and every knob this tier's own code reads.
+!!
+!! The build's thread cap plus the output pair (its affinity clamp warns through the same channel
+!! every other tier does) and the sorting knobs, because `method="sorted"` builds through
+!! `pf_argsort` and that sort answers to those rather than to `index_threads`.
+module test_module_surface_index
+    use parquet_index                  ! THE ONLY library import.
+    use iso_fortran_env, only : int64
+    implicit none
+    private
+    public :: check_index_surface
+
+contains
+
+    !> Round-trips every knob `parquet_index`'s own code reads, and exercises both types.
+    subroutine check_index_surface(what)
+        character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
+        character(len=:), allocatable :: tok
+        type(pf_index_map) :: m
+        type(pf_index_pool) :: p
+        integer :: n_index, n_sort
+
+        what = ""
+        n_index = parquet_get_index_threads()
+        n_sort = parquet_get_sort_threads()
+
+        call parquet_set_index_threads(3)
+        if (parquet_get_index_threads() /= 3) what = "index_threads"
+        if (what == "" .and. pf_index_threads(1000000_int64) > 3) what = "pf_index_threads"
+        ! The sorting knobs, reachable because a sorted build goes through pf_argsort.
+        call parquet_set_sort_threads(2)
+        if (what == "" .and. parquet_get_sort_threads() /= 2) what = "sort_threads"
+        call parquet_set_sort_counting_bucket_limit(64_int64)
+        if (what == "" .and. parquet_get_sort_counting_bucket_limit() /= 64_int64) &
+            what = "sort_counting_bucket_limit"
+        ! The output pair: the affinity clamp emits from this tier.
+        call parquet_set_verbosity("silent")
+        call parquet_get_verbosity(tok)
+        if (what == "" .and. tok /= "silent") what = "verbosity"
+        call parquet_set_verbosity("normal")
+        call parquet_set_message_stream("stderr")
+        call parquet_get_message_stream(tok)
+        if (what == "" .and. tok /= "stderr") what = "message_stream"
+        call parquet_set_message_stream("stdout")
+
+        ! Both types must be usable from this import alone, which is the half a knob round trip
+        ! cannot show: if either type or the component limit stopped being re-exported, this file
+        ! would fail to COMPILE, which is how this test earns its keep.
+        call m%build([10_int64, 11_int64, 12_int64])
+        if (what == "" .and. m%get(11_int64) /= 2_int64) what = "pf_index_map%get"
+        if (what == "" .and. m%ncomponents() /= 1) what = "pf_index_map%ncomponents"
+        call m%get_method(tok)
+        if (what == "" .and. tok /= "direct") what = "pf_index_map%get_method"
+        if (what == "" .and. p%get_index() /= 1_int64) what = "pf_index_pool%get_index"
+        if (what == "" .and. pf_index_max_components < 1) what = "pf_index_max_components"
+
+        call parquet_set_index_threads(n_index)
+        call parquet_set_sort_threads(n_sort)
+        call parquet_set_sort_counting_bucket_limit(0_int64)
+    end subroutine check_index_surface
+
+end module test_module_surface_index
+
 !> `parquet_sorting` alone: the same four sorting knobs, reached through the facade tier.
 module test_module_surface_sorting
     use parquet_sorting                ! THE ONLY library import.
@@ -1140,6 +1203,7 @@ module test_module_surface
     use test_module_surface_struct, only : check_struct_surface
     use test_module_surface_map, only : check_map_surface
     use test_module_surface_random, only : check_random_surface
+    use test_module_surface_index, only : check_index_surface
     use test_module_surface_tables, only : check_tables_surface
     use parquet_settings_base          ! THE ONLY library import -- see the note above.
     use testdrive, only : new_unittest, unittest_type, error_type, check
@@ -1230,6 +1294,8 @@ contains
         testsuite = [ &
             new_unittest("parquet_settings_base alone exposes get AND set for every knob it holds", &
                 test_settings_base_surface), &
+            new_unittest("parquet_index alone exposes both types and every knob it reads", &
+                test_index_surface), &
             new_unittest("parquet_argsort alone exposes every sorting knob it reads", &
                 test_argsort_surface), &
             new_unittest("parquet_sorting alone exposes every sorting knob it reads", &
@@ -1386,6 +1452,16 @@ contains
         call check_io_surface(what)
         call check(error, what == "", "a layer was not reachable through `use parquet_io` alone: " // what)
     end subroutine test_io_surface
+
+    !> The test-drive wrapper over check_index_surface.
+    subroutine test_index_surface(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: what
+
+        call check_index_surface(what)
+        call check(error, what == "", &
+            "something was not reachable through `use parquet_index` alone: " // what)
+    end subroutine test_index_surface
 
     !> The test-drive wrapper over check_argsort_surface.
     subroutine test_argsort_surface(error)

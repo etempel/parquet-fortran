@@ -101,7 +101,7 @@ expect_file="$repo/tools/module_footprints.txt"
 # script answered "'parquet_tables' is not an advertised entry module" to the very name the page,
 # CLAUDE.md and CONTRIBUTING.md all use for it, and the number the page printed for it (64, where
 # the truth is 62) had never been measured by anything at all.
-ENTRY_MODULES="parquet_version parquet_utils parquet_temporal parquet_strings parquet_random parquet_argsort \
+ENTRY_MODULES="parquet_version parquet_utils parquet_temporal parquet_strings parquet_random parquet_argsort parquet_index \
 parquet_sampling parquet_spatial parquet_healpix parquet_columns parquet_list parquet_struct parquet_map \
 parquet_sorting parquet_stats parquet_logging parquet_toml parquet_settings \
 parquet_io parquet_tables parquet"

@@ -64,6 +64,7 @@ module parquet_settings
     public :: parquet_set_random_threads, parquet_get_random_threads
     public :: parquet_set_spatial_threads, parquet_get_spatial_threads
     public :: parquet_set_healpix_threads, parquet_get_healpix_threads
+    public :: parquet_set_index_threads, parquet_get_index_threads
     public :: parquet_set_spatial_rebuild_warning, parquet_get_spatial_rebuild_warning
     public :: parquet_set_random_parallel_min_elements
     public :: parquet_get_random_parallel_min_elements
@@ -412,8 +413,9 @@ contains
     !>
     !> **Adding another cap means adding it here and to the assertion in `test_set_threads`.** The
     !> name says nothing about how many "all" is, so a forgotten call is invisible -- which is how
-    !> this doc-comment came to say "all four" while a fifth and a sixth cap existed. It now NAMES
-    !> them rather than counting them, so a seventh needs one line here and nowhere else.
+    !> this doc-comment came to say "all four" while a fifth and a sixth cap existed. It NAMES them
+    !> rather than counting them, so the next one needs one line here and nowhere else. The
+    !> environment table on the settings guide page does carry a count, and that one has to move.
     subroutine parquet_set_threads(n)
         integer, intent(in) :: n !! thread count for every cap; must be >= 1.
 
@@ -428,6 +430,7 @@ contains
         call parquet_set_random_threads(n)
         call parquet_set_spatial_threads(n)
         call parquet_set_healpix_threads(n)
+        call parquet_set_index_threads(n)
     end subroutine parquet_set_threads
 
     !> Sets the compression codec `parquet_open_writer` uses when the caller passes no
@@ -915,6 +918,12 @@ contains
             call parquet_set_healpix_threads(n32)
         end if
 
+        call env_value("PARQUET_FORTRAN_INDEX_THREADS", text, got)
+        if (got) then
+            call env_int32("PARQUET_FORTRAN_INDEX_THREADS", text, n32)
+            call parquet_set_index_threads(n32)
+        end if
+
         call env_value("PARQUET_FORTRAN_SPATIAL_REBUILD_WARNING", text, got)
         if (got) then
             call env_logical("PARQUET_FORTRAN_SPATIAL_REBUILD_WARNING", text, flag)
@@ -1160,6 +1169,7 @@ contains
         cfg_random_threads = 0
         cfg_spatial_threads = 0
         cfg_healpix_threads = 0
+        cfg_index_threads = 0
         cfg_spatial_rebuild_warning = .true.
         cfg_random_parallel_min_elements = 1000_int64
         cfg_default_compression = ""
@@ -1201,6 +1211,7 @@ contains
         call print_one(u, "random_threads", cfg_random_threads)
         call print_one(u, "spatial_threads", cfg_spatial_threads)
         call print_one(u, "healpix_threads", cfg_healpix_threads)
+        call print_one(u, "index_threads", cfg_index_threads)
         call print_big(u, "random_parallel_min_elements", cfg_random_parallel_min_elements)
         call print_text(u, "spatial_rebuild_warning", merge("true ", "false", cfg_spatial_rebuild_warning))
         call print_text(u, "sort_counting_path", merge("true ", "false", cfg_sort_counting_path))

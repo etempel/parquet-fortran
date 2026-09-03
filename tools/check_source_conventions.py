@@ -1639,6 +1639,28 @@ def check_parquet_argsort_stays_arrow_free():
         "nothing but a sort.")
 
 
+def check_parquet_index_stays_arrow_free():
+    """`use parquet_index` must not drag the Arrow/Parquet C++ stack into a consumer's build.
+
+    One check per tier is the standing rule, and this tier needs its own for a reason worth
+    stating: it is covered by nothing else. `parquet_index` is reached by no other checked module,
+    so a `use parquet_core` added to it -- or to any of its four submodules -- would be invisible
+    to every other closure walk here while multiplying what a `use parquet_index` consumer
+    compiles from a handful of files to the whole reader/writer stack.
+
+    Nothing in `fpm test` can see it either: the library obviously has Arrow, so the stray import
+    compiles and tests perfectly well here and only inflates the consumer's build. The walk covers
+    the submodules, which is where such an import is most likely to be added -- the sorted
+    backend already imports `parquet_argsort`, so the file that would most naturally reach for
+    `parquet_sorting` (and through it `parquet_bindings`) is one of the four rather than the spec.
+    """
+    return _check_stays_arrow_free(
+        "parquet_index",
+        "The index tier is Arrow-free by design: a map or a pool over plain integer keys needs no "
+        "C++ at all, and the sorted backend takes its sort from the argsort tier for exactly that "
+        "reason.")
+
+
 def check_parquet_sorting_stays_arrow_free():
     """`use parquet_sorting` must not reach parquet_bindings either.
 
@@ -4533,11 +4555,14 @@ CHECKS = (
      check_log_env_table_matches_the_source),
     ("parquet_strings does not reach parquet_bindings", check_parquet_strings_stays_leaf),
     ("parquet_argsort stays Arrow-free", check_parquet_argsort_stays_arrow_free),
+    ("parquet_index stays Arrow-free", check_parquet_index_stays_arrow_free),
     ("parquet_sorting stays Arrow-free", check_parquet_sorting_stays_arrow_free),
     ("parquet_sampling stays Arrow-free", check_parquet_sampling_stays_arrow_free),
     ("parquet_columns stays Arrow-free", check_parquet_columns_stays_arrow_free),
     ("parquet_list stays Arrow-free", check_parquet_list_stays_arrow_free),
     ("parquet_struct stays Arrow-free", check_parquet_struct_stays_arrow_free),
+    ("parquet_map stays Arrow-free", check_parquet_map_stays_arrow_free),
+    ("parquet_utils stays Arrow-free", check_parquet_utils_stays_arrow_free),
     ("parquet_temporal stays Arrow-free", check_parquet_temporal_stays_arrow_free),
     ("parquet_version stays Arrow-free", check_parquet_version_stays_arrow_free),
     ("parquet_spatial stays Arrow-free", check_parquet_spatial_stays_arrow_free),

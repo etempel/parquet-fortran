@@ -104,6 +104,8 @@ contains
                 test_spatial_threads_effect), &
             new_unittest("healpix_threads caps what a bulk HEALPix conversion resolves to", &
                 test_healpix_threads_effect), &
+            new_unittest("index_threads caps what an index build resolves to", &
+                test_index_threads_effect), &
             new_unittest("random_parallel_min_elements decides whether a bulk permutation threads", &
                 test_random_parallel_min_effect), &
             new_unittest("the random work floor lowers the thread count before it forces serial", &
@@ -299,6 +301,9 @@ contains
         if (.not. allocated(error)) call check(error, parquet_get_healpix_threads() == 0, &
             "healpix_threads defaults to 0 (automatic)")
         if (allocated(error)) return
+        if (.not. allocated(error)) call check(error, parquet_get_index_threads() == 0, &
+            "index_threads defaults to 0 (automatic)")
+        if (allocated(error)) return
         call check(error, parquet_get_spatial_rebuild_warning(), "spatial_rebuild_warning defaults to .true.")
         if (allocated(error)) return
         call check(error, parquet_get_random_parallel_min_elements() == 1000_int64, &
@@ -364,6 +369,7 @@ contains
         call parquet_set_random_threads(4)
         call parquet_set_spatial_threads(5)
         call parquet_set_healpix_threads(5)
+        call parquet_set_index_threads(5)
         call parquet_set_spatial_rebuild_warning(.false.)
         call parquet_set_random_parallel_min_elements(77_int64)
         call parquet_set_default_compression("gzip")
@@ -1606,6 +1612,8 @@ contains
             "set_threads must set the spatial cap")
         if (.not. allocated(error)) call check(error, parquet_get_healpix_threads() == 3, &
             "set_threads must set the healpix cap")
+        if (.not. allocated(error)) call check(error, parquet_get_index_threads() == 3, &
+            "set_threads must set the index-build cap")
         ! A later individual setter overrides just its own knob, which is what makes the convenience
         ! composable rather than a mode you have to leave.
         if (.not. allocated(error)) then
@@ -2575,6 +2583,70 @@ contains
         call parquet_reset_settings()
         call check(error, parquet_get_healpix_threads() == 0, "reset restores healpix_threads")
     end subroutine test_healpix_threads_effect
+
+    !> The observed effect of `index_threads`, WITH its negative control.
+    !>
+    !> `pf_index_threads(n)` is the observable, for the same reason `pf_healpix_threads` is its
+    !> tier's: the team an index build opens is derived from the WORK as well as from the cap, so
+    !> reading the cap back with `parquet_get_index_threads` would pass against a value that is
+    !> stored and never read. Only a resolved count can tell a live setting from a dead one.
+    !>
+    !> **The negative control is the `auto_n > capped_n` assertion.** Without it, a cap that
+    !> forced one thread unconditionally -- or one that was ignored entirely on a single-processor
+    !> runner -- would satisfy every other assertion here. It is guarded on `avail > 1` because on
+    !> a one-processor machine the automatic answer IS 1 and there is nothing for the cap to lower.
+    subroutine test_index_threads_effect(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int64), parameter :: big = 10000000_int64
+        integer :: auto_n, capped_n, avail
+        !
+        avail = 1
+#ifdef _OPENMP
+        avail = min(omp_get_max_threads(), omp_get_num_procs())
+#endif
+        call parquet_reset_settings()
+        call check(error, parquet_get_index_threads() == 0, "index_threads defaults to 0 (automatic)")
+        if (allocated(error)) return
+        !
+        auto_n = pf_index_threads(big)
+        call check(error, auto_n >= 1, "the automatic answer is always at least one thread")
+        if (allocated(error)) return
+        call check(error, auto_n <= avail, &
+            "the automatic answer never exceeds what OpenMP and the affinity mask allow")
+        if (allocated(error)) return
+        !
+        call parquet_set_index_threads(1)
+        call check(error, parquet_get_index_threads() == 1, "index_threads round-trips")
+        if (allocated(error)) return
+        capped_n = pf_index_threads(big)
+        call check(error, capped_n == 1, "an index cap of 1 forces one thread")
+        if (allocated(error)) return
+        if (avail > 1) then
+            call check(error, auto_n > capped_n, &
+                "negative control: with threads available the automatic answer must EXCEED the cap")
+            if (allocated(error)) return
+        end if
+        !
+        ! A cap of 2 must be honoured exactly, on any machine that has two processors -- which
+        ! separates "the knob is read" from "the knob is read only when it says 1".
+        if (avail > 2) then
+            call parquet_set_index_threads(2)
+            call check(error, pf_index_threads(big) == 2, &
+                "an index cap of 2 resolves to exactly two threads")
+            if (allocated(error)) return
+        end if
+        !
+        ! The WORK still bounds the answer below the cap: a build over ten keys opens no team
+        ! whatever the cap says. This is the other half of the rule and has its own failure mode --
+        ! a resolver that returned the cap outright would thread a ten-key build.
+        call parquet_set_index_threads(0)
+        call check(error, pf_index_threads(10_int64) == 1, &
+            "a build over ten keys is not worth a team whatever the cap allows")
+        if (allocated(error)) return
+        !
+        call parquet_reset_settings()
+        call check(error, parquet_get_index_threads() == 0, "reset restores index_threads")
+    end subroutine test_index_threads_effect
 
     !> The observed effect of the work floor: it decides whether a bulk permutation threads at all.
     !>

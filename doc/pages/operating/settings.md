@@ -146,8 +146,8 @@ capacity is hardware-derived, and `parquet_reset_settings` is how you get it bac
 
 `parquet_set_threads(n)` sets Arrow's pool and every per-area cap together — sorting, the table
 prefetch, the table rewrite, one string column's bulk work, the bulk random draws, the bulk
-spatial queries and the bulk HEALPix conversions — for the common case of "give this library `n`
-threads and no more".
+spatial queries, the bulk HEALPix conversions and an index build — for the common case of "give
+this library `n` threads and no more".
 
 ```fortran
 call parquet_set_threads(4)          ! every one of them
@@ -381,6 +381,26 @@ results are bit-identical.
 `parquet_get_healpix_threads()` reports the raw setting (`0` when automatic). See
 [Converting a whole array at once](../utilities/healpix.html#converting-a-whole-array-at-once) for what the bulk forms are and what
 omitting `threads=` costs you.
+
+## Threads for an index build
+
+`parquet_set_index_threads(n)` caps the threads one `pf_index_map%build` may use. Like every other
+per-area cap it is a cap rather than a request, read per call, with `0` meaning automatic, `1`
+forcing serial, and an explicit `threads=` on the `%build` call itself still winning.
+
+**It bounds the BUILD and nothing else.** A lookup is a few nanoseconds of straight-line code with
+no team to open, so there is nothing there for this knob to govern; what it caps is the key scan
+and, on the direct backend, the scatter. A `method="sorted"` build sorts through `pf_argsort`, so
+*that* phase answers to `sort_threads` instead — a sorted build reads both knobs, each for the
+phase it owns.
+
+**The answer does not depend on the thread count.** The scan is a min/max reduction and the scatter
+writes one distinct slot per unique key, so a threaded build produces the same map as a serial one.
+
+`parquet_get_index_threads()` reports the raw setting (`0` when automatic), and
+`pf_index_threads(n)` reports what an automatic build over `n` keys would actually open — which is
+the one to read, since the team is bounded by the work as well as by this cap. See
+[Threads a build uses](../utilities/index-maps.html#threads-a-build-uses).
 
 ## Writer defaults
 
@@ -653,7 +673,7 @@ One variable per knob, named `PARQUET_FORTRAN_` plus the knob's name in capitals
 
 | variable | accepts |
 |---|---|
-| `PARQUET_FORTRAN_THREADS` | integer >= 1 — sets the eight below at once |
+| `PARQUET_FORTRAN_THREADS` | integer >= 1 — sets the nine below at once |
 | `PARQUET_FORTRAN_ARROW_THREADS` | integer >= 1 |
 | `PARQUET_FORTRAN_SORT_THREADS` | integer >= 0 (`0` = automatic) |
 | `PARQUET_FORTRAN_PREFETCH_THREADS` | integer >= 0 (`0` = automatic) |
@@ -662,6 +682,7 @@ One variable per knob, named `PARQUET_FORTRAN_` plus the knob's name in capitals
 | `PARQUET_FORTRAN_RANDOM_THREADS` | integer >= 0 (`0` = automatic) |
 | `PARQUET_FORTRAN_SPATIAL_THREADS` | integer >= 0 (`0` = automatic) |
 | `PARQUET_FORTRAN_HEALPIX_THREADS` | integer >= 0 (`0` = automatic) |
+| `PARQUET_FORTRAN_INDEX_THREADS` | integer >= 0 (`0` = automatic) |
 | `PARQUET_FORTRAN_SPATIAL_REBUILD_WARNING` | `true` / `false` |
 | `PARQUET_FORTRAN_RANDOM_PARALLEL_MIN_ELEMENTS` | integer >= 0 (`0` = no floor) |
 | `PARQUET_FORTRAN_SORT_COUNTING_PATH` | `true`/`false`/`1`/`0` |
@@ -676,11 +697,11 @@ One variable per knob, named `PARQUET_FORTRAN_` plus the knob's name in capitals
 | `PARQUET_FORTRAN_MESSAGE_STREAM` | `stdout`/`stderr` |
 | `PARQUET_FORTRAN_FILE_DATE` | `YYYY-MM-DDTHH:MM:SS` |
 
-`PARQUET_FORTRAN_THREADS` is `parquet_set_threads` and is applied **before** the eight specific
-thread variables, so a specific variable always overrides it —
+`PARQUET_FORTRAN_THREADS` is `parquet_set_threads` and is applied **before** the specific thread
+variables, so a specific variable always overrides it —
 `PARQUET_FORTRAN_THREADS=8 PARQUET_FORTRAN_SORT_THREADS=2` gives eight threads to Arrow, the
-prefetch, the table, the string column, the random draws, the spatial queries and the HEALPix
-conversions, and two to sorting, whichever order the two appear in your shell.
+prefetch, the table, the string column, the random draws, the spatial queries, the HEALPix
+conversions and an index build, and two to sorting, whichever order the two appear in your shell.
 
 ```bash
 export PARQUET_FORTRAN_THREADS=4
@@ -731,6 +752,7 @@ parquet-fortran settings
   random_threads                   0
   spatial_threads                  0
   healpix_threads                  0
+  index_threads                    0
   random_parallel_min_elements     1000
   spatial_rebuild_warning          true
   sort_counting_path               true

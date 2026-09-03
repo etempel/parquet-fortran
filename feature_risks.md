@@ -243,6 +243,8 @@ something a reader is expected to have.
 | [Risk-175](#risk-175--a-default-written-into-the-parsed-document-blinds-every-unknown-key-sweep) | A default written into the parsed document blinds every unknown-key sweep | 4 — covered |
 | [Risk-176](#risk-176--a-getter-that-forgets-the-shadow-drops-its-key-from-every-saved-configuration) | A getter that forgets the shadow drops its key from every saved configuration | 3 — not testable |
 | [Risk-177](#risk-177--a-pf_toml-section-handle-must-not-outlive-its-document) | A `pf_toml` section handle must not outlive its document | 3 — not testable |
+| [Risk-178](#risk-178--the-values--1-contract-is-what-makes-an-empty-hash-slot-detectable) | The values-≥-1 contract is what makes an empty hash slot detectable | 4 — covered |
+| [Risk-179](#risk-179--a-dropped-parquet_index-guard-issues-one-index-to-two-owners) | A dropped `parquet_index` guard issues one index to two owners | 2 — proposed |
 
 ---
 
@@ -372,6 +374,40 @@ timestamp in the MAML metadata. Parquet stores no values for null entries (only 
 record nullness), confirmed with `pyarrow`: the chunk is 23 bytes with `null_count=6`, and six
 `real64` values cannot fit in 23 bytes. Valgrind reports 0 uninitialised-value errors on that write
 path.
+
+
+### Risk-179 — A dropped `parquet_index` guard issues one index to two owners
+
+`pf_index_pool` and `pf_index_map` are documented safe to mutate from several threads at once, and
+the whole of that promise rests on two named criticals — `pf_index_pool_guard` and
+`pf_index_map_guard` — wrapped around every mutating public entry. Drop one, or narrow one to a
+worker that a second public entry can also reach, and **the failure is a wrong answer rather than a
+crash**: two threads are handed the same index, each writes the slot it names, and one program's
+data quietly overwrites another's. Nothing aborts, nothing warns, and the pool's own counters stay
+self-consistent.
+
+**Three things make this the register's business rather than the test suite's.** The guard is
+invisible in the source of the procedure it protects — the public body is one line and the state it
+guards is in a worker. Removing it is a natural-looking optimisation, because the uncontended
+critical really is measurable in `bench/benchmark_index.sh --mode=mutate`, and the doc-comment
+explaining why it is paid for is on the type rather than at the call. And the test that catches it is
+**probabilistic**: `test_pool_no_double_issue` (`test/test_index_omp.f90`) marks each issued slot
+with the holder's thread identity and counts collisions, which detects a violation only when two
+threads actually overlap.
+
+**Test.** Covered in practice, and confirmed by mutation on 2026-09-03: removing the critical from
+`pool_get_index` was caught. But the detection rate depends on the machine and the team size, so a
+single green run is weaker evidence here than elsewhere — which is why this sits in section 2 rather
+than section 4. What would close it is a deterministic observer: a debug hook that forces two
+notional holders to be recorded, in the shape of `parquet_debug_table_set_inflight` (Risk-6), so the
+guard's absence fails on one thread. That hook does not exist and was deliberately not added, because
+every other state this module has is reachable from an ordinary test and a hook is public surface.
+
+**What it forbids meanwhile.** A worker below the guard must never call a public entry (a named
+critical is not recursive, so that deadlocks rather than failing to build); every argument check of a
+guarded procedure runs INSIDE the region, so at most one thread can reach an `error stop` from these
+types; and a new mutating public procedure inherits the guard by copying its neighbour's shape rather
+than by remembering to.
 
 ## 3. Risks not testable
 
@@ -1097,6 +1133,35 @@ rows' elements.
 Every entry here has a test behind it. What keeps it in the document is the second half: a rule for
 whoever edits the area next. Read the entry for the area you are about to touch before you touch
 it — that is what this section is for, and it is why "covered" is not the same as "finished".
+
+
+### Risk-178 — The values-≥-1 contract is what makes an empty hash slot detectable
+
+`pf_index_map` refuses to store a value below 1, and that guard reads like ordinary input
+validation. It is not: **`val == 0` is how the hash table marks a slot empty.** Admit 0 as a stored
+value and every lookup that lands on that slot stops probing and answers "not found" for a key that
+is present — a silent wrong answer, in the one direction this module's whole test strategy is aimed
+at. The same value also terminates the probe loop on insert, so the key would additionally be
+inserted twice.
+
+**The coupling is invisible from either end.** The guard lives in `ix_check_value` and
+`ix_check_values_range` (`src/parquet_index_map.f90`); the thing it protects is a comparison against
+`0_int64` in four probe loops in `src/parquet_index_hash.f90`. Neither site names the other in code,
+and the guard looks like the sort of check a later reader relaxes to be helpful — "why not let people
+store 0?" — with the tests for the abort passing right up until the relaxation, at which point they
+are the tests that get deleted along with it.
+
+It is also what the design bought several other properties with, so relaxing it costs more than it
+looks: no key value is reserved (the full `int64` key domain is usable), there are no tombstones and
+no occupancy bitmap, and the module never needs the most-negative-`int64` constant that a
+reserved-key design would want — which nagfor 7.2 miscompiles (Risk-125).
+
+**Test.** Covered: `index_build_value_zero` (`test/error_scenarios.f90`) asserts the refusal, and
+`test_backends_agree` asserts the cross-backend equality that a 0-valued slot would break. **Kept
+here for what it forbids**, not for the assertions: a future change must not admit 0 as a stored
+value, and must not "simplify" the empty-slot test into a separate occupancy flag without
+re-measuring what that costs a probe. A caller who genuinely needs to store 0 stores `value + 1`,
+which is what the guide page tells them.
 
 ### Risk-175 — A default written into the parsed document blinds every unknown-key sweep
 

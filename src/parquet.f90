@@ -28,6 +28,9 @@
 !>                          friends, reproducible under any OpenMP schedule.
 !>   * `parquet_sampling`-- permutations, subsets, resampling and weighted draws.
 !>   * `parquet_spatial` -- `pf_spatial_index`: neighbour and k-nearest search.
+!>   * `parquet_index`   -- `pf_index_map` and `pf_index_pool`: fast key-to-index
+!>                          lookup over single or composite integer keys, and a
+!>                          recycling allocator for unique index values.
 !>   * `parquet_healpix` -- the HEALPix sphere pixelisation.
 !>   * `parquet_toml`   -- `pf_toml`: reading and writing TOML configuration
 !>                          files on top of `toml-f`, with checked types, a
@@ -77,6 +80,7 @@ module parquet
     use parquet_random
     use parquet_sampling
     use parquet_spatial
+    use parquet_index
     use parquet_healpix
     use parquet_logging
     use parquet_toml

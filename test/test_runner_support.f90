@@ -287,7 +287,7 @@ contains
             .or. name == "table_parallel" .or. name == "string_parallel" .or. name == "diagnostics" &
             .or. name == "random_omp" .or. name == "random_perm" .or. name == "module_surface" &
             .or. name == "spatial" .or. name == "logging" .or. name == "logging_env" &
-            .or. name == "toml_serial" &
+            .or. name == "toml_serial" .or. name == "index_omp" &
             .or. name == "stats")
     end function suite_is_safe_to_parallelize
 

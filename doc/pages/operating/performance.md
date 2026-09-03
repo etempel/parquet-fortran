@@ -150,7 +150,8 @@ the same row.
 
 **Every** thread count this library resolves — sorting and the statistics that run on the same
 engine, reading a table, rewriting a table, one string column's bulk work, the bulk random draws,
-the bulk spatial queries and the HEALPix bulk forms — is bounded by `omp_get_num_procs()`, which
+the bulk spatial queries, the HEALPix bulk forms and an index build — is bounded by
+`omp_get_num_procs()`, which
 reports the **CPU affinity of the process** rather than the machine. One common environment setting
 reduces that to almost nothing.
 
@@ -182,8 +183,8 @@ OMP_PLACES=sockets avoids it.
 ```
 
 The first word names whichever subsystem noticed — `sorting`, `table prefetching`,
-`table rewriting`, `string operations`, `random draws`, `spatial` or `healpix`. There is one line
-per process, not one per subsystem: they all have the same cause and the same fix.
+`table rewriting`, `string operations`, `random draws`, `spatial`, `healpix` or `index`. There is
+one line per process, not one per subsystem: they all have the same cause and the same fix.
 
 The warning fires only when the clamp actually reduced the thread count, so a job deliberately
 confined to a small cpuset — or one rank pinned per core with `OMP_NUM_THREADS=1` — stays quiet. It

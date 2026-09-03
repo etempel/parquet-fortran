@@ -80,7 +80,7 @@ contains
         ! check_testsuite_continuation_lines (tools/check_source_conventions.py) fails the lint
         ! stage before nagfor ever sees it.
         type(unittest_type), allocatable :: p1(:), p2(:), p3(:), p4(:), p5(:), p6(:), p7(:), &
-                                            p8(:), p9(:), p10(:)
+                                            p8(:), p9(:), p10(:), p11(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -1908,7 +1908,59 @@ contains
             new_unittest("every legal parquet_toml path completes", &
                 test_toml_control_completes) &
             ]
-        testsuite = [p1, p2, p3, p4, p5, p6, p7, p8, p9, p10]
+        p11 = [ &
+            new_unittest("a duplicate key aborts on the direct backend", &
+                test_index_build_duplicate_direct_aborts), &
+            new_unittest("a duplicate key aborts on the hash backend", &
+                test_index_build_duplicate_hash_aborts), &
+            new_unittest("a duplicate key aborts on the sorted backend", &
+                test_index_build_duplicate_sorted_aborts), &
+            new_unittest("a duplicate tuple aborts on the direct backend", &
+                test_index_build_duplicate_tuple_direct_aborts), &
+            new_unittest("a duplicate tuple aborts on the hash backend", &
+                test_index_build_duplicate_tuple_hash_aborts), &
+            new_unittest("storing the value 0 aborts", &
+                test_index_build_value_zero_aborts), &
+            new_unittest("a values array of the wrong length aborts", &
+                test_index_build_values_length_aborts), &
+            new_unittest("a get_many length mismatch aborts", &
+                test_index_get_many_length_aborts), &
+            new_unittest("a lookup of the wrong tuple width aborts", &
+                test_index_tuple_width_mismatch_aborts), &
+            new_unittest("a scalar lookup on a composite map aborts", &
+                test_index_scalar_on_composite_aborts), &
+            new_unittest("setting a key on a sorted map aborts", &
+                test_index_sorted_set_aborts), &
+            new_unittest("removing a key from a sorted map aborts", &
+                test_index_sorted_remove_aborts), &
+            new_unittest("a composite sorted build aborts", &
+                test_index_sorted_composite_aborts), &
+            new_unittest("init with method=direct aborts", &
+                test_index_init_direct_aborts), &
+            new_unittest("init with method=sorted aborts", &
+                test_index_init_sorted_aborts), &
+            new_unittest("an unknown index method token aborts", &
+                test_index_bad_method_aborts), &
+            new_unittest("setting outside a direct map's range aborts", &
+                test_index_direct_set_out_of_range_aborts), &
+            new_unittest("a key wider than the component limit aborts", &
+                test_index_ncomp_too_large_aborts), &
+            new_unittest("an explicit direct map over the whole int64 range aborts", &
+                test_index_direct_range_too_wide_aborts), &
+            new_unittest("removing an absent key without found= aborts", &
+                test_index_remove_absent_aborts), &
+            new_unittest("every legal pf_index_map path completes", &
+                test_index_control_completes), &
+            new_unittest("a pool double free aborts", &
+                test_pool_double_free_aborts), &
+            new_unittest("freeing a never-issued index aborts", &
+                test_pool_free_never_issued_aborts), &
+            new_unittest("freeing index 0 aborts", &
+                test_pool_free_zero_aborts), &
+            new_unittest("every legal pf_index_pool path completes", &
+                test_pool_control_completes) &
+            ]
+        testsuite = [p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11]
     end subroutine collect_tests_parquet_errors
 
 
@@ -2241,6 +2293,208 @@ contains
 
     !> A read-time sort orders ROWS; a descent path has one entry per element, so there is no row
     !> for its values to order.
+    !> See `scenario_index_build_duplicate_direct` (test/error_scenarios.f90) for why this is refused.
+    subroutine test_index_build_duplicate_direct_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_build_duplicate_direct", expect_abort=.true., &
+            failure_message="a duplicate key on the direct backend was expected to abort", &
+            required_stderr="duplicate key")
+    end subroutine test_index_build_duplicate_direct_aborts
+    !
+    !> See `scenario_index_build_duplicate_hash` (test/error_scenarios.f90) for why this is refused.
+    subroutine test_index_build_duplicate_hash_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_build_duplicate_hash", expect_abort=.true., &
+            failure_message="a duplicate key on the hash backend was expected to abort", &
+            required_stderr="duplicate key")
+    end subroutine test_index_build_duplicate_hash_aborts
+    !
+    !> See `scenario_index_build_duplicate_sorted` (test/error_scenarios.f90) for why this is refused.
+    subroutine test_index_build_duplicate_sorted_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_build_duplicate_sorted", expect_abort=.true., &
+            failure_message="a duplicate key on the sorted backend was expected to abort", &
+            required_stderr="duplicate key")
+    end subroutine test_index_build_duplicate_sorted_aborts
+    !
+    !> See `scenario_index_build_duplicate_tuple_direct` (test/error_scenarios.f90) for why this is refused.
+    subroutine test_index_build_duplicate_tuple_direct_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_build_duplicate_tuple_direct", expect_abort=.true., &
+            failure_message="a duplicate tuple on the direct backend was expected to abort", &
+            required_stderr="duplicate key")
+    end subroutine test_index_build_duplicate_tuple_direct_aborts
+    !
+    !> See `scenario_index_build_duplicate_tuple_hash` (test/error_scenarios.f90) for why this is refused.
+    subroutine test_index_build_duplicate_tuple_hash_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_build_duplicate_tuple_hash", expect_abort=.true., &
+            failure_message="a duplicate tuple on the hash backend was expected to abort", &
+            required_stderr="duplicate key")
+    end subroutine test_index_build_duplicate_tuple_hash_aborts
+    !
+    !> See `scenario_index_build_value_zero` (test/error_scenarios.f90) for why this is refused.
+    subroutine test_index_build_value_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_build_value_zero", expect_abort=.true., &
+            failure_message="storing the value 0 was expected to abort", &
+            required_stderr="must be >= 1")
+    end subroutine test_index_build_value_zero_aborts
+    !
+    !> See `scenario_index_build_values_length` (test/error_scenarios.f90) for why this is refused.
+    subroutine test_index_build_values_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_build_values_length", expect_abort=.true., &
+            failure_message="a values array of the wrong length was expected to abort", &
+            required_stderr="one element per key")
+    end subroutine test_index_build_values_length_aborts
+    !
+    !> See `scenario_index_get_many_length` (test/error_scenarios.f90) for why this is refused.
+    subroutine test_index_get_many_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_get_many_length", expect_abort=.true., &
+            failure_message="a get_many length mismatch was expected to abort", &
+            required_stderr="same length")
+    end subroutine test_index_get_many_length_aborts
+    !
+    !> See `scenario_index_tuple_width_mismatch` (test/error_scenarios.f90) for why this is refused.
+    subroutine test_index_tuple_width_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_tuple_width_mismatch", expect_abort=.true., &
+            failure_message="a lookup of the wrong tuple width was expected to abort", &
+            required_stderr="component count")
+    end subroutine test_index_tuple_width_mismatch_aborts
+    !
+    !> See `scenario_index_scalar_on_composite` (test/error_scenarios.f90) for why this is refused.
+    subroutine test_index_scalar_on_composite_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_scalar_on_composite", expect_abort=.true., &
+            failure_message="a scalar lookup on a composite map was expected to abort", &
+            required_stderr="composite keys")
+    end subroutine test_index_scalar_on_composite_aborts
+    !
+    !> See `scenario_index_sorted_set` (test/error_scenarios.f90) for why this is refused.
+    subroutine test_index_sorted_set_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_sorted_set", expect_abort=.true., &
+            failure_message="setting a key on a sorted map was expected to abort", &
+            required_stderr="frozen once built")
+    end subroutine test_index_sorted_set_aborts
+    !
+    !> See `scenario_index_sorted_remove` (test/error_scenarios.f90) for why this is refused.
+    subroutine test_index_sorted_remove_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_sorted_remove", expect_abort=.true., &
+            failure_message="removing a key from a sorted map was expected to abort", &
+            required_stderr="frozen once built")
+    end subroutine test_index_sorted_remove_aborts
+    !
+    !> See `scenario_index_sorted_composite` (test/error_scenarios.f90) for why this is refused.
+    subroutine test_index_sorted_composite_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_sorted_composite", expect_abort=.true., &
+            failure_message="a composite sorted build was expected to abort", &
+            required_stderr="single-component keys only")
+    end subroutine test_index_sorted_composite_aborts
+    !
+    !> See `scenario_index_init_direct` (test/error_scenarios.f90) for why this is refused.
+    subroutine test_index_init_direct_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_init_direct", expect_abort=.true., &
+            failure_message="init with method=direct was expected to abort", &
+            required_stderr="only available on %build")
+    end subroutine test_index_init_direct_aborts
+    !
+    !> See `scenario_index_init_sorted` (test/error_scenarios.f90) for why this is refused.
+    subroutine test_index_init_sorted_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_init_sorted", expect_abort=.true., &
+            failure_message="init with method=sorted was expected to abort", &
+            required_stderr="only available on %build")
+    end subroutine test_index_init_sorted_aborts
+    !
+    !> See `scenario_index_bad_method` (test/error_scenarios.f90) for why this is refused.
+    subroutine test_index_bad_method_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_bad_method", expect_abort=.true., &
+            failure_message="an unknown method token was expected to abort", &
+            required_stderr="unknown method")
+    end subroutine test_index_bad_method_aborts
+    !
+    !> See `scenario_index_direct_set_out_of_range` (test/error_scenarios.f90) for why this is refused.
+    subroutine test_index_direct_set_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_direct_set_out_of_range", expect_abort=.true., &
+            failure_message="setting outside a direct map's range was expected to abort", &
+            required_stderr="outside the range")
+    end subroutine test_index_direct_set_out_of_range_aborts
+    !
+    !> See `scenario_index_ncomp_too_large` (test/error_scenarios.f90) for why this is refused.
+    subroutine test_index_ncomp_too_large_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_ncomp_too_large", expect_abort=.true., &
+            failure_message="a key wider than the component limit was expected to abort", &
+            required_stderr="at most")
+    end subroutine test_index_ncomp_too_large_aborts
+    !
+    !> See `scenario_index_direct_range_too_wide` (test/error_scenarios.f90) for why this is refused.
+    subroutine test_index_direct_range_too_wide_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_direct_range_too_wide", expect_abort=.true., &
+            failure_message="an explicit direct map over the whole int64 range was expected to abort", &
+            required_stderr="cannot cover")
+    end subroutine test_index_direct_range_too_wide_aborts
+    !
+    !> See `scenario_index_remove_absent` (test/error_scenarios.f90) for why this is refused.
+    subroutine test_index_remove_absent_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_remove_absent", expect_abort=.true., &
+            failure_message="removing an absent key without found= was expected to abort", &
+            required_stderr="not in the map")
+    end subroutine test_index_remove_absent_aborts
+    !
+    !> The negative control: every legal call must run to completion, or a guard that fired
+    !> unconditionally would satisfy every abort scenario above while breaking the library.
+    subroutine test_index_control_completes(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_control", expect_abort=.false., &
+            failure_message="every legal pf_index_map call was expected to complete", &
+            required_stderr="index control finished")
+    end subroutine test_index_control_completes
+    !
+    !> See `scenario_pool_double_free` (test/error_scenarios.f90) for why this is refused.
+    subroutine test_pool_double_free_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "pool_double_free", expect_abort=.true., &
+            failure_message="a double free was expected to abort", &
+            required_stderr="already free")
+    end subroutine test_pool_double_free_aborts
+    !
+    !> See `scenario_pool_free_never_issued` (test/error_scenarios.f90) for why this is refused.
+    subroutine test_pool_free_never_issued_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "pool_free_never_issued", expect_abort=.true., &
+            failure_message="freeing a never-issued index was expected to abort", &
+            required_stderr="never handed out")
+    end subroutine test_pool_free_never_issued_aborts
+    !
+    !> See `scenario_pool_free_zero` (test/error_scenarios.f90) for why this is refused.
+    subroutine test_pool_free_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "pool_free_zero", expect_abort=.true., &
+            failure_message="freeing index 0 was expected to abort", &
+            required_stderr="never handed out")
+    end subroutine test_pool_free_zero_aborts
+    !
+    !> The negative control: every legal call must run to completion, or a guard that fired
+    !> unconditionally would satisfy every abort scenario above while breaking the library.
+    subroutine test_pool_control_completes(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "pool_control", expect_abort=.false., &
+            failure_message="every legal pf_index_pool call was expected to complete", &
+            required_stderr="pool control finished")
+    end subroutine test_pool_control_completes
+    !
     subroutine test_sort_key_descent_path_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "sort_key_descent_path", expect_abort=.true., &

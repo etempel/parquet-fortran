@@ -77,6 +77,7 @@ module parquet_settings_base
     public :: cfg_sort_threads, cfg_sort_counting_path, cfg_sort_radix_path
     public :: cfg_sort_counting_bucket_limit, cfg_message_stream
     public :: cfg_spatial_threads, cfg_spatial_rebuild_warning, cfg_healpix_threads
+    public :: cfg_index_threads
     !
     ! ---- The settings API for the Arrow-free modules: state, getter AND setter ----
     public :: parquet_set_sort_threads, parquet_get_sort_threads
@@ -87,6 +88,7 @@ module parquet_settings_base
     public :: parquet_set_random_threads, parquet_set_random_parallel_min_elements
     public :: parquet_set_spatial_threads, parquet_get_spatial_threads
     public :: parquet_set_healpix_threads, parquet_get_healpix_threads
+    public :: parquet_set_index_threads, parquet_get_index_threads
     public :: parquet_set_spatial_rebuild_warning, parquet_get_spatial_rebuild_warning
     public :: parquet_set_verbosity, parquet_get_verbosity
     public :: parquet_set_message_stream, parquet_get_message_stream
@@ -168,6 +170,18 @@ module parquet_settings_base
     !! asked the library for four threads still got up to `min(omp_get_max_threads(), 64)` of them
     !! here -- silently, which is the failure that convenience exists to prevent.
     integer, save :: cfg_healpix_threads = 0
+    !> Cap on the threads one `pf_index_map%build` may use internally. `0` means "auto".
+    !!
+    !! Written by `parquet_set_index_threads` below; read only by `ix_threads`
+    !! (src/parquet_index_map.f90), for the same single-reader reason as cfg_sort_threads and
+    !! cfg_string_threads (feature_risks.md Risk-40).
+    !!
+    !! **It bounds the BUILD and nothing else.** A lookup is a few nanoseconds of straight-line
+    !! code with no team to open, so there is nothing here for this knob to govern; what it caps is
+    !! the min/max key scan and the direct-backend scatter. The sorted backend's `pf_argsort` call
+    !! answers to `sort_threads` instead, because that is the sort's own work being done -- so a
+    !! sorted build reads both knobs, each for the phase it owns.
+    integer, save :: cfg_index_threads = 0
     !> Whether a `pf_spatial_index` says so when a query radius disagrees badly enough with the one
     !! it was built for that it rebuilds itself.
     !!
@@ -538,6 +552,34 @@ contains
 
         n = cfg_healpix_threads
     end function parquet_get_healpix_threads
+    !
+    !> Caps the threads one `pf_index_map%build` may use internally. `0` (the default) means
+    !> automatic.
+    !>
+    !> **It caps the automatic answer and never raises it.** `0` leaves the build to
+    !> `parquet_auto_thread_count`, which is `omp_get_max_threads()` outside a parallel region, 1
+    !> inside one, and always bounded by what this process's CPU affinity allows. A value of `n`
+    !> lowers that; it never overrides the serial-inside-a-region rule, and never overrides an
+    !> explicit `threads=` on the `%build` call.
+    !>
+    !> **Threading a build changes how fast it answers and never what it answers.** The scan is a
+    !> min/max reduction and the scatter writes one distinct slot per unique key, so a threaded
+    !> build produces the same map as a serial one -- which is what makes this admissible as a
+    !> setting at all. It does not reach a lookup: those open no team.
+    subroutine parquet_set_index_threads(n)
+        integer, intent(in) :: n !! thread cap, or 0 for automatic; must be >= 0.
+
+        if (n < 0) error stop "parquet_set_index_threads: n must be >= 0 (0 means automatic)"
+        cfg_index_threads = n
+    end subroutine parquet_set_index_threads
+    !
+    !> The configured index-build thread cap, as set. `0` means automatic and is NOT the resolved
+    !> count -- the automatic answer depends on the work available and on the affinity mask, so
+    !> read this only to find out what was asked for.
+    integer function parquet_get_index_threads() result(n)
+
+        n = cfg_index_threads
+    end function parquet_get_index_threads
     !
     !> Turns the spatial index's automatic-rebuild warning on or off.
     !>

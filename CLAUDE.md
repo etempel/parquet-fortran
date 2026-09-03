@@ -750,8 +750,8 @@ grep -nE "\bnow\b" doc/pages/<page>
 **When this is found on an already-reviewed page, fix the sentences and nothing else.** A page-wide
 rewrap on a later targeted round produced 49 hunks for four one-sentence fixes on
 `types/string-columns.md` and was reverted: the reflow buried the change and would have turned a
-review into a re-read. Rewrap on the round that first reviews a page (see `feature_doc.md` §6.2's
-Pass 4), never on a follow-up.
+review into a re-read. Rewrap on the round that first reviews a page (see
+`tools/doc_review_process.md`'s Pass 4), never on a follow-up.
 
 ### Checking documentation links
 

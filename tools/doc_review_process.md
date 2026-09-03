@@ -65,6 +65,23 @@ current one is outstanding: the maintainer's feedback on one page routinely esta
 that changes how the next page should be reviewed, and reviewing two pages under two different
 conventions wastes one of them.
 
+**The unit can be a GROUP of pages, and the test is whether the pages cross-describe each other.**
+One campaign took four of its 33 rows as groups on the maintainer's instruction, so treat one page
+as the *default* rather than the rule. Grouping fits when a finding is only visible **between**
+pages: six pages describing one subject from six angles produced three findings that were two of
+those pages disagreeing with each other, and a set of index pages — whose only content is a
+description of another page — produced the same stale group summary in two places at once. Neither
+is visible from inside a single page. Grouping does **not** fit merely because pages share a
+directory: asked whether six pages covering six unrelated modules should be grouped the same way,
+the same maintainer answered *"no, [they] are reviewed one at a time"*. **Propose it and let the
+maintainer decide**; do not assume either way.
+
+**When a group is taken, nothing else in this document changes.** The group is one unit in flight,
+it produces one report, and it closes as one. Say explicitly that the per-page report aliases it
+replaces are **struck** ([§13.4](#134-fix-the-report-aliases-up-front)) and that no file was ever
+created under any of them — otherwise a later session reads those unused aliases as pages nobody
+reviewed.
+
 ## 2. The three-step loop
 
 **Starting a campaign:** before any of this, build the page list, fix the report aliases and
@@ -157,8 +174,27 @@ three.
   null/NaN behaviour and performance statement. Find the code that implements it.
 - **Named things** — constants, kind names, setting names, environment variables, grammar operators:
   confirm each exists and is spelled correctly.
+- **Every written-out count and every hand-written enumeration**, checked against the thing it
+  counts or lists rather than read for plausibility. This is the highest-yield item in Pass 1 and it
+  is not close: over one campaign's last three rounds it was **eleven of one round's findings, four
+  of the next and both of the last**, including an API-stability promise naming 16 of 19 entry
+  modules with all three missing ones tabulated on the same page 130 lines below. The defect is
+  manufactured by ordinary correct work — someone adds the nineteenth module and does not think of
+  the sentence — so a *recently edited* page is more suspect, not less.
 - **Anything that cannot be verified from source, do not restate.** Flag it in the report; an
   unverifiable claim carried forward becomes a claim nobody can ever check.
+
+**Where a check already validates a claim, lean on it — and say in the report that you did.** Some
+claims on a page are compared against the build by a lint check: a per-module file count against a
+generated inventory, a promise against a list the tooling owns. Re-deriving those by hand is slower
+and no more trustworthy. What the report must not do is leave the maintainer unable to tell which
+claims were verified against the source, which against a check, and which not at all.
+
+**When a re-derivation finds a drifted enumeration, propose a check that reads its source.**
+Correcting the number is half the fix: nothing stops it drifting again the same afternoon, and the
+whole suite stays green while it does. Five such checks came out of one campaign, each closing a
+claim that had already gone stale. Propose it in the report — writing it is a code change and out of
+scope ([§7](#7-what-a-review-may-edit)).
 
 **A claim about processor-dependent behaviour cannot be verified on one compiler**, and verifying it
 on the one to hand is how a page comes to state a local observation as a fact. One page was reviewed,
@@ -227,7 +263,12 @@ tomorrow.** Verifying by hand in Pass 1 fixes it for one day.
 - a **limit, threshold or ceiling** the page names;
 - an **invariant across an operation** — a pointer detaching, a call that may not be made twice, a
   required call order, something that survives (or does not survive) a mutation;
-- anything the page promises about **concurrency**.
+- anything the page promises about **concurrency**;
+- a claimed **absence** — "nothing in this module validates, aborts or prints", "this never
+  reallocates", "no name of that kind appears anywhere in the guide". A negative is the easiest
+  claim to leave uncovered, because no ordinary test asserts one and the thing that breaks it is an
+  *addition* somewhere else entirely. Where it is a property of the source or of the guide rather
+  than of a run, its test is a lint check rather than a unit test — propose it the same way.
 
 **For each such claim, find the test or establish that there is none.**
 
@@ -307,6 +348,15 @@ claim** is the point of its sentence rather than a speed measurement. The test i
 is *evidence for a design choice a reader has to make* — keep it — or *a snapshot of one machine's
 throughput* — generalise it.
 
+**A page that has accreted edits without a rewrap is damaged in a way no check can see.**
+Successive correct insertions leave a paragraph with lines of wildly uneven length, and an
+enumeration broken mid-item across several of them. The page renders correctly, every check passes,
+and only a reviewer reading the *source* will find it — one landing page carried lines of 173, 139,
+109, 38, 20, 19 and 16 characters in a single paragraph. **Rewrap on the round that first reviews a
+page, never on a follow-up**: a page-wide reflow on a later round buries a one-sentence fix in dozens
+of hunks and turns step 2 into a re-read. Prove any rewrap whitespace-only the way
+[§8](#8-editing-a-page-safely) requires.
+
 **Spelling is left alone.** Where a guide mixes regional spellings, changing them costs the maintainer
 a full re-read in step 2 and buys the reader nothing. Change spelling only inside a paragraph already
 being rewritten for another reason.
@@ -355,9 +405,10 @@ page's step-1 date.
 
 ## 4. The review report
 
-**One file per page, in the repository root, named for the page** — use a stable alias fixed in
-advance so two sessions cannot pick different names for the same page's report. One file per page,
-matching the one-page-in-flight rule; do not accumulate several pages' findings in one file.
+**One file per unit reviewed, in the repository root, named for it** — use a stable alias fixed in
+advance so two sessions cannot pick different names for the same report. The unit is one page, or
+one group of pages taken per [§1](#1-what-a-documentation-review-is-for); either way it is what is
+in flight. Do not accumulate unrelated pages' findings in one file.
 
 These files are git-ignored scratch, so they must be **self-explaining without the conversation that
 produced them**: name the page and the commit at the top, quote the maintainer's decisions verbatim
@@ -557,6 +608,14 @@ change, and step 2 approved the former.
 resolves, quoting the maintainer's own wording; mark the issues now fixed; leave anything declined
 recorded as declined with the reason. A report still showing an answered question as open is worse
 than no report, because the next session will ask it again.
+
+**A later instruction may override an answer already given, and the answer is kept rather than
+rewritten.** Record the override beside it — the date, the new decision, the reason — and say what,
+if anything, was wrong with the original. Usually nothing was: one campaign's decision to give each
+index page its own report was overridden days later by an instruction to review them together, and
+the argument the original answer had weighed and set aside is exactly the argument that later won.
+Silently rewriting a decision loses the record of what was decided when, which is most of what a
+report is for.
 
 ## 7. What a review may edit
 
@@ -771,6 +830,17 @@ So:
 The test is one question: *would someone writing a new page next year need to know it?* If yes, it
 belongs in a tracked file.
 
+**There is a third home, and a campaign needs it: the decisions a campaign settles part-way
+through.** A maintainer's answer on page 15 that governs pages 16 onward is not yet
+durable-convention material and is not a rule about the loop, and leaving it in page 15's report
+means a later session has to open every closed report to discover it exists. Keep a
+**standing-decisions section in the campaign's own working document**: one heading per rule, each
+quoting the instruction verbatim, each naming its *durable* home — this file, the project's own
+documentation-conventions reference, or "nothing enforces it yet, so here until a check exists". Two
+properties keep it useful. It holds **decisions, not work items** — every report still keeps its own
+outstanding items where they were found ([§13.8](#138-close-the-campaign)) — and a rule whose
+durable home is "nowhere yet" is a rule worth proposing a check for.
+
 ## 12. Settings analysis
 
 **This document introduces no process-global parameter**, and neither does a page review conducted
@@ -839,6 +909,18 @@ surface add to *this page's own topic?* That question is what produces the third
 cannot be answered by any diff. A cheap, high-yield form of it is to count mentions — a page whose
 subject was extended and that mentions the extension zero times is a gap with its evidence already
 attached.
+
+**Express the result as a map from body of work to page**, not only as a list of pages: one row per
+feature area, naming its new entry modules and the page or pages that carry it. That is what makes
+the changelog sweep's "which page carries this claim?" answerable at a glance, and a row with an
+empty page cell is a finding before the campaign has started.
+
+**The list's complement is part of the output.** Say what the campaign does *not* cover and why —
+pages whose subject predates the boundary and has not changed, an audit deliberately deferred, a
+tracked document that is out of bounds — and say plainly that out of scope means **not scheduled**,
+not untouchable: a wrong claim found in passing on an unscheduled page is still fixed under
+[§7](#7-what-a-review-may-edit) and still reported. Without that sentence a reviewer meeting such a
+page has to guess, and the two guesses cost very differently.
 
 ### 13.3 Sort the pages into four tiers
 
@@ -924,6 +1006,13 @@ the surface in scope that the maintainer considers settled and does not want rel
 one line to answer and saves several reports' worth of proposals, and it is the natural companion to
 [§14](#14-release-status-decides-what-a-review-may-recommend).
 
+**A second standing question applies whenever the campaign has consequences beyond itself:** does
+finishing it gate anything — a release, a tag, a hand-off — and is the trimmable tier
+([§13.3](#133-sort-the-pages-into-four-tiers)) inside that gate or outside it? A campaign that
+blocks a release is not one whose cheapest tier can be quietly dropped when it runs long. Ask it
+while that tier is still a proposal: the answer changes how the tier is presented, not only how its
+pages are reviewed.
+
 ### 13.8 Close the campaign
 
 **Run [§9](#9-checks-to-run)'s full list once, at the end** — including the docs build, the rendered
@@ -936,6 +1025,19 @@ change.
 to the future" items, per [§4](#4-the-review-report); a campaign does not consolidate them into a
 tracked document, an issue tracker or the standing-risk register on its way out, and it does not
 delete a report to tidy up.
+
+**Record what the campaign produced beyond the page edits** — the checks it caused to be written,
+the library changes it caused, the standing decisions it settled — in a few lines at the end of the
+working document. That list is the evidence the campaign was worth running, it is the first thing a
+later campaign reads, and it is the only place a check is attributed to the review that motivated
+it. One campaign closed with five new lint checks, two library changes and three standing decisions,
+none of which is visible from the page diffs.
+
+**And name the one defect the campaign kept re-finding**, in a sentence, if there is one. That
+sentence generalises where a count of findings does not: for the campaign that produced
+[§3.2](#32-pass-1--accuracy)'s enumeration rule it was that a hand-written count or enumeration
+sitting beside something the build already measures will drift silently, and the only two defences
+are a check that reads the measured list or a review that re-derives rather than reads.
 
 ## 14. Release status decides what a review may recommend
 

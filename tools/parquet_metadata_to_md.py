@@ -58,8 +58,8 @@ codec(s)/encoding(s) actually used and any `unit`/`ucd`/description this library
 provides). General-purpose -- works on any Parquet file, not just this library's own output (a
 standalone Python tool, requires `pyarrow`, not part of this repository's own Fortran toolchain).
 Not part of the public Fortran library or its API, but consumer-facing rather than maintainer/CI-
-only, so it's kept in the fpm-published package (see its `KEEP_PATHS` entry in
-`tools/prep_fpm_publish.sh`):
+only: it is meant to be run by users of this library, and CONTRIBUTING.md's index table marks it
+so:
 
     tools/parquet_metadata_to_md.py data.parquet                 # -> data.md, overwritten if it exists
     tools/parquet_metadata_to_md.py data.parquet report.md

@@ -1019,6 +1019,96 @@ contains
 
 end module test_module_surface_logging
 
+module test_module_surface_toml
+    use parquet_toml                   ! THE ONLY library import.
+    implicit none
+    private
+    public :: check_toml_surface
+
+contains
+
+    !> Reads a whole configuration through `use parquet_toml` alone: parse, section, every getter
+    !! family, the accumulator's sweep, and close.
+    !!
+    !! No file: `pf_toml_loads` is what lets this run inside a concurrently dispatched suite with
+    !! no fixture path to collide on. And no `use parquet_logging` either, which is the point --
+    !! the module aborts through the logger internally, so a program that only reads configuration
+    !! needs one import.
+    subroutine check_toml_surface(what)
+        character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
+        type(pf_toml) :: conf, gen, ent
+        type(pf_toml_strings) :: files
+        character(len=:), allocatable :: text, name, one
+        character(len=PF_TOML_MAX_KEY), allocatable :: keys(:)
+        integer :: n, id
+        real :: f
+        logical :: flag
+
+        what = ""
+        text = 'title = "surface"' // new_line("a") // &
+               '[general]' // new_line("a") // &
+               'nproc = 3' // new_line("a") // &
+               'factor = 0.5' // new_line("a") // &
+               'verbose = true' // new_line("a") // &
+               'files = ["a", "bcd"]' // new_line("a") // &
+               '[[region]]' // new_line("a") // &
+               'id = 1' // new_line("a")
+
+        call pf_toml_loads(conf, text, name = "surface")
+        call pf_toml_get(conf, "title", name)
+        if (name /= "surface") what = "pf_toml_get on a root key"
+
+        if (what == "") then
+            call pf_toml_section(conf, "general", gen)
+            call pf_toml_get(gen, "nproc", n)
+            if (n /= 3) what = "pf_toml_get on a section key"
+        end if
+        if (what == "") then
+            call pf_toml_get(gen, "factor", f)
+            if (abs(f - 0.5) > 1.0e-6) what = "pf_toml_get for a real"
+        end if
+        if (what == "") then
+            call pf_toml_get(gen, "verbose", flag)
+            if (.not. flag) what = "pf_toml_get for a logical"
+        end if
+        if (what == "") then
+            call pf_toml_get(gen, "absent", n, default = 42)
+            if (n /= 42) what = "a default was not applied"
+        end if
+        if (what == "") then
+            call pf_toml_get_strings(gen, "files", files)
+            if (files%count() /= 2) what = "pf_toml_get_strings count"
+        end if
+        if (what == "") then
+            call files%get(2, one)
+            if (one /= "bcd" .or. files%length(2) /= 3) what = "pf_toml_strings element"
+        end if
+        if (what == "") then
+            if (pf_toml_section_count(conf, "region") /= 1) what = "pf_toml_section_count"
+        end if
+        if (what == "") then
+            call pf_toml_section(conf, "region", 1, ent)
+            call pf_toml_get(ent, "id", id)
+            if (id /= 1) what = "an array-of-tables entry"
+        end if
+        if (what == "") then
+            if (.not. pf_toml_has(gen, "nproc")) what = "pf_toml_has"
+        end if
+        if (what == "") then
+            call pf_toml_keys(gen, keys)
+            if (size(keys) /= 4) what = "pf_toml_keys"
+        end if
+        if (what == "") then
+            ! The sweep must stay SILENT here -- everything above was read. If it reported, this
+            ! would abort rather than fail, which is the loudest possible outcome and is fine.
+            call pf_toml_check_all(conf, severity = PF_TOML_IGNORE)
+            call pf_toml_check(gen)
+        end if
+        call pf_toml_close(conf)
+    end subroutine check_toml_surface
+
+end module test_module_surface_toml
+
 module test_module_surface
     use test_module_surface_io, only : check_io_surface
     use test_module_surface_argsort, only : check_argsort_surface
@@ -1029,6 +1119,7 @@ module test_module_surface
     use test_module_surface_version, only : check_version_surface
     use test_module_surface_utils, only : check_utils_surface
     use test_module_surface_logging, only : check_logging_surface
+    use test_module_surface_toml, only : check_toml_surface
     use test_module_surface_spatial, only : check_spatial_surface
     use test_module_surface_healpix, only : check_healpix_surface
     use test_module_surface_columns, only : check_columns_surface
@@ -1144,6 +1235,8 @@ contains
                          test_utils_surface), &
             new_unittest("parquet_logging alone configures a logger and emits through it", &
                          test_logging_surface), &
+            new_unittest("parquet_toml alone reads a whole configuration", &
+                         test_toml_surface), &
             new_unittest("parquet_version alone reports the library version", &
                 test_version_surface), &
             new_unittest("parquet_io alone reaches every layer of the read/write API", &
@@ -1252,6 +1345,16 @@ contains
         call check_logging_surface(what)
         call check(error, what == "", "the logger was not usable through `use parquet_logging` alone: " // what)
     end subroutine test_logging_surface
+
+    !> The test-drive wrapper over check_toml_surface.
+    subroutine test_toml_surface(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: what
+
+        call check_toml_surface(what)
+        call check(error, what == "", &
+            "a configuration was not readable through `use parquet_toml` alone: " // what)
+    end subroutine test_toml_surface
 
     !> The test-drive wrapper over check_version_surface.
     subroutine test_version_surface(error)

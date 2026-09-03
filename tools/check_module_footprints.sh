@@ -103,7 +103,7 @@ expect_file="$repo/tools/module_footprints.txt"
 # the truth is 62) had never been measured by anything at all.
 ENTRY_MODULES="parquet_version parquet_utils parquet_temporal parquet_strings parquet_random parquet_argsort \
 parquet_sampling parquet_spatial parquet_healpix parquet_columns parquet_list parquet_struct parquet_map \
-parquet_sorting parquet_stats parquet_logging parquet_settings \
+parquet_sorting parquet_stats parquet_logging parquet_toml parquet_settings \
 parquet_io parquet_tables parquet"
 
 mode="check"
@@ -164,8 +164,22 @@ measure_module() {
     # The object name carries the dependency's path, so `../pf/src/x.f90` becomes
     # `.._pf_src_x.f90.o`; stripping through the last `src_` recovers the source filename and
     # leaves the probe's own `src_m.f90.o` as plain `m.f90`, which is then dropped.
+    #
+    # THE `_pf_src_` FILTER RUNS BEFORE THAT STRIP, AND IT IS LOAD-BEARING. This repository's own
+    # sources reach the probe through the relative symlink `../pf`, so every one of their objects
+    # carries `_pf_src_` in its flattened name; a BUILD DEPENDENCY's sources are fetched into the
+    # probe's own `build/dependencies/<name>/` instead and flatten differently, so they do not.
+    # Without the filter, `toml-f`'s ~35 files would appear in every section that reaches
+    # `parquet_toml` -- and the committed expectation, the guide's Files column and README's would
+    # all start counting somebody else's parser. The decision (feature_toml.md section 3) is that
+    # this bookkeeping tracks THIS library's own sources; the dependency still compiles, and the
+    # guide page says so next to the `parquet_toml` row. Note the filter also drops the probe's own
+    # `src_m.f90.o`, which the `grep -v` below then no longer has to catch -- it is kept anyway, so
+    # that neither guard alone is silently doing all the work.
     find "$_probe/build" -type f -name '*.o' \
-        | sed 's#.*/##; s/^.*src_//; s/\.o$//' \
+        | sed 's#.*/##' \
+        | grep '_pf_src_' \
+        | sed 's/^.*src_//; s/\.o$//' \
         | grep -v '^m\.f90$' | LC_ALL=C sort -u
 }
 

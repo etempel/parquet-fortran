@@ -298,6 +298,26 @@ contains
             "parquet_string_column must be reachable from use parquet alone")
         if (allocated(error)) return
 
+        ! parquet_toml: the configuration reader. Declared in a block for the same reason as the
+        ! two table handles above -- a dropped re-export then breaks the BUILD here rather than
+        ! only a later assertion, which is this test's whole mechanism.
+        block
+            type(pf_toml) :: conf, gen
+            integer :: nproc
+
+            call pf_toml_loads(conf, 'x = 1' // new_line("a") // '[general]' // new_line("a") // &
+                'nproc = 4' // new_line("a"))
+            call pf_toml_section(conf, "general", gen)
+            call pf_toml_get(gen, "nproc", nproc)
+            call check(error, nproc == 4, &
+                "pf_toml must be reachable from use parquet alone and read a configuration value")
+            if (allocated(error)) then
+                call pf_toml_close(conf)
+                return
+            end if
+            call pf_toml_close(conf)
+        end block
+
         ! parquet_sorting: the raw-array sorting layer, whose public names are pf_*, not parquet_*.
         call pf_argsort([3_int32, 1_int32, 2_int32], sort_perm)
         call check(error, all(sort_perm == [2, 3, 1]), &

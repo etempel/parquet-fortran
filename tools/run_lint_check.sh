@@ -50,8 +50,8 @@
 # which differs deliberately from CI (whose `script:` stops at the first nonzero command): locally
 # it is more useful to see every problem in one pass. The verdict is the same either way -- it exits
 # nonzero if anything failed. Its `CHECKS` list is kept in sync with the CI job by hand, so a check
-# added to one must be added to the other; nothing enforces it. Maintainer-only (stripped from the
-# fpm-published package, see `tools/prep_fpm_publish.sh`).
+# added to one must be added to the other; nothing enforces it. Maintainer-only: nothing outside
+# this repository runs it.
 # ---------------------------------------------------------------------------------------------
 set -euo pipefail
 

@@ -6,6 +6,7 @@ ordered_subpage: random.md
 ordered_subpage: spatial.md
 ordered_subpage: healpix.md
 ordered_subpage: logging.md
+ordered_subpage: configuration-files.md
 ordered_subpage: utils.md
 ordered_subpage: generated-tables.md
 ordered_subpage: embedding-maml-schemas.md
@@ -15,8 +16,8 @@ Things beyond the file being read or written: a general-purpose sorting API over
 arrays and this library's own column types, statistical reductions over those same arrays,
 counter-based random numbers that survive a parallel loop — with the distributions and sampling
 built on them — spatial neighbour search over coordinate arrays, the HEALPix sphere pixelisation,
-leveled logging for your own program, small text and path helpers, and the two generators meant to
-be copied into your own project.
+leveled logging for your own program, TOML configuration files, small text and path helpers, and
+the two generators meant to be copied into your own project.
 
 - [Sorting, ranking and selection](sorting.html) — `pf_sort` and `pf_argsort` over eleven element
   types, from plain arrays to a `parquet_column`, with multi-key sorts and group boundaries; then
@@ -52,6 +53,12 @@ be copied into your own project.
   a cheap `%enabled` check before an expensive message, per-thread context tags and a buffered
   mode that keeps one thread's narrative together inside an OpenMP region. Not this library's
   own messaging, which the settings page covers.
+- [Configuration files with parquet_toml](configuration-files.html) — reading and writing TOML
+  configuration files on top of `toml-f`: checked types so a wrong-typed value never leaves your
+  variable undefined, defaults applied without touching the parsed document, whole-array reads
+  including string lists, diagnostics that point at the offending line, and a report for every key
+  or section your program never read. Safe to call from inside an OpenMP parallel region, and it
+  writes the effective configuration back out.
 - [Text and path helpers with parquet_utils](utils.html) — ASCII case folding, turning a value
   into text with a minimum width or a format of your choosing, and joining and taking apart POSIX
   paths by CPython's `posixpath` rules. A leaf module that cannot fail: nothing in it validates,

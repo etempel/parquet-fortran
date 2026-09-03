@@ -67,7 +67,7 @@
 # speedup is a CEILING on what threading the library could return, not a prediction. Read it against
 # --mode=phases' residual column to see how much of a whole call that ceiling could apply to.
 #
-# Maintainer-only (stripped from the fpm-published package, see tools/prep_fpm_publish.sh).
+# Maintainer-only: nothing outside this repository runs it.
 # ---------------------------------------------------------------------------------------------
 set -euo pipefail
 

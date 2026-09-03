@@ -40,8 +40,7 @@ when a new column kind is added -- and commit the regenerated files;
 `tools/generate_parquet_columns.py --check` re-derives the output and fails if the committed files
 have drifted, which is the cheap way to catch a forgotten regeneration. The other four
 `parquet_columns_*.f90` files (`util`, `validity`, `structural`, `string`) are hand-written and
-the script never touches them. Maintainer-only (stripped from the fpm-published package, see
-`tools/prep_fpm_publish.sh`).
+the script never touches them. Maintainer-only: nothing outside this repository runs it.
 
 It also takes `--bench-guards`, which is for measurement branches only and never for `main`: it
 wraps `get_at`/`set_at`'s two guard calls in cpp `#ifdef`s so one source tree can be built three

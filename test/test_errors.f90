@@ -80,7 +80,7 @@ contains
         ! check_testsuite_continuation_lines (tools/check_source_conventions.py) fails the lint
         ! stage before nagfor ever sees it.
         type(unittest_type), allocatable :: p1(:), p2(:), p3(:), p4(:), p5(:), p6(:), p7(:), &
-                                            p8(:), p9(:)
+                                            p8(:), p9(:), p10(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -1852,7 +1852,55 @@ contains
             new_unittest("one pf_bin_edges boundary per bin rather than one more aborts", &
                 test_stats_bin_edges_size_aborts) &
             ]
-        testsuite = [p1, p2, p3, p4, p5, p6, p7, p8, p9]
+        p10 = [ &
+            new_unittest("a wrong-typed config value aborts rather than leaving it undefined", &
+                test_toml_wrong_type_aborts), &
+            new_unittest("a required config key the file omits aborts", &
+                test_toml_missing_key_aborts), &
+            new_unittest("a config integer beyond int32 is reported, not wrapped", &
+                test_toml_int_overflow_aborts), &
+            new_unittest("a config list of the wrong length aborts in both directions", &
+                test_toml_array_length_aborts), &
+            new_unittest("a config string too long for its slot aborts rather than clipping", &
+                test_toml_string_too_long_aborts), &
+            new_unittest("an absent config list on a bare call aborts", &
+                test_toml_array_required_aborts), &
+            new_unittest("a required config section the file omits aborts", &
+                test_toml_missing_section_aborts), &
+            new_unittest("counting the entries of a plain config table aborts", &
+                test_toml_section_not_array_aborts), &
+            new_unittest("a config entry index out of range aborts", &
+                test_toml_entry_out_of_range_aborts), &
+            new_unittest("a retired config key that is still set aborts", &
+                test_toml_retired_key_aborts), &
+            new_unittest("a config key nobody read aborts under the default severity", &
+                test_toml_unknown_key_aborts), &
+            new_unittest("a config section nobody opened aborts under check_all", &
+                test_toml_unknown_section_aborts), &
+            new_unittest("an unrecognised log level name in a config file aborts", &
+                test_toml_bad_level_aborts), &
+            new_unittest("reading a config section that was not found aborts", &
+                test_toml_closed_handle_aborts), &
+            new_unittest("pf_toml_set on a key that exists aborts, naming pf_toml_update", &
+                test_toml_set_existing_aborts), &
+            new_unittest("pf_toml_update on a key that does not exist aborts, naming pf_toml_set", &
+                test_toml_update_missing_aborts), &
+            new_unittest("closing a config section handle rather than the document aborts", &
+                test_toml_close_not_owner_aborts), &
+            new_unittest("config text that is not TOML aborts without status=", &
+                test_toml_parse_error_aborts), &
+            new_unittest("a config file that cannot be opened aborts without status=", &
+                test_toml_open_error_aborts), &
+            new_unittest("a config string-list index out of range aborts", &
+                test_toml_strings_range_aborts), &
+            new_unittest("an over-long config key name aborts rather than truncating", &
+                test_toml_key_too_long_aborts), &
+            new_unittest("an unknown parquet_toml severity aborts", &
+                test_toml_bad_severity_aborts), &
+            new_unittest("every legal parquet_toml path completes", &
+                test_toml_control_completes) &
+            ]
+        testsuite = [p1, p2, p3, p4, p5, p6, p7, p8, p9, p10]
     end subroutine collect_tests_parquet_errors
 
 
@@ -11695,5 +11743,212 @@ contains
             failure_message="cloning into another table type was expected to abort", &
             required_stderr="source and destination must be the same table type")
     end subroutine test_table_clone_type_mismatch_aborts
+
+    !
+    ! ---- parquet_toml abort paths ----
+    !
+    ! Every one asserts the LIBRARY's own message text and never the runtime's `ERROR STOP` prefix
+    ! or its exit status: both are processor-dependent, and all four compilers in this project's
+    ! fleet differ on them (CLAUDE.md, "A test must not assert a compiler's ERROR STOP spelling or
+    ! exit status"). `check_scenario_exit_status_and_stderr` compares against `/= 0`.
+    !
+
+    !> A value of the wrong type aborts instead of leaving the caller's variable undefined.
+    subroutine test_toml_wrong_type_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_wrong_type", expect_abort=.true., &
+            failure_message="a wrong-typed config value was expected to abort", &
+            required_stderr="is not a whole number")
+    end subroutine test_toml_wrong_type_aborts
+
+    !> A key with no default and no opt-out aborts when the file omits it.
+    subroutine test_toml_missing_key_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_missing_key", expect_abort=.true., &
+            failure_message="a required config key was expected to abort", &
+            required_stderr="config key not found and no default given")
+    end subroutine test_toml_missing_key_aborts
+
+    !> A TOML integer beyond `integer(int32)` is reported rather than silently wrapped.
+    subroutine test_toml_int_overflow_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_int_overflow", expect_abort=.true., &
+            failure_message="an out-of-range config integer was expected to abort", &
+            required_stderr="does not fit")
+    end subroutine test_toml_int_overflow_aborts
+
+    !> A list of the wrong length aborts whether it is too SHORT or too LONG.
+    !!
+    !! Both directions, because the tempting relaxation is one-sided: a file list longer than the
+    !! target looks harmless until you notice that using a prefix of it pairs every value with the
+    !! wrong slot.
+    subroutine test_toml_array_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_array_length_short", expect_abort=.true., &
+            failure_message="a config list read into a shorter array was expected to abort", &
+            required_stderr="config list has the wrong number of entries")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "toml_array_length_long", expect_abort=.true., &
+            failure_message="a config list read into a longer array was expected to abort", &
+            required_stderr="config list has the wrong number of entries")
+    end subroutine test_toml_array_length_aborts
+
+    !> A string longer than the caller's element length aborts rather than being clipped.
+    subroutine test_toml_string_too_long_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_string_too_long", expect_abort=.true., &
+            failure_message="an over-long config string was expected to abort", &
+            required_stderr="config list entry is too long")
+    end subroutine test_toml_string_too_long_aborts
+
+    !> An array getter's bare call requires its key, exactly as a scalar's does.
+    subroutine test_toml_array_required_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_array_required", expect_abort=.true., &
+            failure_message="an absent config list on a bare call was expected to abort", &
+            required_stderr="config key not found and no default given")
+    end subroutine test_toml_array_required_aborts
+
+    !> A required section the file does not have aborts, naming the section.
+    subroutine test_toml_missing_section_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_missing_section", expect_abort=.true., &
+            failure_message="a required config section was expected to abort", &
+            required_stderr="config section not found")
+    end subroutine test_toml_missing_section_aborts
+
+    !> Counting the entries of a plain `[table]` aborts rather than answering.
+    subroutine test_toml_section_not_array_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_section_not_array", expect_abort=.true., &
+            failure_message="counting a plain config table was expected to abort", &
+            required_stderr="config name is not an array of sections")
+    end subroutine test_toml_section_not_array_aborts
+
+    !> An entry index outside `1 .. count` aborts, quoting both numbers.
+    subroutine test_toml_entry_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_entry_out_of_range", expect_abort=.true., &
+            failure_message="an out-of-range config entry index was expected to abort", &
+            required_stderr="config section index out of range")
+    end subroutine test_toml_entry_out_of_range_aborts
+
+    !> A retired key still set stops the run and quotes the advice verbatim.
+    subroutine test_toml_retired_key_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_retired_key", expect_abort=.true., &
+            failure_message="a retired config key was expected to abort", &
+            required_stderr="set nproc_openmp instead")
+    end subroutine test_toml_retired_key_aborts
+
+    !> A key nobody read aborts under `pf_toml_check`'s default severity.
+    subroutine test_toml_unknown_key_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_unknown_key", expect_abort=.true., &
+            failure_message="an unread config key was expected to abort", &
+            required_stderr="Unknown key in the configuration file")
+    end subroutine test_toml_unknown_key_aborts
+
+    !> A whole section nobody opened aborts under `pf_toml_check_all`.
+    !!
+    !! This is the failure `pf_toml_check` alone cannot see, because no per-section sweep ever runs
+    !! over a section the program does not mention.
+    subroutine test_toml_unknown_section_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_unknown_section", expect_abort=.true., &
+            failure_message="an unopened config section was expected to abort", &
+            required_stderr="Section never read: [plain]")
+    end subroutine test_toml_unknown_section_aborts
+
+    !> An unrecognised log level name aborts, listing the names that work.
+    subroutine test_toml_bad_level_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_bad_level", expect_abort=.true., &
+            failure_message="an unrecognised log level name was expected to abort", &
+            required_stderr="unrecognised log level")
+    end subroutine test_toml_bad_level_aborts
+
+    !> Reading from an optional section that was absent aborts rather than returning a default.
+    subroutine test_toml_closed_handle_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_closed_handle", expect_abort=.true., &
+            failure_message="reading a config section that was not found was expected to abort", &
+            required_stderr="pf_toml_is_open")
+    end subroutine test_toml_closed_handle_aborts
+
+    !> `pf_toml_set` refuses a key that exists, and says which procedure to use instead.
+    subroutine test_toml_set_existing_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_set_existing", expect_abort=.true., &
+            failure_message="pf_toml_set on an existing key was expected to abort", &
+            required_stderr="use pf_toml_update to change one that exists")
+    end subroutine test_toml_set_existing_aborts
+
+    !> `pf_toml_update` refuses a key that does not exist, and says which procedure to use instead.
+    subroutine test_toml_update_missing_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_update_missing", expect_abort=.true., &
+            failure_message="pf_toml_update on an absent key was expected to abort", &
+            required_stderr="use pf_toml_set to add one that does not")
+    end subroutine test_toml_update_missing_aborts
+
+    !> Closing a section handle would free a document other handles still borrow.
+    subroutine test_toml_close_not_owner_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_close_not_owner", expect_abort=.true., &
+            failure_message="closing a config section handle was expected to abort", &
+            required_stderr="does not own its document")
+    end subroutine test_toml_close_not_owner_aborts
+
+    !> Malformed TOML aborts without `status`, with toml-f's own diagnostic first.
+    subroutine test_toml_parse_error_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_parse_error", expect_abort=.true., &
+            failure_message="malformed TOML was expected to abort", &
+            required_stderr="is not valid TOML")
+    end subroutine test_toml_parse_error_aborts
+
+    !> A file that cannot be opened aborts without `status`, and is told apart from a parse error.
+    subroutine test_toml_open_error_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_open_error", expect_abort=.true., &
+            failure_message="an unopenable config file was expected to abort", &
+            required_stderr="cannot open configuration file")
+    end subroutine test_toml_open_error_aborts
+
+    !> A `pf_toml_strings` index outside `1 .. count` aborts, naming both numbers.
+    subroutine test_toml_strings_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_strings_range", expect_abort=.true., &
+            failure_message="an out-of-range string-list index was expected to abort", &
+            required_stderr="element index out of range")
+    end subroutine test_toml_strings_range_aborts
+
+    !> An over-long key name aborts rather than truncating into the accumulator.
+    subroutine test_toml_key_too_long_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_key_too_long", expect_abort=.true., &
+            failure_message="an over-long config key name was expected to abort", &
+            required_stderr="key name is too long")
+    end subroutine test_toml_key_too_long_aborts
+
+    !> A severity that is none of the three constants aborts rather than picking one.
+    subroutine test_toml_bad_severity_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_bad_severity", expect_abort=.true., &
+            failure_message="an unknown parquet_toml severity was expected to abort", &
+            required_stderr="unknown severity")
+    end subroutine test_toml_bad_severity_aborts
+
+    !> THE NEGATIVE CONTROL for all of the above: the same setup, every legal path, exit 0.
+    !!
+    !! Without it, each scenario above could be aborting in its shared preamble rather than at the
+    !! call it names, and every one would still report "aborted as expected".
+    subroutine test_toml_control_completes(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_control", expect_abort=.false., &
+            failure_message="the parquet_toml control scenario was expected to exit cleanly", &
+            required_stderr="every legal parquet_toml path completed")
+    end subroutine test_toml_control_completes
 
 end module test_errors

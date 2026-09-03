@@ -32,8 +32,9 @@ Usage:  tools/generate_parquet_stats.py [--check] [--self-test]
                difference (so CI, or a reviewer, can prove the committed output is current).
   --self-test  verify the imported kind table still has the shape this script assumes.
 
-Maintainer-only: tools/ is an allow-list in tools/prep_fpm_publish.sh, so this script is stripped
-from the published package automatically and needs no TOOLS_KEEP entry.
+Maintainer-only: nothing outside this repository runs it. (Contrast a CONSUMER-FACING generator
+such as generate_parquet_maml.sh, which a downstream project runs on its own schemas and which
+CONTRIBUTING.md's index table marks as such.)
 """
 
 import argparse

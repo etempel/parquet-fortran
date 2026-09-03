@@ -33,6 +33,7 @@ program run_tester_pf
     use test_random_weighted, only : collect_tests_parquet_random_weighted
     use test_spatial, only : collect_tests_parquet_spatial
     use test_stats, only : collect_tests_parquet_stats
+    use test_toml, only : collect_tests_toml, collect_tests_toml_serial
     use test_utils, only : collect_tests_utils
     implicit none
     type(testsuite_type), allocatable :: testsuites(:)
@@ -43,6 +44,8 @@ program run_tester_pf
     testsuites = [ &
         new_testsuite("utils", collect_tests_utils), &
         new_testsuite("logging", collect_tests_logging), &
+        new_testsuite("toml", collect_tests_toml), &
+        new_testsuite("toml_serial", collect_tests_toml_serial), &
         new_testsuite("stats", collect_tests_parquet_stats), &
         new_testsuite("spatial", collect_tests_parquet_spatial), &
         new_testsuite("healpix", collect_tests_parquet_healpix), &

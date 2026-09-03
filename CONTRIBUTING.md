@@ -22,7 +22,6 @@ See [CLAUDE.md](CLAUDE.md#contributingmd-is-project-wide-workflow-only--a-tools-
   - [Continuous integration (GitLab CI)](#continuous-integration-gitlab-ci)
   - [Mirroring to GitHub](#mirroring-to-github)
   - [Releasing](#releasing)
-  - [Publishing to the fpm registry](#publishing-to-the-fpm-registry)
 - [Regenerating the built-in MAML module](#regenerating-the-built-in-maml-module)
 - [Extending the MAML schema](#extending-the-maml-schema)
 - [Error-handling conventions in `parquet_wrapper.cpp`](#error-handling-conventions-in-parquet_wrappercpp)
@@ -121,9 +120,8 @@ fpm install --prefix my_path    # generate the executables
 ```
 
 **`app/` holds the one program that ships; `bench/` holds the rest.** `app/program.f90` builds
-`run_parquet_fortran` and is the only executable in the fpm-published package —
-`tools/prep_fpm_publish.sh`'s `APP_KEEP` is an allow-list, so anything else dropped into `app/` is
-stripped from a consumer's install automatically. Every benchmark and probe program lives in
+`run_parquet_fortran` and is the only executable meant for a consumer of this library. Every
+benchmark and probe program lives in
 `bench/` beside the wrapper that drives it, described in its own header comment. Anything needing
 more memory, disk or time than `fpm test` should ever attempt belongs there, never under `test/`.
 
@@ -273,8 +271,8 @@ The repository's own scripts live in **two directories, split by contract**:
 **Every tool is documented in its own header comment** — what it measures or checks, how to invoke
 it, what its environment variables mean, and how to read its output. Read that before running or
 changing one; the tables below exist only so you know what is there. Everything in both directories
-is maintainer-only and stripped from the fpm-published package unless marked **Consumer-facing**
-(`tools/prep_fpm_publish.sh` strips `bench/` whole and allow-lists `tools/`).
+is maintainer-only unless marked **Consumer-facing** — everything in `bench/` without exception,
+and everything in `tools/` but the four generators and converters a downstream project runs itself.
 
 The one to know before your first push is **`tools/run_lint_check.sh`**: it runs the same checks as
 `.gitlab-ci.yml`'s `lint` stage, needs nothing but `python3` and `bash`, and takes about ten seconds.
@@ -335,7 +333,7 @@ Output is committed; re-run the generator and its `--check` after editing one.
 | `nagfor_fpm_shim/nagfor` | Makes `fpm build` and `fpm install` work with NAG despite fpm 0.13's NAG link-line defects. |
 | `build_ci_test_image.sh` | Bakes the CI environment into a local Docker image. **Maintainer-only** — see below. |
 | `run_ci_test_image.sh` | Runs this working tree against that image. |
-| `prep_fpm_publish.sh` | Prepares the disposable branch `fpm publish` packages. **Consumer-facing.** |
+| `prep_fpm_publish.sh` | **Retired 2026-09-03 and awaiting deletion** — see [Why not the fpm registry?](#why-not-the-fpm-registry). |
 | `prep_github_mirroring.sh` | Rewrites GitLab-specific links and badges for the GitHub mirror. |
 | `mirror_to_github.sh` | Drives that rewrite and pushes the mirror. |
 | `fix_ford_page_links.sh` | Repoints `doc/pages/*.md` links FORD does not resolve in embedded markdown. |
@@ -485,56 +483,31 @@ rather than starting a new one, and add its `[X.Y.Z]:` link reference at the foo
 5. **`README.md`'s status line** (`**Status: 2.0 — stable.**`, near the top) — only needs touching
 on a **major** version bump (it deliberately names the series, not the patch level, specifically so
 routine `2.0.x` releases don't need this step at all).
-6. **`fpm publish`** — see "Publishing to the fpm registry" below; this is a separate, deliberate
-step with its own prep script, not part of the version bump itself.
+6. **Push the tag, and mirror to GitHub** — see [Mirroring to GitHub](#mirroring-to-github). The
+GitHub repository is this project's distribution route; it is not published to the fpm registry
+(see [Why not the fpm registry?](#why-not-the-fpm-registry) below).
 
 None of this is automated or enforced by CI today — a future release-checklist script (comparing
 `VERSION.txt` against `cversion` and the latest `CHANGELOG.md` heading, say) would close that gap,
 but hasn't been written.
 
-### Publishing to the fpm registry
+### Why not the fpm registry?
 
-Account/namespace/token setup and the general `fpm publish` workflow are documented upstream in
-[fpm's registry publishing guide](https://fpm.fortran-lang.org/registry/publish.html) — this section
-only covers what's specific to *this* repository, which needs a prep step first for two reasons
-undocumented upstream:
+**This project is distributed by git, from GitHub and from gitlab.4most.eu, and is not published to
+the fpm registry.** A consumer depends on it with a `git`/`tag` entry, as README's quickstart shows.
 
-- The registry [mandatorily enforces module naming](https://fpm.fortran-lang.org/registry/naming.html), but `fpm.toml` keeps `module-naming = false` on `main` since
-  enabling it breaks local `fpm build`/`fpm test` — the `test-drive` dev-dependency's own modules
-  don't comply, and fpm has no per-dependency exemption (fpm PR [#828](https://github.com/fortran-lang/fpm/pull/828) / issue #883; re-check whether this is still true for whatever fpm version
-  you're publishing with).
-- `fpm publish` packages git HEAD, not the working tree or even the staged index (confirmed by
-  testing — uncommitted and staged edits are both silently ignored). Prep edits must be committed
-  somewhere to take effect, without ever landing on `main`.
+The registry
+[mandatorily enforces module naming](https://fpm.fortran-lang.org/registry/naming.html), and fpm has
+no per-dependency exemption for a dependency whose modules do not comply (fpm PR
+[#828](https://github.com/fortran-lang/fpm/pull/828) / issue #883). Both of this project's Fortran
+package dependencies are in that position — `test-drive` and `toml-f` — and while a dev-dependency
+can be commented out for a publish, `toml-f` cannot: `src/parquet_toml.f90` imports it, so it ships.
+A prep script used to work around the dev-dependency half by committing a disposable branch; it was
+retired when `toml-f` made the registry route impossible rather than merely awkward, and its one
+remaining index row says so.
 
-**`tools/prep_fpm_publish.sh`** handles both: commits a disposable local branch (`fpm-publish-prep`,
-never pushed or merged) with `module-naming` enabled, `test-drive` commented out, GitHub-facing doc
-links applied, and maintainer/CI-only files stripped — see the script's own header comment for the
-exact file list and mechanics (keep it in sync per CLAUDE.md's "Keeping tools/prep_fpm_publish.sh in
-sync"). It then runs fpm's token-free preview commands and self-checks the resulting tarball's
-actual contents, exiting nonzero with the specific mismatch if anything's wrong.
-
-`categories`/`keywords` in `fpm.toml` are free text with no registry-enforced vocabulary (confirmed
-by reading the registry backend's source) — the current `categories = ["io"]` needs no change.
-
-**To publish, once you have a registry token:**
-
-```bash
-tools/prep_fpm_publish.sh                       # prep + self-check; stops here if anything's wrong
-fpm publish --token TOKEN --dry-run --verbose   # dry run
-fpm publish --token TOKEN                       # the real, permanent upload -- cannot be undone
-```
-
-**To clean up afterward** (always, whether or not you actually published):
-
-```bash
-git checkout main && git branch -D fpm-publish-prep
-rm -f fpm_model.json
-fpm clean --all
-```
-
-Publishing from a GitLab checkout or the GitHub mirror makes no difference — the disposable branch's
-committed content determines what's published, not which remote you started from.
+Nothing is lost. A git dependency needs no registry account, pins exactly, and is what every
+consumer of this library already uses.
 
 ## Regenerating the built-in MAML module
 

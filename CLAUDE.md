@@ -42,6 +42,7 @@ working rules).
 - [Source code structure & conventions](#source-code-structure--conventions)
   - [One program unit per file; filename == unit name](#one-program-unit-per-file-filename--unit-name)
   - [Some `src/*.f90` files are generated — edit the generator, never the output](#some-srcf90-files-are-generated--edit-the-generator-never-the-output)
+  - [`parquet_toml` is the ONE module that emits through `parquet_logging`](#parquet_toml-is-the-one-module-that-emits-through-parquet_logging-and-the-one-with-a-package-dependency)
   - [Nested submodule tree](#nested-submodule-tree)
   - [Group interface bodies into commented `interface` blocks](#group-interface-bodies-into-commented-interface-blocks)
   - [A module procedure cannot implement its own submodule's spec-declared interface](#a-module-procedure-cannot-implement-its-own-submodules-spec-declared-interface)
@@ -94,7 +95,6 @@ working rules).
   - [If `src/parquet_wrapper.cpp` is ever split into multiple translation units](#if-srcparquet_wrappercpp-is-ever-split-into-multiple-translation-units)
   - [A hand-run `gfortran` without `-J` leaves a `.mod` in the repo root](#a-hand-run-gfortran-without--j-leaves-a-mod-in-the-repo-root-and-a-global-gitignore-hides-it)
   - [Stale `fpm` build cache](#stale-fpm-build-cache)
-  - [Keeping `tools/prep_fpm_publish.sh` in sync](#keeping-toolsprep_fpm_publishsh-in-sync)
   - [Manual (never-`fpm test`) large-scale/benchmark tools](#manual-never-fpm-test-large-scalebenchmark-tools)
   - [Measuring whether Arrow memory was actually freed](#measuring-whether-arrow-memory-was-actually-freed-rss-cannot-answer-the-pool-counter-can)
   - [A `shared_ptr` parameter on a per-row helper](#a-shared_ptr-parameter-on-a-per-row-helper-is-the-first-thing-to-suspect-in-parquet_wrappercpp)
@@ -203,9 +203,8 @@ irreversible action available in this repository, more so than anything in the s
    deleted one that turns out to have held a measurement nobody re-derived costs a campaign.
 
 **Two facts that make this less costly than it sounds.** These files are already invisible to git,
-so leaving them in the tree pollutes no commit and no published package — being untracked, they never
-enter the disposable branch `tools/prep_fpm_publish.sh` builds the tarball from, which is also why
-that script's `REMOVE_PATHS` names only the *tracked* `feature_risks.md` and none of the others. And
+so leaving them in the tree pollutes no commit and no distributed archive — being untracked, they
+are not in the tag a consumer depends on. And
 source comments in this repository routinely cite planning documents that
 are no longer present (`feature_ifx.md`, `feature_table_parallel.md`, `feature_string_parallel.md`
 and others are cited from `tools/` and `src/` while absent from the tree); such a citation is
@@ -1058,12 +1057,55 @@ Working rules for this class of file:
   perfectly until the next regeneration silently deletes it; and the header carries a digest of the
   source input, so `--check` can say "you edited generated text" rather than "this file is stale"
   — without it both look identical and the message has to guess. See `feature_risks.md` Risk-32.
-- **A generator that is maintainer-only needs NO entry in `tools/prep_fpm_publish.sh`** (downstream
-  projects consume the committed output, and `tools/` is an allow-list, so anything not named in
-  `TOOLS_KEEP` is stripped automatically). One that is consumer-facing — like
-  `tools/generate_parquet_maml.sh`, which downstream projects run on their own schemas — **must be
-  added to `TOOLS_KEEP`**, or the published tarball will not contain it. See "Keeping
-  `tools/prep_fpm_publish.sh` in sync".
+- **A generator that is consumer-facing gets a row in CONTRIBUTING.md's index table marked
+  "Consumer-facing"**, and a maintainer-only one does not. That marking is the whole distribution
+  contract now: this project ships as a git checkout, so every file in `tools/` reaches a consumer
+  whether or not they are meant to run it, and the row is what tells them which. (Until 2026-09-03
+  a prep script stripped the tarball `fpm publish` uploaded; the registry route is gone — see
+  CONTRIBUTING.md's "Why not the fpm registry?" — so there is no strip list to keep in sync any
+  more.)
+
+### `parquet_toml` is the ONE module that emits through `parquet_logging`, and the ONE with a package dependency
+
+Two rules the rest of this library follows are deliberately broken by `src/parquet_toml.f90`, and
+both breaks were argued rather than drifted into. Knowing which is which saves a future session
+from "fixing" either.
+
+**It emits through `parquet_logging`, not through `parquet_settings`' three channels.** Every other
+module reaches `parquet_emit_info`/`_warning`/`_error_context` and fails with a bare `error stop`;
+`check_no_direct_printing`'s allow-list comment states the doctrine — *"parquet_logging is a
+separate system with a separate audience: it carries the USER's program's output, not the
+library's"*. Configuration diagnostics genuinely belong to that other audience: they are read by the
+operator of the calling program, in that program's log, beside its own startup messages. Two
+consequences are documented on the guide page rather than left to be discovered — `parquet_verbosity`
+and `parquet_message_stream` govern **nothing** this module prints, and a program that never calls
+`pf_log_init` still gets output, because the default logger behaves as though it owned one stdout
+console sink. Do not route this module through the emit channels, and do not give another module
+this exception without the same argument.
+
+**It brings `toml-f`, this package's only Fortran package dependency.** Three consequences:
+
+- **Every consumer fetches it**, whatever they import — fpm resolves a package's dependency tree
+  before it prunes modules — so a first `fpm build` needs that git remote reachable. Accepted
+  deliberately: most projects that use this library read TOML configuration anyway.
+- **`fpm publish` is off the table for good**, which is why `tools/prep_fpm_publish.sh` was retired
+  and CONTRIBUTING.md carries "Why not the fpm registry?" instead. The registry enforces module
+  naming with no per-dependency exemption; `toml-f`'s modules do not comply, and unlike the
+  `test-drive` DEV-dependency a runtime one cannot be commented out for a publish.
+- **`tools/module_footprints.txt` counts THIS library's own files only.** `measure_module` filters
+  the object list on `_pf_src_` *before* stripping through the last `src_`, so toml-f's ~35 files
+  compile in every affected footprint and appear in none of the sections. That is bookkeeping, not
+  a claim: the guide page says so next to the `parquet_toml` row.
+
+**The concurrency guard is the third thing to know.** Every public entry takes one module-wide
+`!$omp critical (parquet_toml_guard)` and no private worker takes it, which is what makes the module
+safe to call from inside a parallel region — see `feature_toml.md` section 9 for why serialising is
+required rather than polite (toml-f's `%report` returns the deferred-length-character function
+result this project forbids in its own code). Both halves fail silently, so both are enforced by
+`check_parquet_toml_takes_the_guard` (`tools/check_source_conventions.py`) rather than by review.
+The read specifics take the guard INLINE and their bodies contain no `return`, because branching out
+of a `critical` region is non-conforming; everything branchier uses a thin wrapper plus a guard-free
+worker, which may return freely.
 
 ### Nested submodule tree
 
@@ -1136,6 +1178,9 @@ parquet_spatial                 (module — pf_spatial_index over plain coordina
                                  + four submodules: _build, _bulk, _query, _tune)
 parquet_healpix                 (module — the HEALPix sphere pixelisation; Arrow-free, + five
                                  submodules: _core, _arith, _bulk, _grid, _query)
+parquet_toml                    (module — pf_toml: TOML configuration files. Arrow-free; the ONLY
+                                 module reaching a third-party Fortran package (tomlf), and the
+                                 only one that emits through parquet_logging)
 parquet_tables                  (module — parquet_table and its whole surface; GENERATED spec,
                                  + a dozen submodules incl. parquet_tables_container)
 parquet_maml_base               (module — generated)
@@ -1191,7 +1236,8 @@ library `use` to any module in that file**, or it silently stops testing anythin
 
 **`parquet` and `parquet_io` are BOTH facades and neither holds any code.** `src/parquet.f90`
 re-exports `parquet_io`, `parquet_tables`, `parquet_columns`, `parquet_strings`, `parquet_temporal`,
-`parquet_sorting`, `parquet_random`, `parquet_sampling`, `parquet_settings`, `parquet_version` and
+`parquet_sorting`, `parquet_random`, `parquet_sampling`, `parquet_toml`, `parquet_settings`,
+`parquet_version` and
 three types from `parquet_maml_base`, so a user writes exactly one `use parquet`. `src/parquet_io.f90` re-exports `parquet_core` and `parquet_settings` and is the
 supported face of the reader/writer surface for a program that never builds a `parquet_table`.
 Five rules follow, and all five are easy to violate by reflex:
@@ -1369,7 +1415,7 @@ Follow these when adding new public API, types, or internal helpers:
   one.** `parquet_` is for the parquet-file-facing modules (the reader/writer/schema/table/element
   domains: everything listed under "Nested submodule tree"). **`pf_`** — for parquet-fortran, the
   library as a whole — is for *library-wide utility* modules whose subject is not a parquet file at
-  all. There are four: `parquet_sorting` (a general-purpose sorting API over plain Fortran arrays),
+  all. There are five: `parquet_sorting` (a general-purpose sorting API over plain Fortran arrays),
   whose procedures are `pf_sort`, `pf_argsort`, `pf_permute`, … and whose type is `pf_sort_keys`;
   `parquet_argsort` (the tier below it: `pf_argsort` over the six intrinsic element types, plus
   `pf_sort_threads`), which shares that vocabulary because it shares the generic — see the tier note
@@ -1379,7 +1425,10 @@ Follow these when adding new public API, types, or internal helpers:
   identifier `pf_random_algorithm`; and `parquet_sampling` (drawing from a population rather than
   drawing a number), whose procedures are `pf_random_perm_at`, `pf_random_subset`,
   `pf_random_resample`, `pf_weighted_subset`, `pf_weighted_permutation`, … with the type
-  `pf_weighted_draw` and the second frozen identifier `pf_random_perm_algorithm`. **The
+  `pf_weighted_draw` and the second frozen identifier `pf_random_perm_algorithm`; and
+  `parquet_toml` (TOML configuration files, whose subject is a config file rather than a parquet
+  one), whose procedures are `pf_toml_load`, `pf_toml_section`, `pf_toml_get`, `pf_toml_check`, …
+  and whose types are `pf_toml` and `pf_toml_strings`. **The
   `parquet_random`/`parquet_sampling` split is a dependency boundary, not a filing decision** —
   see the leaf rule below. Note the one deliberate exception in each: a **test-only debug
   hook keeps the project-wide `parquet_debug_*` spelling** rather than the module's own prefix
@@ -4426,65 +4475,6 @@ error_scenarios | wc -l` is 1. Run `fpm clean --skip` first whenever you have bu
 `FPM_FFLAGS` value in a session (a coverage run, an OpenMP run, a release build), and treat a *new*
 scenario that passes first time with suspicion until you have seen it fail against a deliberately
 broken implementation.
-
-### Keeping `tools/prep_fpm_publish.sh` in sync
-
-`tools/prep_fpm_publish.sh` builds the tarball content for `fpm publish` (see CONTRIBUTING.md's
-"Publishing to the fpm registry") by committing a disposable local branch that strips
-maintainer/CI-only files and edits `fpm.toml` (comments out `test-drive`, flips
-`module-naming` to `"parquet"`). **`app/` and `tools/` are ALLOW-lists (`APP_KEEP`, `TOOLS_KEEP`);
-only the repository root is a strip-list (`REMOVE_PATHS`).** That asymmetry is the whole design: in
-the two directories where files are added often, a new file is excluded by default, so forgetting
-costs nothing. This list/logic silently goes stale unless updated alongside the change that
-invalidates it — watch for these triggers:
-
-- **A new file lands under `tools/` or `app/`.** If it is maintainer/CI-only — which nearly all of
-  them are — **do nothing**: the allow-lists sweep it into `REMOVE_PATHS` automatically, `tools/` from
-  `git ls-files` and `app/` from a disk glob. Only a **consumer-facing** addition needs an edit, and
-  it must be added to `TOOLS_KEEP`/`APP_KEEP` or it will be stripped from the published tarball. The
-  four consumer-facing tools today are `generate_parquet_maml.sh` (see
-  `doc/pages/utilities/embedding-maml-schemas.md`), `generate_user_table_code.py`,
-  `convert_fits_to_parquet.py` and `parquet_metadata_to_md.py`; `prep_fpm_publish.sh` is in
-  `TOOLS_KEEP` too, for the mechanical reason that a running script should not delete itself.
-- **An allow-list entry is renamed or moved.** This is the one failure mode the inversion creates,
-  and it is the dangerous direction: a stale `TOOLS_KEEP`/`APP_KEEP` entry stops matching, so a
-  *consumer-facing* file is silently stripped. The script validates both lists exist before it
-  creates the disposable branch, so it fails immediately with zero side effects — but, as with
-  `REMOVE_PATHS`, only once someone actually runs it.
-- **A new maintainer/CI-only file lands at the repo root** (another CI config, another
-  AI-instructions-style file, etc.) — same call: add to `REMOVE_PATHS` if it's not
-  consumer-relevant.
-- **A new module is added to `src/`.** It must be named `parquet` or start with `parquet_`, and
-  **nothing on `main` will tell you otherwise**: `fpm.toml` carries `module-naming = false` there,
-  so a badly-named module builds, tests and ships in the working tree indefinitely — the
-  constraint only appears when this script flips the setting to `"parquet"` for the registry,
-  which may be months later and after the name is already in downstream code. Confirmed by
-  flipping the setting and adding a `module example` to `src/`:
-  `ERROR: Module example in ./src/example.f90 does not match its package name (parquet-fortran)
-  or custom prefix (parquet)`. **`test/*.f90` is exempt** — test modules are not checked, which is
-  why `test_table` and friends are fine and why the asymmetry is easy to mistake for "the rule
-  does not apply to us". This matters most for a *generated* module, where the name comes from
-  data rather than from a person: `tools/generate_user_table_code.py` takes it from its MAML's
-  `dataset:` key, so a schema naming a module `example` produces a package that cannot be
-  published.
-- **A root `REMOVE_PATHS` entry is renamed or moved.** Update the path string. The script's
-  pre-flight existence check turns a stale entry into an immediate, zero-side-effect failure
-  rather than a silently-wrong tarball — but only once you actually run it; nothing catches this
-  at edit time. (Only the root entries are hand-written now; the `app/`- and `tools/`-derived
-  entries cannot go stale, since they are enumerated from what is actually there.)
-- **A new dev-dependency is added to `fpm.toml`** — check whether its own modules comply with fpm's
-  [module-naming rules](https://fpm.fortran-lang.org/registry/naming.html) before adding it. If
-  not, it needs the same "comment out in the disposable branch" treatment as `test-drive`, or it
-  will reintroduce the build-breaking conflict documented in CONTRIBUTING.md.
-- **The exact literal text of the `test-drive.git = ...` or `module-naming = false` lines in
-  `fpm.toml` changes** for unrelated reasons — the script's own `SystemExit` checks already catch
-  this by failing loudly, but it's worth knowing why a future `fpm.toml` edit might break the
-  publish script.
-- **Upstream fpm or `test-drive` fixes the module-naming compliance gap** (fpm PR
-  [#828](https://github.com/fortran-lang/fpm/pull/828) / issue #883) — if fpm ever gains a
-  per-dependency naming exemption, or `test-drive` renames its modules to comply, revisit whether
-  the whole `test-drive`-comment-out workaround (and possibly `module-naming = false` on `main`)
-  is still needed at all.
 
 ### Manual (never-`fpm test`) large-scale/benchmark tools
 

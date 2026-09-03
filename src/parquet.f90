@@ -29,6 +29,10 @@
 !>   * `parquet_sampling`-- permutations, subsets, resampling and weighted draws.
 !>   * `parquet_spatial` -- `pf_spatial_index`: neighbour and k-nearest search.
 !>   * `parquet_healpix` -- the HEALPix sphere pixelisation.
+!>   * `parquet_toml`   -- `pf_toml`: reading and writing TOML configuration
+!>                          files on top of `toml-f`, with checked types, a
+!>                          report for every key nobody read, and diagnostics
+!>                          that point at the offending line.
 !>   * `parquet_logging` -- `pf_logger` and the `pf_log_*` procedures: general
 !>                          logging for the calling program. Nothing in this
 !>                          library uses it; the library's own messages go
@@ -75,6 +79,7 @@ module parquet
     use parquet_spatial
     use parquet_healpix
     use parquet_logging
+    use parquet_toml
     use parquet_utils
     ! Only the test hook: the transform itself and its contract check are internal.
     use parquet_expkey, only: parquet_debug_exp_key, parquet_debug_set_exp_key_contract

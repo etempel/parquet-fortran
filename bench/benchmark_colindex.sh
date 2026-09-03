@@ -93,8 +93,7 @@
 # another name would report a null result that looks like a finding. Build trees go to
 # `test_run/colindex-<guards>-<compiler>/`, with the compiler in the name deliberately: naming a
 # tree for the configuration alone lets a second toolchain's binary land in the first one's
-# directory. Maintainer-only (stripped from the fpm-published package, see
-# `tools/prep_fpm_publish.sh`).
+# directory. Maintainer-only: nothing outside this repository runs it.
 # ---------------------------------------------------------------------------------------------
 set -euo pipefail
 

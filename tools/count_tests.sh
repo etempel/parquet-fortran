@@ -15,7 +15,7 @@
 # run required): it reads `test/run_tester.f90`'s `new_testsuite(...)` registrations, locates each
 # suite's `collect_tests_parquet_*` subroutine, and counts the `new_unittest(...)` entries inside it
 # -- cross-checked against an actual `fpm test run_tester` run's PASSED/FAILED line count.
-# Maintainer-only (stripped from the fpm-published package, see `tools/prep_fpm_publish.sh`).
+# Maintainer-only: nothing outside this repository runs it.
 # ---------------------------------------------------------------------------------------------
 set -euo pipefail
 

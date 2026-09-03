@@ -3,7 +3,7 @@ title: Choosing a module: what each entry module costs to import
 ---
 
 `use parquet` brings the whole library into scope and is the right answer for most programs. It is
-also the largest: a project that imports it compiles **95** of this library's Fortran files.
+also the largest: a project that imports it compiles **96** of this library's Fortran files.
 
 Every layer underneath is importable on its own, and several of them cost a great deal less. This
 page says what each entry module gives you, what it costs, and — the part that is easy to get wrong
@@ -53,13 +53,14 @@ in every one of them.
 | `parquet_struct` | 11 | no | `parquet_struct_column` / `parquet_struct_row`: one value per declared field per row |
 | `parquet_map` | 11 | no | `parquet_map_column` / `parquet_map_row`: string-keyed `key -> value` entries per row |
 | `parquet_logging` | 1 | no | `pf_logger` and the `pf_log_*` procedures: leveled logging to several destinations at once, with a layout you choose and correct behaviour inside an OpenMP parallel region |
+| `parquet_toml` | 2 | no | `pf_toml`: reading and writing TOML configuration files on top of `toml-f`, with checked types, a report for every key nobody read, and diagnostics that point at the offending line |
 | `parquet_utils` | 1 | no | `pf_to_lower`, `pf_to_str`, `pf_join_path` and the path splitters: ASCII case folding, value-to-text, and POSIX path handling |
 | `parquet_sorting` | 21 | no | the whole sorting API, every element type, including `pf_sort_keys` |
 | `parquet_stats` | 27 | no | the `pf_*` array-statistics family: reductions over plain Fortran arrays |
 | `parquet_settings` | 3 | **yes** | the process-global knobs, and `parquet_get_arrow_version` |
 | `parquet_io` | 53 | **yes** | reading and writing Parquet files, and nothing else |
 | `parquet_tables` | 72 | **yes** | the `parquet_table` container |
-| `parquet` | 95 | **yes** | everything above, through one `use` |
+| `parquet` | 96 | **yes** | everything above, through one `use` |
 
 Four rows deserve a note.
 
@@ -132,6 +133,7 @@ anything else.
 | `parquet_struct` | `verbosity` and `message_stream` |
 | `parquet_map` | `verbosity` and `message_stream` |
 | `parquet_logging` | none — deliberately. It is not the library's own messaging system and reads neither knob; `pf_log_configure_from_env` is its own configuration route |
+| `parquet_toml` | none — it reads none; its output is governed by `parquet_logging`, not by `verbosity`/`message_stream` |
 | `parquet_strings` | `string_threads`, plus `verbosity` and `message_stream` |
 | `parquet_sampling` | `random_threads`, `random_parallel_min_elements` |
 | `parquet_spatial` | `spatial_threads`, `spatial_rebuild_warning`, the four sorting knobs, plus `verbosity` and `message_stream` |

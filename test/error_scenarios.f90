@@ -2359,6 +2359,54 @@ program error_scenarios
         call scenario_logging_composed_name_too_long()
     case ("logging_control")
         call scenario_logging_control()
+    case ("toml_wrong_type")
+        call scenario_toml_wrong_type()
+    case ("toml_missing_key")
+        call scenario_toml_missing_key()
+    case ("toml_int_overflow")
+        call scenario_toml_int_overflow()
+    case ("toml_array_length_short")
+        call scenario_toml_array_length(2)
+    case ("toml_array_length_long")
+        call scenario_toml_array_length(4)
+    case ("toml_string_too_long")
+        call scenario_toml_string_too_long()
+    case ("toml_array_required")
+        call scenario_toml_array_required()
+    case ("toml_missing_section")
+        call scenario_toml_missing_section()
+    case ("toml_section_not_array")
+        call scenario_toml_section_not_array()
+    case ("toml_entry_out_of_range")
+        call scenario_toml_entry_out_of_range()
+    case ("toml_retired_key")
+        call scenario_toml_retired_key()
+    case ("toml_unknown_key")
+        call scenario_toml_unknown_key()
+    case ("toml_unknown_section")
+        call scenario_toml_unknown_section()
+    case ("toml_bad_level")
+        call scenario_toml_bad_level()
+    case ("toml_closed_handle")
+        call scenario_toml_closed_handle()
+    case ("toml_set_existing")
+        call scenario_toml_set_existing()
+    case ("toml_update_missing")
+        call scenario_toml_update_missing()
+    case ("toml_close_not_owner")
+        call scenario_toml_close_not_owner()
+    case ("toml_parse_error")
+        call scenario_toml_parse_error()
+    case ("toml_open_error")
+        call scenario_toml_open_error()
+    case ("toml_strings_range")
+        call scenario_toml_strings_range()
+    case ("toml_key_too_long")
+        call scenario_toml_key_too_long()
+    case ("toml_bad_severity")
+        call scenario_toml_bad_severity()
+    case ("toml_control")
+        call scenario_toml_control()
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -20567,5 +20615,380 @@ contains
         call lg%error("control record")
         call lg%close()
     end subroutine scenario_logging_control
+
+    ! ================================================================================
+    ! parquet_toml
+    !
+    ! Every one of these builds its document with pf_toml_loads from a STRING. That is deliberate
+    ! and it is about this harness rather than about taste: tools/run_error_scenarios.sh dispatches
+    ! scenarios with `xargs -P`, so several of these processes run at once, and a shared fixture
+    ! PATH between two of them is the collision the project's own rule warns about. A string
+    ! literal cannot collide. The one scenario that names a file names one that does not exist.
+    !
+    ! scenario_toml_control is the negative control for the whole group: it walks the same setup
+    ! every scenario above uses and exits 0, so a scenario that "aborted as expected" cannot have
+    ! been aborting in the shared preamble instead of at the call under test.
+    ! ================================================================================
+
+    !> The document every scenario in this group reads.
+    subroutine toml_sample(text)
+        character(len=:), allocatable, intent(out) :: text  !! Receives the TOML document.
+        character(len=1) :: nl
+
+        nl = new_line("a")
+        text = 'title = "example"' // nl // &
+               '[general]' // nl // &
+               'nproc = 4' // nl // &
+               'factor = 2.5' // nl // &
+               'name = "run one"' // nl // &
+               'limits = [1, 2, 3]' // nl // &
+               'files = ["a", "bc", "a much longer third"]' // nl // &
+               'level = "WARNING"' // nl // &
+               '[plain]' // nl // &
+               'x = 1' // nl // &
+               '[[region]]' // nl // &
+               'id = 1' // nl
+    end subroutine toml_sample
+
+    !> A value that is there but of the wrong type must abort, not leave the variable undefined.
+    subroutine scenario_toml_wrong_type()
+        type(pf_toml) :: conf, gen
+        character(len=:), allocatable :: text
+        integer :: n
+
+        call toml_sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+        call pf_toml_get(gen, "factor", n)
+        print '(a)', "scenario_toml_wrong_type: reading 2.5 as an integer should have aborted"
+    end subroutine scenario_toml_wrong_type
+
+    !> A key with no default and no `required = .false.` must abort when the file omits it.
+    subroutine scenario_toml_missing_key()
+        type(pf_toml) :: conf, gen
+        character(len=:), allocatable :: text
+        integer :: n
+
+        call toml_sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+        call pf_toml_get(gen, "not_in_the_file", n)
+        print '(a)', "scenario_toml_missing_key: a required key should have aborted"
+    end subroutine scenario_toml_missing_key
+
+    !> A TOML integer too large for `integer(int32)` must be reported, never wrapped.
+    subroutine scenario_toml_int_overflow()
+        type(pf_toml) :: conf
+        integer(int32) :: n
+
+        call pf_toml_loads(conf, "big = 9223372036854775807" // new_line("a"))
+        call pf_toml_get(conf, "big", n)
+        print '(a)', "scenario_toml_int_overflow: a value beyond int32 should have aborted"
+    end subroutine scenario_toml_int_overflow
+
+    !> A list of the wrong length must abort in BOTH directions, never use a prefix.
+    subroutine scenario_toml_array_length(n)
+        integer, intent(in) :: n   !! Size of the caller's array: 2 (too short) or 4 (too long).
+        type(pf_toml) :: conf, gen
+        character(len=:), allocatable :: text
+        integer, allocatable :: got(:)
+
+        call toml_sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+        allocate(got(n))
+        got = 0
+        call pf_toml_get(gen, "limits", got)
+        print '(a)', "scenario_toml_array_length: a length mismatch should have aborted"
+    end subroutine scenario_toml_array_length
+
+    !> A string element longer than the caller's declared length must abort, never be clipped.
+    subroutine scenario_toml_string_too_long()
+        type(pf_toml) :: conf, gen
+        character(len=:), allocatable :: text
+        character(len=4) :: files(3)
+
+        call toml_sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+        call pf_toml_get(gen, "files", files)
+        print '(a)', "scenario_toml_string_too_long: a clipped file name should have aborted"
+    end subroutine scenario_toml_string_too_long
+
+    !> An array getter's bare call requires its key, exactly as a scalar's does.
+    subroutine scenario_toml_array_required()
+        type(pf_toml) :: conf, gen
+        character(len=:), allocatable :: text
+        integer :: got(3)
+
+        call toml_sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+        got = 0
+        call pf_toml_get(gen, "no_such_list", got)
+        print '(a)', "scenario_toml_array_required: an absent list on a bare call should have aborted"
+    end subroutine scenario_toml_array_required
+
+    !> A section the program needs and the file does not have must abort.
+    subroutine scenario_toml_missing_section()
+        type(pf_toml) :: conf, sect
+        character(len=:), allocatable :: text
+
+        call toml_sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "not_there", sect)
+        print '(a)', "scenario_toml_missing_section: a required section should have aborted"
+    end subroutine scenario_toml_missing_section
+
+    !> Counting the entries of a plain `[table]` is a programming error, not an answer of 1.
+    subroutine scenario_toml_section_not_array()
+        type(pf_toml) :: conf
+        character(len=:), allocatable :: text
+        integer :: n
+
+        call toml_sample(text)
+        call pf_toml_loads(conf, text)
+        n = pf_toml_section_count(conf, "plain")
+        print '(a)', "scenario_toml_section_not_array: counting a plain table should have aborted"
+    end subroutine scenario_toml_section_not_array
+
+    !> An entry index outside `1 .. count` must abort rather than return a closed handle.
+    subroutine scenario_toml_entry_out_of_range()
+        type(pf_toml) :: conf, ent
+        character(len=:), allocatable :: text
+
+        call toml_sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "region", 7, ent)
+        print '(a)', "scenario_toml_entry_out_of_range: entry 7 of 1 should have aborted"
+    end subroutine scenario_toml_entry_out_of_range
+
+    !> A retired key that is still set must stop the run, not be ignored.
+    subroutine scenario_toml_retired_key()
+        type(pf_toml) :: conf, gen
+        character(len=:), allocatable :: text
+
+        call toml_sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+        call pf_toml_retire(gen, "nproc", "set nproc_openmp instead")
+        print '(a)', "scenario_toml_retired_key: a retired key should have aborted"
+    end subroutine scenario_toml_retired_key
+
+    !> A key nobody read must abort under the default severity.
+    subroutine scenario_toml_unknown_key()
+        type(pf_toml) :: conf, gen
+        character(len=:), allocatable :: text
+        integer :: n
+
+        call toml_sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+        call pf_toml_get(gen, "nproc", n)
+        call pf_toml_check(gen)
+        print '(a)', "scenario_toml_unknown_key: an unread key should have aborted"
+    end subroutine scenario_toml_unknown_key
+
+    !> A whole SECTION nobody opened must abort under `pf_toml_check_all`.
+    !!
+    !! This is the one-level-up form of a misspelt key, and the failure `pf_toml_check` alone
+    !! cannot see: nothing in the program ever mentions `[plain]`, so no per-section sweep runs
+    !! over it.
+    subroutine scenario_toml_unknown_section()
+        type(pf_toml) :: conf, gen
+        character(len=:), allocatable :: text, name
+        integer :: n, i, id
+        real(real64) :: f
+        integer :: limits(3)
+        character(len=32) :: files(3)
+        integer :: lev
+        type(pf_toml) :: ent
+
+        call toml_sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_get(conf, "title", name)
+        call pf_toml_section(conf, "general", gen)
+        call pf_toml_get(gen, "nproc", n)
+        call pf_toml_get(gen, "factor", f)
+        call pf_toml_get(gen, "name", name)
+        call pf_toml_get(gen, "limits", limits)
+        call pf_toml_get(gen, "files", files)
+        call pf_toml_get_level(gen, "level", lev)
+        do i = 1, pf_toml_section_count(conf, "region")
+            call pf_toml_section(conf, "region", i, ent)
+            call pf_toml_get(ent, "id", id)
+        end do
+        ! Everything read EXCEPT [plain], which is what check_all must report.
+        call pf_toml_check_all(conf)
+        print '(a)', "scenario_toml_unknown_section: an unopened section should have aborted"
+    end subroutine scenario_toml_unknown_section
+
+    !> A log level name nothing recognises must abort, listing the names that work.
+    subroutine scenario_toml_bad_level()
+        type(pf_toml) :: conf
+        integer :: lev
+
+        call pf_toml_loads(conf, 'level = "LOUD"' // new_line("a"))
+        call pf_toml_get_level(conf, "level", lev)
+        print '(a)', "scenario_toml_bad_level: an unrecognised level name should have aborted"
+    end subroutine scenario_toml_bad_level
+
+    !> Reading from an optional section that was not found must abort, never return a default.
+    subroutine scenario_toml_closed_handle()
+        type(pf_toml) :: conf, sect
+        character(len=:), allocatable :: text
+        integer :: n
+        logical :: found
+
+        call toml_sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "not_there", sect, required = .false., found = found)
+        ! `found` is .false. here; a program that ignores it and reads anyway must be stopped
+        ! rather than handed a default, which would make an absent section indistinguishable from
+        ! an empty one.
+        call pf_toml_get(sect, "anything", n, default = 1)
+        print '(a)', "scenario_toml_closed_handle: reading a closed section should have aborted"
+    end subroutine scenario_toml_closed_handle
+
+    !> `pf_toml_set` ADDS: a key that already exists must be refused, naming `pf_toml_update`.
+    subroutine scenario_toml_set_existing()
+        type(pf_toml) :: conf, gen
+        character(len=:), allocatable :: text
+
+        call toml_sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+        call pf_toml_set(gen, "nproc", 9)
+        print '(a)', "scenario_toml_set_existing: setting an existing key should have aborted"
+    end subroutine scenario_toml_set_existing
+
+    !> `pf_toml_update` CHANGES: a key that is not there must be refused, naming `pf_toml_set`.
+    subroutine scenario_toml_update_missing()
+        type(pf_toml) :: conf, gen
+        character(len=:), allocatable :: text
+
+        call toml_sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+        call pf_toml_update(gen, "brand_new", 9)
+        print '(a)', "scenario_toml_update_missing: updating an absent key should have aborted"
+    end subroutine scenario_toml_update_missing
+
+    !> Closing a SECTION handle would free a document other handles still borrow.
+    subroutine scenario_toml_close_not_owner()
+        type(pf_toml) :: conf, gen
+        character(len=:), allocatable :: text
+
+        call toml_sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+        call pf_toml_close(gen)
+        print '(a)', "scenario_toml_close_not_owner: closing a section handle should have aborted"
+    end subroutine scenario_toml_close_not_owner
+
+    !> Without `status`, text that is not TOML aborts, with toml-f's own diagnostic first.
+    subroutine scenario_toml_parse_error()
+        type(pf_toml) :: conf
+
+        call pf_toml_loads(conf, "this is not = = valid toml" // new_line("a"))
+        print '(a)', "scenario_toml_parse_error: malformed TOML should have aborted"
+    end subroutine scenario_toml_parse_error
+
+    !> Without `status`, a file that cannot be opened aborts.
+    subroutine scenario_toml_open_error()
+        type(pf_toml) :: conf
+
+        call pf_toml_load(conf, "test_run/no_such_file_for_the_open_scenario.toml")
+        print '(a)', "scenario_toml_open_error: an unopenable file should have aborted"
+    end subroutine scenario_toml_open_error
+
+    !> A `pf_toml_strings` index outside `1 .. count` must abort, naming both numbers.
+    subroutine scenario_toml_strings_range()
+        type(pf_toml) :: conf, gen
+        type(pf_toml_strings) :: files
+        character(len=:), allocatable :: text, one
+
+        call toml_sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+        call pf_toml_get_strings(gen, "files", files)
+        call files%get(9, one)
+        print '(a)', "scenario_toml_strings_range: element 9 of 3 should have aborted"
+    end subroutine scenario_toml_strings_range
+
+    !> A key name longer than PF_TOML_MAX_KEY must abort, never be silently truncated.
+    !!
+    !! Truncation is the dangerous outcome rather than merely untidy: two distinct keys that
+    !! truncate to the same text would compare equal in the accumulator, so one would hide the
+    !! other from the unknown-key sweep.
+    subroutine scenario_toml_key_too_long()
+        type(pf_toml) :: conf
+        character(len=PF_TOML_MAX_KEY + 1) :: huge_key
+        integer :: n
+
+        huge_key = repeat("k", PF_TOML_MAX_KEY + 1)
+        call pf_toml_loads(conf, 'a = 1' // new_line("a"))
+        call pf_toml_get(conf, huge_key, n, default = 0)
+        print '(a)', "scenario_toml_key_too_long: an over-long key should have aborted"
+    end subroutine scenario_toml_key_too_long
+
+    !> A severity that is none of the three constants must abort rather than pick one.
+    subroutine scenario_toml_bad_severity()
+        type(pf_toml) :: conf
+
+        call pf_toml_loads(conf, 'a = 1' // new_line("a"))
+        call pf_toml_check(conf, severity = 42)
+        print '(a)', "scenario_toml_bad_severity: an unknown severity should have aborted"
+    end subroutine scenario_toml_bad_severity
+
+    !> NEGATIVE CONTROL for the whole group: the same setup, every legal path, exit 0.
+    !!
+    !! Without this, a scenario above could be aborting in `toml_sample` or `pf_toml_loads` rather
+    !! than at the call it names, and every one of them would still report "aborted as expected".
+    subroutine scenario_toml_control()
+        type(pf_toml) :: conf, gen, ent, sect
+        type(pf_toml_strings) :: files
+        character(len=:), allocatable :: text, name, one
+        character(len=32) :: fixed(3)
+        integer :: n, i, id, lev, limits(3), status
+        real(real64) :: f
+        logical :: found
+
+        call toml_sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_get(conf, "title", name)
+        call pf_toml_section(conf, "general", gen)
+        call pf_toml_get(gen, "nproc", n)
+        call pf_toml_get(gen, "factor", f)
+        call pf_toml_get(gen, "name", name)
+        call pf_toml_get(gen, "limits", limits)
+        call pf_toml_get(gen, "files", fixed)
+        call pf_toml_get_strings(gen, "files", files)
+        call files%get(2, one)
+        call pf_toml_get_level(gen, "level", lev)
+        call pf_toml_get(gen, "absent", n, default = 3)
+        call pf_toml_retire(gen, "gone_key", "nothing to do")
+        call pf_toml_require(gen, "nproc;factor")
+        call pf_toml_check(gen)
+        call pf_toml_section(conf, "not_there", sect, required = .false., found = found)
+        call pf_toml_section(conf, "plain", sect)
+        call pf_toml_get(sect, "x", n)
+        do i = 1, pf_toml_section_count(conf, "region")
+            call pf_toml_section(conf, "region", i, ent)
+            call pf_toml_get(ent, "id", id)
+        end do
+        call pf_toml_check_all(conf)
+        call pf_toml_update(gen, "nproc", 5)
+        call pf_toml_set(gen, "brand_new", 6)
+        call pf_toml_close(conf)
+
+        call pf_toml_load(conf, "test_run/no_such_file_for_the_control.toml", status)
+        if (status /= PF_TOML_ERR_OPEN) then
+            print '(a)', "scenario_toml_control: a missing file should report PF_TOML_ERR_OPEN"
+            error stop "scenario_toml_control: wrong status"
+        end if
+        call pf_toml_close(conf)
+        print '(a)', "scenario_toml_control: every legal parquet_toml path completed"
+    end subroutine scenario_toml_control
 
 end program error_scenarios

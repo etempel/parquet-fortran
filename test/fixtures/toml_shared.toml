@@ -1,0 +1,27 @@
+# A committed, read-only fixture for parquet_toml's concurrency tests.
+#
+# Several tests in the `toml` suite load THIS SAME PATH at the same time -- test-drive dispatches a
+# suite's tests with `!$omp parallel do`, which is where the simultaneous readers come from. That
+# does not violate the project's "never share a fixture file path between two tests" rule: that
+# rule bans sharing a path two tests WRITE or DELETE, and nothing ever writes to this one. Reading
+# one configuration file from several threads at once is the use case parquet_toml was asked to
+# support, so a shared read-only fixture is the point rather than a hazard.
+#
+# Do not add a key here without updating every test that sweeps it with pf_toml_check_all.
+
+title = "shared fixture"
+
+[general]
+nproc = 8
+factor = 1.25
+verbose = true
+name = "concurrent"
+limits = [10, 20, 30]
+
+[[region]]
+id = 1
+label = "north"
+
+[[region]]
+id = 2
+label = "south"

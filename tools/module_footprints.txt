@@ -207,6 +207,11 @@ parquet_wrapper.cpp
 parquet_logging.f90
 parquet_wrapper.cpp
 
+[parquet_toml]
+parquet_logging.f90
+parquet_toml.f90
+parquet_wrapper.cpp
+
 [parquet_settings]
 parquet_bindings.f90
 parquet_settings.f90
@@ -430,6 +435,7 @@ parquet_tables_slice.f90
 parquet_tables_sort.f90
 parquet_tables_write.f90
 parquet_temporal.f90
+parquet_toml.f90
 parquet_utils.f90
 parquet_version.f90
 parquet_wrapper.cpp

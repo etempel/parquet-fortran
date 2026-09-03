@@ -15,7 +15,7 @@ source-dir = "app"
 main = "program.f90"
 
 # bench/ holds every maintainer-only benchmark and probe program (app/ holds only the one
-# executable that ships -- see tools/prep_fpm_publish.sh's APP_KEEP). `auto-executables = true`
+# executable meant for a consumer of this library). `auto-executables = true`
 # below scans app/ ONLY, so bench/ has to be named here to be built at all. ONE entry is enough:
 # declaring a source-dir registers that whole directory for auto-discovery, so the other programs
 # in bench/ are picked up without an entry each (measured against fpm 0.13.0 alpha -- a two-program
@@ -29,6 +29,18 @@ main = "benchmark_table.f90"
 
 [dependencies]
 openmp = "*"
+# The TOML parser behind src/parquet_toml.f90, and this package's ONLY real Fortran package
+# dependency -- `openmp` above is fpm's metapackage (a compiler flag, not a package).
+#
+# The pin is the etempel FORK, not upstream, and both 4MOST projects that consume this library pin
+# the same branch. It carries two nagfor fixes upstream does not: a compiler-error workaround, and a
+# subnormal-underflow warning fix -- and `fpm.toml`'s own `nagfor` feature passes `-Warn=subnormal`,
+# so the second one is needed here for the same reason it was needed there. A BRANCH pin rather
+# than a rev pin is deliberate: the fork is under this project's maintainer's control, so it moves
+# only when they push it, and keeping all three projects on one dependency line has diagnostic
+# value. Switch to a rev pin only if byte-reproducible historical builds start to matter.
+#toml-f.git = "https://github.com/toml-f/toml-f"
+toml-f = {git = "https://github.com/etempel/toml-f", branch = "nagfor_fix"}
 
 [dev-dependencies]
 test-drive.git = "https://github.com/fortran-lang/test-drive"
@@ -191,3 +203,6 @@ md_extensions = ["markdown.extensions.toc"]
 [extra.ford.extra_mods]
 iso_fortran_env = "https://gcc.gnu.org/onlinedocs/gfortran/ISO_005fFORTRAN_005fENV.html"
 iso_c_binding = "https://gcc.gnu.org/onlinedocs/gfortran/ISO_005fC_005fBINDING.html"
+# The TOML parser src/parquet_toml.f90 is built on. Its sources live under build/dependencies/,
+# outside `src_dir`, so FORD cannot resolve `use tomlf` and would report it as an unknown module.
+tomlf = "https://toml-f.readthedocs.io"

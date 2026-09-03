@@ -1086,6 +1086,11 @@ DIRECT_PRINT_ALLOWED = {
     # parquet_logging is a separate system with a separate audience: it carries the USER's
     # program's output, not the library's, so it must NOT route through the emit channels --
     # `verbosity` and `message_stream` govern what this library says, not what its caller says.
+    # src/parquet_toml.f90 is the one module in src/ that emits through THAT system rather than
+    # through the channels, and it is a deliberate exception rather than an oversight:
+    # configuration diagnostics are read by the operator of the calling program, in that program's
+    # log, beside its own startup messages. It needs no entry in this list because it writes to no
+    # unit by name -- every line it produces goes through pf_log_error/pf_log_warning/pf_log_fatal.
     # `machinery_warning` is the one place it writes to a unit by name (every sink write goes to a
     # unit held in a variable), and it reports a failure of the logging machinery itself, which is
     # why it deliberately bypasses sinks, layout and the output critical section alike.
@@ -1816,6 +1821,121 @@ def check_parquet_logging_stays_arrow_free():
         "A logging module must not require the Arrow stack to print a line.")
 
 
+def check_parquet_toml_takes_the_guard():
+    """Every public `parquet_toml` entry takes the module guard; no private worker does.
+
+    `parquet_toml` is safe to call from inside an OpenMP parallel region because each public entry
+    wraps its work in one module-wide named critical section. Both halves of that arrangement fail
+    silently if broken, and in opposite directions:
+
+      * **A public procedure added WITHOUT the guard** races on the document's accumulator and on
+        toml-f's `intent(inout)` table, and -- worst -- on the hidden length temporary gfortran
+        uses to receive `toml_context%report`'s `character(:), allocatable` result, which is the
+        PR113797 shape this project forbids in its own code and has already been bitten by once
+        (`top_level_of`, found by ThreadSanitizer). Nothing fails on an ordinary run: the corruption
+        needs concurrency and a particular allocator state.
+      * **A private worker that TAKES the guard** self-deadlocks the moment a guarded entry calls
+        it, because a named critical section is not reentrant. That is a hang rather than a wrong
+        answer, on one thread, with no diagnostic.
+
+    Two clauses, and the exemptions are DERIVED rather than listed, so they cannot go stale:
+
+      1. every public procedure of the module takes the guard, unless it is a `pf_toml_strings`
+         binding (that type is a self-contained copy referencing no document and no module state,
+         so there is nothing to serialise and a lock inside `%get` would sit in a per-element
+         loop), or unless its body contains no `call` at all and never touches `%doc` (a pure
+         pointer or scalar query such as `pf_toml_is_open`);
+      2. no procedure that is not public contains the directive.
+
+    See feature_toml.md section 9.
+    """
+    path = SRC / "parquet_toml.f90"
+    if not path.is_file():
+        return ["src/parquet_toml.f90: missing -- this check needs updating"]
+    lines = path.read_text(encoding="utf-8").splitlines()
+
+    # ---- the public surface: `public ::` lists plus every generic's `module procedure` members --
+    public = set()
+    for raw in lines:
+        code = strip_comment(raw)
+        m = re.match(r"^\s*public\s*::\s*(.*)$", code, re.I)
+        if m:
+            for name in re.split(r"[,\s]+", m.group(1).replace("&", "")):
+                if name:
+                    public.add(name.lower())
+        m = re.match(r"^\s*module\s+procedure\s*(?:::)?\s*(.*)$", code, re.I)
+        if m:
+            for name in re.split(r"[,\s]+", m.group(1).replace("&", "")):
+                if name:
+                    public.add(name.lower())
+    if not public:
+        return ["src/parquet_toml.f90: parsed no public names -- this check has gone blind"]
+
+    # ---- walk the procedure bodies ---------------------------------------------------------
+    proc_re = re.compile(
+        r"^\s*(?:pure\s+|elemental\s+|impure\s+|recursive\s+)*"
+        r"(?:subroutine|(?:integer|logical|real|character)[^:]*function|function)\s+(\w+)", re.I)
+    end_re = re.compile(r"^\s*end\s+(?:subroutine|function)\b", re.I)
+    problems = []
+    name, body, raw_body, inside = "", [], [], False
+    bodies = []
+    for raw in lines:
+        code = strip_comment(raw)
+        if not inside:
+            m = proc_re.match(code)
+            if m:
+                name, body, raw_body, inside = m.group(1), [], [], True
+            continue
+        if end_re.match(code):
+            bodies.append((name, body, raw_body))
+            inside = False
+            continue
+        body.append(code)
+        raw_body.append(raw)
+
+    GUARD = "critical (parquet_toml_guard)"
+    for name, body, raw_body in bodies:
+        text = "\n".join(body)
+        # The guard is a `!$omp` DIRECTIVE, i.e. a comment -- so it is looked for in the raw lines,
+        # which strip_comment has not touched.
+        guarded = any(GUARD in ln for ln in raw_body)
+        is_public = name.lower() in public
+        if is_public:
+            strings_binding = re.search(r"class\s*\(\s*pf_toml_strings\s*\)", text, re.I)
+            trivial = not re.search(r"^\s*call\s", text, re.M | re.I) and "%doc" not in text.lower()
+            if not guarded and not strings_binding and not trivial:
+                problems.append(
+                    "src/parquet_toml.f90: public procedure `%s` does not take "
+                    "`!$omp critical (parquet_toml_guard)` -- without it a concurrent call races on "
+                    "the accumulator and on toml-f's own state, silently (feature_toml.md 9)" % name)
+        elif guarded:
+            problems.append(
+                "src/parquet_toml.f90: private worker `%s` takes the module guard -- a named "
+                "critical section is not reentrant, so the first guarded entry that calls it "
+                "self-deadlocks, on one thread, with no diagnostic (feature_toml.md 9)" % name)
+    return problems
+
+
+def check_parquet_toml_stays_arrow_free():
+    """`use parquet_toml` must not reach parquet_bindings.
+
+    Its Fortran graph is `tomlf` plus `parquet_logging`, and that is the whole of it. A program
+    that only wants to read its own configuration file should not compile the reader, the writer
+    or the C++ wrapper to do it -- and the edge that would break this is an inviting one, because
+    `parquet_settings` is where every OTHER module in this library gets its output knobs from.
+    This module deliberately does not want them: it emits through `parquet_logging`, whose levels
+    and sinks belong to the calling program, so `parquet_verbosity` governs nothing here (which
+    the guide page says out loud, for the reader who changes it and sees no effect).
+
+    One check per tier rather than one for the group, per the established pattern: the only module
+    that imports `parquet_toml` is the `parquet` facade, which reaches Arrow anyway, so nothing
+    else would notice this tier acquiring an edge.
+    """
+    return _check_stays_arrow_free(
+        "parquet_toml",
+        "A configuration-file reader must not require the Arrow stack to read a config file.")
+
+
 def check_parquet_utils_stays_arrow_free():
     """`use parquet_utils` must not reach parquet_bindings.
 
@@ -2476,8 +2596,24 @@ def check_no_per_element_string_alloc():
     endproc_re = re.compile(r"^\s*end\s+(?:subroutine|function)\b", re.I)
     # Only files that actually handle parquet_string_column storage can trip this; scanning all of
     # src/ is deliberate, so a NEW consumer in a file nobody thought of is caught too.
+    #
+    # ONE narrowing, and it is written so that it lapses by itself. `toml_table` and `toml_array`
+    # both carry a binding called `get` -- toml-f's, which hands back a POINTER and allocates
+    # nothing -- so a file importing `tomlf` produces `call tbl%get(key, ptr)` hits that are not
+    # this hazard at all. Such a file is skipped ONLY while it also has no `parquet_string` in it,
+    # i.e. only while it provably cannot hold the storage this rule protects. The day
+    # src/parquet_toml.f90 imports parquet_strings, the exemption stops applying on its own,
+    # which an allowlist of file names could not do (CLAUDE.md, "A static check that enumerates
+    # names goes stale silently").
     for path in sorted(SRC.glob("*.f90")):
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        # CODE only, never comments: src/parquet_toml.f90's own header cites `parquet_string` as
+        # the precedent for its borrowed-handle lifetime rule, and a whole-text search would read
+        # that prose as evidence the file handles string columns.
+        code_text = "\n".join(strip_comment(ln) for ln in lines)
+        if re.search(r"^\s*use\s+tomlf\b", code_text, re.M | re.I) \
+                and not re.search(r"parquet_string", code_text, re.I):
+            continue
         depth = 0
         proc = ""
         for n, line in enumerate(lines, 1):
@@ -4407,6 +4543,8 @@ CHECKS = (
     ("parquet_spatial stays Arrow-free", check_parquet_spatial_stays_arrow_free),
     ("parquet_healpix stays Arrow-free", check_parquet_healpix_stays_arrow_free),
     ("parquet_logging stays Arrow-free", check_parquet_logging_stays_arrow_free),
+    ("parquet_toml stays Arrow-free", check_parquet_toml_stays_arrow_free),
+    ("every parquet_toml entry takes the module guard", check_parquet_toml_takes_the_guard),
     ("parquet_utils is total: every procedure pure, no error stop",
      check_parquet_utils_is_total),
     ("parquet_stats stays Arrow-free", check_parquet_stats_stays_arrow_free),

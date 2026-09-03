@@ -240,6 +240,9 @@ something a reader is expected to have.
 | [Risk-172](#risk-172--a-running-fold-built-on--or--silently-drops-a-nan-instead-of-propagating-it) | A running fold built on `<` or `>` silently DROPS a NaN instead of propagating it | 4 — covered |
 | [Risk-173](#risk-173--a-two-pass-size-then-fill-whose-sizing-pass-discards-work-writes-past-the-buffer-and-the-answer-is-still-right) | A two-pass size-then-fill whose sizing pass DISCARDS work writes past the buffer, and the answer is still right | 4 — covered |
 | [Risk-174](#risk-174--a-threaded-sort-that-never-decomposes-is-invisible-and-the-fortran-engine-has-its-own-floor) | A threaded sort that never decomposes is invisible, and the Fortran engine has its own floor | 4 — covered |
+| [Risk-175](#risk-175--a-default-written-into-the-parsed-document-blinds-every-unknown-key-sweep) | A default written into the parsed document blinds every unknown-key sweep | 4 — covered |
+| [Risk-176](#risk-176--a-getter-that-forgets-the-shadow-drops-its-key-from-every-saved-configuration) | A getter that forgets the shadow drops its key from every saved configuration | 3 — not testable |
+| [Risk-177](#risk-177--a-pf_toml-section-handle-must-not-outlive-its-document) | A `pf_toml` section handle must not outlive its document | 3 — not testable |
 
 ---
 
@@ -375,6 +378,32 @@ path.
 Each of these says how to check or avoid the risk instead. Most are not gaps at all — they are a
 cost, a caveat about the input, a property of a process that has already aborted, or a pre-state no
 test can arrange — and writing a test for them would freeze the wrong thing as a contract.
+
+### Risk-176 — A getter that forgets the shadow drops its key from every saved configuration
+
+**What breaks.** `pf_toml_save` writes the **effective** configuration, and it can only do that
+because every getter records the value it resolved -- the file's, or the default it applied -- into
+a shadow `toml_table` that lives beside the parsed one. A getter that reads correctly and forgets
+that one `set_value` returns the right answer to its caller and silently omits its key from every
+file the program ever saves. There are 19 read specifics and each carries its own copy of the line.
+
+**Why it is quiet.** Nothing in the reading path consults the shadow, so every value test passes.
+The saved file is still valid TOML, still reloads, and is simply missing a key -- which a reader
+notices only if they know that key should have been there. The reverse mistake is quieter still: a
+getter that writes the *file's* value where it should have written the *resolved* one differs only
+when a default was applied.
+
+**Test.** Not testable in general, and the reason is the shape rather than the effort: an assertion
+can only cover the specifics somebody thought to write it for, which is exactly the set that was
+not forgotten. `test_save_effective` (`test/test_toml.f90`) pins the property itself -- a defaulted
+key present in the saved file, an unread key absent -- for one type, and `test_build_and_save`
+covers the write side's scalars, one integer array and one string list. What has no observer is the
+*other* fifteen specifics.
+
+**What to do instead.** When adding a read specific, copy its neighbour whole rather than writing
+it fresh: the shadow line is the last statement of every one of them, and a copied body cannot omit
+it. When adding a new TYPE, add a save/reload assertion for it in `test/test_toml.f90` at the same
+time -- that is the only thing that would have caught the omission for that type.
 
 ### Risk-156 — A struct write loses a field because a push was forgotten
 
@@ -1049,6 +1078,55 @@ rows' elements.
 Every entry here has a test behind it. What keeps it in the document is the second half: a rule for
 whoever edits the area next. Read the entry for the area you are about to touch before you touch
 it — that is what this section is for, and it is why "covered" is not the same as "finished".
+
+### Risk-175 — A default written into the parsed document blinds every unknown-key sweep
+
+**What breaks.** `parquet_toml` never passes `default=` to toml-f, and tests `has_key` first
+instead, applying the default itself. It is one optional argument away from not doing that:
+`call get_value(sect%tbl, key, value, default, stat=stat)` is shorter, reads better, and is what
+toml-f's own documentation shows.
+
+**Why it would be quiet.** toml-f's defaulting **inserts** the key into the parsed table. After
+that the document contains every key the program asked for, so `pf_toml_check` and
+`pf_toml_check_all` find nothing to report -- on every file, for every project, for ever. No value
+changes. No test that asserts a value fails. The library simply stops doing the one thing it exists
+for, and the failure surfaces as a user's misspelt optional key silently taking its default, months
+later, in somebody else's program.
+
+This is the property the whole design rests on: it is what makes a sweep correct *whenever* it is
+called, which is what allows the accumulated-key design to exist at all. Both 4MOST reference
+implementations must sweep before their first defaulted read and carry a comment saying so.
+
+**Covered by** `test_defaults_not_inserted` (`test/test_toml.f90`), which reads a key with a
+default that the file does not set and then asserts, through `pf_toml_keys`, that the key is **not**
+in the section. It carries its own negative control -- a key the file does set must be in that list
+-- so it cannot pass by the search being broken.
+
+**What it still forbids.** Do not pass `default=` to toml-f anywhere, and do not ask toml-f for a
+child table or array without `requested = .false.`: `get_value(table, key, ptr)` **creates** the
+missing table, which is the same hazard one level up and would make `pf_toml_check_all` report
+nothing about sections. `pf_toml_update` is the one deliberate writer into the parsed document, and
+it marks its key read, so the sweep stays correct through it.
+
+### Risk-177 — A `pf_toml` section handle must not outlive its document
+
+**What breaks.** `pf_toml_load` fills the one handle that owns the parsed document; every handle
+`pf_toml_section` hands back holds two raw pointers into it. After `pf_toml_close` those pointers
+are dangling, and Fortran offers no way to detect it.
+
+**Why it is quiet.** The same reason `%col` on a mutated `parquet_table` is (Risk-11): freed memory
+usually still reads as what it held, so the value is usually right and occasionally is not.
+
+**Test.** Deliberately none, and this is the register's "not testable" case rather than a gap: a
+test asserting a particular symptom of undefined behaviour would be asserting an accident, and
+would then fail the first time an allocator changed.
+
+**What to do instead, and what is checked.** Close the document last. The contract is stated on
+`pf_toml_close`, in the module header and on the guide page. Two of its edges *are* enforced:
+closing a section handle rather than the document is fatal (`toml_close_not_owner`), and reading
+from a handle that was never opened, or from an optional section that was not found, is fatal
+(`toml_closed_handle`). `pf_toml_strings` is deliberately outside all of this -- it copies its
+strings out and is asserted to survive a close by `test_strings_outlive_document`.
 
 ### Risk-123 — Two families over one coordinate space couple in the rarest cell, and every marginal stays clean
 

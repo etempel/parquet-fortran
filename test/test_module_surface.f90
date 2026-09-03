@@ -1099,6 +1099,19 @@ contains
             if (size(keys) /= 4) what = "pf_toml_keys"
         end if
         if (what == "") then
+            n = 77
+            call pf_toml_get_opt(gen, "absent", n)
+            if (n /= 77) what = "pf_toml_get_opt kept the variable"
+        end if
+        if (what == "") then
+            call pf_toml_get_strings_opt(gen, "files", files, count = 2)
+            if (files%count() /= 2) what = "pf_toml_get_strings_opt with count"
+        end if
+        if (what == "") then
+            call pf_toml_delete(gen, "absent_key_that_was_never_there")
+            call pf_toml_mark_section(gen)
+        end if
+        if (what == "") then
             ! The sweep must stay SILENT here -- everything above was read. If it reported, this
             ! would abort rather than fail, which is the loudest possible outcome and is fine.
             call pf_toml_check_all(conf, severity = PF_TOML_IGNORE)

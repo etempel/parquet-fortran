@@ -12,19 +12,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`parquet_toml`**: an Arrow-free entry module for reading and writing TOML configuration files,
   built on [toml-f](https://github.com/toml-f/toml-f) — which becomes this library's first Fortran
   package dependency, so every consumer now fetches it. `pf_toml_load`/`pf_toml_loads` parse a file
-  or a string, `pf_toml_section` opens `[name]` and `[[name]]` entries at any nesting depth, and
-  one `pf_toml_get` generic reads scalars and caller-sized arrays of `integer(int32/int64)`,
+  or a string, `pf_toml_section` opens `[name]` and `[[name]]` entries at any nesting depth, and one
+  `pf_toml_get` generic reads scalars and caller-sized arrays of `integer(int32/int64)`,
   `real(real32/real64)`, `logical` and `character`, with `pf_toml_get_alloc` for a list the file
   sizes, `pf_toml_get_strings` for a string list that keeps each element's own length, and
-  `pf_toml_get_level` for a `PF_LEVEL_*` value read by name. A wrong-typed value aborts with the
-  offending source line quoted instead of leaving the variable undefined, and a default is applied
-  without writing it into the parsed document — which is what lets `pf_toml_check` and
-  `pf_toml_check_all` report every key and every section the program never read, from a list
-  accumulated automatically rather than one written down. `pf_toml_require`, `pf_toml_retire`,
-  `pf_toml_mark`, `pf_toml_report` and raw-object escape hatches round out the read side;
-  `pf_toml_new`, `pf_toml_new_section`, `pf_toml_append_section`, `pf_toml_set`, `pf_toml_update`
-  and `pf_toml_save` write the effective configuration back out. Every public procedure is safe to
-  call from inside an OpenMP parallel region. See
+  `pf_toml_get_level` for a `PF_LEVEL_*` value read by name. One rule covers every getter: the bare
+  call requires its key, `pf_toml_get` opts out with `default =`, and `pf_toml_get_opt`,
+  `pf_toml_get_alloc_opt` and `pf_toml_get_strings_opt` opt out by keeping whatever the variable
+  already holds. A wrong-typed value aborts with the offending source line quoted instead of leaving
+  the variable undefined, and a default is applied without writing it into the parsed document —
+  which is what lets `pf_toml_check` and `pf_toml_check_all` report every key and every section the
+  program never read, from a list accumulated automatically rather than one written down.
+  `pf_toml_require`, `pf_toml_retire`, `pf_toml_mark`, `pf_toml_mark_section`, `pf_toml_report` and
+  raw-object escape hatches round out the read side; `pf_toml_new`, `pf_toml_new_section`,
+  `pf_toml_append_section`, `pf_toml_set`, `pf_toml_update` and `pf_toml_delete` build a document,
+  `pf_toml_save` writes the effective configuration back out and `pf_toml_dump` writes the document
+  as parsed. Every public procedure is safe to call from inside an OpenMP parallel region. See
   [Configuration files](doc/pages/utilities/configuration-files.md).
 
 ### Changed

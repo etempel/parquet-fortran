@@ -82,10 +82,19 @@ handle's display path composes: `general`, then `general.nested`, then `region[3
 what every later message quotes.
 
 `required` defaults to `.true.`: a section you ask for is one your program needs. With
-`required = .false.` an absent section leaves the handle **closed**, and reading from a closed
-handle is fatal rather than returning defaults — guard the reads with `pf_toml_is_open`. Returning
-defaults would make an absent section indistinguishable from an empty one, which is exactly the
-silence this module exists to remove.
+`required = .false.` an absent section leaves the handle **closed**.
+
+**Reading a value from a closed handle is fatal** rather than returning defaults — guard the reads
+with `pf_toml_is_open`. Returning defaults would make an absent section indistinguishable from an
+empty one, which is exactly the silence this module exists to remove. That holds for
+`pf_toml_get_opt` too, whose defaults live in the variables: the handle still has to be open.
+
+**The validators are the exception and are silent on a closed handle.** `pf_toml_check`,
+`pf_toml_retire`, `pf_toml_mark`, `pf_toml_mark_section` and `pf_toml_section_count` all do nothing
+rather than stop, because a section that does not exist has no keys to sweep, none to mark and none
+to warn about — and whether an optional section is present is not known before it is opened, so a
+caller cannot be asked to test first. `pf_toml_require` still stops: its keys are required and they
+are not there, which is a real failure at any level.
 
 `pf_toml_section_count` answers `0` for an absent name, which makes this the whole idiom for an
 optional repeated section:
@@ -108,43 +117,66 @@ diagnostics and the same coverage: `call pf_toml_get(conf, "title", title)`.
 ## Reading values
 
 ```fortran
-call pf_toml_get(sect, key, value, [default])          ! scalar
-call pf_toml_get(sect, key, values, [required])        ! array, exact length match
-call pf_toml_get_alloc(sect, key, values, [required])  ! array, the file chooses the size
-call pf_toml_get_strings(sect, key, strings, [required])
+call pf_toml_get(sect, key, value, [default])            ! scalar
+call pf_toml_get(sect, key, values, [default])           ! array, exact length match
+call pf_toml_get_alloc(sect, key, values)                ! array, the file chooses the size
+call pf_toml_get_strings(sect, key, strings, [count])
 call pf_toml_get_level(sect, key, level, [default])
+
+call pf_toml_get_opt(sect, key, value)                   ! keep the variable if the key is absent
+call pf_toml_get_opt(sect, key, values)
+call pf_toml_get_alloc_opt(sect, key, values)
+call pf_toml_get_strings_opt(sect, key, strings, [count])
 ```
+
+Square brackets mark an optional argument throughout this page.
 
 `value` is an `integer(int32)`, `integer(int64)`, `real(real32)`, `real(real64)`, `logical` or
 `character(len=:), allocatable` scalar. `values` is a rank-1 array of any of those six, with
 `character(len=*)` for the string form; `pf_toml_get_alloc` takes the same five numeric and logical
 types and deliberately has no character form.
 
-**Every form requires its key unless you opt out, and the two opt-outs differ by shape.** A scalar
-opts out by taking a `default`; an array opts out with `required = .false.`, and then carries its
-default *in the variable* — whatever it held on entry stands. That is what makes "inherit from the
-previous entry unless this one overrides it" an ordinary assignment written before the call:
+**One rule covers every getter, at every shape:**
+
+> The bare call requires its key. `pf_toml_get` opts out with `default =`. The `_opt` call opts out
+> by keeping whatever the variable already holds. `default =` is offered exactly where the caller
+> owns the size — the scalar and fixed-length-array forms — and never by `pf_toml_get_alloc` or
+> `pf_toml_get_strings`, which take their size from the file.
+
+The `_opt` forms are what make "inherit from the previous entry unless this one overrides it" two
+ordinary lines:
 
 ```fortran
-this_region = previous_region                                  ! inherit everything
-call pf_toml_get(sect, "airmass_limit", this_region%airmass, required = .false.)   ! then override
+this_region = previous_region                                   ! inherit everything
+call pf_toml_get_opt(sect, "airmass_limit", this_region%airmass) ! then override
 ```
 
-**Always write `default =` and `required =` as keyword arguments.** In fourth position a bare
-`.true.` means "the default is true" for a `logical` scalar and "this key is required" for a
-`logical` array. The compiler resolves it by rank and is never wrong; a reader might be.
+**An `_opt` call asks you to have given the variable a value.** Its `value` is `intent(inout)`, so
+passing an undefined variable is not conforming and a checked build will trap on it. That is the
+assertion the separate name makes: `pf_toml_get` says "this program needs a value here",
+`pf_toml_get_opt` says "this variable already has one".
+
+**Never pass one variable as both `values` and `default`.** `call pf_toml_get(s, "k", x, x)`
+associates `x` with an `intent(out)` dummy and an `intent(in)` one, which the standard forbids and
+no compiler diagnoses; the "default" applied is then whatever undefining `x` left behind. That call
+means `call pf_toml_get_opt(s, "k", x)`. Writing `default =` as a keyword argument is the habit that
+keeps the two apart at a glance.
 
 A few rules worth knowing:
 
 - An array's length must match `size(values)` **exactly, in both directions**. Silently using a
   prefix of a list that is too long pairs each value with the wrong slot, which nothing downstream
-  could catch.
-- A string element longer than `len(values)` is fatal rather than clipped. A silently truncated
-  file name is the worst outcome available here.
+  could catch. A rank-1 `default` must be `size(values)` long for the same reason.
+- A string element longer than `len(values)` is fatal rather than clipped, in a `default` as much as
+  in the file. A silently truncated file name is the worst outcome available here.
 - Reading a `real` accepts a TOML integer and converts it. Reading an `integer` does **not** accept
   a TOML float, and a value too large for `integer(int32)` is reported rather than wrapped.
-- With `required = .false.`, `pf_toml_get_alloc` leaves its result **unallocated**, and
-  `allocated(values)` is part of the contract.
+- `pf_toml_get_alloc_opt` leaves its result exactly as it found it, so an unallocated one stays
+  unallocated and `allocated(values)` answers "did the file set this key?". A variable that already
+  held a list keeps it.
+- An `_opt` read records what the run actually used — the file's value, or the variable's own — so
+  `pf_toml_save` writes it either way. The one thing recorded nowhere is an absent value: a
+  `character(len=:), allocatable` scalar left unallocated is not an empty string.
 
 ### Lists of strings
 
@@ -156,15 +188,22 @@ is read into a `pf_toml_strings` instead, which keeps each element exact.
 type(pf_toml_strings) :: files
 character(len=:), allocatable :: one
 
-call pf_toml_get_strings(sect, "input_files", files, required = .false.)
+call pf_toml_get_strings_opt(sect, "input_files", files)
 do i = 1, files%count()
     call files%get(i, one)          ! `one` is allocated to this element's exact length
 end do
 n = files%length(2)                 ! element 2's length, without fetching it
 ```
 
-An absent optional key gives a usable object whose `%count()` is `0`, so the loop above is the
-whole idiom. The object copies its strings out of the document, so it survives `pf_toml_close`.
+A freshly declared `files` that the file does not set still answers `%count() == 0`, so the loop
+above is the whole idiom for an optional list. The object copies its strings out of the document, so
+it survives `pf_toml_close`.
+
+`count =` demands an exact number of entries and is fatal in **both** directions. That is what a
+list whose length must match some other setting needs — three column names for three sky conditions
+is a correctness constraint, and a list of the wrong length pairs each name with the wrong
+condition. It is checked only when the file sets the key, so an absent optional list is not measured
+against it.
 
 ### Log levels
 
@@ -188,6 +227,7 @@ call pf_toml_check_all(doc, [severity])    ! everything nobody read, in the whol
 call pf_toml_require(sect, keys)           ! a ';'-separated list that must all be present
 call pf_toml_retire(sect, key, advice)     ! stop if a retired key is still set
 call pf_toml_mark(sect, key)               ! record a key you read some other way
+call pf_toml_mark_section(sect)            ! record a whole section, recursively
 ```
 
 **`pf_toml_check` is the centre of the module.** It compares the keys the file gives against
@@ -196,8 +236,8 @@ asked-for keys is accumulated automatically by every getter and every `pf_toml_s
 not the key was in the file — so there is no known-key list to write down anywhere, and none to
 keep in step with the reads as they change.
 
-The required half needs no list either, and no separate call: a getter with no `default` and no
-`required = .false.` stops on an absent key at the point of the read, naming it.
+The required half needs no list either, and no separate call: a bare getter — no `default`, and not
+one of the `_opt` forms — stops on an absent key at the point of the read, naming it.
 
 **It may be called at any point, including last.** Nothing here writes a default into the parsed
 document, so the document a sweep sees is the document the file described. Ordering is not a trap.
@@ -220,6 +260,15 @@ first — somebody bringing an old file forward is usually missing several.
 **`pf_toml_retire` stops rather than warns.** A retired key that is merely ignored is worse than
 one that is rejected: the run proceeds with a value written nowhere the user can see, and the file
 looks as though it still works.
+
+**`pf_toml_mark_section` excuses a whole section from both sweeps**, for a section your program
+deliberately does not read — a `[developer]` block whose keys are only read when a developer mode is
+on, say. The alternative is to read every key unconditionally and re-apply the defaults by hand,
+which rebuilds exactly the key list this module exists to delete. It marks **recursively**, so a
+sub-table below the section is not then reported as a section nobody read; the cost is that a
+misspelt *nested* section name inside a marked section is silenced too. Marking is not reading, so
+`pf_toml_save` does not write a marked section's keys — which is right, because the program did not
+use them.
 
 ## Escape hatches
 
@@ -251,7 +300,9 @@ call pf_toml_new_section(parent, name, sect)
 call pf_toml_append_section(parent, name, sect)   ! one more [[name]] entry
 call pf_toml_set(sect, key, value)                ! ADDS a key that is not there
 call pf_toml_update(sect, key, value)             ! CHANGES a key that is
-call pf_toml_save(doc, file)
+call pf_toml_delete(sect, key)                    ! REMOVES a key; absent is a no-op
+call pf_toml_save(doc, file)                      ! the EFFECTIVE configuration
+call pf_toml_dump(doc, file)                      ! the document AS PARSED
 ```
 
 **`pf_toml_set` and `pf_toml_update` are separate on purpose, and each checks.** `pf_toml_set`
@@ -271,6 +322,12 @@ value. A value with a genuine trailing blank goes through the escape hatch.
 refused, because a section is a place to put keys rather than a value to get wrong. It works on a
 loaded document too, adding a section the file did not have.
 
+**`pf_toml_delete` is the third of the trio and the one that does *not* refuse the other state.**
+Deleting is idempotent — afterwards the key is not there, whether or not it was — so there is no
+wrong outcome for a guard to prevent, and "remove this key if the file happens to set it" is one
+line. The key goes from the parsed document *and* from the effective one, so a later `pf_toml_save`
+does not write back a value an earlier read had resolved.
+
 ### What `pf_toml_save` writes
 
 **The effective configuration: the values the run actually used, with defaults made explicit.**
@@ -282,10 +339,20 @@ what is written. Two consequences follow, and both are the point:
 - A key the file set but your program never read is **absent**. The saved file states what the run
   used, not what it was handed.
 
-For a verbatim copy of the input, copy the file. For a verbatim dump of the parsed document, use
-`pf_toml_table` and toml-f's own `toml_dump`.
-
 An existing file is overwritten.
+
+### What `pf_toml_dump` writes
+
+**The document as parsed**, plus every `pf_toml_set`, `pf_toml_update` and `pf_toml_delete` applied
+since. Everything the file carried is there whether or not your program read it, which is exactly
+where `pf_toml_save` differs — so loading a file, editing one key and writing it back out is
+`pf_toml_dump`, while recording what a run used is `pf_toml_save`.
+
+**Neither is a verbatim copy.** toml-f's serialiser writes values rather than source, so comments
+are dropped and the key order and formatting are toml-f's. For a file people hand-edit and keep
+comments in, copy the file.
+
+Both take the document handle rather than a section, and both overwrite.
 
 ## Thread safety
 
@@ -327,8 +394,8 @@ Two consequences worth knowing before you go looking for a knob:
 
 Every failure is fatal by default, through `pf_log_fatal`, which writes the message at
 `PF_LEVEL_CRITICAL`, flushes every sink and then stops. The only opt-outs are `pf_toml_load`'s
-`status`, `pf_toml_section`'s `required = .false.`, `pf_toml_has` and a check's
-`severity = PF_TOML_WARN`.
+`status`, `pf_toml_section`'s `required = .false.`, a getter's `default =` or its `_opt` form,
+`pf_toml_has`, and a check's `severity = PF_TOML_WARN`.
 
 A message looks like this, and the middle block is toml-f's own rendered report:
 

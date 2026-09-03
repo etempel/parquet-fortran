@@ -2389,6 +2389,14 @@ program error_scenarios
         call scenario_toml_bad_level()
     case ("toml_closed_handle")
         call scenario_toml_closed_handle()
+    case ("toml_default_size")
+        call scenario_toml_default_size()
+    case ("toml_strings_count_short")
+        call scenario_toml_strings_count_short()
+    case ("toml_strings_count_long")
+        call scenario_toml_strings_count_long()
+    case ("toml_dump_not_owner")
+        call scenario_toml_dump_not_owner()
     case ("toml_set_existing")
         call scenario_toml_set_existing()
     case ("toml_update_missing")
@@ -20885,6 +20893,61 @@ contains
         call pf_toml_close(gen)
         print '(a)', "scenario_toml_close_not_owner: closing a section handle should have aborted"
     end subroutine scenario_toml_close_not_owner
+
+    !> A rank-1 `default` must hold exactly as many entries as the array it would fill.
+    !!
+    !! The mistake this catches is a default written once and an array later resized, which would
+    !! otherwise be a shape-mismatch assignment inside the library rather than a named failure.
+    subroutine scenario_toml_default_size()
+        type(pf_toml) :: conf, gen
+        character(len=:), allocatable :: text
+        integer :: got(3)
+
+        call toml_sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+        call pf_toml_get(gen, "no_such_list", got, default = [1, 2])
+        print '(a)', "scenario_toml_default_size: a default of the wrong size should have aborted"
+    end subroutine scenario_toml_default_size
+
+    !> `count` is fatal when the file's list is too SHORT.
+    subroutine scenario_toml_strings_count_short()
+        type(pf_toml) :: conf, gen
+        type(pf_toml_strings) :: files
+        character(len=:), allocatable :: text
+
+        call toml_sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+        call pf_toml_get_strings(gen, "files", files, count = 4)
+        print '(a)', "scenario_toml_strings_count_short: a list shorter than count should have aborted"
+    end subroutine scenario_toml_strings_count_short
+
+    !> `count` is fatal when the file's list is too LONG, which is the direction a caller is most
+    !> tempted to allow: a prefix of a too-long list pairs each value with the wrong slot.
+    subroutine scenario_toml_strings_count_long()
+        type(pf_toml) :: conf, gen
+        type(pf_toml_strings) :: files
+        character(len=:), allocatable :: text
+
+        call toml_sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+        call pf_toml_get_strings(gen, "files", files, count = 2)
+        print '(a)', "scenario_toml_strings_count_long: a list longer than count should have aborted"
+    end subroutine scenario_toml_strings_count_long
+
+    !> `pf_toml_dump` writes a whole document, so a section handle is a mistake, not a subset.
+    subroutine scenario_toml_dump_not_owner()
+        type(pf_toml) :: conf, gen
+        character(len=:), allocatable :: text
+
+        call toml_sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+        call pf_toml_dump(gen, "test_run/toml_dump_not_owner.toml")
+        print '(a)', "scenario_toml_dump_not_owner: dumping a section handle should have aborted"
+    end subroutine scenario_toml_dump_not_owner
 
     !> Without `status`, text that is not TOML aborts, with toml-f's own diagnostic first.
     subroutine scenario_toml_parse_error()

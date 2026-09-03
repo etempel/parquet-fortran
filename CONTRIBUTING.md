@@ -333,7 +333,6 @@ Output is committed; re-run the generator and its `--check` after editing one.
 | `nagfor_fpm_shim/nagfor` | Makes `fpm build` and `fpm install` work with NAG despite fpm 0.13's NAG link-line defects. |
 | `build_ci_test_image.sh` | Bakes the CI environment into a local Docker image. **Maintainer-only** — see below. |
 | `run_ci_test_image.sh` | Runs this working tree against that image. |
-| `prep_fpm_publish.sh` | **Retired 2026-09-03 and awaiting deletion** — see [Why not the fpm registry?](#why-not-the-fpm-registry). |
 | `prep_github_mirroring.sh` | Rewrites GitLab-specific links and badges for the GitHub mirror. |
 | `mirror_to_github.sh` | Drives that rewrite and pushes the mirror. |
 | `fix_ford_page_links.sh` | Repoints `doc/pages/*.md` links FORD does not resolve in embedded markdown. |

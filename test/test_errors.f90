@@ -1881,6 +1881,14 @@ contains
                 test_toml_bad_level_aborts), &
             new_unittest("reading a config section that was not found aborts", &
                 test_toml_closed_handle_aborts), &
+            new_unittest("a rank-1 default of the wrong size aborts", &
+                test_toml_default_size_aborts), &
+            new_unittest("get_strings count aborts on a list that is too short", &
+                test_toml_strings_count_short_aborts), &
+            new_unittest("get_strings count aborts on a list that is too long", &
+                test_toml_strings_count_long_aborts), &
+            new_unittest("pf_toml_dump on a section handle rather than the document aborts", &
+                test_toml_dump_not_owner_aborts), &
             new_unittest("pf_toml_set on a key that exists aborts, naming pf_toml_update", &
                 test_toml_set_existing_aborts), &
             new_unittest("pf_toml_update on a key that does not exist aborts, naming pf_toml_set", &
@@ -11875,6 +11883,38 @@ contains
             failure_message="reading a config section that was not found was expected to abort", &
             required_stderr="pf_toml_is_open")
     end subroutine test_toml_closed_handle_aborts
+
+    !> A rank-1 `default` whose size differs from the array it fills is named, not assigned.
+    subroutine test_toml_default_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_default_size", expect_abort=.true., &
+            failure_message="a rank-1 default of the wrong size was expected to abort", &
+            required_stderr="the default has 2 entries")
+    end subroutine test_toml_default_size_aborts
+
+    !> `count` is fatal when the file's list has too few entries.
+    subroutine test_toml_strings_count_short_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_strings_count_short", expect_abort=.true., &
+            failure_message="a string list shorter than count= was expected to abort", &
+            required_stderr="the program needs 4")
+    end subroutine test_toml_strings_count_short_aborts
+
+    !> `count` is fatal in the other direction too: a prefix would pair values with wrong slots.
+    subroutine test_toml_strings_count_long_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_strings_count_long", expect_abort=.true., &
+            failure_message="a string list longer than count= was expected to abort", &
+            required_stderr="the program needs 2")
+    end subroutine test_toml_strings_count_long_aborts
+
+    !> `pf_toml_dump` writes a whole document, so a section handle is refused as `pf_toml_save` is.
+    subroutine test_toml_dump_not_owner_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_dump_not_owner", expect_abort=.true., &
+            failure_message="pf_toml_dump on a section handle was expected to abort", &
+            required_stderr="not the document handle")
+    end subroutine test_toml_dump_not_owner_aborts
 
     !> `pf_toml_set` refuses a key that exists, and says which procedure to use instead.
     subroutine test_toml_set_existing_aborts(error)

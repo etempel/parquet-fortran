@@ -3993,8 +3993,8 @@ the only profile that checks anything at runtime.
   around a compiler bug, leaving the checked build checking a different program. It does not reduce
   to a synthetic (three tried, all clean), so a NAG report needs it bisected out of the real tree.
 
-  **Three compile-time nagfor defects were found and fixed while getting the build clean under it,
-  and two of the fixes are rules that must not be reverted.** (a) An ICE (`Panic: Cannot find scope
+  **Four compile-time nagfor defects have been found and fixed while getting the build clean under
+  it, and three of the fixes are rules that must not be reverted.** (a) An ICE (`Panic: Cannot find scope
   id 0`) when compiling any submodule of a module declaring a `FINAL` bound to a **separate module
   procedure** — so **every `FINAL` target must stay module-contained**, and moving one into a
   submodule silently reintroduces the ICE for every sibling submodule. (b) Invalid C for the
@@ -4003,7 +4003,23 @@ the only profile that checks anything at runtime.
   `parquet_string_column`'s (deallocations F2018 9.7.3.2 already performs); **do not add either
   back**, and note the remaining four release C++ handles and OpenMP locks and must stay. (c)
   Invalid C for a pointer-valued function result used directly as an actual argument — bind it to
-  a local pointer first.
+  a local pointer first. (d) **Invalid C for a PARENT-TYPE component read through a `class(...)`
+  pointer in a `select type`'s `class default` arm** — `no member named 'addr' in 'struct ...'`,
+  because the generated C dereferences with `.` where the pointer needs `->`. The fix is to write
+  the concrete `type is (...)` arms out, so the type is static at every read; where the extension
+  set is small and closed that costs nothing and changes no behaviour. `key_origin`
+  (`src/parquet_toml.f90`) is the worked example: toml-f has exactly three extensions of
+  `toml_value`, so its `class default` became three arms plus an unreachable one, and its own
+  doc-comment says why it must not be folded back.
+
+  **The last of those is a warning about the CHECK itself, not only about the construct.** It
+  reached the tree in the commit that added `parquet_toml`, and from that moment
+  `tools/check_nag_undefined.sh` could not build `run_tester_pf` **at all** — so the script
+  reported `error: ran 0 suite(s) but expected 22 -- this run proves nothing` and every one of the
+  22 suites went unchecked, not just the new one. That is the vacuity guard doing its job, and it
+  is the reason to run this script after adding a suite to a runner rather than only after touching
+  something that looks related to it: a single new module can take the whole gate down, and the
+  failure is a compile error in a profile nothing else builds.
 
 **`-C=dangling` and `-C=calls` are BOTH in the set, and the one-word source change that let them in
 must not be reverted.** Neither check is the ingredient: what matters is the `target` attribute on

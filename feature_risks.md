@@ -385,7 +385,25 @@ test can arrange — and writing a test for them would freeze the wrong thing as
 because every getter records the value it resolved -- the file's, or the default it applied -- into
 a shadow `toml_table` that lives beside the parsed one. A getter that reads correctly and forgets
 that one `set_value` returns the right answer to its caller and silently omits its key from every
-file the program ever saves. There are 19 read specifics and each carries its own copy of the line.
+file the program ever saves. There are **37** read specifics across six generics -- `pf_toml_get`
+(12), `pf_toml_get_opt` (12), `pf_toml_get_alloc` (5), `pf_toml_get_alloc_opt` (5),
+`pf_toml_get_strings`/`_opt` and `pf_toml_get_level` -- and each carries its own copy of the line.
+
+**The `_opt` forms make it worse in one specific way.** Their shadow write is *conditional*: there
+is nothing to record when the variable holds nothing (an unallocated deferred-length character, an
+unallocated `_alloc_opt` target, a `_strings_opt` target the file never set). So an `_opt` specific
+that skips the shadow write in a case where it should not have is indistinguishable, by inspection,
+from one correctly declining to record an absent value. `test_opt_reaches_the_shadow`
+(`test/test_toml.f90`) is the one assertion that separates them -- it reads an absent key into a
+variable holding `42`, saves, reloads and demands `42` back.
+
+**`pf_toml_delete` is the mirror image and belongs to the same risk.** It removes a key from the
+parsed document *and* from the shadow, and the shadow half is the one that can be forgotten: a key
+an earlier getter had already resolved is sitting in the effective document, so a delete that
+skipped it has `pf_toml_save` write back the value the caller had just removed. `test_delete`
+(`test/test_toml.f90`) reads the key first, on purpose, so that the shadow line is load-bearing --
+a version of that test which deleted an unread key would pass against a delete that ignores the
+shadow entirely.
 
 **Why it is quiet.** Nothing in the reading path consults the shadow, so every value test passes.
 The saved file is still valid TOML, still reloads, and is simply missing a key -- which a reader
@@ -397,8 +415,9 @@ when a default was applied.
 can only cover the specifics somebody thought to write it for, which is exactly the set that was
 not forgotten. `test_save_effective` (`test/test_toml.f90`) pins the property itself -- a defaulted
 key present in the saved file, an unread key absent -- for one type, and `test_build_and_save`
-covers the write side's scalars, one integer array and one string list. What has no observer is the
-*other* fifteen specifics.
+covers the write side's scalars, one integer array and one string list. `test_opt_reaches_the_shadow`
+and `test_delete` cover the two shapes described above. What has no observer is the remaining
+specifics, one per type per generic.
 
 **What to do instead.** When adding a read specific, copy its neighbour whole rather than writing
 it fresh: the shadow line is the last statement of every one of them, and a copied body cannot omit

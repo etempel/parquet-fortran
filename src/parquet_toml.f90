@@ -34,6 +34,12 @@
 !! call pf_toml_close(conf)
 !! ```
 !!
+!! **One rule covers every getter, at every shape.** The bare call requires its key. `pf_toml_get`
+!! opts out with `default =`; `pf_toml_get_opt`, `pf_toml_get_alloc_opt` and
+!! `pf_toml_get_strings_opt` opt out by leaving whatever the variable already holds. `default =`
+!! is offered exactly where the caller owns the size -- the scalar and fixed-length-array forms --
+!! and never by `pf_toml_get_alloc` or `pf_toml_get_strings`, which take their size from the file.
+!!
 !! **Output goes through `parquet_logging`, not through this library's own message channels.**
 !! That is deliberate and it is this module's one departure from the rest of parquet-fortran:
 !! configuration diagnostics are read by the operator of the *calling* program, in that program's
@@ -191,11 +197,13 @@ module parquet_toml
     public :: pf_toml_load, pf_toml_loads, pf_toml_close, pf_toml_new
     public :: pf_toml_section, pf_toml_section_count, pf_toml_has_section
     public :: pf_toml_get, pf_toml_get_alloc, pf_toml_get_strings, pf_toml_get_level
-    public :: pf_toml_require, pf_toml_retire, pf_toml_check, pf_toml_check_all, pf_toml_mark
+    public :: pf_toml_get_opt, pf_toml_get_alloc_opt, pf_toml_get_strings_opt
+    public :: pf_toml_require, pf_toml_retire, pf_toml_check, pf_toml_check_all
+    public :: pf_toml_mark, pf_toml_mark_section
     public :: pf_toml_has, pf_toml_is_open, pf_toml_keys, pf_toml_path, pf_toml_filename
     public :: pf_toml_table, pf_toml_context, pf_toml_report
     public :: pf_toml_new_section, pf_toml_append_section
-    public :: pf_toml_set, pf_toml_update, pf_toml_save
+    public :: pf_toml_set, pf_toml_update, pf_toml_delete, pf_toml_save, pf_toml_dump
 
     !> Opens one section of a configuration file, as `[name]` or as entry `idx` of `[[name]]`.
     !!
@@ -213,10 +221,20 @@ module parquet_toml
     !! nested section, open its parent first.
     !!
     !! `required` defaults to `.true.`: a section you ask for is one your program needs. With
-    !! `required = .false.` an absent section leaves `sect` closed, sets `found` to `.false.` if it
-    !! is present, and reading from that closed handle is fatal -- never a silent default, because
-    !! that would make an absent section indistinguishable from an empty one. Guard the reads with
-    !! `pf_toml_is_open` instead.
+    !! `required = .false.` an absent section leaves `sect` closed, and sets `found` to `.false.`
+    !! if it is present.
+    !!
+    !! **Reading a value from a closed handle is fatal** -- never a silent default, because that
+    !! would make an absent section indistinguishable from an empty one. Guard the reads with
+    !! `pf_toml_is_open`, or take the defaults from the variables by reading through
+    !! `pf_toml_get_opt`, which is fatal on a closed handle just the same.
+    !!
+    !! **The validators are the exception and are silent on a closed handle**: `pf_toml_check`,
+    !! `pf_toml_retire`, `pf_toml_mark`, `pf_toml_mark_section` and `pf_toml_section_count` all do
+    !! nothing rather than stop, because a section that does not exist has no keys to sweep, none
+    !! to mark and none to warn about -- and whether an optional section is present is not known
+    !! before it is opened. `pf_toml_require` still stops: its keys are required and they are not
+    !! there, which is a real failure at any level.
     !!
     !! `idx` is 1-based and must be in range; `pf_toml_section_count` is how you find out how many
     !! entries there are, and `do i = 1, pf_toml_section_count(...)` is the whole idiom.
@@ -234,7 +252,7 @@ module parquet_toml
     !!
     !! ```fortran
     !! call pf_toml_get(sect, key, value  [, default])   !! scalar
-    !! call pf_toml_get(sect, key, values [, required])  !! array, exact length match
+    !! call pf_toml_get(sect, key, values [, default])   !! array, exact length match
     !! ```
     !!
     !! `value` is an `integer(int32)`, `integer(int64)`, `real(real32)`, `real(real64)`, `logical`
@@ -242,18 +260,20 @@ module parquet_toml
     !! with `character(len=*)` for the string form. In every form `key` is the key to read and
     !! `sect` the handle to read it from.
     !!
-    !! **Every form requires its key unless you opt out, and the two opt-outs differ by shape.** A
-    !! scalar opts out by taking a `default`; an array opts out with `required = .false.`, and then
-    !! carries its default in the variable -- whatever `values` held on entry stands. That is what
-    !! makes "inherit from the previous entry unless this one overrides it" an ordinary assignment
-    !! written before the call, and it is why there is no `default=` for arrays: a same-rank
-    !! `intent(in)` default would invite `call pf_toml_get(s, "k", x, x)`, which no compiler
-    !! diagnoses.
+    !! **Every form requires its key unless you pass a `default`, and that rule is the same at both
+    !! ranks.** An array's `default` is a rank-1 array of the same type holding exactly
+    !! `size(values)` elements; any other size is fatal, in the same way and with the same shape of
+    !! message as a file list of the wrong length. To leave the variable alone rather than default
+    !! it, call `pf_toml_get_opt`, which is the whole of that procedure's meaning.
     !!
-    !! **Always write `default =` and `required =` as keyword arguments.** In fourth position a
-    !! bare `.true.` means "the default is true" for a `logical` scalar and "this key is required"
-    !! for a `logical` array. The compiler resolves it by rank and is never wrong; a reader might
-    !! be.
+    !! **Never pass one variable as both `values` and `default`.** `call pf_toml_get(s, "k", x, x)`
+    !! associates `x` with an `intent(out)` dummy and an `intent(in)` one, which F2018 15.5.2.13
+    !! forbids and no compiler diagnoses; the "default" applied is then whatever undefining `x` on
+    !! entry left behind. That call means `call pf_toml_get_opt(s, "k", x)`.
+    !!
+    !! **Write `default =` as a keyword argument.** Nothing else can occupy fourth position, so
+    !! there is no ambiguity to resolve -- but the keyword is what makes a bare `.true.` there
+    !! readable as a value rather than as a flag.
     !!
     !! An array's length must match `size(values)` exactly, in **both** directions, and a mismatch
     !! is fatal with both counts and the source line quoted. Silently using a prefix of a list that
@@ -284,15 +304,81 @@ module parquet_toml
     !! key. There is deliberately no `character` form: a variable-shape string list is read with
     !! `pf_toml_get_strings`, which keeps each element's own length.
     !!
-    !! `required` defaults to `.true.`, like every other getter. With `required = .false.` an
-    !! absent key leaves the result **unallocated**, and `allocated(values)` is part of the
-    !! contract. No default is possible or offered -- the whole point of this form is that the file
-    !! chooses the size.
+    !! The key is required, like every other bare getter, and no `default` is possible or offered
+    !! -- the whole point of this form is that the *file* chooses the size. To read a list that may
+    !! legitimately be absent, call `pf_toml_get_alloc_opt`: it leaves the variable exactly as it
+    !! found it, so an unallocated one stays unallocated and `allocated(values)` answers "did the
+    !! file set this key?".
     interface pf_toml_get_alloc
         module procedure pf_toml_get_alloc_i32, pf_toml_get_alloc_i64
         module procedure pf_toml_get_alloc_r32, pf_toml_get_alloc_r64
         module procedure pf_toml_get_alloc_log
     end interface pf_toml_get_alloc
+
+    !> Reads one value **if the file sets the key**, and otherwise leaves the variable alone.
+    !!
+    !! ```fortran
+    !! call pf_toml_get_opt(sect, key, value)    !! scalar
+    !! call pf_toml_get_opt(sect, key, values)   !! array, exact length match when present
+    !! ```
+    !!
+    !! The optional counterpart to `pf_toml_get`, over the same six types at the same two ranks:
+    !! `integer(int32)`, `integer(int64)`, `real(real32)`, `real(real64)`, `logical` and
+    !! `character` -- `character(len=:), allocatable` when scalar, `character(len=*)` when rank-1.
+    !! There is no `default` argument and there must not be, because **the variable is the
+    !! default**; there is no `required` argument either, since not being required is the whole
+    !! procedure.
+    !!
+    !! This is what makes "inherit from the previous entry unless this one overrides it" two
+    !! ordinary lines -- assign the inherited value, then call this for each key the entry may set:
+    !!
+    !! ```fortran
+    !! this_region = previous_region
+    !! call pf_toml_get_opt(sect, "max_airmass", this_region%max_airmass)
+    !! ```
+    !!
+    !! **The caller must have given the variable a value.** `value` is `intent(inout)`, so passing
+    !! an undefined variable is the caller's own non-conformance and a checked build
+    !! (`nagfor -C=undefined`) traps on it. That is the assertion the separate name makes:
+    !! `pf_toml_get` says "this program needs a value here", `pf_toml_get_opt` says "this variable
+    !! already has one".
+    !!
+    !! Everything else is `pf_toml_get`'s. A wrong-typed value is fatal rather than left undefined;
+    !! an array's length must match `size(values)` exactly when the key IS present; and the key is
+    !! recorded as read whether or not the file sets it, so `pf_toml_check` stays accurate either
+    !! way.
+    !!
+    !! The resolved value -- the file's, or the one the variable already held -- is recorded for
+    !! `pf_toml_save`, with one exception: a `character(len=:), allocatable` scalar the caller left
+    !! unallocated and the file does not set stays unallocated, and an absent value is written
+    !! nowhere rather than as an empty string.
+    interface pf_toml_get_opt
+        module procedure pf_toml_get_opt_i32, pf_toml_get_opt_i64
+        module procedure pf_toml_get_opt_r32, pf_toml_get_opt_r64
+        module procedure pf_toml_get_opt_log, pf_toml_get_opt_str
+        module procedure pf_toml_get_opt_i32_arr, pf_toml_get_opt_i64_arr
+        module procedure pf_toml_get_opt_r32_arr, pf_toml_get_opt_r64_arr
+        module procedure pf_toml_get_opt_log_arr, pf_toml_get_opt_str_arr
+    end interface pf_toml_get_opt
+
+    !> Reads a file-sized list **if the file sets the key**, and otherwise leaves the variable alone.
+    !!
+    !! ```fortran
+    !! call pf_toml_get_alloc_opt(sect, key, values)
+    !! ```
+    !!
+    !! The optional counterpart to `pf_toml_get_alloc`, over the same five types. `values` is
+    !! `intent(inout)`, so an absent key leaves it exactly as it was -- **unallocated if it was
+    !! unallocated**, which makes `allocated(values)` the answer to "did the file set this key?".
+    !! A variable that already held a list keeps it, and that list is what `pf_toml_save` records.
+    !!
+    !! There is no `default` argument, for `pf_toml_get_alloc`'s own reason: the file chooses the
+    !! size.
+    interface pf_toml_get_alloc_opt
+        module procedure pf_toml_get_alloc_opt_i32, pf_toml_get_alloc_opt_i64
+        module procedure pf_toml_get_alloc_opt_r32, pf_toml_get_alloc_opt_r64
+        module procedure pf_toml_get_alloc_opt_log
+    end interface pf_toml_get_alloc_opt
 
     !> ADDS a key that is not there yet. Fatal if it already is -- use `pf_toml_update` for that.
     !!
@@ -657,11 +743,11 @@ contains
     end subroutine pf_toml_get_str
 
     !> `pf_toml_get` for an `integer(int32)` array of a length the caller fixes.
-    subroutine pf_toml_get_i32_arr(sect, key, values, required)
-        type(pf_toml), intent(in) :: sect                !! Handle to read from.
-        character(len=*), intent(in) :: key              !! Key to read.
-        integer(int32), intent(inout) :: values(:)       !! Default in, file value out.
-        logical, intent(in), optional :: required        !! Fatal when absent. Default `.true.`.
+    subroutine pf_toml_get_i32_arr(sect, key, values, default)
+        type(pf_toml), intent(in) :: sect                  !! Handle to read from.
+        character(len=*), intent(in) :: key                !! Key to read.
+        integer(int32), intent(out) :: values(:)           !! Receives the list.
+        integer(int32), intent(in), optional :: default(:) !! Applied when the key is absent.
         type(toml_array), pointer :: arr
         integer(int32), allocatable :: tmp(:)
         integer :: stat, origin
@@ -675,8 +761,11 @@ contains
             if (stat /= toml_stat%success .or. .not. allocated(tmp)) &
                 call fail_value(sect, key, origin, stat, "a list of whole numbers")
             values = tmp
+        else if (present(default)) then
+            call check_default_size(sect, key, size(default), size(values))
+            values = default
         else
-            call require_key(sect, key, required)
+            call fail_missing(sect, key)
         end if
         call shadow_new_array(sect, key, arr)
         if (associated(arr)) call set_value(arr, values)
@@ -684,11 +773,11 @@ contains
     end subroutine pf_toml_get_i32_arr
 
     !> `pf_toml_get` for an `integer(int64)` array of a length the caller fixes.
-    subroutine pf_toml_get_i64_arr(sect, key, values, required)
-        type(pf_toml), intent(in) :: sect                !! Handle to read from.
-        character(len=*), intent(in) :: key              !! Key to read.
-        integer(int64), intent(inout) :: values(:)       !! Default in, file value out.
-        logical, intent(in), optional :: required        !! Fatal when absent. Default `.true.`.
+    subroutine pf_toml_get_i64_arr(sect, key, values, default)
+        type(pf_toml), intent(in) :: sect                  !! Handle to read from.
+        character(len=*), intent(in) :: key                !! Key to read.
+        integer(int64), intent(out) :: values(:)           !! Receives the list.
+        integer(int64), intent(in), optional :: default(:) !! Applied when the key is absent.
         type(toml_array), pointer :: arr
         integer(int64), allocatable :: tmp(:)
         integer :: stat, origin
@@ -702,8 +791,11 @@ contains
             if (stat /= toml_stat%success .or. .not. allocated(tmp)) &
                 call fail_value(sect, key, origin, stat, "a list of whole numbers")
             values = tmp
+        else if (present(default)) then
+            call check_default_size(sect, key, size(default), size(values))
+            values = default
         else
-            call require_key(sect, key, required)
+            call fail_missing(sect, key)
         end if
         call shadow_new_array(sect, key, arr)
         if (associated(arr)) call set_value(arr, values)
@@ -711,11 +803,11 @@ contains
     end subroutine pf_toml_get_i64_arr
 
     !> `pf_toml_get` for a `real(real32)` array of a length the caller fixes.
-    subroutine pf_toml_get_r32_arr(sect, key, values, required)
-        type(pf_toml), intent(in) :: sect              !! Handle to read from.
-        character(len=*), intent(in) :: key            !! Key to read.
-        real(real32), intent(inout) :: values(:)       !! Default in, file value out.
-        logical, intent(in), optional :: required      !! Fatal when absent. Default `.true.`.
+    subroutine pf_toml_get_r32_arr(sect, key, values, default)
+        type(pf_toml), intent(in) :: sect                !! Handle to read from.
+        character(len=*), intent(in) :: key              !! Key to read.
+        real(real32), intent(out) :: values(:)           !! Receives the list.
+        real(real32), intent(in), optional :: default(:) !! Applied when the key is absent.
         type(toml_array), pointer :: arr
         real(real32), allocatable :: tmp(:)
         integer :: stat, origin
@@ -729,8 +821,11 @@ contains
             if (stat /= toml_stat%success .or. .not. allocated(tmp)) &
                 call fail_value(sect, key, origin, stat, "a list of numbers")
             values = tmp
+        else if (present(default)) then
+            call check_default_size(sect, key, size(default), size(values))
+            values = default
         else
-            call require_key(sect, key, required)
+            call fail_missing(sect, key)
         end if
         call shadow_new_array(sect, key, arr)
         if (associated(arr)) call set_value(arr, values)
@@ -738,11 +833,11 @@ contains
     end subroutine pf_toml_get_r32_arr
 
     !> `pf_toml_get` for a `real(real64)` array of a length the caller fixes.
-    subroutine pf_toml_get_r64_arr(sect, key, values, required)
-        type(pf_toml), intent(in) :: sect              !! Handle to read from.
-        character(len=*), intent(in) :: key            !! Key to read.
-        real(real64), intent(inout) :: values(:)       !! Default in, file value out.
-        logical, intent(in), optional :: required      !! Fatal when absent. Default `.true.`.
+    subroutine pf_toml_get_r64_arr(sect, key, values, default)
+        type(pf_toml), intent(in) :: sect                !! Handle to read from.
+        character(len=*), intent(in) :: key              !! Key to read.
+        real(real64), intent(out) :: values(:)           !! Receives the list.
+        real(real64), intent(in), optional :: default(:) !! Applied when the key is absent.
         type(toml_array), pointer :: arr
         real(real64), allocatable :: tmp(:)
         integer :: stat, origin
@@ -756,8 +851,11 @@ contains
             if (stat /= toml_stat%success .or. .not. allocated(tmp)) &
                 call fail_value(sect, key, origin, stat, "a list of numbers")
             values = tmp
+        else if (present(default)) then
+            call check_default_size(sect, key, size(default), size(values))
+            values = default
         else
-            call require_key(sect, key, required)
+            call fail_missing(sect, key)
         end if
         call shadow_new_array(sect, key, arr)
         if (associated(arr)) call set_value(arr, values)
@@ -765,11 +863,11 @@ contains
     end subroutine pf_toml_get_r64_arr
 
     !> `pf_toml_get` for a `logical` array of a length the caller fixes.
-    subroutine pf_toml_get_log_arr(sect, key, values, required)
+    subroutine pf_toml_get_log_arr(sect, key, values, default)
         type(pf_toml), intent(in) :: sect           !! Handle to read from.
         character(len=*), intent(in) :: key         !! Key to read.
-        logical, intent(inout) :: values(:)         !! Default in, file value out.
-        logical, intent(in), optional :: required   !! Fatal when absent. Default `.true.`.
+        logical, intent(out) :: values(:)           !! Receives the list.
+        logical, intent(in), optional :: default(:) !! Applied when the key is absent.
         type(toml_array), pointer :: arr
         logical, allocatable :: tmp(:)
         integer :: stat, origin
@@ -783,8 +881,11 @@ contains
             if (stat /= toml_stat%success .or. .not. allocated(tmp)) &
                 call fail_value(sect, key, origin, stat, "a list of true/false values")
             values = tmp
+        else if (present(default)) then
+            call check_default_size(sect, key, size(default), size(values))
+            values = default
         else
-            call require_key(sect, key, required)
+            call fail_missing(sect, key)
         end if
         call shadow_new_array(sect, key, arr)
         if (associated(arr)) call set_value(arr, values)
@@ -794,13 +895,14 @@ contains
     !> `pf_toml_get` for a `character` array of a length the caller fixes.
     !!
     !! toml-f has no whole-array string getter, so this reads element by element. A value longer
-    !! than `len(values)` is fatal rather than truncated: a silently clipped file name is the worst
-    !! outcome available here.
-    subroutine pf_toml_get_str_arr(sect, key, values, required)
-        type(pf_toml), intent(in) :: sect              !! Handle to read from.
-        character(len=*), intent(in) :: key            !! Key to read.
-        character(len=*), intent(inout) :: values(:)   !! Default in, file value out; blank padded.
-        logical, intent(in), optional :: required      !! Fatal when absent. Default `.true.`.
+    !! than `len(values)` is fatal rather than truncated -- a silently clipped file name is the
+    !! worst outcome available here -- and an over-long `default` element is refused for the same
+    !! reason.
+    subroutine pf_toml_get_str_arr(sect, key, values, default)
+        type(pf_toml), intent(in) :: sect                    !! Handle to read from.
+        character(len=*), intent(in) :: key                  !! Key to read.
+        character(len=*), intent(out) :: values(:)           !! Receives the list; blank padded.
+        character(len=*), intent(in), optional :: default(:) !! Applied when the key is absent.
         type(toml_array), pointer :: arr, sarr
         character(len=:), allocatable :: one
         integer :: stat, origin, i
@@ -819,23 +921,25 @@ contains
                 values(i) = one
                 if (associated(sarr)) call set_value(sarr, i, one)
             end do
+        else if (present(default)) then
+            call check_default_size(sect, key, size(default), size(values))
+            do i = 1, size(values)
+                if (len_trim(default(i)) > len(values)) call fail_too_long(sect, key, sect%tbl%origin, i, &
+                    len_trim(default(i)), len(values))
+                values(i) = default(i)
+                if (associated(sarr)) call set_value(sarr, i, trim(default(i)))
+            end do
         else
-            call require_key(sect, key, required)
-            if (associated(sarr)) then
-                do i = 1, size(values)
-                    call set_value(sarr, i, trim(values(i)))
-                end do
-            end if
+            call fail_missing(sect, key)
         end if
         !$omp end critical (parquet_toml_guard)
     end subroutine pf_toml_get_str_arr
 
     !> `pf_toml_get_alloc` for an `integer(int32)` list sized by the file.
-    subroutine pf_toml_get_alloc_i32(sect, key, values, required)
-        type(pf_toml), intent(in) :: sect                            !! Handle to read from.
-        character(len=*), intent(in) :: key                          !! Key to read.
-        integer(int32), allocatable, intent(out) :: values(:)        !! Receives the list.
-        logical, intent(in), optional :: required                    !! Fatal when absent. Default `.true.`.
+    subroutine pf_toml_get_alloc_i32(sect, key, values)
+        type(pf_toml), intent(in) :: sect                     !! Handle to read from.
+        character(len=*), intent(in) :: key                   !! Key to read.
+        integer(int32), allocatable, intent(out) :: values(:) !! Receives the list.
         type(toml_array), pointer :: arr
         integer :: stat, origin
         logical :: in_file
@@ -848,7 +952,7 @@ contains
             if (stat /= toml_stat%success .or. .not. allocated(values)) &
                 call fail_value(sect, key, origin, stat, "a list of whole numbers")
         else
-            call require_key(sect, key, required)
+            call fail_missing(sect, key)
         end if
         if (allocated(values)) then
             call shadow_new_array(sect, key, arr)
@@ -858,11 +962,10 @@ contains
     end subroutine pf_toml_get_alloc_i32
 
     !> `pf_toml_get_alloc` for an `integer(int64)` list sized by the file.
-    subroutine pf_toml_get_alloc_i64(sect, key, values, required)
-        type(pf_toml), intent(in) :: sect                            !! Handle to read from.
-        character(len=*), intent(in) :: key                          !! Key to read.
-        integer(int64), allocatable, intent(out) :: values(:)        !! Receives the list.
-        logical, intent(in), optional :: required                    !! Fatal when absent. Default `.true.`.
+    subroutine pf_toml_get_alloc_i64(sect, key, values)
+        type(pf_toml), intent(in) :: sect                     !! Handle to read from.
+        character(len=*), intent(in) :: key                   !! Key to read.
+        integer(int64), allocatable, intent(out) :: values(:) !! Receives the list.
         type(toml_array), pointer :: arr
         integer :: stat, origin
         logical :: in_file
@@ -875,7 +978,7 @@ contains
             if (stat /= toml_stat%success .or. .not. allocated(values)) &
                 call fail_value(sect, key, origin, stat, "a list of whole numbers")
         else
-            call require_key(sect, key, required)
+            call fail_missing(sect, key)
         end if
         if (allocated(values)) then
             call shadow_new_array(sect, key, arr)
@@ -885,11 +988,10 @@ contains
     end subroutine pf_toml_get_alloc_i64
 
     !> `pf_toml_get_alloc` for a `real(real32)` list sized by the file.
-    subroutine pf_toml_get_alloc_r32(sect, key, values, required)
-        type(pf_toml), intent(in) :: sect                          !! Handle to read from.
-        character(len=*), intent(in) :: key                        !! Key to read.
-        real(real32), allocatable, intent(out) :: values(:)        !! Receives the list.
-        logical, intent(in), optional :: required                  !! Fatal when absent. Default `.true.`.
+    subroutine pf_toml_get_alloc_r32(sect, key, values)
+        type(pf_toml), intent(in) :: sect                   !! Handle to read from.
+        character(len=*), intent(in) :: key                 !! Key to read.
+        real(real32), allocatable, intent(out) :: values(:) !! Receives the list.
         type(toml_array), pointer :: arr
         integer :: stat, origin
         logical :: in_file
@@ -902,7 +1004,7 @@ contains
             if (stat /= toml_stat%success .or. .not. allocated(values)) &
                 call fail_value(sect, key, origin, stat, "a list of numbers")
         else
-            call require_key(sect, key, required)
+            call fail_missing(sect, key)
         end if
         if (allocated(values)) then
             call shadow_new_array(sect, key, arr)
@@ -912,11 +1014,10 @@ contains
     end subroutine pf_toml_get_alloc_r32
 
     !> `pf_toml_get_alloc` for a `real(real64)` list sized by the file.
-    subroutine pf_toml_get_alloc_r64(sect, key, values, required)
-        type(pf_toml), intent(in) :: sect                          !! Handle to read from.
-        character(len=*), intent(in) :: key                        !! Key to read.
-        real(real64), allocatable, intent(out) :: values(:)        !! Receives the list.
-        logical, intent(in), optional :: required                  !! Fatal when absent. Default `.true.`.
+    subroutine pf_toml_get_alloc_r64(sect, key, values)
+        type(pf_toml), intent(in) :: sect                   !! Handle to read from.
+        character(len=*), intent(in) :: key                 !! Key to read.
+        real(real64), allocatable, intent(out) :: values(:) !! Receives the list.
         type(toml_array), pointer :: arr
         integer :: stat, origin
         logical :: in_file
@@ -929,7 +1030,7 @@ contains
             if (stat /= toml_stat%success .or. .not. allocated(values)) &
                 call fail_value(sect, key, origin, stat, "a list of numbers")
         else
-            call require_key(sect, key, required)
+            call fail_missing(sect, key)
         end if
         if (allocated(values)) then
             call shadow_new_array(sect, key, arr)
@@ -939,11 +1040,10 @@ contains
     end subroutine pf_toml_get_alloc_r64
 
     !> `pf_toml_get_alloc` for a `logical` list sized by the file.
-    subroutine pf_toml_get_alloc_log(sect, key, values, required)
-        type(pf_toml), intent(in) :: sect                     !! Handle to read from.
-        character(len=*), intent(in) :: key                   !! Key to read.
-        logical, allocatable, intent(out) :: values(:)        !! Receives the list.
-        logical, intent(in), optional :: required             !! Fatal when absent. Default `.true.`.
+    subroutine pf_toml_get_alloc_log(sect, key, values)
+        type(pf_toml), intent(in) :: sect              !! Handle to read from.
+        character(len=*), intent(in) :: key            !! Key to read.
+        logical, allocatable, intent(out) :: values(:) !! Receives the list.
         type(toml_array), pointer :: arr
         integer :: stat, origin
         logical :: in_file
@@ -956,7 +1056,7 @@ contains
             if (stat /= toml_stat%success .or. .not. allocated(values)) &
                 call fail_value(sect, key, origin, stat, "a list of true/false values")
         else
-            call require_key(sect, key, required)
+            call fail_missing(sect, key)
         end if
         if (allocated(values)) then
             call shadow_new_array(sect, key, arr)
@@ -970,63 +1070,37 @@ contains
     !! ```fortran
     !! type(pf_toml_strings) :: files
     !! character(len=:), allocatable :: one
-    !! call pf_toml_get_strings(sect, "input_files", files, required = .false.)
+    !! call pf_toml_get_strings(sect, "input_files", files)
     !! do i = 1, files%count()
     !!     call files%get(i, one)
     !! end do
     !! ```
     !!
-    !! `required` defaults to `.true.` like every other getter. With `required = .false.` an absent
-    !! key yields a usable object whose `%count()` is `0`, which is friendlier than the unallocated
-    !! convention `pf_toml_get_alloc` uses and makes the loop above the whole idiom for an optional
-    !! file list. The result copies its strings out of the document, so it stays valid after
-    !! `pf_toml_close`.
-    subroutine pf_toml_get_strings(sect, key, strings, required)
-        type(pf_toml), intent(in) :: sect                  !! Handle to read from.
-        character(len=*), intent(in) :: key                !! Key to read.
-        type(pf_toml_strings), intent(out) :: strings      !! Receives the list.
-        logical, intent(in), optional :: required          !! Fatal when absent. Default `.true.`.
-        type(toml_array), pointer :: arr, sarr
-        character(len=:), allocatable :: one
-        integer :: stat, origin, i, j, n, total, pos
+    !! The key is required, like every other bare getter. For a list that may legitimately be
+    !! absent, call `pf_toml_get_strings_opt`: it leaves `strings` exactly as it found it, and a
+    !! freshly declared one answers `%count() == 0`, so the loop above is the whole idiom for an
+    !! optional file list either way.
+    !!
+    !! `count` demands an exact number of entries and is fatal in **both** directions. That is what
+    !! a list whose length must match some other setting needs -- three column names for three sky
+    !! conditions is a correctness constraint, and a list of the wrong length pairs each name with
+    !! the wrong condition. It is checked only when the file sets the key.
+    !!
+    !! The result copies its strings out of the document, so it stays valid after `pf_toml_close`.
+    subroutine pf_toml_get_strings(sect, key, strings, count)
+        type(pf_toml), intent(in) :: sect             !! Handle to read from.
+        character(len=*), intent(in) :: key           !! Key to read.
+        type(pf_toml_strings), intent(out) :: strings !! Receives the list.
+        integer, intent(in), optional :: count        !! Exact number of entries the list must hold.
         logical :: in_file
 
         !$omp critical (parquet_toml_guard)
         call begin_read(sect, key, in_file)
-        origin = 0
-        n = 0
-        nullify(arr)
         if (in_file) then
-            call open_list(sect, key, -1, arr, origin)
-            n = toml_len(arr)
+            call fill_strings(sect, key, strings, count)
         else
-            call require_key(sect, key, required)
+            call fail_missing(sect, key)
         end if
-        ! Two passes -- measure, then copy -- so the packed buffer is allocated once at its exact
-        ! size rather than grown. A configuration list is short enough that reading each element
-        ! twice costs nothing, and a growable buffer here would be the only thing in this module
-        ! that has to reason about capacity.
-        allocate(strings%off(n + 1))
-        strings%off(1) = 1
-        strings%n = n
-        total = 0
-        do i = 1, n
-            call get_value(arr, i, one, stat=stat)
-            if (stat /= toml_stat%success .or. .not. allocated(one)) &
-                call fail_value(sect, key, origin, stat, "a list of strings")
-            total = total + len(one)
-            strings%off(i + 1) = total + 1
-        end do
-        allocate(strings%buf(total))
-        call shadow_new_array(sect, key, sarr)
-        do i = 1, n
-            call get_value(arr, i, one, stat=stat)
-            pos = strings%off(i)
-            do j = 1, len(one)
-                strings%buf(pos + j - 1) = one(j:j)
-            end do
-            if (associated(sarr)) call set_value(sarr, i, one)
-        end do
         !$omp end critical (parquet_toml_guard)
     end subroutine pf_toml_get_strings
 
@@ -1066,6 +1140,423 @@ contains
         if (associated(sect%shadow)) call set_value(sect%shadow, key, name)
         !$omp end critical (parquet_toml_guard)
     end subroutine pf_toml_get_level
+
+    !> `pf_toml_get_opt` for an `integer(int32)` scalar: the variable stands when the key is absent.
+    subroutine pf_toml_get_opt_i32(sect, key, value)
+        type(pf_toml), intent(in) :: sect      !! Handle to read from.
+        character(len=*), intent(in) :: key    !! Key to read.
+        integer(int32), intent(inout) :: value !! Default in, file value out.
+        integer :: stat, origin
+        logical :: in_file
+
+        !$omp critical (parquet_toml_guard)
+        call begin_read(sect, key, in_file)
+        origin = 0
+        if (in_file) then
+            call get_value(sect%tbl, key, value, stat=stat, origin=origin)
+            if (stat /= toml_stat%success) call fail_value(sect, key, origin, stat, "a whole number")
+        end if
+        if (associated(sect%shadow)) call set_value(sect%shadow, key, value)
+        !$omp end critical (parquet_toml_guard)
+    end subroutine pf_toml_get_opt_i32
+
+    !> `pf_toml_get_opt` for an `integer(int64)` scalar: the variable stands when the key is absent.
+    subroutine pf_toml_get_opt_i64(sect, key, value)
+        type(pf_toml), intent(in) :: sect      !! Handle to read from.
+        character(len=*), intent(in) :: key    !! Key to read.
+        integer(int64), intent(inout) :: value !! Default in, file value out.
+        integer :: stat, origin
+        logical :: in_file
+
+        !$omp critical (parquet_toml_guard)
+        call begin_read(sect, key, in_file)
+        origin = 0
+        if (in_file) then
+            call get_value(sect%tbl, key, value, stat=stat, origin=origin)
+            if (stat /= toml_stat%success) call fail_value(sect, key, origin, stat, "a whole number")
+        end if
+        if (associated(sect%shadow)) call set_value(sect%shadow, key, value)
+        !$omp end critical (parquet_toml_guard)
+    end subroutine pf_toml_get_opt_i64
+
+    !> `pf_toml_get_opt` for a `real(real32)` scalar: the variable stands when the key is absent.
+    subroutine pf_toml_get_opt_r32(sect, key, value)
+        type(pf_toml), intent(in) :: sect    !! Handle to read from.
+        character(len=*), intent(in) :: key  !! Key to read.
+        real(real32), intent(inout) :: value !! Default in, file value out.
+        integer :: stat, origin
+        logical :: in_file
+
+        !$omp critical (parquet_toml_guard)
+        call begin_read(sect, key, in_file)
+        origin = 0
+        if (in_file) then
+            call get_value(sect%tbl, key, value, stat=stat, origin=origin)
+            if (stat /= toml_stat%success) call fail_value(sect, key, origin, stat, "a number")
+        end if
+        if (associated(sect%shadow)) call set_value(sect%shadow, key, value)
+        !$omp end critical (parquet_toml_guard)
+    end subroutine pf_toml_get_opt_r32
+
+    !> `pf_toml_get_opt` for a `real(real64)` scalar: the variable stands when the key is absent.
+    subroutine pf_toml_get_opt_r64(sect, key, value)
+        type(pf_toml), intent(in) :: sect    !! Handle to read from.
+        character(len=*), intent(in) :: key  !! Key to read.
+        real(real64), intent(inout) :: value !! Default in, file value out.
+        integer :: stat, origin
+        logical :: in_file
+
+        !$omp critical (parquet_toml_guard)
+        call begin_read(sect, key, in_file)
+        origin = 0
+        if (in_file) then
+            call get_value(sect%tbl, key, value, stat=stat, origin=origin)
+            if (stat /= toml_stat%success) call fail_value(sect, key, origin, stat, "a number")
+        end if
+        if (associated(sect%shadow)) call set_value(sect%shadow, key, value)
+        !$omp end critical (parquet_toml_guard)
+    end subroutine pf_toml_get_opt_r64
+
+    !> `pf_toml_get_opt` for a `logical` scalar: the variable stands when the key is absent.
+    subroutine pf_toml_get_opt_log(sect, key, value)
+        type(pf_toml), intent(in) :: sect   !! Handle to read from.
+        character(len=*), intent(in) :: key !! Key to read.
+        logical, intent(inout) :: value     !! Default in, file value out.
+        integer :: stat, origin
+        logical :: in_file
+
+        !$omp critical (parquet_toml_guard)
+        call begin_read(sect, key, in_file)
+        origin = 0
+        if (in_file) then
+            call get_value(sect%tbl, key, value, stat=stat, origin=origin)
+            if (stat /= toml_stat%success) call fail_value(sect, key, origin, stat, "true or false")
+        end if
+        if (associated(sect%shadow)) call set_value(sect%shadow, key, value)
+        !$omp end critical (parquet_toml_guard)
+    end subroutine pf_toml_get_opt_log
+
+    !> `pf_toml_get_opt` for a deferred-length `character` scalar.
+    !!
+    !! A variable the caller left unallocated stays unallocated when the file does not set the key,
+    !! so `allocated(value)` answers "does this value exist at all?" -- and nothing is recorded for
+    !! `pf_toml_save`, because an absent value is not an empty string.
+    subroutine pf_toml_get_opt_str(sect, key, value)
+        type(pf_toml), intent(in) :: sect                     !! Handle to read from.
+        character(len=*), intent(in) :: key                   !! Key to read.
+        character(len=:), allocatable, intent(inout) :: value !! Default in, file value out.
+        integer :: stat, origin
+        logical :: in_file
+
+        !$omp critical (parquet_toml_guard)
+        call begin_read(sect, key, in_file)
+        origin = 0
+        if (in_file) then
+            call get_value(sect%tbl, key, value, stat=stat, origin=origin)
+            if (stat /= toml_stat%success) call fail_value(sect, key, origin, stat, "a string")
+            if (.not. allocated(value)) value = ""
+        end if
+        if (allocated(value)) then
+            if (associated(sect%shadow)) call set_value(sect%shadow, key, value)
+        end if
+        !$omp end critical (parquet_toml_guard)
+    end subroutine pf_toml_get_opt_str
+
+    !> `pf_toml_get_opt` for an `integer(int32)` array: the variable stands when the key is absent.
+    subroutine pf_toml_get_opt_i32_arr(sect, key, values)
+        type(pf_toml), intent(in) :: sect          !! Handle to read from.
+        character(len=*), intent(in) :: key        !! Key to read.
+        integer(int32), intent(inout) :: values(:) !! Default in, file value out.
+        type(toml_array), pointer :: arr
+        integer(int32), allocatable :: tmp(:)
+        integer :: stat, origin
+        logical :: in_file
+
+        !$omp critical (parquet_toml_guard)
+        call begin_read(sect, key, in_file)
+        if (in_file) then
+            call open_list(sect, key, size(values), arr, origin)
+            call get_value(arr, tmp, stat=stat)
+            if (stat /= toml_stat%success .or. .not. allocated(tmp)) &
+                call fail_value(sect, key, origin, stat, "a list of whole numbers")
+            values = tmp
+        end if
+        call shadow_new_array(sect, key, arr)
+        if (associated(arr)) call set_value(arr, values)
+        !$omp end critical (parquet_toml_guard)
+    end subroutine pf_toml_get_opt_i32_arr
+
+    !> `pf_toml_get_opt` for an `integer(int64)` array: the variable stands when the key is absent.
+    subroutine pf_toml_get_opt_i64_arr(sect, key, values)
+        type(pf_toml), intent(in) :: sect          !! Handle to read from.
+        character(len=*), intent(in) :: key        !! Key to read.
+        integer(int64), intent(inout) :: values(:) !! Default in, file value out.
+        type(toml_array), pointer :: arr
+        integer(int64), allocatable :: tmp(:)
+        integer :: stat, origin
+        logical :: in_file
+
+        !$omp critical (parquet_toml_guard)
+        call begin_read(sect, key, in_file)
+        if (in_file) then
+            call open_list(sect, key, size(values), arr, origin)
+            call get_value(arr, tmp, stat=stat)
+            if (stat /= toml_stat%success .or. .not. allocated(tmp)) &
+                call fail_value(sect, key, origin, stat, "a list of whole numbers")
+            values = tmp
+        end if
+        call shadow_new_array(sect, key, arr)
+        if (associated(arr)) call set_value(arr, values)
+        !$omp end critical (parquet_toml_guard)
+    end subroutine pf_toml_get_opt_i64_arr
+
+    !> `pf_toml_get_opt` for a `real(real32)` array: the variable stands when the key is absent.
+    subroutine pf_toml_get_opt_r32_arr(sect, key, values)
+        type(pf_toml), intent(in) :: sect        !! Handle to read from.
+        character(len=*), intent(in) :: key      !! Key to read.
+        real(real32), intent(inout) :: values(:) !! Default in, file value out.
+        type(toml_array), pointer :: arr
+        real(real32), allocatable :: tmp(:)
+        integer :: stat, origin
+        logical :: in_file
+
+        !$omp critical (parquet_toml_guard)
+        call begin_read(sect, key, in_file)
+        if (in_file) then
+            call open_list(sect, key, size(values), arr, origin)
+            call get_value(arr, tmp, stat=stat)
+            if (stat /= toml_stat%success .or. .not. allocated(tmp)) &
+                call fail_value(sect, key, origin, stat, "a list of numbers")
+            values = tmp
+        end if
+        call shadow_new_array(sect, key, arr)
+        if (associated(arr)) call set_value(arr, values)
+        !$omp end critical (parquet_toml_guard)
+    end subroutine pf_toml_get_opt_r32_arr
+
+    !> `pf_toml_get_opt` for a `real(real64)` array: the variable stands when the key is absent.
+    subroutine pf_toml_get_opt_r64_arr(sect, key, values)
+        type(pf_toml), intent(in) :: sect        !! Handle to read from.
+        character(len=*), intent(in) :: key      !! Key to read.
+        real(real64), intent(inout) :: values(:) !! Default in, file value out.
+        type(toml_array), pointer :: arr
+        real(real64), allocatable :: tmp(:)
+        integer :: stat, origin
+        logical :: in_file
+
+        !$omp critical (parquet_toml_guard)
+        call begin_read(sect, key, in_file)
+        if (in_file) then
+            call open_list(sect, key, size(values), arr, origin)
+            call get_value(arr, tmp, stat=stat)
+            if (stat /= toml_stat%success .or. .not. allocated(tmp)) &
+                call fail_value(sect, key, origin, stat, "a list of numbers")
+            values = tmp
+        end if
+        call shadow_new_array(sect, key, arr)
+        if (associated(arr)) call set_value(arr, values)
+        !$omp end critical (parquet_toml_guard)
+    end subroutine pf_toml_get_opt_r64_arr
+
+    !> `pf_toml_get_opt` for a `logical` array: the variable stands when the key is absent.
+    subroutine pf_toml_get_opt_log_arr(sect, key, values)
+        type(pf_toml), intent(in) :: sect   !! Handle to read from.
+        character(len=*), intent(in) :: key !! Key to read.
+        logical, intent(inout) :: values(:) !! Default in, file value out.
+        type(toml_array), pointer :: arr
+        logical, allocatable :: tmp(:)
+        integer :: stat, origin
+        logical :: in_file
+
+        !$omp critical (parquet_toml_guard)
+        call begin_read(sect, key, in_file)
+        if (in_file) then
+            call open_list(sect, key, size(values), arr, origin)
+            call get_value(arr, tmp, stat=stat)
+            if (stat /= toml_stat%success .or. .not. allocated(tmp)) &
+                call fail_value(sect, key, origin, stat, "a list of true/false values")
+            values = tmp
+        end if
+        call shadow_new_array(sect, key, arr)
+        if (associated(arr)) call set_value(arr, values)
+        !$omp end critical (parquet_toml_guard)
+    end subroutine pf_toml_get_opt_log_arr
+
+    !> `pf_toml_get_opt` for a `character` array of a length the caller fixes.
+    subroutine pf_toml_get_opt_str_arr(sect, key, values)
+        type(pf_toml), intent(in) :: sect            !! Handle to read from.
+        character(len=*), intent(in) :: key          !! Key to read.
+        character(len=*), intent(inout) :: values(:) !! Default in, file value out; blank padded.
+        type(toml_array), pointer :: arr, sarr
+        character(len=:), allocatable :: one
+        integer :: stat, origin, i
+        logical :: in_file
+
+        !$omp critical (parquet_toml_guard)
+        call begin_read(sect, key, in_file)
+        call shadow_new_array(sect, key, sarr)
+        if (in_file) then
+            call open_list(sect, key, size(values), arr, origin)
+            do i = 1, size(values)
+                call get_value(arr, i, one, stat=stat)
+                if (stat /= toml_stat%success .or. .not. allocated(one)) &
+                    call fail_value(sect, key, origin, stat, "a list of strings")
+                if (len(one) > len(values)) call fail_too_long(sect, key, origin, i, len(one), len(values))
+                values(i) = one
+                if (associated(sarr)) call set_value(sarr, i, one)
+            end do
+        else
+            if (associated(sarr)) then
+                do i = 1, size(values)
+                    call set_value(sarr, i, trim(values(i)))
+                end do
+            end if
+        end if
+        !$omp end critical (parquet_toml_guard)
+    end subroutine pf_toml_get_opt_str_arr
+
+    !> `pf_toml_get_alloc_opt` for an `integer(int32)` list: the variable stands when the key is absent.
+    subroutine pf_toml_get_alloc_opt_i32(sect, key, values)
+        type(pf_toml), intent(in) :: sect                       !! Handle to read from.
+        character(len=*), intent(in) :: key                     !! Key to read.
+        integer(int32), allocatable, intent(inout) :: values(:) !! Default in, file value out.
+        type(toml_array), pointer :: arr
+        integer :: stat, origin
+        logical :: in_file
+
+        !$omp critical (parquet_toml_guard)
+        call begin_read(sect, key, in_file)
+        if (in_file) then
+            call open_list(sect, key, -1, arr, origin)
+            call get_value(arr, values, stat=stat)
+            if (stat /= toml_stat%success .or. .not. allocated(values)) &
+                call fail_value(sect, key, origin, stat, "a list of whole numbers")
+        end if
+        if (allocated(values)) then
+            call shadow_new_array(sect, key, arr)
+            if (associated(arr)) call set_value(arr, values)
+        end if
+        !$omp end critical (parquet_toml_guard)
+    end subroutine pf_toml_get_alloc_opt_i32
+
+    !> `pf_toml_get_alloc_opt` for an `integer(int64)` list: the variable stands when the key is absent.
+    subroutine pf_toml_get_alloc_opt_i64(sect, key, values)
+        type(pf_toml), intent(in) :: sect                       !! Handle to read from.
+        character(len=*), intent(in) :: key                     !! Key to read.
+        integer(int64), allocatable, intent(inout) :: values(:) !! Default in, file value out.
+        type(toml_array), pointer :: arr
+        integer :: stat, origin
+        logical :: in_file
+
+        !$omp critical (parquet_toml_guard)
+        call begin_read(sect, key, in_file)
+        if (in_file) then
+            call open_list(sect, key, -1, arr, origin)
+            call get_value(arr, values, stat=stat)
+            if (stat /= toml_stat%success .or. .not. allocated(values)) &
+                call fail_value(sect, key, origin, stat, "a list of whole numbers")
+        end if
+        if (allocated(values)) then
+            call shadow_new_array(sect, key, arr)
+            if (associated(arr)) call set_value(arr, values)
+        end if
+        !$omp end critical (parquet_toml_guard)
+    end subroutine pf_toml_get_alloc_opt_i64
+
+    !> `pf_toml_get_alloc_opt` for a `real(real32)` list: the variable stands when the key is absent.
+    subroutine pf_toml_get_alloc_opt_r32(sect, key, values)
+        type(pf_toml), intent(in) :: sect                     !! Handle to read from.
+        character(len=*), intent(in) :: key                   !! Key to read.
+        real(real32), allocatable, intent(inout) :: values(:) !! Default in, file value out.
+        type(toml_array), pointer :: arr
+        integer :: stat, origin
+        logical :: in_file
+
+        !$omp critical (parquet_toml_guard)
+        call begin_read(sect, key, in_file)
+        if (in_file) then
+            call open_list(sect, key, -1, arr, origin)
+            call get_value(arr, values, stat=stat)
+            if (stat /= toml_stat%success .or. .not. allocated(values)) &
+                call fail_value(sect, key, origin, stat, "a list of numbers")
+        end if
+        if (allocated(values)) then
+            call shadow_new_array(sect, key, arr)
+            if (associated(arr)) call set_value(arr, values)
+        end if
+        !$omp end critical (parquet_toml_guard)
+    end subroutine pf_toml_get_alloc_opt_r32
+
+    !> `pf_toml_get_alloc_opt` for a `real(real64)` list: the variable stands when the key is absent.
+    subroutine pf_toml_get_alloc_opt_r64(sect, key, values)
+        type(pf_toml), intent(in) :: sect                     !! Handle to read from.
+        character(len=*), intent(in) :: key                   !! Key to read.
+        real(real64), allocatable, intent(inout) :: values(:) !! Default in, file value out.
+        type(toml_array), pointer :: arr
+        integer :: stat, origin
+        logical :: in_file
+
+        !$omp critical (parquet_toml_guard)
+        call begin_read(sect, key, in_file)
+        if (in_file) then
+            call open_list(sect, key, -1, arr, origin)
+            call get_value(arr, values, stat=stat)
+            if (stat /= toml_stat%success .or. .not. allocated(values)) &
+                call fail_value(sect, key, origin, stat, "a list of numbers")
+        end if
+        if (allocated(values)) then
+            call shadow_new_array(sect, key, arr)
+            if (associated(arr)) call set_value(arr, values)
+        end if
+        !$omp end critical (parquet_toml_guard)
+    end subroutine pf_toml_get_alloc_opt_r64
+
+    !> `pf_toml_get_alloc_opt` for a `logical` list: the variable stands when the key is absent.
+    subroutine pf_toml_get_alloc_opt_log(sect, key, values)
+        type(pf_toml), intent(in) :: sect                !! Handle to read from.
+        character(len=*), intent(in) :: key              !! Key to read.
+        logical, allocatable, intent(inout) :: values(:) !! Default in, file value out.
+        type(toml_array), pointer :: arr
+        integer :: stat, origin
+        logical :: in_file
+
+        !$omp critical (parquet_toml_guard)
+        call begin_read(sect, key, in_file)
+        if (in_file) then
+            call open_list(sect, key, -1, arr, origin)
+            call get_value(arr, values, stat=stat)
+            if (stat /= toml_stat%success .or. .not. allocated(values)) &
+                call fail_value(sect, key, origin, stat, "a list of true/false values")
+        end if
+        if (allocated(values)) then
+            call shadow_new_array(sect, key, arr)
+            if (associated(arr)) call set_value(arr, values)
+        end if
+        !$omp end critical (parquet_toml_guard)
+    end subroutine pf_toml_get_alloc_opt_log
+
+    !> Reads a string list **if the file sets the key**, and otherwise leaves `strings` alone.
+    !!
+    !! The optional counterpart to `pf_toml_get_strings`; see that procedure for `count` and for
+    !! what the result is. A freshly declared `strings` that the file does not set still answers
+    !! `%count() == 0`, which is the same behaviour the older `required = .false.` form gave, and a
+    !! `strings` that already holds a list keeps it -- which that form could not do.
+    subroutine pf_toml_get_strings_opt(sect, key, strings, count)
+        type(pf_toml), intent(in) :: sect               !! Handle to read from.
+        character(len=*), intent(in) :: key             !! Key to read.
+        type(pf_toml_strings), intent(inout) :: strings !! Default in, file value out.
+        integer, intent(in), optional :: count          !! Exact number of entries the list must hold.
+        logical :: in_file
+
+        !$omp critical (parquet_toml_guard)
+        call begin_read(sect, key, in_file)
+        if (in_file) then
+            call fill_strings(sect, key, strings, count)
+        else
+            call strings_to_shadow(sect, key, strings)
+        end if
+        !$omp end critical (parquet_toml_guard)
+    end subroutine pf_toml_get_strings_opt
 
     ! ---- pf_toml_strings' own bindings -------------------------------------------------------
     !
@@ -1201,6 +1692,36 @@ contains
         call mark_impl(sect, key)
         !$omp end critical (parquet_toml_guard)
     end subroutine pf_toml_mark
+
+    !> Records a whole section as understood, so neither sweep reports anything inside it.
+    !!
+    !! The section-level companion to `pf_toml_mark`, for a section a program deliberately does not
+    !! read: a `[developer]` block whose keys are only read when a developer mode is on, say. The
+    !! alternative is to read every key unconditionally and re-apply the defaults by hand, which
+    !! rebuilds exactly the hand-maintained key list this module exists to delete.
+    !!
+    !! **It marks recursively** -- every key, every sub-table and every `[[name]]` entry below this
+    !! section -- because "this section is understood" is a statement about the section, not about
+    !! its first level. Shallow marking would leave `pf_toml_check_all` reporting
+    !! `[developer.advanced]` as a section nobody read, which is a partial report about a section
+    !! the caller has just excused. The cost is that a misspelt *nested* section name inside a
+    !! marked section is silenced too.
+    !!
+    !! **It is silent on a section the file does not have**, unlike a getter: whether an optional
+    !! section is present is not known before it is opened, so a caller that means "ignore this
+    !! section if it is there" cannot be asked to test first. The same holds for `pf_toml_check`,
+    !! `pf_toml_retire`, `pf_toml_mark` and `pf_toml_section_count`; a *value* read from a closed
+    !! handle is still fatal.
+    !!
+    !! Marking is not reading. A marked section's keys never reach the effective document, so
+    !! `pf_toml_save` does not write them -- which is right, because the program did not use them.
+    subroutine pf_toml_mark_section(sect)
+        type(pf_toml), intent(in) :: sect      !! Section to record as understood.
+
+        !$omp critical (parquet_toml_guard)
+        call mark_section_impl(sect)
+        !$omp end critical (parquet_toml_guard)
+    end subroutine pf_toml_mark_section
 
     ! ================================================================================
     ! Presence, escape hatches and helpers
@@ -1380,6 +1901,55 @@ contains
         call save_impl(doc, file)
         !$omp end critical (parquet_toml_guard)
     end subroutine pf_toml_save
+
+    !> Writes the document **as parsed**, plus every `pf_toml_set`/`update`/`delete` applied.
+    !!
+    !! The companion to `pf_toml_save`, and the pair is the whole point of having two names.
+    !! `pf_toml_save` writes the *effective* configuration -- what the program resolved, defaults
+    !! made explicit, keys nobody read left out. This writes the *document* -- everything the file
+    !! carried, whether or not the program read it, plus any typed edits made since. Loading a
+    !! file, editing one key and writing it back out is this one; recording what a run actually
+    !! used is the other.
+    !!
+    !! **Neither is a verbatim copy, and this one is not either.** toml-f's serialiser writes
+    !! values rather than source, so comments are dropped and the key order and formatting are
+    !! toml-f's. For a file people hand-edit and keep comments in, copy the file.
+    !!
+    !! Pass the document handle, not a section; an existing file is overwritten.
+    subroutine pf_toml_dump(doc, file)
+        type(pf_toml), intent(in) :: doc         !! Document handle, as an open left it.
+        character(len=*), intent(in) :: file     !! Path to write to.
+
+        !$omp critical (parquet_toml_guard)
+        call dump_impl(doc, file)
+        !$omp end critical (parquet_toml_guard)
+    end subroutine pf_toml_dump
+
+    !> REMOVES a key. Does nothing if it is not there.
+    !!
+    !! ```fortran
+    !! call pf_toml_delete(sect, key)
+    !! ```
+    !!
+    !! The third member of the write trio, and the one that does **not** refuse the other state.
+    !! `pf_toml_set` refuses a key that exists and `pf_toml_update` refuses one that does not,
+    !! because each catches a caller who is wrong about the document: setting an existing key would
+    !! overwrite a value the caller thinks it is introducing, and updating a missing one would
+    !! introduce a value the caller thinks it is changing. Deleting is **idempotent** -- afterwards
+    !! the key is not there, whether or not it was -- so there is no wrong outcome for a guard to
+    !! prevent, and "remove this key if the file happens to set it" is one line.
+    !!
+    !! The key is removed from the parsed document *and* from the effective one, so a later
+    !! `pf_toml_save` does not write back a value an earlier `pf_toml_get` had resolved. It is also
+    !! recorded as dealt with, so a sweep does not then report it as unknown.
+    subroutine pf_toml_delete(sect, key)
+        type(pf_toml), intent(in) :: sect        !! Handle to remove the key from.
+        character(len=*), intent(in) :: key      !! Key to remove.
+
+        !$omp critical (parquet_toml_guard)
+        call delete_impl(sect, key)
+        !$omp end critical (parquet_toml_guard)
+    end subroutine pf_toml_delete
 
     !> `pf_toml_set` for an `integer(int32)` scalar.
     subroutine pf_toml_set_i32(sect, key, value)
@@ -1847,7 +2417,8 @@ contains
         type(toml_array), pointer :: arr
 
         n = 0
-        call require_open(parent, "pf_toml_section_count")
+        ! An absent optional section has nothing to count: see pf_toml_mark_section.
+        if (.not. associated(parent%tbl)) return
         call parent%tbl%get(name, vptr)
         if (.not. associated(vptr)) return
         select type (vptr)
@@ -1928,7 +2499,8 @@ contains
         character(len=PF_TOML_MAX_PATH) :: full
         character(len=:), allocatable :: wh
 
-        call require_open(sect, "pf_toml_retire")
+        ! An absent optional section has nothing to retire: see pf_toml_mark_section.
+        if (.not. associated(sect%tbl)) return
         call check_key_len(sect, key)
         call path_join(sect, key, full)
         call mark_path(sect%doc, full)
@@ -1950,7 +2522,8 @@ contains
         character(len=:), allocatable :: wh
         integer :: sev, i, nbad
 
-        call require_open(sect, "pf_toml_check")
+        ! An absent optional section has nothing to sweep: see pf_toml_mark_section.
+        if (.not. associated(sect%tbl)) return
         sev = resolve_severity(severity, "pf_toml_check")
         nbad = 0
         call sect%tbl%get_keys(klist)
@@ -2077,11 +2650,76 @@ contains
         character(len=*), intent(in) :: key    !! Key to record.
         character(len=PF_TOML_MAX_PATH) :: full
 
-        call require_open(sect, "pf_toml_mark")
+        ! An absent optional section has nothing to mark: see pf_toml_mark_section.
+        if (.not. associated(sect%tbl)) return
         call check_key_len(sect, key)
         call path_join(sect, key, full)
         call mark_path(sect%doc, full)
     end subroutine mark_impl
+
+    !> Records a whole section as understood. See `pf_toml_mark_section`.
+    !!
+    !! It must NOT call `require_open`, unlike its four neighbours: an absent optional section has
+    !! nothing to mark, and a caller cannot know before opening whether the section is there. That
+    !! early return is also why this is a worker rather than inline in the public entry -- a
+    !! `return` from inside a `critical` region is non-conforming.
+    subroutine mark_section_impl(sect)
+        type(pf_toml), intent(in) :: sect      !! Section to record as understood.
+
+        if (.not. associated(sect%tbl)) return
+        call mark_tree(sect%doc, sect%tbl, sect%path)
+    end subroutine mark_section_impl
+
+    !> One table's worth of `pf_toml_mark_section`, descending into every section below it.
+    !!
+    !! The mirror image of `sweep_impl`: that one stops at a section nobody read, this one records
+    !! everything so that no sweep ever reaches inside. A path too long to compose is skipped
+    !! rather than fatal -- a marking pass exists to silence reports, so it cannot itself stop a
+    !! run that would otherwise have worked.
+    recursive subroutine mark_tree(doc, tbl, path)
+        type(pf_toml_doc), intent(inout) :: doc             !! The document's accumulator.
+        type(toml_table), pointer, intent(in) :: tbl        !! Table to mark.
+        character(len=*), intent(in) :: path                !! This table's display path.
+        type(toml_key), allocatable :: klist(:)
+        class(toml_value), pointer :: vptr
+        type(toml_table), pointer :: sub
+        type(toml_array), pointer :: arr
+        character(len=PF_TOML_MAX_PATH) :: full, entry
+        integer :: i, k, need
+
+        call tbl%get_keys(klist)
+        do i = 1, size(klist)
+            need = len_trim(path) + len(klist(i)%key)
+            if (len_trim(path) > 0) need = need + 1
+            if (need > PF_TOML_MAX_PATH) cycle
+            if (len_trim(path) > 0) then
+                full = trim(path) // "." // klist(i)%key
+            else
+                full = klist(i)%key
+            end if
+            call mark_path(doc, full)
+            call tbl%get(klist(i)%key, vptr)
+            if (.not. associated(vptr)) cycle
+            select type (vptr)
+            type is (toml_table)
+                sub => vptr
+                call mark_tree(doc, sub, full)
+            type is (toml_array)
+                arr => vptr
+                if (is_array_of_tables(arr)) then
+                    do k = 1, toml_len(arr)
+                        if (len_trim(full) + 2 + len_trim(pf_str(k)) > PF_TOML_MAX_PATH) cycle
+                        entry = trim(full) // "[" // trim(pf_str(k)) // "]"
+                        call mark_path(doc, entry)
+                        call get_value(arr, k, sub)
+                        if (associated(sub)) call mark_tree(doc, sub, entry)
+                    end do
+                end if
+            class default
+                continue
+            end select
+        end do
+    end subroutine mark_tree
 
     !> Lists a section's keys. See `pf_toml_keys`.
     subroutine keys_impl(sect, keys)
@@ -2240,6 +2878,45 @@ contains
             call pf_log_fatal("ERR: cannot write configuration file: " // file)
         end if
     end subroutine save_impl
+
+    !> Writes the parsed document out. See `pf_toml_dump`.
+    subroutine dump_impl(doc, file)
+        type(pf_toml), intent(in) :: doc         !! Document handle.
+        character(len=*), intent(in) :: file     !! Path to write to.
+        type(toml_error), allocatable :: terr
+
+        call require_open(doc, "pf_toml_dump")
+        if (.not. doc%owner) then
+            call pf_log_error("pf_toml_dump: this handle is a section, not the document.")
+            call pf_log_error("... dumping writes the whole configuration, so pass the handle an open filled.")
+            call pf_log_fatal("ERR: pf_toml_dump: not the document handle")
+        end if
+        call toml_dump(doc%doc%root, file, terr)
+        if (allocated(terr)) then
+            call pf_log_error("Cannot write configuration file: " // file)
+            call log_block(terr%message)
+            call pf_log_fatal("ERR: cannot write configuration file: " // file)
+        end if
+    end subroutine dump_impl
+
+    !> Removes a key from the parsed AND the effective document. See `pf_toml_delete`.
+    !!
+    !! `toml_table%delete` is already a no-op on a key that is not there, so the tolerance the
+    !! public contract promises costs nothing here. The shadow delete is the half that matters: a
+    !! key an earlier getter resolved is sitting in the effective document, and skipping it would
+    !! have `pf_toml_save` write back a value the caller had just removed.
+    subroutine delete_impl(sect, key)
+        type(pf_toml), intent(in) :: sect      !! Handle to remove the key from.
+        character(len=*), intent(in) :: key    !! Key to remove.
+        character(len=PF_TOML_MAX_PATH) :: full
+
+        call require_open(sect, "pf_toml_delete")
+        call check_key_len(sect, key)
+        call path_join(sect, key, full)
+        call mark_path(sect%doc, full)
+        call sect%tbl%delete(key)
+        if (associated(sect%shadow)) call sect%shadow%delete(key)
+    end subroutine delete_impl
 
     !> `pf_toml_set`/`pf_toml_update` for an `integer(int32)` scalar.
     subroutine write_i32(sect, key, value, adding)
@@ -2502,17 +3179,101 @@ contains
         call pf_log_fatal("ERR: configuration key name is too long")
     end subroutine check_key_len
 
-    !> Applies the `required` rule when a key is absent: fatal unless the caller opted out.
-    subroutine require_key(sect, key, required)
-        type(pf_toml), intent(in) :: sect            !! Handle being read from.
-        character(len=*), intent(in) :: key          !! The absent key.
-        logical, intent(in), optional :: required    !! Default `.true.`.
-        logical :: need
+    !> Stops when a rank-1 `default` does not hold exactly as many entries as it would fill.
+    !!
+    !! The message deliberately mirrors `fail_length`'s, so the two ways a list can be the wrong
+    !! length -- the file's, and the program's own default -- read alike.
+    subroutine check_default_size(sect, key, ngot, nwant)
+        type(pf_toml), intent(in) :: sect      !! Handle being read from.
+        character(len=*), intent(in) :: key    !! The key.
+        integer, intent(in) :: ngot            !! How many entries the default has.
+        integer, intent(in) :: nwant           !! How many the program needs.
+        character(len=:), allocatable :: wh, head
 
-        need = .true.
-        if (present(required)) need = required
-        if (need) call fail_missing(sect, key)
-    end subroutine require_key
+        if (ngot == nwant) return
+        call where_text(sect, key, wh)
+        head = wh // ": the default has " // trim(pf_str(ngot)) // " entries and the program needs " &
+            // trim(pf_str(nwant))
+        call fail_tail(sect, sect%tbl%origin, head, &
+            "ERR: config default has the wrong number of entries: " // key)
+    end subroutine check_default_size
+
+    !> Fills a `pf_toml_strings` from `key`'s list, which the caller has confirmed is present.
+    !!
+    !! Two passes -- measure, then copy -- so the packed buffer is allocated once at its exact size
+    !! rather than grown. A configuration list is short enough that reading each element twice
+    !! costs nothing, and a growable buffer here would be the only thing in this module that has to
+    !! reason about capacity.
+    !!
+    !! Shared by `pf_toml_get_strings` and `pf_toml_get_strings_opt`, which differ only in what
+    !! they do when the key is absent, so it deallocates first rather than relying on an
+    !! `intent(out)` reset the optional form does not have.
+    subroutine fill_strings(sect, key, strings, count)
+        type(pf_toml), intent(in) :: sect                   !! Handle being read from.
+        character(len=*), intent(in) :: key                 !! Key being read.
+        type(pf_toml_strings), intent(inout) :: strings     !! Receives the list.
+        integer, intent(in), optional :: count              !! Exact number of entries required.
+        type(toml_array), pointer :: arr, sarr
+        character(len=:), allocatable :: one
+        integer :: stat, origin, i, j, n, total, pos, nwant
+
+        nwant = -1
+        if (present(count)) nwant = count
+        call open_list(sect, key, nwant, arr, origin)
+        n = toml_len(arr)
+        if (allocated(strings%off)) deallocate(strings%off)
+        if (allocated(strings%buf)) deallocate(strings%buf)
+        allocate(strings%off(n + 1))
+        strings%off(1) = 1
+        strings%n = n
+        total = 0
+        do i = 1, n
+            call get_value(arr, i, one, stat=stat)
+            if (stat /= toml_stat%success .or. .not. allocated(one)) &
+                call fail_value(sect, key, origin, stat, "a list of strings")
+            total = total + len(one)
+            strings%off(i + 1) = total + 1
+        end do
+        allocate(strings%buf(total))
+        call shadow_new_array(sect, key, sarr)
+        do i = 1, n
+            call get_value(arr, i, one, stat=stat)
+            pos = strings%off(i)
+            do j = 1, len(one)
+                strings%buf(pos + j - 1) = one(j:j)
+            end do
+            if (associated(sarr)) call set_value(sarr, i, one)
+        end do
+    end subroutine fill_strings
+
+    !> Records a `pf_toml_strings`'s existing content in the effective document.
+    !!
+    !! What `pf_toml_get_strings_opt` does when the file does not set the key: whatever the caller
+    !! already had is the value the run used, so that is what a later `pf_toml_save` must write. A
+    !! variable the caller never filled has no value at all and is skipped -- writing an empty list
+    !! would claim the run used one, and `allocated(%off)` is exactly the "was this ever filled"
+    !! test, since a list read as genuinely empty has a one-element offset array.
+    subroutine strings_to_shadow(sect, key, strings)
+        type(pf_toml), intent(in) :: sect                !! Handle being read from.
+        character(len=*), intent(in) :: key              !! Key being read.
+        type(pf_toml_strings), intent(in) :: strings     !! The list to record.
+        type(toml_array), pointer :: sarr
+        character(len=:), allocatable :: one
+        integer :: i, j, n
+
+        if (.not. allocated(strings%off)) return
+        call shadow_new_array(sect, key, sarr)
+        if (.not. associated(sarr)) return
+        do i = 1, strings%n
+            n = strings%off(i + 1) - strings%off(i)
+            allocate(character(len=n) :: one)
+            do j = 1, n
+                one(j:j) = strings%buf(strings%off(i) + j - 1)
+            end do
+            call set_value(sarr, i, one)
+            deallocate(one)
+        end do
+    end subroutine strings_to_shadow
 
     !> Points `arr` at `key`'s list, checking that it IS a list and, when `nwant >= 0`, its length.
     subroutine open_list(sect, key, nwant, arr, origin)
@@ -2696,6 +3457,14 @@ contains
     end function resolve_severity
 
     !> The source token of `key`'s VALUE, or `0` when the file does not set it.
+    !!
+    !! **The three concrete arms are not a simplification waiting to happen.** `toml_table`,
+    !! `toml_array` and `toml_keyval` are toml-f's only extensions of `toml_value`, so a single
+    !! `class default` reading the inherited `%origin` off the polymorphic pointer would be exactly
+    !! equivalent -- and nagfor 7.2 generates invalid C for it under `-C=undefined`, failing the
+    !! `nagundef` profile with `no member named 'addr'`. Writing the arms out keeps the type static
+    !! at every read. See CLAUDE.md, "nagfor-specific gotchas". The `class default` below is
+    !! unreachable and exists only to make the construct total.
     integer function key_origin(sect, key) result(origin)
         type(pf_toml), intent(in) :: sect      !! Handle the key belongs to.
         character(len=*), intent(in) :: key    !! The key.
@@ -2708,8 +3477,12 @@ contains
         select type (vptr)
         type is (toml_keyval)
             origin = vptr%origin_value
-        class default
+        type is (toml_table)
             origin = vptr%origin
+        type is (toml_array)
+            origin = vptr%origin
+        class default
+            continue
         end select
     end function key_origin
 

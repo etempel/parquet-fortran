@@ -53,17 +53,23 @@ contains
             new_unittest("section_count counts entries and answers 0 for an absent name", test_section_count), &
             new_unittest("an array of tables is read entry by entry", test_array_of_tables), &
             new_unittest("caller-sized arrays round-trip for every type", test_array_round_trip), &
-            new_unittest("an absent array with required=.false. keeps its entry values", test_array_optional), &
+            new_unittest("an absent array read with get_opt keeps its entry values", test_array_optional), &
+            new_unittest("get_opt keeps the variable for every scalar type", test_get_opt_scalars), &
+            new_unittest("get_opt leaves an unallocated character scalar unallocated", test_get_opt_str_unset), &
+            new_unittest("a rank-1 default is applied when the key is absent", test_array_default), &
             new_unittest("get_alloc sizes the result from the file", test_get_alloc), &
-            new_unittest("get_alloc leaves the result unallocated when optional and absent", test_get_alloc_absent), &
+            new_unittest("get_alloc_opt leaves the result unallocated when the key is absent", test_get_alloc_absent), &
             new_unittest("a string list keeps each element's own length", test_strings_lengths), &
             new_unittest("a string list survives closing the document", test_strings_outlive_document), &
             new_unittest("an absent optional string list has count 0", test_strings_absent), &
+            new_unittest("an exact count is accepted when the list matches", test_strings_count), &
             new_unittest("a default is NEVER inserted into the parsed document", test_defaults_not_inserted), &
             new_unittest("check stays silent on a file the program fully read", test_check_clean_file_is_silent), &
             new_unittest("check stays silent after a defaulted read", test_check_silent_after_default), &
             new_unittest("check_all stays silent when everything was read", test_check_all_clean), &
             new_unittest("mark makes a hand-read key known to the sweep", test_mark), &
+            new_unittest("mark_section silences a whole subtree, recursively", test_mark_section), &
+            new_unittest("the validators are silent on an absent optional section", test_closed_handle_validators), &
             new_unittest("a retired key that is absent is silent", test_retire_absent), &
             new_unittest("log levels are read by name", test_get_level), &
             new_unittest("has, has_section, keys, path and filename", test_presence_helpers), &
@@ -74,6 +80,9 @@ contains
             new_unittest("update changes a key and set adds one", test_set_and_update), &
             new_unittest("append_section builds an array of tables", test_append_section), &
             new_unittest("save writes the effective configuration", test_save_effective), &
+            new_unittest("get_opt records the variable's own value for save", test_opt_reaches_the_shadow), &
+            new_unittest("delete removes a key, and an absent key is a no-op", test_delete), &
+            new_unittest("dump writes the parsed document, save writes the effective one", test_dump), &
             new_unittest("shared file, concurrent reader 1", test_shared_reader_1), &
             new_unittest("shared file, concurrent reader 2", test_shared_reader_2), &
             new_unittest("shared file, concurrent reader 3", test_shared_reader_3), &
@@ -368,7 +377,7 @@ contains
         call pf_toml_close(conf)
     end subroutine test_array_round_trip
 
-    !> With `required = .false.`, an absent list leaves whatever the variable already held.
+    !> `pf_toml_get_opt` leaves whatever the variable already held when the key is absent.
     subroutine test_array_optional(error)
         type(error_type), allocatable, intent(out) :: error  !! test-drive's error slot.
         type(pf_toml) :: conf, gen
@@ -379,12 +388,12 @@ contains
         call pf_toml_loads(conf, text)
         call pf_toml_section(conf, "general", gen)
         r64 = [9.0_real64, 8.0_real64]
-        call pf_toml_get(gen, "no_such_list", r64, required = .false.)
+        call pf_toml_get_opt(gen, "no_such_list", r64)
         call check(error, all(abs(r64 - [9.0_real64, 8.0_real64]) < 1.0e-12_real64), &
             "an absent optional list must leave the caller's own values in place")
         if (allocated(error)) return
         ! Negative control: the same call on a key the file DOES set must overwrite them.
-        call pf_toml_get(gen, "weights", r64, required = .false.)
+        call pf_toml_get_opt(gen, "weights", r64)
         call check(error, all(abs(r64 - [0.5_real64, 1.5_real64]) < 1.0e-12_real64), &
             "a present list must overwrite the variable's entry values")
         call pf_toml_close(conf)
@@ -427,12 +436,12 @@ contains
         call sample(text)
         call pf_toml_loads(conf, text)
         call pf_toml_section(conf, "general", gen)
-        call pf_toml_get_alloc(gen, "no_such_list", ints, required = .false.)
+        call pf_toml_get_alloc_opt(gen, "no_such_list", ints)
         call check(error, .not. allocated(ints), &
-            "an absent optional list must leave get_alloc's result unallocated")
+            "an absent optional list must leave get_alloc_opt's result unallocated")
         if (allocated(error)) return
         ! Negative control: the same variable, a key that IS there.
-        call pf_toml_get_alloc(gen, "limits", ints, required = .false.)
+        call pf_toml_get_alloc_opt(gen, "limits", ints)
         call check(error, allocated(ints), "a present list must allocate the result")
         call pf_toml_close(conf)
     end subroutine test_get_alloc_absent
@@ -502,7 +511,7 @@ contains
         call sample(text)
         call pf_toml_loads(conf, text)
         call pf_toml_section(conf, "general", gen)
-        call pf_toml_get_strings(gen, "no_such_files", files, required = .false.)
+        call pf_toml_get_strings_opt(gen, "no_such_files", files)
         call check(error, files%count() == 0, "an absent optional string list must have count 0")
         if (allocated(error)) return
         n = 0
@@ -512,6 +521,291 @@ contains
         call check(error, n == 0, "the do-loop idiom over an absent list must run zero times")
         call pf_toml_close(conf)
     end subroutine test_strings_absent
+
+    !> `pf_toml_get_opt` overwrites when the file sets the key and keeps the variable when it does
+    !> not -- asserted for all six scalar types, each with its own negative control.
+    subroutine test_get_opt_scalars(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive's error slot.
+        type(pf_toml) :: conf, gen
+        character(len=:), allocatable :: text, name
+        integer(int32) :: i32
+        integer(int64) :: i64
+        real(real32) :: r32
+        real(real64) :: r64
+        logical :: flag
+
+        call sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+
+        ! Absent keys: every variable must come back untouched.
+        i32 = 11; i64 = 12_int64; r32 = 1.5_real32; r64 = 2.5_real64; flag = .true.
+        name = "kept"
+        call pf_toml_get_opt(gen, "no_such_i32", i32)
+        call pf_toml_get_opt(gen, "no_such_i64", i64)
+        call pf_toml_get_opt(gen, "no_such_r32", r32)
+        call pf_toml_get_opt(gen, "no_such_r64", r64)
+        call pf_toml_get_opt(gen, "no_such_log", flag)
+        call pf_toml_get_opt(gen, "no_such_str", name)
+        call check(error, i32 == 11 .and. i64 == 12_int64, "an absent key must leave both integer kinds alone")
+        if (allocated(error)) return
+        call check(error, abs(r32 - 1.5_real32) < 1.0e-6_real32 .and. abs(r64 - 2.5_real64) < 1.0e-12_real64, &
+            "an absent key must leave both real kinds alone")
+        if (allocated(error)) return
+        call check(error, flag .and. name == "kept", "an absent key must leave a logical and a string alone")
+        if (allocated(error)) return
+
+        ! Negative control: the same calls on keys the file DOES set must overwrite every one.
+        call pf_toml_get_opt(gen, "nproc", i32)
+        call pf_toml_get_opt(gen, "nproc", i64)
+        call pf_toml_get_opt(gen, "factor", r32)
+        call pf_toml_get_opt(gen, "factor", r64)
+        call pf_toml_get_opt(gen, "verbose", flag)
+        call pf_toml_get_opt(gen, "name", name)
+        call check(error, i32 == 4 .and. i64 == 4_int64, "a present key must overwrite both integer kinds")
+        if (allocated(error)) return
+        call check(error, abs(r32 - 2.5_real32) < 1.0e-6_real32 .and. abs(r64 - 2.5_real64) < 1.0e-12_real64, &
+            "a present key must overwrite both real kinds")
+        if (allocated(error)) return
+        call check(error, flag .and. name == "run one", "a present key must overwrite a logical and a string")
+        call pf_toml_close(conf)
+    end subroutine test_get_opt_scalars
+
+    !> The one contract `pf_toml_get_opt` adds: an unallocated character scalar the file does not
+    !> set stays unallocated, so `allocated()` answers "does this value exist at all?".
+    subroutine test_get_opt_str_unset(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive's error slot.
+        type(pf_toml) :: conf, gen
+        character(len=:), allocatable :: text, name
+
+        call sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+        call pf_toml_get_opt(gen, "no_such_str", name)
+        call check(error, .not. allocated(name), &
+            "an absent key must leave an unallocated character scalar unallocated")
+        if (allocated(error)) return
+        ! Negative control: a key that IS there must allocate it, at the value's own length.
+        call pf_toml_get_opt(gen, "name", name)
+        call check(error, allocated(name), "a present key must allocate the result")
+        if (allocated(error)) return
+        call check(error, name == "run one", "a present key must give the value its own length")
+        call pf_toml_close(conf)
+    end subroutine test_get_opt_str_unset
+
+    !> A rank-1 `default =` fills the array when the key is absent, and is ignored when it is not.
+    subroutine test_array_default(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive's error slot.
+        type(pf_toml) :: conf, gen
+        character(len=:), allocatable :: text
+        integer(int32) :: i32(3)
+        real(real64) :: r64(2)
+        logical :: flags(2)
+        character(len=8) :: names(3)
+
+        call sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+
+        call pf_toml_get(gen, "no_such_list", i32, default = [7, 8, 9])
+        call check(error, all(i32 == [7, 8, 9]), "an absent list must take the rank-1 default")
+        if (allocated(error)) return
+        call pf_toml_get(gen, "no_such_list", r64, default = [1.25_real64, 2.75_real64])
+        call check(error, all(abs(r64 - [1.25_real64, 2.75_real64]) < 1.0e-12_real64), &
+            "an absent real list must take the rank-1 default")
+        if (allocated(error)) return
+        call pf_toml_get(gen, "no_such_list", flags, default = [.true., .false.])
+        call check(error, flags(1) .and. .not. flags(2), "an absent logical list must take the rank-1 default")
+        if (allocated(error)) return
+        call pf_toml_get(gen, "no_such_list", names, default = ["one     ", "two     ", "three   "])
+        call check(error, trim(names(3)) == "three", "an absent string list must take the rank-1 default")
+        if (allocated(error)) return
+
+        ! Negative control: with the key present the default must be ignored entirely.
+        call pf_toml_get(gen, "limits", i32, default = [7, 8, 9])
+        call check(error, all(i32 == [1, 2, 3]), "a present list must be read rather than defaulted")
+        call pf_toml_close(conf)
+    end subroutine test_array_default
+
+    !> `count` accepts a list of the right length, and does not fire for an absent optional one.
+    subroutine test_strings_count(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive's error slot.
+        type(pf_toml) :: conf, gen
+        type(pf_toml_strings) :: files, fresh
+        character(len=:), allocatable :: text, one
+
+        call sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+        call pf_toml_get_strings(gen, "files", files, count = 3)
+        call check(error, files%count() == 3, "count = 3 must accept the three-element list")
+        if (allocated(error)) return
+        call files%get(2, one)
+        call check(error, one == "bc", "the list must still be read correctly when count is given")
+        if (allocated(error)) return
+        ! An absent optional list is not measured against `count`: the caller already said it may
+        ! not be there. A FRESH variable is used here rather than `files`, because the whole point
+        ! of the optional form is that it leaves what it found -- which the next check asserts.
+        call pf_toml_get_strings_opt(gen, "no_such_files", fresh, count = 3)
+        call check(error, fresh%count() == 0, "count must not fire for an absent optional list")
+        if (allocated(error)) return
+        call pf_toml_get_strings_opt(gen, "no_such_files", files, count = 3)
+        call check(error, files%count() == 3, &
+            "an absent optional list must leave a variable that already held one alone")
+        call pf_toml_close(conf)
+    end subroutine test_strings_count
+
+    !> `pf_toml_mark_section` silences a section and everything below it, sub-tables included.
+    subroutine test_mark_section(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive's error slot.
+        type(pf_toml) :: conf, gen, reg
+        character(len=:), allocatable :: text
+        integer :: i, id
+
+        call sample(text)
+        call pf_toml_loads(conf, text)
+        ! Read the root keys and the array of tables, but mark [general] rather than reading it.
+        call pf_toml_mark(conf, "title")
+        call pf_toml_mark(conf, "count")
+        call pf_toml_section(conf, "general", gen)
+        call pf_toml_mark_section(gen)
+        do i = 1, pf_toml_section_count(conf, "region")
+            call pf_toml_section(conf, "region", i, reg)
+            call pf_toml_get(reg, "id", id)
+        end do
+        ! Would abort if [general]'s nine keys or its [general.nested] sub-table were reported,
+        ! which is what makes this a test of the RECURSION rather than only of the first level.
+        call pf_toml_check_all(conf)
+        call check(error, .true., "check_all must be silent over a marked section and its sub-tables")
+        call pf_toml_close(conf)
+    end subroutine test_mark_section
+
+    !> The five validators do nothing on the handle of an absent optional section, and still act
+    !> on an open one -- the negative control without which "silent" proves nothing.
+    subroutine test_closed_handle_validators(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive's error slot.
+        type(pf_toml) :: conf, gen, missing
+        character(len=:), allocatable :: text
+        logical :: found
+
+        call sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "not_there", missing, required = .false., found = found)
+        call check(error, .not. found, "the fixture must not carry the optional section")
+        if (allocated(error)) return
+        ! None of these may abort. A section that does not exist has nothing to sweep, mark or warn
+        ! about, and a caller cannot know before opening whether it is there.
+        call pf_toml_check(missing)
+        call pf_toml_retire(missing, "old_key", "use new_key instead")
+        call pf_toml_mark(missing, "anything")
+        call pf_toml_mark_section(missing)
+        call check(error, pf_toml_section_count(missing, "sub") == 0, &
+            "section_count on a closed parent must answer 0")
+        if (allocated(error)) return
+        ! Negative control: on an OPEN section the same procedures must still do their work, or
+        ! five unconditional no-ops would pass everything above.
+        call pf_toml_section(conf, "general", gen)
+        call pf_toml_mark_section(gen)
+        call pf_toml_check(gen)
+        call check(error, pf_toml_section_count(conf, "region") == 2, &
+            "section_count on an open parent must still count the entries")
+        call pf_toml_close(conf)
+    end subroutine test_closed_handle_validators
+
+    !> A value `pf_toml_get_opt` took from the variable rather than from the file is still the
+    !> value the run used, so `pf_toml_save` must write it.
+    subroutine test_opt_reaches_the_shadow(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive's error slot.
+        type(pf_toml) :: conf, gen, back, gback
+        character(len=:), allocatable :: text
+        character(len=*), parameter :: out_file = "test_run/toml_opt_shadow.toml"
+        integer :: kept
+
+        call sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+        kept = 42
+        call pf_toml_get_opt(gen, "no_such_key", kept)
+        call pf_toml_save(conf, out_file)
+        call pf_toml_close(conf)
+
+        call pf_toml_load(back, out_file)
+        call pf_toml_section(back, "general", gback)
+        kept = 0
+        call pf_toml_get(gback, "no_such_key", kept)
+        call check(error, kept == 42, "save must record the value get_opt resolved from the variable")
+        call pf_toml_close(back)
+    end subroutine test_opt_reaches_the_shadow
+
+    !> `pf_toml_delete` removes a key from the parsed AND the effective document, and does nothing
+    !> at all when the key is not there.
+    subroutine test_delete(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive's error slot.
+        type(pf_toml) :: conf, gen, back, gback
+        character(len=:), allocatable :: text
+        character(len=*), parameter :: out_file = "test_run/toml_delete.toml"
+        integer :: nproc
+
+        call sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+        ! Read the key first, so the effective document holds it and the shadow delete is load
+        ! bearing: without it, save would write the value back out.
+        call pf_toml_get(gen, "nproc", nproc)
+        call check(error, nproc == 4, "the fixture must set general.nproc")
+        if (allocated(error)) return
+        call pf_toml_delete(gen, "nproc")
+        call check(error, .not. pf_toml_has(gen, "nproc"), "delete must remove the key from the document")
+        if (allocated(error)) return
+        ! A key that is not there: no abort, and nothing else disturbed.
+        call pf_toml_delete(gen, "never_was_here")
+        call pf_toml_delete(gen, "nproc")
+        call check(error, pf_toml_has(gen, "factor"), "deleting an absent key must disturb nothing else")
+        if (allocated(error)) return
+        call pf_toml_save(conf, out_file)
+        call pf_toml_close(conf)
+
+        call pf_toml_load(back, out_file)
+        call pf_toml_section(back, "general", gback)
+        call check(error, .not. pf_toml_has(gback, "nproc"), &
+            "a deleted key must not be written back out by save")
+        call pf_toml_close(back)
+    end subroutine test_delete
+
+    !> `pf_toml_dump` writes the document as parsed, where `pf_toml_save` writes what was read.
+    subroutine test_dump(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive's error slot.
+        type(pf_toml) :: conf, gen, back, gback
+        character(len=:), allocatable :: text, name
+        character(len=*), parameter :: out_file = "test_run/toml_dump.toml"
+        integer :: nproc
+
+        call sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+        ! Edit one key and dump WITHOUT reading anything else.
+        call pf_toml_update(gen, "nproc", 16)
+        call pf_toml_dump(conf, out_file)
+        call pf_toml_close(conf)
+
+        call pf_toml_load(back, out_file)
+        call pf_toml_section(back, "general", gback)
+        call pf_toml_get(gback, "nproc", nproc)
+        call check(error, nproc == 16, "dump must carry the update through")
+        if (allocated(error)) return
+        ! The discriminator against save: a key nobody read is still there.
+        call pf_toml_get(gback, "name", name)
+        call check(error, name == "run one", &
+            "dump must carry a key the program never read, which save would have dropped")
+        if (allocated(error)) return
+        call check(error, pf_toml_has_section(back, "general"), "dump must carry the sections too")
+        if (allocated(error)) return
+        call pf_toml_mark_section(gback)
+        call pf_toml_mark(back, "title")
+        call pf_toml_mark(back, "count")
+        call pf_toml_mark_section(back)
+        call pf_toml_close(back)
+    end subroutine test_dump
 
     ! ================================================================================
     ! The property everything else rests on

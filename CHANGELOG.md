@@ -5,287 +5,93 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v2.2.0] - 2026-09-03
 
 ### Added
 
-- **`parquet_utils`: text and path helpers.** A new Arrow-free leaf entry module, one Fortran
-  file, importing nothing but `iso_fortran_env`. `pf_to_lower`/`pf_to_upper` fold ASCII case, as a
-  copy or in place, leaving every other byte — including multi-byte UTF-8 — untouched. `pf_to_str`
-  renders an `integer(int32)`, `integer(int64)`, `real(real32)`, `real(real64)` or `logical` as
-  text, with an optional minimum field width, padding character and format; a `logical` renders as
-  `true`/`false`. `pf_join_path` joins two to five components, or an array of them, by CPython's
-  `posixpath.join` rules, and `pf_dirname`, `pf_basename`, `pf_path_ext`, `pf_path_stem`,
-  `pf_split_path` and `pf_path_add_suffix` take a path apart and rebuild it with a suffix inserted
-  before the extension. Nothing in the module validates, aborts or prints, and every result comes
-  back allocated. See [Text and path helpers](doc/pages/utilities/utils.md).
-
-- **`parquet_stats`: array statistics over plain Fortran arrays.** A new Arrow-free entry module
-  under `pf_*` names, for reducing arrays a program already has rather than anything about a
-  parquet file. It opens with `pf_count_valid`, which answers how many elements are in the
-  population over `integer(int32)`, `integer(int64)`, `real(real32)`, `real(real64)` and `logical`
-  arrays — with `n_null=`/`n_nan=` reporting why the rest left — and with it the conventions the
-  rest of the family follows: a null (`is_valid=`), a NaN (`skipnan=`, defaulting to excluded as
-  `pf_minmax` already does) and a zero weight (`weights=`) each leave the population, in that
-  order, so a weight belonging to an excluded element is never examined; an empty or fully
-  excluded population answers zero rather than aborting; and every procedure declares its optional
-  arguments in one fixed order. A non-finite value is data rather than an error: a population
-  containing `+Inf` sums and means to `+Inf` with `ok=.true.`, as numpy and pandas answer, while
-  its central moments are NaN. The moment
-  family follows over `real(real64)` arrays: `pf_sum`, `pf_mean`, `pf_variance`, `pf_stddev`,
-  `pf_sem`, `pf_skewness`, `pf_kurtosis`, and `pf_moments`, which produces all of them plus the
-  counts, the sum and the extremes in at most one pair of passes, with `ok=` over the outputs asked
-  for -- a call needing nothing from the second pass, `pf_sum` among them, makes only the first. They are weighted (`weights=`,
-  `weight_type=`), take `ddof=`/`bias=`/`excess=` with pandas' defaults rather than numpy's, are
-  computed two-pass over a fixed pairwise block tree so that the variance is shift-invariant, and
-  return a quiet NaN with `ok=.false.` wherever a statistic is undefined. A `pf_stats` accumulator
-  summarises a population once and answers any number of queries off it: `%compute` for a resident
-  array, `%init` plus `%update` for one arriving in pieces, and `%merge` — whose array form folds in
-  index order, and which requires the two accumulators to agree on all three of `retain`,
-  `weight_type` and `skipnan` — for accumulating in parallel. Everything in the module takes any of six inputs:
-  `real(real64)`, `real(real32)`, `integer(int32)`, `integer(int64)` and `logical` arrays, all
-  widened exactly, and a scalar numeric `type(parquet_column)` dispatched on its kind. The
-  central-moment pass is threaded on a large population, with `threads=` to override the automatic
-  count; the answer is bit-identical at every thread count and without OpenMP. Order statistics
-  follow: `pf_median`, `pf_quantile`, `pf_quantiles`, `pf_iqr`, `pf_trim_mean` and
-  `pf_percentile_of_score`, over the same six inputs, with numpy's six `method=` tokens and
-  weighted quantiles whose rule reduces exactly to the unweighted one at equal weights. A
-  `pf_stats` orders its retained values once and answers every later order statistic off that
-  ordering, dropping it whenever `%update` or `%merge` changes the population. `pf_mad` gives the
-  median absolute deviation, scaled by default so that it estimates the standard deviation of clean
-  Gaussian data, with `scale=` and `center=`; `pf_mode` gives the most common value over the
-  integer, logical and string kinds, breaking ties to the smallest value — or, through `modes=`,
-  returning every tied value as pandas' `Series.mode()` does. `pf_describe` fills a `pf_stats` in
-  one pair of passes and one ordering, with `ok=`, and `%print` renders the summary block pandas'
-  `describe()` prints. `pf_gmean` and `pf_hmean` give the geometric and harmonic means, also as
-  `pf_stats` queries; `pf_cov` and `pf_corr` the pairwise-complete covariance and correlation,
-  Pearson or Spearman, with `pf_cov(x, x)` reproducing `pf_variance(x)` bit for bit under either
-  `weight_type`; `pf_zscore`
-  standardises a whole array; and `pf_sigma_clipped_stats` reproduces astropy's iterative clip on a
-  single ordering, reporting the surviving mask so the same clip can be applied to another column.
-  `pf_cumsum`, `pf_cumprod`, `pf_cummax` and `pf_cummin` give the running folds, where an excluded
-  element yields an excluded output element and the running value carries past it unchanged, as
-  pandas does. `pf_bucketize` says which bin of a sorted edge array each value falls in, and
-  `pf_histogram` how many values — or how much weight — landed in each, under either numpy's or
-  pandas' edge convention, reporting the values that reached no bin rather than dropping them
-  silently, and optionally as a `density=` normalised the way `np.histogram` normalises one; both
-  take `weights=`, so the histogram is the bucketize tally in every case. `pf_bin_edges` supplies
-  the edges themselves, spanning the finite part of the population's own range, and always
-  strictly increasing so that the `pf_histogram` call they exist for cannot abort.
-  See [Array statistics](doc/pages/utilities/statistics.md).
-- **`parquet_logging`: general-purpose logging for the calling program.** A `pf_logger` type and a
-  matching set of `pf_log_*` procedures on a process-wide default logger: eight ascending severity
-  levels using Python's numbers (`PF_LEVEL_DEBUG` = 10, and an arbitrary integer level is accepted
-  too), several sinks at once — console, a file the logger opens, or a unit you own — each with its
-  own threshold, layout, colour policy, flush-by-level policy and rank filter, and `%print` to
-  dump the whole configuration. The line layout is a template
-  with named placeholders (`{stamp}`, `{level}`, `{name}`, `{thread}`, `{rank}`, `{context}`,
-  `{message}`, …) where `{field|sep}` emits its separator only when the field is non-empty; ISO-8601
-  timestamps and a monotonic `{elapsed}`. `%enabled` is one integer comparison, for guarding an
-  expensive message. From an OpenMP region: one shared logger, serialised writes, a per-thread
-  context stack (`pf_log_push_context`/`pf_log_pop_context`) over a shared base, `{thread}` in the
-  layout, and an opt-in buffered mode that keeps one thread's records contiguous. Also `once=` and
-  `every=` deduplication, per-name level overrides that turn a library's noise down or one
-  subsystem's up and are removed again with `pf_log_unset_level`, a per-thread name stack
-  (`pf_log_push_name`/`pf_log_pop_name`) letting a subprogram name itself without knowing its
-  caller's name, a caller-supplied rank filter
-  that adds no MPI dependency, `pf_str` for building
-  messages by concatenation, and `pf_log_configure_from_env`. It is a leaf — `use parquet_logging`
-  compiles one Fortran file — and it is **not** this library's own messaging, which stays with
-  `verbosity` and `message_stream`; nothing in the library uses it.
-- **`parquet_healpix`: the HEALPix sphere pixelisation.** Direction to pixel and back, from angles
-  or from unit vectors (`pf_ang2pix_ring`/`pf_ang2pix_nest`, `pf_vec2pix_*`, `pf_pix2ang_*`,
-  `pf_pix2vec_*`, `pf_ang2vec`/`pf_vec2ang`), conversion between the RING and NEST numbering
-  schemes (`pf_ring2nest`/`pf_nest2ring`) and between resolutions within NEST
-  (`pf_ud_pix_nest`), and the pixels of a disc — exact or overlapping, in either scheme, into your
-  buffer (`pf_query_disc`), into one the library sizes itself (`pf_query_disc_alloc`), or as a
-  count alone (`pf_query_disc_count`); `pf_query_disc_max_count` bounds that count for any
-  position, so one buffer can serve a whole loop of queries. Grid arithmetic over `nside`, `npix`, order, pixel area,
-  resolution, ring index and ring latitude (`pf_nside2npix`, `pf_npix2nside`, `pf_nside2order`,
-  `pf_order2nside`, `pf_nside2pixarea`, `pf_nside2resol`, `pf_max_pixrad`, `pf_pix2ring_*`,
-  `pf_ring2z`), angular separation between two directions (`pf_angdist`) or between two RA/Dec
-  positions in degrees (`pf_angdist_deg`), and the squared-chord pair that replaces it in a
-  comparison (`pf_chord2_from_angle`/`pf_angle_from_chord2`). Every conversion also has a `_bulk`
-  form over whole arrays with an optional `threads=`, capped process-wide by
-  `parquet_set_healpix_threads` and reported by `pf_healpix_threads`. Every integer argument takes
-  `integer(int32)` or `integer(int64)`; the scalar conversions are `pure elemental`, so they
-  accept whole arrays. No floating-point exception is raised on valid input, so a program running
-  under `-ffpe-trap` needs no guard around a call. `pf_healpix_grid` carries an `nside`, a scheme
-  and a declination convention as one object, validated once by `%init`, so a conversion or a disc
-  query on it restates none of them and the `_ring`/`_nest` pairs collapse to one binding each; it
-  is also the only place this module offers an RA/Dec layer (`%radec2pix`, `%pix2radec`,
-  `%radec2vec`, `%vec2radec` and `%query_disc_radec`, in degrees, read in `PF_HP_DEC_NORTH` or
-  `PF_HP_DEC_SOUTH`). A new Arrow-free entry module (`use parquet_healpix` compiles seven Fortran
-  files).
-- **`parquet_spatial`: `pf_spatial_index`, a uniform-grid spatial index over plain coordinate
-  arrays.** Ball search into a caller-owned buffer, the self-join as CSR, the pair list and
-  count-only forms, all threaded; `k`-nearest search (`%nearest`) and every point's `k`-th
-  neighbour distance at once (`%kth_distance`); segment, cylinder and truncated-cone searches
-  around an axis, reporting where on the axis each point sits (`axis_point=`/`axis_t=`);
-  search on the sky by angular radius (`%build_sky`/`%within_sky`/`%count_within_sky`/
-  `%nearest_sky`/`%kth_distance_sky` plus the three bulk forms `%all_within_sky`/
-  `%pairs_within_sky`/`%count_all_within_sky`, degrees in and degrees out everywhere,
-  `%rebuild_for` included), backed by either a 3D grid or the HEALPix
-  pixelisation of the sphere (`backend=PF_SKY_GRID3D`, the default, or `backend=PF_SKY_HEALPIX`,
-  with `nside=`, `%backend()`, `%nside()` and `%npix()`); two or three dimensions; optional periodic
-  boundaries with the minimum-image convention; and an automatically chosen cell size. Every
-  radius query takes an optional inner radius (`r_inner=`), making the ball an annulus, and can
-  return its rows ordered by distance (`sorted=`). Every bulk query takes one radius or one per
-  point; the pair list is symmetric under a per-point radius (a pair qualifies when either ball
-  reaches the other) while the CSR and count forms are directed. `pf_connected_components` labels
-  an edge list's connected components, so a Friends-of-Friends group finder is `%pairs_within`
-  followed by one more call. A new Arrow-free entry module (`use parquet_spatial` compiles fifteen
-  Fortran files), with `spatial_threads` and `spatial_rebuild_warning` joining the process-global
-  settings.
-- **`parquet_get_column_shape(reader, name, shape)`** reports whether a column is a `"scalar"`,
-  `"vector"`, `"list"`, `"map"`, `"struct"` or `"unknown"`, from the file schema alone. Orthogonal
-  to `parquet_get_column_type`, which reports the element type and is unchanged. An Arrow encoding
-  wrapper — an extension, dictionary or run-end-encoded type — is read through, so the shape
-  reported is that of the wrapped storage.
-- **`parquet_list`: `parquet_list_column`, a variable-length list column, plus `parquet_list_row`,
-  a lightweight handle to one of its rows.** Rows may hold different numbers of values, including
-  none, and a row may be a null (absent) list distinct from a present but empty one; element nulls
-  inside a row are tracked separately from row nulls. Nine scalar payload kinds, an
-  offsets-plus-payload layout matching Arrow's, geometric growth, deep copy, move, and a
-  `%gather_rows` rebuild that serves reordering, filtering and duplication. A `parquet_column` can
-  take ownership of one through the new `%adopt_container`, which is how the container reaches the
-  rest of the library. A new Arrow-free entry module (`use parquet_list` compiles eleven Fortran
-  files) that reads no settings.
-  `parquet_read_column`/`parquet_read_column_chunk` read a `LIST`/`LARGE_LIST` column from a
-  Parquet file straight into one, whole or one row group at a time, with per-row lengths, null rows
-  and null elements intact and with the payload kind taken from the file rather than declared;
-  filtering, sampling and sorting compose with it. A list leaf nested inside a `STRUCT` is now
-  addressable by its dotted path. `parquet_write_column`/`parquet_write_column_chunk` write one back
-  out as a genuine variable-length `LIST` column, declared in a schema as `list[<elemtype>]`; the
-  value type decides the file's physical shape, so a 2-D array still writes a fixed-width vector
-  column and a `parquet_list_column` always writes a `LIST`. A list may now hold a container — a list of
-  structs, of maps or of lists — **on read**; the payload is reached with `parquet_list_row%nested`,
-  and a nested leaf is addressable directly by a descent path (`"list_of_struct[].x"`). **Not yet**:
-  writing a nested container, which is refused with a message naming the column and the payload
-  kind. A container column declares neither `col_size:` nor `array_size:` — both fix a width that is
-  the same in every row — so a `write_maml=.true.` sidecar carries neither key for one, whatever the
-  source MAML declared.
-- **`parquet_struct`: `parquet_struct_column`, a `STRUCT` column, plus `parquet_struct_row`, a
-  lightweight handle to one of its rows.** Every row holds one value per declared field and the
-  fields may have different types; the field set is fixed by `%init(names, kinds)` and covers the
-  nine scalar kinds. A row may be a null (absent) struct instance, distinct from a present one
-  whose fields are null, and the two are tracked separately. `%get_field(name, value)` reads a
-  field in one call and `%field(name)` narrows a handle for step-by-step navigation; an unknown
-  field name can warn instead of aborting. Deep copy, move, and a `%gather_rows` rebuild that
-  serves reordering, filtering and duplication. A `parquet_column` can take ownership of one
-  through `%adopt_container`. A new Arrow-free entry module (`use parquet_struct` compiles eleven
-  Fortran files). `parquet_read_column`/`parquet_read_column_chunk` read a `STRUCT` column from a
-  Parquet file straight into one, whole or one row group at a time, taking the field set from the
-  file; `parquet_write_column`/`parquet_write_column_chunk` write one back out, declared in a
-  schema as `struct` — the field layout comes from the column object, never from MAML. Addressing
-  a struct's leaves by their dotted paths (`"person.age"`) is unchanged and still reaches any
-  depth of nesting. A field may now be a list or a map **on read**, reached with
-  `parquet_struct_row%nested`; a field that is itself a struct is still refused, and its leaves are
-  read by their dotted paths as before. A `date`, `time` or `timestamp` field is written at
-  microsecond resolution — a struct's fields carry no unit declaration — and a value with finer
-  precision is refused rather than truncated. **Not yet**: writing a struct whose field is a
-  container.
-- **`parquet_map`: `parquet_map_column`, a `MAP` column, plus `parquet_map_row`, a lightweight
-  handle to one of its rows.** Every row holds zero or more `key -> value` entries; keys are
-  strings and the value kind is fixed by `%init(value_kind)` and covers the nine scalar kinds.
-  Duplicate keys are preserved in the order given, so `%get(key, value)` returns the first match,
-  `occurrence=` selects a later one, and `%key_count`/`%contains_key` answer about them;
-  `%get_at`/`%key_at` walk a row positionally. A row may be a null (absent) map, a present but
-  empty one, or hold an entry whose value is null — three states, all tracked separately, and a
-  key is never null. Every lookup can warn or report `found=` instead of aborting. Deep copy,
-  move, and a `%gather_rows` rebuild that serves reordering, filtering and duplication. A
-  `parquet_column` can take ownership of one through `%adopt_container`. A new Arrow-free entry
-  module (`use parquet_map` compiles eleven Fortran files). `parquet_read_column`/
-  `parquet_read_column_chunk` read a `MAP` column from a Parquet file straight into one, whole or
-  one row group at a time; `parquet_write_column`/`parquet_write_column_chunk` write one back out,
-  declared in a schema as `map[<valuetype>]`. A value may now be a container **on read**, reached with
-  `parquet_map_row%nested`, and `parquet_get_map_value_type` reports `list`/`map`/`struct` for one.
-  A map under a `STRUCT` path (`"person.attrs"`) is now readable too, closing a name that was
-  listed and would not resolve. **Not yet**: its keys must be strings, and writing a map whose
-  value is a container is refused. A
-  map's total entry count is capped at 2,147,483,647 — Arrow has no `large_map` to widen into, so
-  a column past it is refused rather than written in a wider form.
-- **A `parquet_table` column can be a list, a map or a struct.** A `MAP` column is classified as a
-  `parquet_map_column` automatically; a variable-length `LIST` column becomes a
-  `parquet_list_column` when `parquet_open_table`'s new `list_columns="container"` argument asks
-  for it, instead of being measured for a uniform width (`"auto"`, the default, is unchanged); a
-  `parquet_struct_column` is added in memory with `%add_column`. Each gets the same five accessors
-  a `parquet_string_column` has — `%col`, `%get`, `%set`, `%add_column` and a column handle's
-  `%ref` — and none takes an `is_valid=` mask, because a container carries its own per-row
-  nullness. `%is_null(name, i)`, the rank-1 `%get_valid_mask` and `%ensure_validity` answer; the
-  element-granular forms are refused. Every row-structural mutation (`%sort_by`, `%filter_rows`,
-  `%delete_rows`, `%truncate`, `%top_n`, `%append`) carries a container column along, though one
-  may not be a sort key. `%print_stat` reports the shortest and longest row in place of a minimum
-  and maximum, and `parquet_write_table` writes all three back out with a temporal payload's
-  resolution intact. **Not yet**: no `%get_slice`, `%get_element` or row-handle access, which
-  address a fixed-width cell a container row does not have.
-- **`parquet_get_map_value_type(reader, name, type_name)`** reports a map column's value type from
-  the file schema alone, or `"unknown"` for a column that is not a readable map. It is what
-  `parquet_get_column_type` cannot answer, since that query reports `"unknown"` for every map.
+- **`parquet_utils`**: an Arrow-free leaf module of text and path helpers — `pf_to_lower`/
+  `pf_to_upper`, `pf_to_str` for rendering a number or a `logical` as text, and `pf_join_path`,
+  `pf_dirname`, `pf_basename`, `pf_path_ext`, `pf_path_stem`, `pf_split_path` and
+  `pf_path_add_suffix` for taking a path apart and rebuilding it. See
+  [Text and path helpers](doc/pages/utilities/utils.md).
+- **`parquet_stats`**: an Arrow-free entry module of `pf_*` array statistics over `real64`,
+  `real32`, `int32`, `int64` and `logical` arrays and scalar numeric `parquet_column`s, each
+  taking an optional null mask, NaN policy and weights. Counts and moments (`pf_count_valid`,
+  `pf_sum`, `pf_mean`, `pf_variance`, `pf_stddev`, `pf_sem`, `pf_skewness`, `pf_kurtosis`,
+  `pf_moments`), order statistics (`pf_median`, `pf_quantile`, `pf_quantiles`, `pf_iqr`,
+  `pf_trim_mean`, `pf_percentile_of_score`, `pf_mad`, `pf_mode`), `pf_gmean`/`pf_hmean`,
+  `pf_cov`/`pf_corr` (Pearson or Spearman), `pf_zscore`, `pf_sigma_clipped_stats`, the running
+  folds `pf_cumsum`/`pf_cumprod`/`pf_cummax`/`pf_cummin`, and binning with `pf_bucketize`,
+  `pf_histogram` and `pf_bin_edges`. A `pf_stats` accumulator summarises a population once —
+  resident, incremental (`%update`) or merged from parallel parts (`%merge`) — and answers any
+  number of queries off it; `pf_describe` and `%print` render pandas' `describe()` block. The
+  moment pass is threaded, with `threads=`, and is bit-identical at every thread count. See
+  [Array statistics](doc/pages/utilities/statistics.md).
+- **`parquet_logging`**: a general-purpose logger for the calling program — a `pf_logger` type and
+  `pf_log_*` procedures on a process-wide default logger, with eight severity levels, several
+  sinks at once (console, a file, or a unit you own) each with its own threshold, layout, colour
+  and flush policy, templated line layouts, `once=`/`every=` deduplication, per-name level
+  overrides, per-thread name and context stacks, a caller-supplied rank filter and
+  `pf_log_configure_from_env`. It is a leaf module and the library itself does not use it.
+- **`parquet_healpix`**: the HEALPix sphere pixelisation, Arrow-free. Direction to pixel and back
+  from angles or unit vectors, RING/NEST conversion, resolution changes, disc queries
+  (`pf_query_disc` and its allocating, counting and bounding forms), grid arithmetic over `nside`,
+  `npix`, order, pixel area, resolution and rings, and angular separation. Every conversion has a
+  `_bulk` form over whole arrays with an optional `threads=`, and `pf_healpix_grid` carries an
+  `nside`, scheme and declination convention as one object with an RA/Dec layer on top.
+- **`parquet_spatial`**: `pf_spatial_index`, an Arrow-free uniform-grid spatial index over plain
+  coordinate arrays in two or three dimensions. Ball search, the self-join as CSR, pair-list and
+  count-only forms, `k`-nearest search and `k`-th neighbour distances, segment/cylinder/cone
+  searches around an axis, and angular search on the sky backed by either a 3D grid or HEALPix.
+  Queries take an inner radius, can return rows ordered by distance, and take one radius or one
+  per point; periodic boundaries and an automatic cell size are supported. `pf_connected_components`
+  labels an edge list's components, making a Friends-of-Friends group finder one further call.
+- **`parquet_list`, `parquet_struct` and `parquet_map`**: three Arrow-free container column types
+  — `parquet_list_column` (variable-length rows), `parquet_struct_column` (a fixed field set of
+  possibly differing types) and `parquet_map_column` (string-keyed `key -> value` entries) — each
+  with a lightweight row handle, nine scalar payload kinds, per-row and per-element null tracking,
+  deep copy, move and a `%gather_rows` rebuild. A `parquet_column` takes ownership of one through
+  the new `%adopt_container`. `parquet_read_column`/`parquet_read_column_chunk` read `LIST`,
+  `LARGE_LIST`, `STRUCT` and `MAP` columns from a file straight into them, whole or one row group
+  at a time, and `parquet_write_column`/`parquet_write_column_chunk` write them back out, declared
+  in a schema as `list[<elemtype>]`, `struct` or `map[<valuetype>]`. A container nested inside
+  another is readable — reached through `%nested`, or by a descent path such as
+  `"list_of_struct[].x"` — and writing one is refused with a message naming the column.
+- **A `parquet_table` column can be a list, a map or a struct.** A `MAP` column is classified
+  automatically, a variable-length `LIST` becomes a `parquet_list_column` when
+  `parquet_open_table`'s new `list_columns="container"` asks for it, and a `parquet_struct_column`
+  is added in memory with `%add_column`. Each gets `%col`, `%get`, `%set`, `%add_column` and a
+  column handle's `%ref`; every row-structural mutation carries them along, `%print_stat` reports
+  the shortest and longest row, and `parquet_write_table` writes them back out. Element-granular
+  validity, `%get_slice`, `%get_element` and row-handle access are refused, since a container row
+  has no fixed-width cell.
+- **Two new schema queries answered from the file metadata alone**: `parquet_get_column_shape`
+  reports whether a column is a `"scalar"`, `"vector"`, `"list"`, `"map"`, `"struct"` or
+  `"unknown"`, and `parquet_get_map_value_type` reports a map column's value type.
 
 ### Changed
 
-- **`parquet_stats` no longer copies the population when it has nothing to exclude.** Pass one
-  deferred its compaction, so an unmasked, unweighted, NaN-free call allocates, writes and frees
-  one array less. `pf_variance` over 10000000 elements is **2.3x faster serially**, and threading
-  the same call goes from a loss to a gain — measured 1.07x before and 1.91x after under
-  gfortran, 1.08x to 1.54x under ifx, on a 64-core mask. Results are unchanged, bit for bit.
-- **`STATS_MIN_PER_THREAD` lowered from 32768 to 8192 survivors per thread**, re-measured on the
-  shipped `pf_variance` rather than on a replica.
-- **`parquet_healpix` is faster, with no interface change.** `pf_query_disc` is 1.3-1.6x faster
-  under gfortran; a disc returned in the NEST scheme is about 3x faster in either compiler;
-  `pf_query_disc_alloc` is about 2x faster; and `pf_ang2pix_ring`/`pf_ang2pix_nest`/`pf_vec2pix_*`
-  are 1.1-1.3x faster. Results are unchanged.
 - **`pf_nth_element` and `pf_nth_quantile` are 2.5-3.9x faster on a large array**, and
-  `pf_minmax`/`pf_argminmax` are faster too. A selection above a couple of hundred elements is now
-  answered by ordering rather than by quickselecting, which reaches the radix path and the thread
-  team. Answers are unchanged. `pf_quantiles`, `pf_median` and `pf_iqr` follow suit and now always
-  order.
+  `pf_minmax`/`pf_argminmax` are faster too. `pf_quantiles`, `pf_median` and `pf_iqr` follow suit.
+  Answers are unchanged.
 - **`pf_minmax` and `pf_nth_quantile` take an optional `ok=`, so an all-null population can be
-  reported instead of aborting.** `ok` is `.true.` whenever a value was produced — partial nullness
-  is not a failure — and `.false.` only when every value is null (and, for `pf_minmax`, NaN), in
-  which case the value arguments were not written and must not be read. Omitting the argument
-  restores the abort, so existing callers are unaffected. `pf_argminmax` is unchanged and still
-  aborts.
+  reported instead of aborting.** Omitting the argument restores the abort; `pf_argminmax` is
+  unchanged.
 - **`parquet_write_table`'s `copy_metadata=`/`metadata_keys=` no longer carry a key the writer
   generates itself** — `DATE`, `name`, the two `IVOA.VOTable-Parquet.*` keys and every
   `column.<name>.<attr>` entry. `copy_metadata=.true.` skips them; `metadata_keys=` naming one is
-  now an error. A copied file previously carried a second entry for each, and for `column.*` that
-  second entry was the one a reader got back.
-
-- **A zero-radius sky query is documented as unreliable for finding one catalogue entry.** The
-  query point's unit vector is re-derived from `(ra, dec)`, and that conversion need not agree to
-  the last bit with the one `%build_sky` stored, so `%within_sky(ra(k), dec(k), 0.0)` may find
-  nothing. Ask for a radius above that error — 1e-9 degrees is 3.6 microarcseconds. `%within` is
-  unaffected.
+  now an error.
 
 ### Fixed
 
-- **`pf_to_str` returns the same text in a `-check all` build as in a plain one.** A value too
-  wide for its edit descriptor is filled with asterisks by the runtime and is not an error, but
-  ifx's `-check output_conversion` reports one; `pf_to_str(12345, s, fmt='(i2)')` gave `***`
-  instead of `**` under `--profile debug`.
-- **`%fatal`/`pf_log_fatal` aborts exactly once when several threads reach it together.** The
-  procedure is serialised, so a concurrent fatal now emits one record rather than one per thread and
-  performs a single `ERROR STOP`. The process exit status was previously nondeterministic under ifx
-  — including `0`, reporting success for a run that had aborted.
-- **`parquet_get_column_total_elements` reports a variable-length `list` column's element count** —
-  the sum of its rows' own lengths — rather than its row count.
-- **`parquet_get_col_size` and `parquet_get_column_total_elements` see through an Arrow encoding
-  wrapper.** A column stored as an extension, dictionary or run-end-encoded type over a fixed-size
-  list now reports that list's width rather than `1`.
-- **`schema%get_field` and `schema%add_field_from` keep a temporal column's unit and UTC flag.**
-  They returned the stored base token, so a `timestamp[ns,utc]` column copied with `%add_field_from`
-  became a bare `timestamp` — microseconds, not UTC-adjusted — while still validating and still
-  writing.
-- **`schema%set_col_size` refuses a container column** instead of accepting a width that
-  `parquet_write_column` then rejected as an "array size mismatch", a message naming the caller's
-  data rather than the declaration.
 - **Concurrent `parquet_open_reader`/`parquet_open_writer` calls no longer corrupt the heap while a
-  file date is pinned.** Mirroring `parquet_set_file_date` to the C++ side reassigned a
-  process-global `std::string` on every open, so two threads freed the same buffer; the process
-  then aborted elsewhere with glibc's `malloc(): unaligned tcache chunk detected`. Every mirrored
-  setting is now atomic or mutex-guarded.
+  file date is pinned.** Every setting mirrored to the C++ side is now atomic or mutex-guarded.
+- **`parquet_get_col_size` and `parquet_get_column_total_elements` report a variable-length `list`
+  column's element count** — the sum of its rows' own lengths, rather than its row count — **and
+  see through an Arrow extension, dictionary or run-end-encoded wrapper** to the width of the
+  fixed-size list underneath.
+- **`schema%get_field` and `schema%add_field_from` keep a temporal column's unit and UTC flag.** A
+  `timestamp[ns,utc]` column copied with `%add_field_from` became a bare `timestamp`.
 - **A NaN is left out of a float column's reported minimum and maximum.** `%print_stat` and a
   write-time `qc: min:`/`max:` violation warning both report the range over the values that can be
   ordered, and a column whose every value is a NaN reports `NaN`. Either previously gave a

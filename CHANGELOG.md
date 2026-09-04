@@ -48,7 +48,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   target; a result array of the wrong length is an error and zero targets returns nothing.
 - **Matching and joining.** `parquet_table%join(other, on [, other_on] [, how] [, columns]
   [, other_suffix] [, threads])` matches another table's rows against this one's on one or more key
-  columns and brings that table's columns over, mutating this table in place and detaching it;
+  columns and brings that table's columns over, mutating this table in place and detaching it
+  unless every one of its rows survives exactly once and in place — the m:1 left join, which keeps
+  its file, its unread columns and its `%generation()`;
   `how=` is `"inner"` or `"left"`. The key column appears once when both sides name it the same,
   and only an incoming name that clashes is suffixed (`other_suffix=`, default `"_2"`). `columns=`
   absent carries the columns of `other` that are already resident, and naming one reads it; a

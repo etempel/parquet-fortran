@@ -926,7 +926,8 @@ module parquet_tables
         generic :: top_n => table_top_n, table_top_n_string
         procedure, private :: table_join              !! %join specific, array of key names.
         procedure, private :: table_join_string       !! %join specific, separated key string.
-        !> Matches another table's rows against this one's and brings its columns over. Detaching.
+        !> Matches another table's rows against this one's and brings its columns over. Detaching,
+        !! unless every row of this table survives exactly once and in place.
         generic :: join => table_join, table_join_string
         ! --- the ORDER, without applying it: read-only, and they do NOT detach ---
         procedure, private :: table_argsort_by_i32    !! %argsort_by specific, int32 permutation.
@@ -6555,10 +6556,16 @@ module parquet_tables
         !> Matches `other`'s rows against this table's on one or more key columns, keeps the rows
         !! `how` asks for, and brings `other`'s columns over.
         !!
-        !! **`%join` MUTATES this table and DETACHES it**, like every other row-structural
-        !! operation here. `call t%clone(out)` first is the non-mutating form and needs no separate
-        !! API -- a clone copies only the columns that are resident, so on a lazy table it is
-        !! nearly free.
+        !! **`%join` MUTATES this table**, and detaches it from its file unless the result holds
+        !! every one of its rows exactly once and in its original order -- which is a property of
+        !! the DATA, not of `how`: a left join keeps every left row, but keeps it once only when
+        !! each matched key is unique in `other`. On that path nothing is rewritten, no unread
+        !! column becomes unreadable, the file stays open, and `%generation()` moves only if the
+        !! new columns had to grow the slot array, which `%reserve_columns` lets a caller avoid --
+        !! so an outstanding `%col` pointer can survive the whole operation. `%is_detached()`
+        !! reports which of the two happened. `call t%clone(out)` first is the non-mutating form
+        !! and needs no separate API -- a clone copies only the columns that are resident, so on a
+        !! lazy table it is nearly free.
         !!
         !! **Keys are NAMES, not sort keys.** `on` takes one column name per key, primary first,
         !! and a direction token (`"-id"`, `"id desc"`) is refused: a join is an equality test, and
@@ -6576,8 +6583,10 @@ module parquet_tables
         !! every column it has.** A freshly opened right table has none, so a join given neither
         !! `columns=` nor a prior `%materialize_all()` brings no payload across at all. Naming a
         !! column DOES read it, by the ordinary lazy first touch. The same rule governs THIS
-        !! table: a column of it that has not been read is skipped rather than read, and once the
-        !! join has detached, that column is gone -- so materialize what you need first.
+        !! table on a join that DETACHES: a column of it that has not been read is skipped rather
+        !! than read, and is then gone -- so materialize what you need before one. A join that
+        !! keeps every row where it was reads and skips nothing, and leaves every unread column
+        !! exactly as readable as it was.
         !!
         !! **The key column appears once**, taken from this table, when `on` and `other_on` name
         !! the same thing. When they differ both are kept, because the right key really is a

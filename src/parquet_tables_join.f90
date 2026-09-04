@@ -465,6 +465,32 @@ contains
         end do
     end subroutine join_gather_index
     !
+    !> Whether the output leaves every one of this table's rows exactly where it was -- the
+    !! computed condition the non-detaching join turns on.
+    !!
+    !! It is deliberately a property of the PAIR LIST rather than of `how=`, which is what
+    !! `feature_risks.md` Risk-184 is about and what S1's third convention requires: a left join
+    !! keeps every left row, but keeps it ONCE only when the right key is unique within each
+    !! matched group, so "any left join" is the wrong rule and would leave a table attached to a
+    !! file its rows no longer line up with. Being computed also means the condition costs nothing
+    !! to extend -- an inner join that happens to match every row exactly once takes the same path,
+    !! and so will `how="semi"` when P6 adds it, with no clause of their own.
+    logical function join_keeps_left_rows(il, n_out, nl) result(kept)
+        integer(int64), intent(in) :: il(:)     !! per output row: the left row it came from.
+        integer(int64), intent(in) :: n_out     !! output rows.
+        integer(int64), intent(in) :: nl        !! this table's rows before the join.
+        integer(int64) :: o
+        !
+        kept = n_out == nl
+        if (.not. kept) return
+        do o = 1_int64, n_out
+            if (il(o) /= o) then
+                kept = .false.
+                return
+            end if
+        end do
+    end function join_keeps_left_rows
+    !
     !> The rewrite: this table's own columns gathered by `il`, then `other`'s carried in beside
     !! them. The only procedure here that writes to `self`, which is what makes "validate
     !! everything, then mutate everything" checkable by looking at the call order in `table_join`.
@@ -479,18 +505,28 @@ contains
         character(len=*), intent(in) :: dnames(:)    !! this table's name for each.
         integer, allocatable :: lslots(:), dslots(:)
         integer :: j
+        logical :: rebuilt
         !
-        ! THIS TABLE'S OWN COLUMNS FIRST, and in place: on both joins this carries out every
-        ! output row has a left row, so `il` names a real row for every one of them -- there is
-        ! nothing to null-fill and no deep_copy to make. %gather rewrites each column where it
-        ! stands, exactly as %top_n's does, and its own range check is what would catch a 0.
-        !
-        ! A column that has not been READ is skipped rather than read (table_mutable_slots), which
-        ! is this file's approved policy and the reason the guide tells a caller to materialize
-        ! what they need before a join that detaches: afterwards the detach guard is what answers.
-        call table_mutable_slots(self, lslots)
-        if (size(lslots) > 0) call table_colwork(self%cache, PCW_GATHER, lslots, rows=il)
-        self%row_count = n_out
+        ! THE ONE DECISION IN THIS PROCEDURE. When the output holds every one of this table's rows
+        ! exactly once and in order, the join adds columns and changes nothing else: no row moves,
+        ! so no column is rewritten, no unread column becomes unreadable, the slice scope still
+        ! means what it did, and the file stays open. When it does not, this is a row-structural
+        ! mutation like any other in parquet_tables_rowmutate.f90 and behaves like one.
+        rebuilt = .not. join_keeps_left_rows(il, n_out, self%row_count)
+        if (rebuilt) then
+            ! THIS TABLE'S OWN COLUMNS FIRST, and in place: on both joins this carries out every
+            ! output row has a left row, so `il` names a real row for every one of them -- there is
+            ! nothing to null-fill and no deep_copy to make. %gather rewrites each column where it
+            ! stands, exactly as %top_n's does, and its own range check is what would catch a 0.
+            !
+            ! A column that has not been READ is skipped rather than read (table_mutable_slots),
+            ! which is this file's approved policy and the reason the guide tells a caller to
+            ! materialize what they need before a join that detaches: afterwards the detach guard
+            ! is what answers. On the other branch there is nothing to skip and nothing to lose.
+            call table_mutable_slots(self, lslots)
+            if (size(lslots) > 0) call table_colwork(self%cache, PCW_GATHER, lslots, rows=il)
+            self%row_count = n_out
+        end if
         ! Every slot created SERIALLY and all of them before anything is written into one:
         ! table_new_slot reallocates cols(:) when it grows, which no thread may be holding a
         ! descriptor into.
@@ -511,10 +547,16 @@ contains
                 self%cache%cols(dslots(j))%user_populated = .true.
             end do
         end if
-        self%cache%generation = self%cache%generation + 1_int64
-        ! DETACHED LAST, per this layer's second rule: a mutation that fails should leave the
-        ! table attached and diagnosable rather than detached and half-changed.
-        call table_detach(self)
+        if (rebuilt) then
+            self%cache%generation = self%cache%generation + 1_int64
+            ! DETACHED LAST, per this layer's second rule: a mutation that fails should leave the
+            ! table attached and diagnosable rather than detached and half-changed.
+            call table_detach(self)
+        end if
+        ! On the other branch the counter is left to table_new_slot, which bumps it only when the
+        ! slot array had to GROW -- %reserve_columns' published guarantee, and the whole reason an
+        ! outstanding %col pointer can survive a join at all. Bumping here as well would take that
+        ! back for every caller, since a join always adds at least as many slots as it carries.
     end subroutine join_apply
     !
     !> Phase A: one concatenated `parquet_column` per join key, added to `skeys` in order.

@@ -249,6 +249,7 @@ something a reader is expected to have.
 | [Risk-181](#risk-181--a-key-buffers-maxn-1-floor-is-not-its-row-count) | A key buffer's `max(n, 1)` floor is not its row count | 4 — covered |
 | [Risk-182](#risk-182--set_validitys-add-only-behaviour-is-what-a-joins-null-fill-rests-on) | `%set_validity`'s add-only behaviour is what a join's null-fill rests on | 4 — covered |
 | [Risk-183](#risk-183--a-join-carries-only-the-resident-right-columns-and-a-schema-less-write-then-loses-them) | A join carries only the resident right columns, and a schema-less write then loses them | 2 — proposed |
+| [Risk-184](#risk-184--the-non-detaching-join-is-a-computed-condition-and-both-halves-of-it-are-load-bearing) | The non-detaching join is a computed condition, and BOTH halves of it are load-bearing | 4 — covered |
 
 ---
 
@@ -1158,6 +1159,44 @@ rows' elements.
 
 
 ## 4. Risks already covered, kept for what they still forbid
+
+### Risk-184 — The non-detaching join is a computed condition, and BOTH halves of it are load-bearing
+
+A join that leaves every row of the left table exactly once, in place, has only added columns, so it
+keeps its file, its unread columns, its slice scope and its `%generation()`. That is the whole point
+of the m:1 left join and the reason a 300-column lazy table can be joined having read one column.
+The condition is computed from the pair list -- `n_out == nl`, and `il(o) == o` for every `o`
+(`join_keeps_left_rows`, `src/parquet_tables_join.f90`) -- and it must stay that way.
+
+**Widening it to a property of `how=` leaves a table attached whose rows have been duplicated.** A
+left join keeps every left row, but keeps it once only when each matched key is unique in the right
+table; against a repeated key the row set has changed. The table would then still believe it can
+read from its file, and the next read of a column it had not yet read comes back at the FILE's row
+count -- a column of the wrong length, aligned to nothing, beside columns of the joined length. No
+guard fires, because the table was told nothing had moved.
+
+**Dropping either half of the condition is a different wrong answer, and the second half is the one
+that hides.** Without `n_out == nl`, an inner join matching only a prefix of the left rows emits
+`il = [1, 2, ... n_out]`: every entry equals its own position, the identity walk reports that
+nothing moved, and the table keeps its old row count beside a payload of the true length -- rows
+that are gone, reported as present. That arm was missing from the first version of the test and was
+found by mutation, not by review, because no fixture in the suite had an identity-prefix pair list.
+
+**Rule:** the condition is a function of `il` and `n_out` alone and must never consult `how`. It may
+be widened only by making it MORE conservative. `how="semi"`, when P6 lands it, needs no clause of
+its own -- it drops rows, so it fails the count test by construction, and a clause written for it
+would be the beginning of the list this rule exists to prevent. And the counter must be left to
+`table_new_slot`, which bumps only when the slot array grew: an unconditional bump in `join_apply`
+compiles, passes every value assertion, and quietly takes `%reserve_columns`' guarantee away.
+
+**Test:** `test_join_no_detach_control` (`test/test_table_join.f90`), three arms over one file and
+one left table differing only in the right key -- unique (must not detach), repeated (must detach),
+and matching a prefix under `how="inner"` (must detach, and the carried column must be one row
+long). Beside it `test_join_no_detach_lazy` asserts the payoff and Risk-184's own failure mode (an
+unread column read afterwards, at the table's row count and holding its own rows),
+`test_join_no_detach_generation` both directions of the `%reserve_columns` rule with a live `%col`
+pointer, and `test_join_no_detach_slice` that a slice keeps its own three rows rather than the
+file's first three. Eight mutations, all caught.
 
 ### Risk-182 — `%set_validity`'s add-only behaviour is what a join's null-fill rests on
 

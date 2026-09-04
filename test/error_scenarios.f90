@@ -17808,6 +17808,12 @@ contains
     !! of the wrong length silently aligned to nothing. This is the loud half of the residency
     !! rule, and the reason the guide tells a caller to materialize what they need first. Reading
     !! the key column, which the join itself read, is the control.
+    !!
+    !! **The right key is DUPLICATED on purpose, and the scenario is vacuous without it.** A join
+    !! that leaves every left row exactly once and in place does not detach at all (`Risk-184`), so
+    !! against a unique key this reads the skipped column perfectly happily -- which is what it did
+    !! until P4 landed and this scenario stopped aborting. The duplicate is what makes it a join
+    !! that rewrites the row set.
     subroutine scenario_join_detached_column()
         character(len=*), parameter :: f = "test_run/scen_join_detached.parquet"
         type(parquet_table) :: src, a, b
@@ -17815,7 +17821,7 @@ contains
         call join_fixture(src, [10_int64, 20_int64])
         call parquet_write_table(src, f, overwrite=.true.)
         call parquet_open_table(a, f)
-        call join_fixture(b, [20_int64])
+        call join_fixture(b, [20_int64, 20_int64])
         call a%join(b, "id", how="left")
         call a%get("id", got)
         print '(a,i0)', "the key column the join read is still readable, rows=", size(got)

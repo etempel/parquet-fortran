@@ -42,6 +42,11 @@ module test_table_join
     integer(int64), parameter :: LKEY(5) = [30_int64, 10_int64, 99_int64, 20_int64, 10_int64]
     !> The shared fixture's right key column: one unmatched (40) and one duplicated (10).
     integer(int64), parameter :: RKEY(4) = [20_int64, 10_int64, 40_int64, 10_int64]
+    !> A right key with NO duplicate, so a left join against it leaves every left row exactly
+    !! where it was. `RKEY` is the same fixture with 10 repeated, which is what makes the two a
+    !! matched pair: the non-detaching tests below use this one and their negative controls use
+    !! `RKEY`, so the only difference between the two arms is the uniqueness of one key.
+    integer(int64), parameter :: UKEY(3) = [10_int64, 20_int64, 40_int64]
     !
 contains
     !
@@ -85,6 +90,14 @@ contains
                 test_join_detaches), &
             new_unittest("a zero-row right table joins to all-nulls", &
                 test_join_empty_right), &
+            new_unittest("a join that moves no row does not detach; one that does, does", &
+                test_join_no_detach_control), &
+            new_unittest("a non-detaching join leaves the unread columns readable", &
+                test_join_no_detach_lazy), &
+            new_unittest("a reserved slot keeps %generation() and a %col pointer across a join", &
+                test_join_no_detach_generation), &
+            new_unittest("a slice joined in place keeps its own rows and its own scope", &
+                test_join_no_detach_slice), &
             new_unittest("an incoming column keeps its own unit", &
                 test_join_units) &
             ]
@@ -786,6 +799,191 @@ contains
         end do
         call check(error, ok, "every row carried from an empty table must be null")
     end subroutine test_join_empty_right
+    !
+    !> The non-detaching join's computed condition, and the negative control beside it.
+    !!
+    !! The two arms differ in ONE thing: whether the right key repeats. Everything else -- the
+    !! file, the left table, `how=`, `columns=` -- is identical, so a guard that never fires and a
+    !! guard that always fires each fail exactly one arm. That pairing is the whole point of this
+    !! test; splitting it into two would let either half be quietly deleted.
+    subroutine test_join_no_detach_control(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: f = "test_run/join_nodetach_ctl.parquet"
+        type(parquet_table) :: src, a, u, d, p
+        integer(int64), allocatable :: got(:)
+        !
+        call build(src, "id", LKEY)
+        call parquet_write_table(src, f, overwrite=.true.)
+        call build(u, "id", UKEY)
+        call build(d, "id", RKEY)
+        ! ARM 1 -- a right key with no duplicate, so every left row survives exactly once and in
+        ! its original position, and the join is `%add_column` and nothing else.
+        call parquet_open_table(a, f)
+        call a%join(u, "id", how="left", columns="payload")
+        call check(error, a%nrows() == size(LKEY, kind=int64), &
+            "a left join must keep every left row")
+        if (allocated(error)) return
+        call check(error, .not. a%is_detached(), &
+            "a join that leaves every row where it was must not detach")
+        if (allocated(error)) return
+        call check(error, a%has_column("payload_2"), &
+            "the payload must still arrive on the non-detaching path")
+        if (allocated(error)) return
+        ! ARM 2 -- the same join against a key that repeats once. Two left rows are duplicated, so
+        ! the row set has changed and the table must cut its file loose like any other mutation.
+        call parquet_open_table(a, f)
+        call a%join(d, "id", how="left", columns="payload")
+        call check(error, a%nrows() > size(LKEY, kind=int64), &
+            "a duplicated right key must emit more rows than the left table had")
+        if (allocated(error)) return
+        call check(error, a%is_detached(), &
+            "a join that duplicates a row must detach, exactly as every row mutation does")
+        if (allocated(error)) return
+        ! ARM 3 -- the second negative control, for the OTHER half of the condition. An inner join
+        ! matching only the FIRST left row emits `il = [1]`: every entry equals its own position,
+        ! so the identity walk alone reports that nothing moved. Only the row COUNT says
+        ! otherwise, and without it the table would keep its old row count beside a one-row
+        ! payload -- rows that are simply gone, reported as present. Mutation found this arm
+        ! missing; the two arms above cannot reach it, because neither shrinks the row set.
+        call parquet_open_table(a, f)
+        call build(p, "id", LKEY(1:1))
+        call a%join(p, "id", how="inner", columns="payload")
+        call check(error, a%nrows() == 1_int64, &
+            "an inner join matching one left row must leave one row")
+        if (allocated(error)) return
+        call check(error, a%is_detached(), &
+            "a join that DROPS rows must detach even though the rows it kept did not move")
+        if (allocated(error)) return
+        call a%get("payload_2", got)
+        call check(error, size(got, kind=int64) == 1_int64, &
+            "and the carried column must be one row long, not the left table's old count")
+    end subroutine test_join_no_detach_control
+    !
+    !> The payoff: a column the join never read is still readable afterwards, at the right length
+    !! and holding its own values.
+    !!
+    !! This is `feature_risks.md` Risk-184's failure mode stated as an assertion. Widening the
+    !! condition to "any left join" leaves the table attached with its rows duplicated, and the
+    !! next read of an unread column then comes back at the FILE's row count -- a column of the
+    !! wrong length aligned to nothing, with no error anywhere. Asserting the length as well as
+    !! the values is what makes that visible; the values alone would still line up at the front.
+    subroutine test_join_no_detach_lazy(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: f = "test_run/join_nodetach_lazy.parquet"
+        type(parquet_table) :: src, a, u
+        integer(int64), allocatable :: got(:)
+        integer(int64) :: k
+        logical :: ok
+        !
+        call build(src, "id", LKEY)
+        call parquet_write_table(src, f, overwrite=.true.)
+        call parquet_open_table(a, f)
+        call build(u, "id", UKEY)
+        call a%join(u, "id", how="left", columns="payload")
+        call check(error, .not. a%is_detached(), "the fixture must take the non-detaching path")
+        if (allocated(error)) return
+        call check(error, a%residency("payload") == RES_EMPTY, &
+            "a join that moves no row must not read a column it was not asked for")
+        if (allocated(error)) return
+        call a%get("payload", got)
+        call check(error, size(got, kind=int64) == a%nrows(), &
+            "a column read after the join must come back at the table's row count")
+        if (allocated(error)) return
+        ok = .true.
+        do k = 1_int64, a%nrows()
+            if (got(k) /= k) ok = .false.
+        end do
+        call check(error, ok, "and holding its own rows, in their own order")
+    end subroutine test_join_no_detach_lazy
+    !
+    !> `%reserve_columns` interaction: on the non-detaching path the counter is left to
+    !! `table_new_slot`, which bumps only when the slot array had to grow.
+    !!
+    !! Both arms are needed and neither is the interesting one alone: the reserved arm alone would
+    !! pass against a join that never bumps at all, and the unreserved arm alone against one that
+    !! always does.
+    subroutine test_join_no_detach_generation(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table), target :: a
+        type(parquet_table) :: u
+        integer(int64), pointer :: p(:)
+        integer(int64) :: g0
+        integer(int64) :: filler(size(LKEY))
+        character(len=16) :: nm
+        integer :: k
+        logical :: ok
+        !
+        ! ARM 1 -- room reserved for the incoming column, so no descriptor moves.
+        call build(a, "id", LKEY)
+        call build(u, "id", UKEY)
+        call a%reserve_columns(a%ncols() + 1)
+        call a%col("payload", p)
+        g0 = a%generation()
+        call a%join(u, "id", how="left", columns="payload")
+        call check(error, .not. a%is_detached(), "the fixture must take the non-detaching path")
+        if (allocated(error)) return
+        call check(error, a%generation() == g0, &
+            "a join that moves no row and grows no slot array must not bump %generation()")
+        if (allocated(error)) return
+        ! Only now, and only because the counter said so: reading through a pointer whose storage
+        ! had been rebuilt would be undefined rather than a failed assertion.
+        ok = associated(p)
+        if (ok) ok = size(p, kind=int64) == a%nrows()
+        if (ok) then
+            do k = 1, size(LKEY)
+                if (p(k) /= int(k, int64)) ok = .false.
+            end do
+        end if
+        call check(error, ok, "and an outstanding %col pointer must still read its own column")
+        if (allocated(error)) return
+        ! ARM 2 -- the negative control: no spare slot, so the array grows and every descriptor
+        ! relocates. The counter must say so, because that is the one thing a caller holding a
+        ! pointer has to go on.
+        call build(a, "id", LKEY)
+        filler = LKEY
+        do while (a%column_capacity(free=.true.) > 0)
+            write(nm, "(A,I0)") "fill_", a%ncols()
+            call a%add_column(trim(nm), filler)
+        end do
+        g0 = a%generation()
+        call a%join(u, "id", how="left", columns="payload")
+        call check(error, a%generation() > g0, &
+            "a join with no spare slot relocates every descriptor and must bump %generation()")
+    end subroutine test_join_no_detach_generation
+    !
+    !> A slice joined on the non-detaching path keeps its own rows and its own scope: the rows
+    !! did not move, so the slice still means what it did and a later read still reads its half of
+    !! the file rather than the whole of it.
+    subroutine test_join_no_detach_slice(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: f = "test_run/join_nodetach_slice.parquet"
+        type(parquet_table) :: src, a, u
+        integer(int64), allocatable :: got(:)
+        integer(int64) :: k
+        logical :: ok
+        !
+        call build(src, "id", LKEY)
+        call parquet_write_table(src, f, overwrite=.true.)
+        call parquet_open_table(a, f, 2_int64, 4_int64)
+        call build(u, "id", UKEY)
+        call a%join(u, "id", how="left", columns="payload")
+        call check(error, a%nrows() == 3_int64, "the slice must keep its own three rows")
+        if (allocated(error)) return
+        call check(error, .not. a%is_detached(), &
+            "a slice whose rows did not move must keep its file and its scope")
+        if (allocated(error)) return
+        call a%get("payload", got)
+        call check(error, size(got, kind=int64) == 3_int64, &
+            "a column read after the join must come back at the SLICE's row count")
+        if (allocated(error)) return
+        ok = .true.
+        do k = 1_int64, 3_int64
+            ! The file's payload is 1..5, so the slice's own rows are 2, 3, 4 -- reading the whole
+            ! file, or reading it from the top, would both show up here.
+            if (got(k) /= k + 1_int64) ok = .false.
+        end do
+        call check(error, ok, "and holding the slice's own rows, not the file's first three")
+    end subroutine test_join_no_detach_slice
     !
     !> An incoming column keeps its own unit.
     subroutine test_join_units(error)

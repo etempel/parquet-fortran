@@ -463,6 +463,7 @@ scenarios=(
     "table_top_n_detached_read:1"
     "column_gather_out_of_range:1"
     "string_column_gather_out_of_range:1"
+    "table_append_self:1"
     "table_append_unknown_column:1"
     "table_append_kind_mismatch:1"
     "table_append_width_mismatch:1"

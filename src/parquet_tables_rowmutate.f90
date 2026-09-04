@@ -325,6 +325,17 @@ contains
     !
     module procedure table_append_table
         call table_check_open(self, "append")
+        ! Refused BEFORE the lock, and before anything is written. Appending a table to itself
+        ! argument-associates one object with an intent(inout) and an intent(in) dummy, which
+        ! F2018 15.5.2.13 forbids as soon as either is defined -- and one level down it reaches
+        ! parquet_column%append as both the column being grown and the column being read. No
+        ! compiler in this project's fleet diagnoses it, and it usually appears to work, because
+        ! ensure_capacity copies the old storage forward before the read; that is precisely what
+        ! makes it worth refusing rather than leaving to the optimiser's discretion.
+        if (associated(self%cache, other%cache)) then
+            error stop EP // "append: a table cannot be appended to itself -- take a %clone " // &
+                "first and append that, or use %append_null_rows and fill the new rows"
+        end if
         call table_lock(self%cache)
         call append_begin(self)
         call append_table_worker(self, other)
@@ -510,6 +521,15 @@ contains
         ! different mistake: appending bumps this table's own generation, so such a handle is
         ! self-invalidating and re-fetching it inside the loop would fail again on the next
         ! iteration. Telling that caller to re-fetch would send them round the same loop.
+        !
+        ! NOTE, unresolved and deliberately not changed here: the FIRST self-append is permitted
+        ! (scenario table_append_row_self exercises it as a negative control), and it reaches
+        ! append_row_of with one parquet_column as both the intent(inout) `self` and the intent(in)
+        ! `other` -- an F2018 15.5.2.13 violation that currently works only because
+        ! ensure_capacity copies the old storage forward before the read. Refusing it outright, or
+        ! staging the row through a temporary column, are both behaviour decisions for the
+        ! maintainer rather than a silent fix; %append(table) is refused outright above because it
+        ! never had a designed self-case at all.
         if (.not. r%is_valid()) then
             if (associated(self%cache, r%cache)) then
                 error stop EP // "append: this row handle names the table being appended to, and " // &

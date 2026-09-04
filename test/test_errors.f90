@@ -1142,6 +1142,10 @@ contains
                 test_table_sort_by_unknown_column_aborts), &
             new_unittest("sort_by on a vector column aborts", &
                 test_table_sort_by_vector_column_aborts), &
+            new_unittest("append of a table to itself aborts", &
+                test_table_append_self_aborts), &
+            new_unittest("append of a DIFFERENT table still works", &
+                test_table_append_other_still_works), &
             new_unittest("append with an extra column in the source aborts", &
                 test_table_append_unknown_column_aborts), &
             new_unittest("append with a kind mismatch aborts", &
@@ -11691,6 +11695,23 @@ contains
             failure_message="sorting by a vector column was expected to abort", &
             required_stderr="column cannot be a sort key; there is no defined order on a whole vector row")
     end subroutine test_table_sort_by_vector_column_aborts
+
+    subroutine test_table_append_self_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_append_self", expect_abort=.true., &
+            failure_message="appending a table to itself was expected to abort", &
+            required_stderr="a table cannot be appended to itself")
+    end subroutine test_table_append_self_aborts
+
+    !> The negative control for the guard above, and it is not optional: a guard that refused EVERY
+    !! %append would satisfy the abort test perfectly while breaking the operation outright. The
+    !! scenario appends a different table before appending itself, so this asserts that half ran.
+    subroutine test_table_append_other_still_works(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_streams(error, "table_append_self", "append of another table ok, nrows=3", &
+            expect_on="stdout", &
+            failure_message="the self-append guard also blocked appending a different table")
+    end subroutine test_table_append_other_still_works
 
     subroutine test_table_append_unknown_column_aborts(error)
         type(error_type), allocatable, intent(out) :: error

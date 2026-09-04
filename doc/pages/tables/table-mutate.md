@@ -519,7 +519,7 @@ directly.
 
 ```fortran
 real(real64), pointer :: ra(:)
-integer(int64) :: lo, hi
+integer(int64) :: first, last
 logical :: ok
 
 call t%sort_by(["ra"])
@@ -527,10 +527,14 @@ call t%col("ra", ra)
 
 call pf_is_sorted(ra, ok)                 ! O(n), once
 do i = 1, size(targets)
-    call pf_equal_range(ra, targets(i), lo, hi, assume_sorted=ok)
-    ! rows lo .. hi-1 hold targets(i)
+    call pf_equal_range(ra, targets(i), first, last, assume_sorted=ok)
+    ! rows first .. last hold targets(i) -- INCLUSIVE
 end do
 ```
+
+**`last` is inclusive, and an absent target comes back as `last == first - 1`** — so the count is
+`last - first + 1` and the test for "did I find anything" is `last >= first`, not `last > first`.
+Reading `ra(first)` without checking that count first reads a row that does not match.
 
 **Check once, outside the loop.** `assume_sorted` defaults to `.false.`, which is the safe default —
 searching unsorted input returns a plausible index with no symptom — but it makes each search O(n)

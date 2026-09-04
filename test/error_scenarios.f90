@@ -1984,6 +1984,8 @@ program error_scenarios
         call scenario_column_gather_out_of_range()
     case ("string_column_gather_out_of_range")
         call scenario_string_column_gather_out_of_range()
+    case ("table_append_self")
+        call scenario_table_append_self()
     case ("table_append_unknown_column")
         call scenario_table_append_unknown_column()
     case ("table_append_kind_mismatch")
@@ -16315,6 +16317,24 @@ contains
         call col%gather([2_int64, 5_int64])   ! -> aborts
         print '(a,i0)', "unexpectedly gathered an element outside the column, n=", col%size()
     end subroutine scenario_string_column_gather_out_of_range
+
+    !> Appending a table to ITSELF is refused: it would argument-associate one object with an
+    !! intent(inout) and an intent(in) dummy, and one level down hand parquet_column%append the same
+    !! column as both operands (F2018 15.5.2.13). No compiler here diagnoses it, and it usually
+    !! appears to work, which is exactly why it is refused rather than left to the optimiser.
+    subroutine scenario_table_append_self()
+        type(parquet_table) :: t, other
+        call parquet_new_table(t)
+        call t%add_column("x", [1_int32, 2_int32])
+        ! Negative control first: appending a DIFFERENT table with the same columns is legitimate
+        ! and must stay so, or a guard that refused every %append would pass this scenario too.
+        call parquet_new_table(other)
+        call other%add_column("x", [3_int32])
+        call t%append(other)
+        print '(a,i0)', "append of another table ok, nrows=", t%nrows()
+        call t%append(t)   ! -> aborts
+        print '(a,i0)', "unexpectedly appended a table to itself, nrows=", t%nrows()
+    end subroutine scenario_table_append_self
 
     !> A column the appended table has and this one does not is never silently dropped.
     subroutine scenario_table_append_unknown_column()

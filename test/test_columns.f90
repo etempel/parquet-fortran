@@ -55,6 +55,8 @@ contains
             new_unittest("vector kinds round-trip as (width, nrows)", test_roundtrip_vector), &
             new_unittest("string vector uses one flat store, stride width", test_roundtrip_string_vector), &
             new_unittest("data_ptr aliases live storage (writes show through)", test_data_ptr_aliases), &
+            new_unittest("a zero-row column has storage, and data_ptr keeps its shape", &
+                test_empty_column_has_storage), &
             new_unittest("a null-free column allocates no validity bitmap", test_sparse_validity_unallocated), &
             new_unittest("set_null allocates the bitmap lazily", test_set_null_allocates_bitmap), &
             new_unittest("whole-column set_all drops the bitmap in O(1)", test_set_all_drops_bitmap), &
@@ -368,6 +370,53 @@ contains
         call sp%get(4_int64, s)
         call check(error, trim(s) == "s", "row 2 element 1 should sit at flat index (2-1)*3 + 1 = 4")
     end subroutine test_roundtrip_string_vector
+    !
+    !> A zero-row column's storage is ALLOCATED, and `data_ptr` over it keeps every shape a
+    !! caller reads off the result.
+    !!
+    !! `init` allocates the storage at zero rows (`allocate_empty_storage`) precisely so that
+    !! `p => col%i32(1:0)` is not a reference to an unallocated allocatable -- non-conforming
+    !! however empty the section is, silent on gfortran/ifx/flang, and reported by nagfor's
+    !! `-C=array`. **That conformance is not observable from Fortran**, so the checked build is
+    !! its only test and this one guards the other half: the shapes the fix had to preserve.
+    !! `%capacity()` must stay 0 (the array exists but reserves nothing) and a VECTOR column's
+    !! `size(p, 1)` must stay `width` -- the two observables the alternative fixes would have
+    !! moved, and the reason this one was chosen.
+    subroutine test_empty_column_has_storage(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column), target :: c
+        integer(int32), pointer :: p(:)
+        integer(int32), pointer :: pv(:,:)
+        !
+        call c%init(PK_INT32, 0_int64)
+        call check(error, c%length() == 0_int64, "a zero-row column holds no rows")
+        if (allocated(error)) return
+        call check(error, c%capacity() == 0_int64, &
+            "and reserves none: the storage exists but its capacity is still 0")
+        if (allocated(error)) return
+        call c%data_ptr(p)
+        call check(error, associated(p), "data_ptr on an empty column returns an associated pointer")
+        if (allocated(error)) return
+        call check(error, size(p) == 0, "of zero size")
+        if (allocated(error)) return
+        ! The vector case is the one that discriminates: a shared zero-size target, or a
+        ! disassociated pointer, would each have moved this from `width` to 0.
+        call c%init(PK_INT32_VEC, 0_int64, width=3_int32)
+        call c%data_ptr(pv)
+        call check(error, associated(pv), "data_ptr on an empty vector column is associated too")
+        if (allocated(error)) return
+        call check(error, size(pv, 1) == 3, &
+            "an empty vector column's first extent is its width, not 0")
+        if (allocated(error)) return
+        call check(error, size(pv, 2) == 0, "and its second extent is the row count")
+        if (allocated(error)) return
+        ! Still usable afterwards: the zero-sized allocation must not confuse the growth path.
+        call c%init(PK_INT32, 0_int64)
+        call c%append_values([7_int32])
+        call c%data_ptr(p)
+        call check(error, size(p) == 1 .and. p(1) == 7_int32, &
+            "a column that started empty must still grow normally")
+    end subroutine test_empty_column_has_storage
     !
     subroutine test_data_ptr_aliases(error)
         type(error_type), allocatable, intent(out) :: error

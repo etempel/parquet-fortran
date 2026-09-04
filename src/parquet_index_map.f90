@@ -888,7 +888,15 @@ contains
 
         ok = .false.
         span = 0_int64
-        if (lo < 0_int64 .and. hi > huge(hi) + lo) return
+        ! NESTED, not `.and.`-ed: Fortran does not short-circuit, so the one-line form evaluates
+        ! `huge(hi) + lo` for a NON-NEGATIVE `lo` too, which overflows for any `lo > 0` -- the
+        ! guard's own overflow, in the guard against overflow. Silent on gfortran, ifx and flang;
+        ! nagfor's `-C=intovf` aborts on it ("INTEGER(int64) overflow for 9223372036854775807 +
+        ! 10"). Same class as the bounds-checking instances CLAUDE.md records under
+        ! "`.and.` does not short-circuit"; the fix there is the fix here.
+        if (lo < 0_int64) then
+            if (hi > huge(hi) + lo) return
+        end if
         d = hi - lo
         if (d > budget - 1_int64) return
         span = d + 1_int64

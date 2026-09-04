@@ -59,13 +59,17 @@ contains
         call check_kind(self, PK_INT32, "set_all")
         call check_nrows(self, size(values, kind=int64), "set_all")
         if (mod_nulls) then
-            ! Guarded on nrows: a ZERO-ROW column has no storage at all (`grow_storage` returns
-            ! early at n == 0), so this whole-array assignment would reference an unallocated
-            ! allocatable. The section is empty either way, but referencing an unallocated
-            ! allocatable is not conforming -- nagfor's -C=array rejects it at run time
-            ! ("ALLOCATABLE SELF%i32 is not currently allocated") while gfortran no-ops silently.
-            ! Reached by the documented `%add_column(name, empty)` shape that declares a column
-            ! before a parallel region appends to it.
+            ! Guarded on nrows: this whole-array assignment would otherwise reference an
+            ! unallocated allocatable on a zero-row column -- the section is empty either way, but
+            ! referencing an unallocated allocatable is not conforming, and nagfor's -C=array
+            ! rejects it at run time while gfortran no-ops silently. Reached by the documented
+            ! `%add_column(name, empty)` shape that declares a column before a parallel region
+            ! appends to it.
+            !
+            ! `init` now calls `allocate_empty_storage`, so the storage is in fact allocated on
+            ! every path and this guard is redundant. KEPT deliberately: it costs a comparison on
+            ! a bulk operation, and it is the local defence if that invariant is ever broken from
+            ! another file. Do not read it as evidence that a zero-row column has no storage.
             if (self%nrows > 0_int64) self%i32(1:self%nrows) = values
             call drop_bitmap(self)
         else
@@ -138,13 +142,17 @@ contains
         call check_kind(self, PK_INT64, "set_all")
         call check_nrows(self, size(values, kind=int64), "set_all")
         if (mod_nulls) then
-            ! Guarded on nrows: a ZERO-ROW column has no storage at all (`grow_storage` returns
-            ! early at n == 0), so this whole-array assignment would reference an unallocated
-            ! allocatable. The section is empty either way, but referencing an unallocated
-            ! allocatable is not conforming -- nagfor's -C=array rejects it at run time
-            ! ("ALLOCATABLE SELF%i64 is not currently allocated") while gfortran no-ops silently.
-            ! Reached by the documented `%add_column(name, empty)` shape that declares a column
-            ! before a parallel region appends to it.
+            ! Guarded on nrows: this whole-array assignment would otherwise reference an
+            ! unallocated allocatable on a zero-row column -- the section is empty either way, but
+            ! referencing an unallocated allocatable is not conforming, and nagfor's -C=array
+            ! rejects it at run time while gfortran no-ops silently. Reached by the documented
+            ! `%add_column(name, empty)` shape that declares a column before a parallel region
+            ! appends to it.
+            !
+            ! `init` now calls `allocate_empty_storage`, so the storage is in fact allocated on
+            ! every path and this guard is redundant. KEPT deliberately: it costs a comparison on
+            ! a bulk operation, and it is the local defence if that invariant is ever broken from
+            ! another file. Do not read it as evidence that a zero-row column has no storage.
             if (self%nrows > 0_int64) self%i64(1:self%nrows) = values
             call drop_bitmap(self)
         else
@@ -217,13 +225,17 @@ contains
         call check_kind(self, PK_FLOAT32, "set_all")
         call check_nrows(self, size(values, kind=int64), "set_all")
         if (mod_nulls) then
-            ! Guarded on nrows: a ZERO-ROW column has no storage at all (`grow_storage` returns
-            ! early at n == 0), so this whole-array assignment would reference an unallocated
-            ! allocatable. The section is empty either way, but referencing an unallocated
-            ! allocatable is not conforming -- nagfor's -C=array rejects it at run time
-            ! ("ALLOCATABLE SELF%f32 is not currently allocated") while gfortran no-ops silently.
-            ! Reached by the documented `%add_column(name, empty)` shape that declares a column
-            ! before a parallel region appends to it.
+            ! Guarded on nrows: this whole-array assignment would otherwise reference an
+            ! unallocated allocatable on a zero-row column -- the section is empty either way, but
+            ! referencing an unallocated allocatable is not conforming, and nagfor's -C=array
+            ! rejects it at run time while gfortran no-ops silently. Reached by the documented
+            ! `%add_column(name, empty)` shape that declares a column before a parallel region
+            ! appends to it.
+            !
+            ! `init` now calls `allocate_empty_storage`, so the storage is in fact allocated on
+            ! every path and this guard is redundant. KEPT deliberately: it costs a comparison on
+            ! a bulk operation, and it is the local defence if that invariant is ever broken from
+            ! another file. Do not read it as evidence that a zero-row column has no storage.
             if (self%nrows > 0_int64) self%f32(1:self%nrows) = values
             call drop_bitmap(self)
         else
@@ -296,13 +308,17 @@ contains
         call check_kind(self, PK_FLOAT64, "set_all")
         call check_nrows(self, size(values, kind=int64), "set_all")
         if (mod_nulls) then
-            ! Guarded on nrows: a ZERO-ROW column has no storage at all (`grow_storage` returns
-            ! early at n == 0), so this whole-array assignment would reference an unallocated
-            ! allocatable. The section is empty either way, but referencing an unallocated
-            ! allocatable is not conforming -- nagfor's -C=array rejects it at run time
-            ! ("ALLOCATABLE SELF%f64 is not currently allocated") while gfortran no-ops silently.
-            ! Reached by the documented `%add_column(name, empty)` shape that declares a column
-            ! before a parallel region appends to it.
+            ! Guarded on nrows: this whole-array assignment would otherwise reference an
+            ! unallocated allocatable on a zero-row column -- the section is empty either way, but
+            ! referencing an unallocated allocatable is not conforming, and nagfor's -C=array
+            ! rejects it at run time while gfortran no-ops silently. Reached by the documented
+            ! `%add_column(name, empty)` shape that declares a column before a parallel region
+            ! appends to it.
+            !
+            ! `init` now calls `allocate_empty_storage`, so the storage is in fact allocated on
+            ! every path and this guard is redundant. KEPT deliberately: it costs a comparison on
+            ! a bulk operation, and it is the local defence if that invariant is ever broken from
+            ! another file. Do not read it as evidence that a zero-row column has no storage.
             if (self%nrows > 0_int64) self%f64(1:self%nrows) = values
             call drop_bitmap(self)
         else
@@ -375,13 +391,17 @@ contains
         call check_kind(self, PK_LOGICAL, "set_all")
         call check_nrows(self, size(values, kind=int64), "set_all")
         if (mod_nulls) then
-            ! Guarded on nrows: a ZERO-ROW column has no storage at all (`grow_storage` returns
-            ! early at n == 0), so this whole-array assignment would reference an unallocated
-            ! allocatable. The section is empty either way, but referencing an unallocated
-            ! allocatable is not conforming -- nagfor's -C=array rejects it at run time
-            ! ("ALLOCATABLE SELF%bool is not currently allocated") while gfortran no-ops silently.
-            ! Reached by the documented `%add_column(name, empty)` shape that declares a column
-            ! before a parallel region appends to it.
+            ! Guarded on nrows: this whole-array assignment would otherwise reference an
+            ! unallocated allocatable on a zero-row column -- the section is empty either way, but
+            ! referencing an unallocated allocatable is not conforming, and nagfor's -C=array
+            ! rejects it at run time while gfortran no-ops silently. Reached by the documented
+            ! `%add_column(name, empty)` shape that declares a column before a parallel region
+            ! appends to it.
+            !
+            ! `init` now calls `allocate_empty_storage`, so the storage is in fact allocated on
+            ! every path and this guard is redundant. KEPT deliberately: it costs a comparison on
+            ! a bulk operation, and it is the local defence if that invariant is ever broken from
+            ! another file. Do not read it as evidence that a zero-row column has no storage.
             if (self%nrows > 0_int64) self%bool(1:self%nrows) = values
             call drop_bitmap(self)
         else
@@ -454,13 +474,17 @@ contains
         call check_kind(self, PK_DATE, "set_all")
         call check_nrows(self, size(values, kind=int64), "set_all")
         if (mod_nulls) then
-            ! Guarded on nrows: a ZERO-ROW column has no storage at all (`grow_storage` returns
-            ! early at n == 0), so this whole-array assignment would reference an unallocated
-            ! allocatable. The section is empty either way, but referencing an unallocated
-            ! allocatable is not conforming -- nagfor's -C=array rejects it at run time
-            ! ("ALLOCATABLE SELF%dt is not currently allocated") while gfortran no-ops silently.
-            ! Reached by the documented `%add_column(name, empty)` shape that declares a column
-            ! before a parallel region appends to it.
+            ! Guarded on nrows: this whole-array assignment would otherwise reference an
+            ! unallocated allocatable on a zero-row column -- the section is empty either way, but
+            ! referencing an unallocated allocatable is not conforming, and nagfor's -C=array
+            ! rejects it at run time while gfortran no-ops silently. Reached by the documented
+            ! `%add_column(name, empty)` shape that declares a column before a parallel region
+            ! appends to it.
+            !
+            ! `init` now calls `allocate_empty_storage`, so the storage is in fact allocated on
+            ! every path and this guard is redundant. KEPT deliberately: it costs a comparison on
+            ! a bulk operation, and it is the local defence if that invariant is ever broken from
+            ! another file. Do not read it as evidence that a zero-row column has no storage.
             if (self%nrows > 0_int64) self%dt(1:self%nrows) = values
             self%nulls_dirty = .true.
         else
@@ -535,13 +559,17 @@ contains
         call check_kind(self, PK_TIME, "set_all")
         call check_nrows(self, size(values, kind=int64), "set_all")
         if (mod_nulls) then
-            ! Guarded on nrows: a ZERO-ROW column has no storage at all (`grow_storage` returns
-            ! early at n == 0), so this whole-array assignment would reference an unallocated
-            ! allocatable. The section is empty either way, but referencing an unallocated
-            ! allocatable is not conforming -- nagfor's -C=array rejects it at run time
-            ! ("ALLOCATABLE SELF%tm is not currently allocated") while gfortran no-ops silently.
-            ! Reached by the documented `%add_column(name, empty)` shape that declares a column
-            ! before a parallel region appends to it.
+            ! Guarded on nrows: this whole-array assignment would otherwise reference an
+            ! unallocated allocatable on a zero-row column -- the section is empty either way, but
+            ! referencing an unallocated allocatable is not conforming, and nagfor's -C=array
+            ! rejects it at run time while gfortran no-ops silently. Reached by the documented
+            ! `%add_column(name, empty)` shape that declares a column before a parallel region
+            ! appends to it.
+            !
+            ! `init` now calls `allocate_empty_storage`, so the storage is in fact allocated on
+            ! every path and this guard is redundant. KEPT deliberately: it costs a comparison on
+            ! a bulk operation, and it is the local defence if that invariant is ever broken from
+            ! another file. Do not read it as evidence that a zero-row column has no storage.
             if (self%nrows > 0_int64) self%tm(1:self%nrows) = values
             self%nulls_dirty = .true.
         else
@@ -616,13 +644,17 @@ contains
         call check_kind(self, PK_TIMESTAMP, "set_all")
         call check_nrows(self, size(values, kind=int64), "set_all")
         if (mod_nulls) then
-            ! Guarded on nrows: a ZERO-ROW column has no storage at all (`grow_storage` returns
-            ! early at n == 0), so this whole-array assignment would reference an unallocated
-            ! allocatable. The section is empty either way, but referencing an unallocated
-            ! allocatable is not conforming -- nagfor's -C=array rejects it at run time
-            ! ("ALLOCATABLE SELF%ts is not currently allocated") while gfortran no-ops silently.
-            ! Reached by the documented `%add_column(name, empty)` shape that declares a column
-            ! before a parallel region appends to it.
+            ! Guarded on nrows: this whole-array assignment would otherwise reference an
+            ! unallocated allocatable on a zero-row column -- the section is empty either way, but
+            ! referencing an unallocated allocatable is not conforming, and nagfor's -C=array
+            ! rejects it at run time while gfortran no-ops silently. Reached by the documented
+            ! `%add_column(name, empty)` shape that declares a column before a parallel region
+            ! appends to it.
+            !
+            ! `init` now calls `allocate_empty_storage`, so the storage is in fact allocated on
+            ! every path and this guard is redundant. KEPT deliberately: it costs a comparison on
+            ! a bulk operation, and it is the local defence if that invariant is ever broken from
+            ! another file. Do not read it as evidence that a zero-row column has no storage.
             if (self%nrows > 0_int64) self%ts(1:self%nrows) = values
             self%nulls_dirty = .true.
         else
@@ -736,13 +768,17 @@ contains
         call check_width(self, size(values, 1, kind=int64), "set_all")
         call check_nrows(self, size(values, 2, kind=int64), "set_all")
         if (mod_nulls) then
-            ! Guarded on nrows: a ZERO-ROW column has no storage at all (`grow_storage` returns
-            ! early at n == 0), so this whole-array assignment would reference an unallocated
-            ! allocatable. The section is empty either way, but referencing an unallocated
-            ! allocatable is not conforming -- nagfor's -C=array rejects it at run time
-            ! ("ALLOCATABLE SELF%i32v is not currently allocated") while gfortran no-ops silently.
-            ! Reached by the documented `%add_column(name, empty)` shape that declares a column
-            ! before a parallel region appends to it.
+            ! Guarded on nrows: this whole-array assignment would otherwise reference an
+            ! unallocated allocatable on a zero-row column -- the section is empty either way, but
+            ! referencing an unallocated allocatable is not conforming, and nagfor's -C=array
+            ! rejects it at run time while gfortran no-ops silently. Reached by the documented
+            ! `%add_column(name, empty)` shape that declares a column before a parallel region
+            ! appends to it.
+            !
+            ! `init` now calls `allocate_empty_storage`, so the storage is in fact allocated on
+            ! every path and this guard is redundant. KEPT deliberately: it costs a comparison on
+            ! a bulk operation, and it is the local defence if that invariant is ever broken from
+            ! another file. Do not read it as evidence that a zero-row column has no storage.
             if (self%nrows > 0_int64) self%i32v(:, 1:self%nrows) = values
             call drop_bitmap(self)
         else
@@ -856,13 +892,17 @@ contains
         call check_width(self, size(values, 1, kind=int64), "set_all")
         call check_nrows(self, size(values, 2, kind=int64), "set_all")
         if (mod_nulls) then
-            ! Guarded on nrows: a ZERO-ROW column has no storage at all (`grow_storage` returns
-            ! early at n == 0), so this whole-array assignment would reference an unallocated
-            ! allocatable. The section is empty either way, but referencing an unallocated
-            ! allocatable is not conforming -- nagfor's -C=array rejects it at run time
-            ! ("ALLOCATABLE SELF%i64v is not currently allocated") while gfortran no-ops silently.
-            ! Reached by the documented `%add_column(name, empty)` shape that declares a column
-            ! before a parallel region appends to it.
+            ! Guarded on nrows: this whole-array assignment would otherwise reference an
+            ! unallocated allocatable on a zero-row column -- the section is empty either way, but
+            ! referencing an unallocated allocatable is not conforming, and nagfor's -C=array
+            ! rejects it at run time while gfortran no-ops silently. Reached by the documented
+            ! `%add_column(name, empty)` shape that declares a column before a parallel region
+            ! appends to it.
+            !
+            ! `init` now calls `allocate_empty_storage`, so the storage is in fact allocated on
+            ! every path and this guard is redundant. KEPT deliberately: it costs a comparison on
+            ! a bulk operation, and it is the local defence if that invariant is ever broken from
+            ! another file. Do not read it as evidence that a zero-row column has no storage.
             if (self%nrows > 0_int64) self%i64v(:, 1:self%nrows) = values
             call drop_bitmap(self)
         else
@@ -976,13 +1016,17 @@ contains
         call check_width(self, size(values, 1, kind=int64), "set_all")
         call check_nrows(self, size(values, 2, kind=int64), "set_all")
         if (mod_nulls) then
-            ! Guarded on nrows: a ZERO-ROW column has no storage at all (`grow_storage` returns
-            ! early at n == 0), so this whole-array assignment would reference an unallocated
-            ! allocatable. The section is empty either way, but referencing an unallocated
-            ! allocatable is not conforming -- nagfor's -C=array rejects it at run time
-            ! ("ALLOCATABLE SELF%f32v is not currently allocated") while gfortran no-ops silently.
-            ! Reached by the documented `%add_column(name, empty)` shape that declares a column
-            ! before a parallel region appends to it.
+            ! Guarded on nrows: this whole-array assignment would otherwise reference an
+            ! unallocated allocatable on a zero-row column -- the section is empty either way, but
+            ! referencing an unallocated allocatable is not conforming, and nagfor's -C=array
+            ! rejects it at run time while gfortran no-ops silently. Reached by the documented
+            ! `%add_column(name, empty)` shape that declares a column before a parallel region
+            ! appends to it.
+            !
+            ! `init` now calls `allocate_empty_storage`, so the storage is in fact allocated on
+            ! every path and this guard is redundant. KEPT deliberately: it costs a comparison on
+            ! a bulk operation, and it is the local defence if that invariant is ever broken from
+            ! another file. Do not read it as evidence that a zero-row column has no storage.
             if (self%nrows > 0_int64) self%f32v(:, 1:self%nrows) = values
             call drop_bitmap(self)
         else
@@ -1096,13 +1140,17 @@ contains
         call check_width(self, size(values, 1, kind=int64), "set_all")
         call check_nrows(self, size(values, 2, kind=int64), "set_all")
         if (mod_nulls) then
-            ! Guarded on nrows: a ZERO-ROW column has no storage at all (`grow_storage` returns
-            ! early at n == 0), so this whole-array assignment would reference an unallocated
-            ! allocatable. The section is empty either way, but referencing an unallocated
-            ! allocatable is not conforming -- nagfor's -C=array rejects it at run time
-            ! ("ALLOCATABLE SELF%f64v is not currently allocated") while gfortran no-ops silently.
-            ! Reached by the documented `%add_column(name, empty)` shape that declares a column
-            ! before a parallel region appends to it.
+            ! Guarded on nrows: this whole-array assignment would otherwise reference an
+            ! unallocated allocatable on a zero-row column -- the section is empty either way, but
+            ! referencing an unallocated allocatable is not conforming, and nagfor's -C=array
+            ! rejects it at run time while gfortran no-ops silently. Reached by the documented
+            ! `%add_column(name, empty)` shape that declares a column before a parallel region
+            ! appends to it.
+            !
+            ! `init` now calls `allocate_empty_storage`, so the storage is in fact allocated on
+            ! every path and this guard is redundant. KEPT deliberately: it costs a comparison on
+            ! a bulk operation, and it is the local defence if that invariant is ever broken from
+            ! another file. Do not read it as evidence that a zero-row column has no storage.
             if (self%nrows > 0_int64) self%f64v(:, 1:self%nrows) = values
             call drop_bitmap(self)
         else
@@ -1216,13 +1264,17 @@ contains
         call check_width(self, size(values, 1, kind=int64), "set_all")
         call check_nrows(self, size(values, 2, kind=int64), "set_all")
         if (mod_nulls) then
-            ! Guarded on nrows: a ZERO-ROW column has no storage at all (`grow_storage` returns
-            ! early at n == 0), so this whole-array assignment would reference an unallocated
-            ! allocatable. The section is empty either way, but referencing an unallocated
-            ! allocatable is not conforming -- nagfor's -C=array rejects it at run time
-            ! ("ALLOCATABLE SELF%boolv is not currently allocated") while gfortran no-ops silently.
-            ! Reached by the documented `%add_column(name, empty)` shape that declares a column
-            ! before a parallel region appends to it.
+            ! Guarded on nrows: this whole-array assignment would otherwise reference an
+            ! unallocated allocatable on a zero-row column -- the section is empty either way, but
+            ! referencing an unallocated allocatable is not conforming, and nagfor's -C=array
+            ! rejects it at run time while gfortran no-ops silently. Reached by the documented
+            ! `%add_column(name, empty)` shape that declares a column before a parallel region
+            ! appends to it.
+            !
+            ! `init` now calls `allocate_empty_storage`, so the storage is in fact allocated on
+            ! every path and this guard is redundant. KEPT deliberately: it costs a comparison on
+            ! a bulk operation, and it is the local defence if that invariant is ever broken from
+            ! another file. Do not read it as evidence that a zero-row column has no storage.
             if (self%nrows > 0_int64) self%boolv(:, 1:self%nrows) = values
             call drop_bitmap(self)
         else
@@ -1331,13 +1383,17 @@ contains
         call check_width(self, size(values, 1, kind=int64), "set_all")
         call check_nrows(self, size(values, 2, kind=int64), "set_all")
         if (mod_nulls) then
-            ! Guarded on nrows: a ZERO-ROW column has no storage at all (`grow_storage` returns
-            ! early at n == 0), so this whole-array assignment would reference an unallocated
-            ! allocatable. The section is empty either way, but referencing an unallocated
-            ! allocatable is not conforming -- nagfor's -C=array rejects it at run time
-            ! ("ALLOCATABLE SELF%dtv is not currently allocated") while gfortran no-ops silently.
-            ! Reached by the documented `%add_column(name, empty)` shape that declares a column
-            ! before a parallel region appends to it.
+            ! Guarded on nrows: this whole-array assignment would otherwise reference an
+            ! unallocated allocatable on a zero-row column -- the section is empty either way, but
+            ! referencing an unallocated allocatable is not conforming, and nagfor's -C=array
+            ! rejects it at run time while gfortran no-ops silently. Reached by the documented
+            ! `%add_column(name, empty)` shape that declares a column before a parallel region
+            ! appends to it.
+            !
+            ! `init` now calls `allocate_empty_storage`, so the storage is in fact allocated on
+            ! every path and this guard is redundant. KEPT deliberately: it costs a comparison on
+            ! a bulk operation, and it is the local defence if that invariant is ever broken from
+            ! another file. Do not read it as evidence that a zero-row column has no storage.
             if (self%nrows > 0_int64) self%dtv(:, 1:self%nrows) = values
             self%nulls_dirty = .true.
         else
@@ -1448,13 +1504,17 @@ contains
         call check_width(self, size(values, 1, kind=int64), "set_all")
         call check_nrows(self, size(values, 2, kind=int64), "set_all")
         if (mod_nulls) then
-            ! Guarded on nrows: a ZERO-ROW column has no storage at all (`grow_storage` returns
-            ! early at n == 0), so this whole-array assignment would reference an unallocated
-            ! allocatable. The section is empty either way, but referencing an unallocated
-            ! allocatable is not conforming -- nagfor's -C=array rejects it at run time
-            ! ("ALLOCATABLE SELF%tmv is not currently allocated") while gfortran no-ops silently.
-            ! Reached by the documented `%add_column(name, empty)` shape that declares a column
-            ! before a parallel region appends to it.
+            ! Guarded on nrows: this whole-array assignment would otherwise reference an
+            ! unallocated allocatable on a zero-row column -- the section is empty either way, but
+            ! referencing an unallocated allocatable is not conforming, and nagfor's -C=array
+            ! rejects it at run time while gfortran no-ops silently. Reached by the documented
+            ! `%add_column(name, empty)` shape that declares a column before a parallel region
+            ! appends to it.
+            !
+            ! `init` now calls `allocate_empty_storage`, so the storage is in fact allocated on
+            ! every path and this guard is redundant. KEPT deliberately: it costs a comparison on
+            ! a bulk operation, and it is the local defence if that invariant is ever broken from
+            ! another file. Do not read it as evidence that a zero-row column has no storage.
             if (self%nrows > 0_int64) self%tmv(:, 1:self%nrows) = values
             self%nulls_dirty = .true.
         else
@@ -1565,13 +1625,17 @@ contains
         call check_width(self, size(values, 1, kind=int64), "set_all")
         call check_nrows(self, size(values, 2, kind=int64), "set_all")
         if (mod_nulls) then
-            ! Guarded on nrows: a ZERO-ROW column has no storage at all (`grow_storage` returns
-            ! early at n == 0), so this whole-array assignment would reference an unallocated
-            ! allocatable. The section is empty either way, but referencing an unallocated
-            ! allocatable is not conforming -- nagfor's -C=array rejects it at run time
-            ! ("ALLOCATABLE SELF%tsv is not currently allocated") while gfortran no-ops silently.
-            ! Reached by the documented `%add_column(name, empty)` shape that declares a column
-            ! before a parallel region appends to it.
+            ! Guarded on nrows: this whole-array assignment would otherwise reference an
+            ! unallocated allocatable on a zero-row column -- the section is empty either way, but
+            ! referencing an unallocated allocatable is not conforming, and nagfor's -C=array
+            ! rejects it at run time while gfortran no-ops silently. Reached by the documented
+            ! `%add_column(name, empty)` shape that declares a column before a parallel region
+            ! appends to it.
+            !
+            ! `init` now calls `allocate_empty_storage`, so the storage is in fact allocated on
+            ! every path and this guard is redundant. KEPT deliberately: it costs a comparison on
+            ! a bulk operation, and it is the local defence if that invariant is ever broken from
+            ! another file. Do not read it as evidence that a zero-row column has no storage.
             if (self%nrows > 0_int64) self%tsv(:, 1:self%nrows) = values
             self%nulls_dirty = .true.
         else

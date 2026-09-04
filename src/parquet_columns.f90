@@ -2711,6 +2711,27 @@ module parquet_columns
             class(parquet_column), intent(inout) :: self !! the column.
             integer(int64), intent(in) :: need_rows      !! rows the storage must hold.
         end subroutine ensure_capacity
+        !> Allocates the active storage at ZERO rows, so that a column of a known kind always has
+        !! an allocated storage array even before it holds anything.
+        !!
+        !! **`ensure_capacity` cannot do this**, and that is the whole reason this exists: it
+        !! returns early whenever `need_rows <= cap`, which for a fresh column is `0 <= 0`, so a
+        !! zero-row column ends up live -- a real kind, a real width, answering `%length()` -- with
+        !! no storage array at all. Everything downstream that names the storage then references an
+        !! **unallocated allocatable**: `%data_ptr`'s `p => col%i32(1:col%nrows)` and `set_all`'s
+        !! whole-array assignment both did, and both are non-conforming however empty the section
+        !! is. gfortran, ifx and flang no-op them; nagfor's `-C=array` reports
+        !! *"ALLOCATABLE COL%I32 is not currently allocated"* and stops the run. Reached by
+        !! `%get` on any table a filter emptied, and by the documented `%add_column(name, empty)`
+        !! shape -- ordinary use, not an edge case.
+        !!
+        !! Allocated at exactly zero rows, so `cap`, `%capacity()` and `size(storage)` all stay 0
+        !! and nothing observable changes; the vector kinds keep their first extent, so
+        !! `size(p, 1)` is still `width`. The string and container kinds allocate nothing here --
+        !! their stores carry their own state and `init` has already created it.
+        module subroutine allocate_empty_storage(self)
+            class(parquet_column), intent(inout) :: self !! the column, with `kind`/`width` set.
+        end subroutine allocate_empty_storage
         !> Reallocates the active storage down to exactly `nrows` rows, releasing any spare
         !! capacity. A no-op when there is none, and on the string kinds (whose own store carries
         !! its capacity). The counterpart of `ensure_capacity`, and the only place capacity shrinks.

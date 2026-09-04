@@ -4284,12 +4284,20 @@ def check_contributing_is_an_index():
 #: The column types whose `%view`/`%view_all` hand back a handle holding a pointer to the passed
 #: object. F2018 15.5.2.4 leaves that pointer UNDEFINED on return unless the actual argument has
 #: the TARGET attribute, so every call site must declare its column `target`.
-VIEWED_COLUMN_TYPES = (
-    "parquet_list_column",
-    "parquet_map_column",
-    "parquet_struct_column",
-    "parquet_string_column",
-)
+#: What `_handle_returning_bindings` is expected to derive, as `type -> {binding, ...}`.
+#:
+#: This is an EXPECTATION, checked against the source on every run, not a list the check works
+#: from -- the call-site scan uses whatever the derivation actually finds, so a new binding is
+#: covered the moment it exists. The expectation is what stops the derivation failing silently:
+#: a regex that stopped matching would otherwise leave the check passing over an empty set.
+#: A difference in either direction is reported, so adding a fifth handle-returning type is a
+#: one-line edit here that the check asks for by name rather than one nobody remembers.
+EXPECTED_HANDLE_BINDINGS = {
+    "parquet_list_column": {"view"},
+    "parquet_map_column": {"view"},
+    "parquet_struct_column": {"view"},
+    "parquet_string_column": {"view", "view_all", "view_slice"},
+}
 
 
 def _procedure_scopes(lines):
@@ -4394,14 +4402,104 @@ def check_open_table_arguments_are_forwarded():
     return problems
 
 
-def check_view_call_sites_declare_target():
-    """CLAUDE.md -- a `%view` call site must declare its column `target`.
+def _handle_returning_bindings():
+    """`(type -> {binding, ...})` for every binding that hands back a pointer AT its own dummy.
 
-    `parquet_list_column%view`, its map/struct twins and `parquet_string_column%view`/`%view_all`
-    return a handle whose stored pointer is associated with the passed-object dummy. F2018
-    15.5.2.4 leaves such a pointer UNDEFINED on return whenever the actual argument does not have
-    the TARGET attribute -- so the handle is unusable, and the `associated(self%col)` guard inside
-    every handle binding is itself non-conforming.
+    Derived from the source by SHAPE, never enumerated. The hazard has one signature -- a pointer
+    assignment whose right-hand side is the bare passed-object dummy, `h%col => self` -- so this
+    walks `src/` for exactly that, takes the enclosing procedure's `class(T) ... :: self`
+    declaration, and maps the procedure's name back to whatever binding(s) of `T` reach it.
+
+    Deriving rather than listing is the point. The previous version of this check carried four
+    type names and a `view|view_all` regex, and `parquet_string_column%view_slice` -- which points
+    at `self` in exactly the same way, one screen further down the same file -- was never checked
+    at all. A list of names cannot report that it has gone narrow; a derivation can.
+
+    Returns `(bindings, spellings, notes)`. `bindings` is the PUBLIC face -- a specific that is
+    reachable through a `generic ::` is reported under the generic's name only, since that is what
+    a caller writes and what the expectation should read as. `spellings` is every name the call
+    can be made under, generic and specific alike, and is what the call-site scan uses: a private
+    specific is still callable from inside its own module, and checking it costs nothing.
+    `notes` carries any structural complaint about the derivation itself.
+    """
+    assign = re.compile(r"=>\s*self\s*$")
+    selfdecl = re.compile(r"^\s*(?:type|class)\s*\(\s*(\w+)\s*\)(.*?)::\s*self\b", re.I)
+    # `procedure :: bind => impl`, `procedure :: impl`, and `generic :: g => a, b`.
+    bind_named = re.compile(r"^\s*procedure\s*(?:,[^:]*)?::\s*(\w+)\s*=>\s*(\w+)", re.I)
+    bind_plain = re.compile(r"^\s*procedure\s*(?:,[^:]*)?::\s*(\w+)\s*(?:!.*)?$", re.I)
+    generic = re.compile(r"^\s*generic\s*(?:,[^:]*)?::\s*(\w+)\s*=>\s*(.+)$", re.I)
+
+    impls = {}          # type -> {implementing procedure name, ...}
+    notes = []
+    for path in sorted(SRC.glob("*.f90")):
+        lines = path.read_text(encoding="utf-8", errors="replace").split("\n")
+        for first, last in _procedure_scopes(lines):
+            body = [strip_comment(r) for r in lines[first:last + 1]]
+            if not any(assign.search(r) for r in body):
+                continue
+            m = re.match(r"^\s*(?:(?:pure|impure|elemental|recursive|module)\s+)*"
+                         r"(?:[\w()=:,*\s]+?\s)??(?:subroutine|function)\s+(\w+)",
+                         body[0], re.I)
+            if not m:
+                continue
+            owner = next((d.group(1).lower() for d in
+                          (selfdecl.match(r) for r in body) if d), None)
+            if owner is None:
+                notes.append(
+                    "%s:%d: `%s` pointer-assigns the bare passed object but declares no `self` "
+                    "this check can read -- the derivation has gone stale"
+                    % (path.relative_to(REPO_ROOT), first + 1, m.group(1)))
+                continue
+            impls.setdefault(owner, set()).add(m.group(1).lower())
+
+    bindings, spellings = {}, {}
+    for path in sorted(SRC.glob("*.f90")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for owner, wanted in impls.items():
+            tm = re.search(r"^\s*type\s*(?:,[^:]*)?::\s*%s\b(.*?)^\s*end\s+type\b" % owner,
+                           text, re.I | re.S | re.M)
+            if not tm:
+                continue
+            body = [strip_comment(r) for r in tm.group(1).split("\n")]
+            # Names that a `generic ::` covers, whether or not this type is the one that
+            # implements them: those are the specifics, and the generic is their public face.
+            covered = set()
+            for code in body:
+                g = generic.match(code)
+                if g:
+                    covered |= {s.strip().lower() for s in g.group(2).split(",")}
+            for code in body:
+                g = generic.match(code)
+                if g:
+                    if {s.strip().lower() for s in g.group(2).split(",")} & wanted:
+                        bindings.setdefault(owner, set()).add(g.group(1).lower())
+                        spellings.setdefault(owner, set()).add(g.group(1).lower())
+                    continue
+                b = bind_named.match(code)
+                if b:
+                    name, impl = b.group(1).lower(), b.group(2).lower()
+                else:
+                    b = bind_plain.match(code)
+                    if not b:
+                        continue
+                    # `procedure :: view_i64` -- the binding IS its own implementation.
+                    name = impl = b.group(1).lower()
+                if impl not in wanted:
+                    continue
+                spellings.setdefault(owner, set()).add(name)
+                if name not in covered:
+                    bindings.setdefault(owner, set()).add(name)
+    return bindings, spellings, notes
+
+
+def check_view_call_sites_declare_target():
+    """CLAUDE.md -- a handle-returning call site must declare its column `target`.
+
+    `parquet_list_column%view`, its map/struct twins and `parquet_string_column`'s
+    `%view`/`%view_all`/`%view_slice` return a handle whose stored pointer is associated with the
+    passed-object dummy. F2018 15.5.2.4 leaves such a pointer UNDEFINED on return whenever the
+    actual argument does not have the TARGET attribute -- so the handle is unusable, and the
+    `associated(self%col)` guard inside every handle binding is itself non-conforming.
 
     **gfortran, ifx and flang all execute the non-conforming form perfectly happily**, so nothing
     in CI, in an ordinary `fpm test` or in a coverage run can see this. Only nagfor's `-C=dangling`
@@ -4409,14 +4507,46 @@ def check_view_call_sites_declare_target():
     handle. That is what makes it worth a static check: the failure mode is a silent one on every
     compiler the project builds with by default.
 
-    The check is scope-aware -- a declaration is only reported when `%view` is called on that name
-    inside the same procedure -- so a column merely declared beside an unrelated handle costs
+    **The rule is about the pointer's TARGET, not about handing back a pointer.** A binding that
+    reaches through a POINTER component -- `parquet_table%col`, whose `p => self%cache%cols(...)`
+    lands in the heap object `self%cache` points at -- is not in this class at all, because that
+    object is not the dummy and does not stop existing when the call returns. That is why ~120
+    `%col` call sites correctly declare no `target`, and why the derivation below matches only a
+    bare `=> self`.
+
+    Both the type list and the binding names are DERIVED (`_handle_returning_bindings`) and then
+    compared against `EXPECTED_HANDLE_BINDINGS`, so the check reports its own narrowing. The
+    call-site scan uses the derived set, so a newly added binding is covered before anyone updates
+    the expectation.
+
+    The check is scope-aware -- a declaration is only reported when the binding is called on that
+    name inside the same procedure -- so a column merely declared beside an unrelated handle costs
     nothing.
     """
-    problems = []
-    call = re.compile(r"(?<![\w%])([A-Za-z_]\w*)%view(?:_all)?\s*\(")
+    bindings, spellings, problems = _handle_returning_bindings()
+    problems = list(problems)
+    if bindings != {k: set(v) for k, v in EXPECTED_HANDLE_BINDINGS.items()}:
+        for t in sorted(set(bindings) | set(EXPECTED_HANDLE_BINDINGS)):
+            got = bindings.get(t, set())
+            want = set(EXPECTED_HANDLE_BINDINGS.get(t, set()))
+            if got != want:
+                problems.append(
+                    "handle-returning bindings for `%s`: source has {%s}, "
+                    "EXPECTED_HANDLE_BINDINGS in tools/check_source_conventions.py says {%s}. "
+                    "A binding that pointer-assigns its bare passed object (`h%%col => self`) puts "
+                    "every call site under F2018 15.5.2.4; update the expectation and check the "
+                    "new binding's call sites declare `target`."
+                    % (t, ", ".join(sorted(got)) or "-", ", ".join(sorted(want)) or "-"))
+    if not bindings:
+        return problems + [
+            "no `h%col => self` binding found under src/ -- the handle API has been renamed, or "
+            "this check's derivation has gone stale and it is passing vacuously"]
+
+    # Longest first, so `%view_slice(` is not matched as `%view` with a stray suffix.
+    names = sorted({b for v in spellings.values() for b in v}, key=len, reverse=True)
+    call = re.compile(r"(?<![\w%%])([A-Za-z_]\w*)%%(?:%s)\s*\(" % "|".join(names))
     decl = re.compile(r"^\s*(?:type|class)\s*\(\s*(%s)\s*\)(.*?)::(.*)$"
-                      % "|".join(VIEWED_COLUMN_TYPES), re.I)
+                      % "|".join(sorted(spellings)), re.I)
     roots = [SRC, TEST, REPO_ROOT / "app", REPO_ROOT / "bench"]
     paths = sorted(p for root in roots if root.is_dir() for p in root.glob("*.f90"))
     seen_any_call = False
@@ -4438,22 +4568,22 @@ def check_view_call_sites_declare_target():
                 attrs = m.group(2).lower()
                 if "target" in attrs or "pointer" in attrs:
                     continue
-                names = [re.sub(r"\(.*", "", n).strip().lower() for n in m.group(3).split(",")]
-                hit = sorted(n for n in names if n in viewed)
+                declared = [re.sub(r"\(.*", "", n).strip().lower() for n in m.group(3).split(",")]
+                hit = sorted(n for n in declared if n in viewed)
                 if not hit:
                     continue
                 problems.append(
-                    "%s:%d: `%s` is a %s that `%%view` is called on in this procedure, but it is "
-                    "not declared `target`. F2018 15.5.2.4 leaves the returned handle's pointer "
-                    "undefined; gfortran, ifx and flang run it anyway and only nagfor's "
-                    "`-C=dangling` reports it. Add `, target` to the declaration:\n    %s"
+                    "%s:%d: `%s` is a %s that a handle-returning binding is called on in this "
+                    "procedure, but it is not declared `target`. F2018 15.5.2.4 leaves the "
+                    "returned handle's pointer undefined; gfortran, ifx and flang run it anyway "
+                    "and only nagfor's `-C=dangling` reports it. Add `, target`:\n    %s"
                     % (path.relative_to(REPO_ROOT), first + offset + 1, ", ".join(hit),
                        m.group(1), raw.strip()))
     if not seen_any_call:
         problems.append(
-            "no `%view`/`%view_all` call site found under src/, test/, app/ or bench/ -- the "
-            "handle API has been renamed, or this check's scope detection has gone stale and it "
-            "is passing vacuously")
+            "no handle-returning call site found under src/, test/, app/ or bench/ -- the handle "
+            "API has been renamed, or this check's scope detection has gone stale and it is "
+            "passing vacuously")
     return problems
 
 

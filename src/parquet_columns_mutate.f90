@@ -476,6 +476,51 @@ contains
         self%cap = newcap
     end procedure ensure_capacity
     !
+    module procedure allocate_empty_storage
+        ! Zero-sized, deliberately: `cap` is left alone, so %capacity() still answers 0 and
+        ! size(storage) still equals cap. The point is only that the array EXISTS -- see the
+        ! interface's own doc-comment for what references it when it does not.
+        select case (self%kind)
+        case (PK_INT32)
+            if (.not. allocated(self%i32)) allocate(self%i32(0))
+        case (PK_INT64)
+            if (.not. allocated(self%i64)) allocate(self%i64(0))
+        case (PK_FLOAT32)
+            if (.not. allocated(self%f32)) allocate(self%f32(0))
+        case (PK_FLOAT64)
+            if (.not. allocated(self%f64)) allocate(self%f64(0))
+        case (PK_LOGICAL)
+            if (.not. allocated(self%bool)) allocate(self%bool(0))
+        case (PK_DATE)
+            if (.not. allocated(self%dt)) allocate(self%dt(0))
+        case (PK_TIME)
+            if (.not. allocated(self%tm)) allocate(self%tm(0))
+        case (PK_TIMESTAMP)
+            if (.not. allocated(self%ts)) allocate(self%ts(0))
+        case (PK_INT32_VEC)
+            if (.not. allocated(self%i32v)) allocate(self%i32v(self%width, 0))
+        case (PK_INT64_VEC)
+            if (.not. allocated(self%i64v)) allocate(self%i64v(self%width, 0))
+        case (PK_FLOAT32_VEC)
+            if (.not. allocated(self%f32v)) allocate(self%f32v(self%width, 0))
+        case (PK_FLOAT64_VEC)
+            if (.not. allocated(self%f64v)) allocate(self%f64v(self%width, 0))
+        case (PK_LOGICAL_VEC)
+            if (.not. allocated(self%boolv)) allocate(self%boolv(self%width, 0))
+        case (PK_DATE_VEC)
+            if (.not. allocated(self%dtv)) allocate(self%dtv(self%width, 0))
+        case (PK_TIME_VEC)
+            if (.not. allocated(self%tmv)) allocate(self%tmv(self%width, 0))
+        case (PK_TIMESTAMP_VEC)
+            if (.not. allocated(self%tsv)) allocate(self%tsv(self%width, 0))
+        case default
+            ! The string and container kinds own their storage through `str`/`container`, which
+            ! `init`/`adopt_container` allocate; PK_NONE has no storage by definition. Nothing to
+            ! do, and no error -- this is called unconditionally from `init`.
+            continue ! GCOVR_EXCL_LINE -- gcov attribution artifact: a bare `continue` no-op
+        end select
+    end procedure allocate_empty_storage
+    !
     module procedure shrink_storage
         integer(int64) :: n
         integer(int32), allocatable :: tmp_i32(:)

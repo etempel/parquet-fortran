@@ -59,6 +59,14 @@ contains
             if (len_trim(unit) > 0) self%unit = trim(unit)
         end if
         if (is_string_kind(kind)) allocate(self%str)
+        ! BEFORE the rows, and unconditionally: a zero-row column is otherwise live -- a real kind,
+        ! a real width, answering %length() -- with no storage array allocated at all, because
+        ! `ensure_capacity` returns early on `0 <= 0`. Everything that then names the storage
+        ! references an unallocated allocatable, which is non-conforming however empty the section
+        ! is; see allocate_empty_storage's own doc-comment for what does and what reports it.
+        ! Costs nothing when `nrows > 0` -- grow_rows reallocates over the zero-sized array the
+        ! same way it would over an unallocated one.
+        call allocate_empty_storage(self)
         if (nrows > 0_int64) call grow_rows(self, nrows)
         if (is_temporal_kind(kind)) then
             self%nulls_dirty = .true.

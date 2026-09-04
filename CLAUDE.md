@@ -3132,6 +3132,17 @@ Compiler-independent rules. Anything specific to one compiler is in its own sect
   segfault under `nagdeb` — that is what turned this one from "an intermittent nagfor bug" into a
   one-line source defect.
 
+  **The FOURTH instance was not an out-of-bounds read but an INTEGER OVERFLOW, in a guard against
+  overflow.** `ix_span_ok` (`src/parquet_index_map.f90`) wrote
+  `if (lo < 0_int64 .and. hi > huge(hi) + lo) return`, whose second operand overflows for any
+  `lo > 0` — precisely the case the first operand exists to exclude. The *result* is unaffected
+  (`.false. .and. anything` is false), so this is a pure conformance defect with no wrong answer
+  behind it, which is exactly why it survived: nothing could see it but nagfor's `-C=intovf`, and
+  it left an overflow the optimiser is entitled to reason from (CLAUDE.md's own Risk-94 hazard).
+  **So the class is wider than array bounds** — grep for any `.and.` whose second operand *computes*
+  rather than compares, and check that it is safe for every value the first operand admits. The fix
+  is the same nesting.
+
   **The same non-short-circuiting is also a PERFORMANCE hazard, and there it is compiler-dependent
   in a way that hides on gfortran.** `if (cheap_test .and. expensive_call() == 0)` may evaluate the
   expensive half unconditionally. Measured instance: `table_resolve`'s
@@ -4065,7 +4076,7 @@ violation reappeared at six `%view` call sites across `test/error_scenarios.f90`
 was fixed, because nothing but a nagfor run can see it and a nagfor run is not what anyone reaches
 for while adding a test. `check_view_call_sites_declare_target`
 (`tools/check_source_conventions.py`) now scans `src/`, `test/`, `app/` and `bench/` and reports
-any declaration of one of the four viewed column types that is used as `%view`/`%view_all`'s
+any declaration of a handle-returning column type that is used as such a binding's
 passed object **within the same procedure** without `target`. Two things about reading a failure
 here: the abort names the **handle binding** (`associated(self%col)` inside `check_handle`), never
 the `%view` call that produced the handle, so grep for `%view` in the scenario rather than reading
@@ -4073,15 +4084,67 @@ the line the message points at; and under test-drive's per-suite parallelism the
 whichever test was on the faulting thread, not to the last `Starting` line — one run reported a
 `parquet_list` dangling pointer under a failing *map* test, and the two were unrelated sites.
 
-**What the remaining checks found is worth the trouble: three real standard violations, all the
+**The rule is about the pointer's TARGET, not about handing a pointer back — and getting that
+backwards costs an afternoon.** `%view`'s handle does `h%col => self`: the target *is* the dummy, so
+15.5.2.4 applies and the call site needs `target`. `parquet_table%col` looks identical from outside
+— a binding whose passed object is `intent(in), target` handing back a pointer — and is **not** in
+this class at all, because its `p => self%cache%cols(i)%values%…` lands inside the object
+`self%cache` points at, which is heap-allocated, is not the dummy, and does not stop existing when
+the call returns. That is why ~120 `%col` call sites correctly declare no `target`, and why
+`-C=dangling` has never complained about one. **The one-command discriminator is
+`grep -rnE "=> *self( |$)" src/*.f90`** — a bare `=> self` is the hazard; `=> self%<pointer
+component>` is not. Anything reached through a pointer component is safe by construction, which is
+also why `parquet_table_row`'s `r%cache => self%cache` needs nothing. An audit that keys on "returns
+a pointer" instead will report every accessor in the table layer as broken.
+
+**The check derives its own scope, and the staleness it was closing had moved into its REGEX.** The
+first version carried four type names *and* a `%view|%view_all` call pattern — and
+`parquet_string_column%view_slice`, which points at `self` in exactly the same way one screen
+further down the same file, was matched by neither, leaving four procedures unchecked.
+`_handle_returning_bindings` now finds every bare `=> self` in `src/`, reads the enclosing
+procedure's `class(T) :: self`, maps the procedure back to `T`'s bindings, and compares the result
+against `EXPECTED_HANDLE_BINDINGS`; the call-site scan uses what it derived, so a new binding is
+covered before anyone updates the expectation. **The lesson beyond this check: a name list is the
+obvious place for a static check to go stale, and a regex encoding one binding's spelling is the
+non-obvious one.** Both were wrong here and only the first is the documented failure mode.
+
+**What the remaining checks found is worth the trouble: four real standard violations, all the
 same shape — a ZERO-SIZED thing referenced where the standard forbids it.** Each was invisible under
-gfortran, which no-ops all three:
+gfortran, which no-ops all four:
 
 | site | what | check |
 |---|---|---|
 | `make_valid_buf` (`parquet_read.f90`) | `C_LOC` on a zero-sized array — F2018 18.2.3.6 requires nonzero-sized | `-C=pointer` |
 | `set_all_*` (generated) | whole-array assignment to a zero-row column's storage, which `grow_storage` never allocates (`if (n == 0) return`) | `-C=array` |
 | `build_from_character` / `append_values` (`parquet_strings.f90`) | unallocated `self%data` passed to `pack_character_bytes` when every element is blank | `-C=array` |
+| `parquet_column_data_ptr_*` (generated) | `p => col%i32(1:col%nrows)` on a zero-row column, whose storage the same allocators never allocate. Reached by `%get` on any table a filter emptied — see below | `-C=array` |
+
+**The fourth was fixed at the ROOT rather than guarded, and that is the one to copy.** `%init` now
+calls `allocate_empty_storage`, so a column of a known kind always has its storage array allocated —
+at exactly zero rows, so `cap`, `%capacity()` and `size(storage)` all stay 0 and a vector column's
+`size(p, 1)` is still `width`. **Nothing observable changed**, which is what made this preferable to
+the two point fixes considered: pointing at a per-kind zero-size `save` target would have moved
+`size(p, 1)` to 0 for the vector kinds, and returning a disassociated pointer would have made an
+empty column indistinguishable from a missing one at the public `%col` while needing guards at ~119
+call sites. **Both of those fix one procedure; this fixes the class** — `set_all_*`'s own
+`if (self%nrows > 0)` guard is now redundant (kept, with its comment corrected to say so), and the
+next bulk path inherits the fix instead of needing a guard nobody will think to add.
+
+The estimate that nearly stopped this being fixed was wrong and is worth recording: the invariant
+looked as though it needed holding through `adopt`/`move_from`/the rebuilds, and **every one of them
+already held it** — `gather_storage` allocates `max(n, 1)`, `adopt_*` refuses an unallocated input
+outright, `move_from` hands over the allocation, `deep_copy` routes through `init`. The whole change
+was `init`'s one line. Check what the neighbours actually do before pricing an invariant.
+
+**It BLOCKED the checking build, which is the real lesson here.** `fpm test run_tester_cpp --profile
+nagdeb` used to abort inside the `table` suite at 19 suites of 28, so everything after it —
+`table_parallel`, `table_codegen`, `table_container`, `table_join`, `container_nested`, `settings`,
+`module_surface`, `diagnostics` — had never been measured under `-C=all` at all. Fixing it exposed a
+**second** blocker immediately (`ix_span_ok`'s non-short-circuiting `.and.`, below), and only then
+did the runner complete. **So run the WHOLE runner, not one suite, and expect a queue**: a checking
+build stops at the first failure, so one defect hides every later one, and per-suite runs are what
+let two accumulate unseen. `fpm test --profile nagdeb` now passes end to end (2885 passed, 0 failed,
+0 runtime errors, at `OMP_NUM_THREADS=1`) — that is the state to keep it in.
 
 **The generalisable rule: a zero-length case reaches storage that was never allocated, because the
 allocators here all skip zero deliberately.** `grow_storage` returns early at `n == 0`;

@@ -1480,6 +1480,27 @@ module parquet_columns
             class(parquet_column), intent(inout) :: self !! the column.
             integer(int64), intent(in) :: need_rows      !! rows the storage must hold.
         end subroutine ensure_capacity
+        !> Allocates the active storage at ZERO rows, so that a column of a known kind always has
+        !! an allocated storage array even before it holds anything.
+        !!
+        !! **`ensure_capacity` cannot do this**, and that is the whole reason this exists: it
+        !! returns early whenever `need_rows <= cap`, which for a fresh column is `0 <= 0`, so a
+        !! zero-row column ends up live -- a real kind, a real width, answering `%length()` -- with
+        !! no storage array at all. Everything downstream that names the storage then references an
+        !! **unallocated allocatable**: `%data_ptr`'s `p => col%i32(1:col%nrows)` and `set_all`'s
+        !! whole-array assignment both did, and both are non-conforming however empty the section
+        !! is. gfortran, ifx and flang no-op them; nagfor's `-C=array` reports
+        !! *"ALLOCATABLE COL%I32 is not currently allocated"* and stops the run. Reached by
+        !! `%get` on any table a filter emptied, and by the documented `%add_column(name, empty)`
+        !! shape -- ordinary use, not an edge case.
+        !!
+        !! Allocated at exactly zero rows, so `cap`, `%capacity()` and `size(storage)` all stay 0
+        !! and nothing observable changes; the vector kinds keep their first extent, so
+        !! `size(p, 1)` is still `width`. The string and container kinds allocate nothing here --
+        !! their stores carry their own state and `init` has already created it.
+        module subroutine allocate_empty_storage(self)
+            class(parquet_column), intent(inout) :: self !! the column, with `kind`/`width` set.
+        end subroutine allocate_empty_storage
         !> Reallocates the active storage down to exactly `nrows` rows, releasing any spare
         !! capacity. A no-op when there is none, and on the string kinds (whose own store carries
         !! its capacity). The counterpart of `ensure_capacity`, and the only place capacity shrinks.
@@ -1856,13 +1877,17 @@ contains""")
         call check_kind(self, {pk}, "set_all")
         call check_nrows(self, size(values, kind=int64), "set_all")
         if (mod_nulls) then
-            ! Guarded on nrows: a ZERO-ROW column has no storage at all (`grow_storage` returns
-            ! early at n == 0), so this whole-array assignment would reference an unallocated
-            ! allocatable. The section is empty either way, but referencing an unallocated
-            ! allocatable is not conforming -- nagfor's -C=array rejects it at run time
-            ! ("ALLOCATABLE SELF%{comp} is not currently allocated") while gfortran no-ops silently.
-            ! Reached by the documented `%add_column(name, empty)` shape that declares a column
-            ! before a parallel region appends to it.
+            ! Guarded on nrows: this whole-array assignment would otherwise reference an
+            ! unallocated allocatable on a zero-row column -- the section is empty either way, but
+            ! referencing an unallocated allocatable is not conforming, and nagfor's -C=array
+            ! rejects it at run time while gfortran no-ops silently. Reached by the documented
+            ! `%add_column(name, empty)` shape that declares a column before a parallel region
+            ! appends to it.
+            !
+            ! `init` now calls `allocate_empty_storage`, so the storage is in fact allocated on
+            ! every path and this guard is redundant. KEPT deliberately: it costs a comparison on
+            ! a bulk operation, and it is the local defence if that invariant is ever broken from
+            ! another file. Do not read it as evidence that a zero-row column has no storage.
             if (self%nrows > 0_int64) self%{comp}(1:self%nrows) = values""")
             if temporal:
                 w("            self%nulls_dirty = .true.")
@@ -1990,13 +2015,17 @@ contains""")
         call check_width(self, size(values, 1, kind=int64), "set_all")
         call check_nrows(self, size(values, 2, kind=int64), "set_all")
         if (mod_nulls) then
-            ! Guarded on nrows: a ZERO-ROW column has no storage at all (`grow_storage` returns
-            ! early at n == 0), so this whole-array assignment would reference an unallocated
-            ! allocatable. The section is empty either way, but referencing an unallocated
-            ! allocatable is not conforming -- nagfor's -C=array rejects it at run time
-            ! ("ALLOCATABLE SELF%{comp} is not currently allocated") while gfortran no-ops silently.
-            ! Reached by the documented `%add_column(name, empty)` shape that declares a column
-            ! before a parallel region appends to it.
+            ! Guarded on nrows: this whole-array assignment would otherwise reference an
+            ! unallocated allocatable on a zero-row column -- the section is empty either way, but
+            ! referencing an unallocated allocatable is not conforming, and nagfor's -C=array
+            ! rejects it at run time while gfortran no-ops silently. Reached by the documented
+            ! `%add_column(name, empty)` shape that declares a column before a parallel region
+            ! appends to it.
+            !
+            ! `init` now calls `allocate_empty_storage`, so the storage is in fact allocated on
+            ! every path and this guard is redundant. KEPT deliberately: it costs a comparison on
+            ! a bulk operation, and it is the local defence if that invariant is ever broken from
+            ! another file. Do not read it as evidence that a zero-row column has no storage.
             if (self%nrows > 0_int64) self%{comp}(:, 1:self%nrows) = values""")
             if temporal:
                 w("            self%nulls_dirty = .true.")
@@ -2201,6 +2230,29 @@ contains""")
         end select
         self%cap = newcap
     end procedure ensure_capacity
+    !
+    module procedure allocate_empty_storage
+        ! Zero-sized, deliberately: `cap` is left alone, so %capacity() still answers 0 and
+        ! size(storage) still equals cap. The point is only that the array EXISTS -- see the
+        ! interface's own doc-comment for what references it when it does not.
+        select case (self%kind)""")
+    for k in ARRAY_KINDS:
+        tag, pk, decl, comp, rank, cat = k
+        if rank == 1:
+            w(f"""        case ({pk})
+            if (.not. allocated(self%{comp})) allocate(self%{comp}(0))""")
+        else:
+            # The first extent is `width`, not 0: a caller reading size(p, 1) off an empty vector
+            # column gets the width, which is what the unallocated form happened to yield.
+            w(f"""        case ({pk})
+            if (.not. allocated(self%{comp})) allocate(self%{comp}(self%width, 0))""")
+    w("""        case default
+            ! The string and container kinds own their storage through `str`/`container`, which
+            ! `init`/`adopt_container` allocate; PK_NONE has no storage by definition. Nothing to
+            ! do, and no error -- this is called unconditionally from `init`.
+            continue ! GCOVR_EXCL_LINE -- gcov attribution artifact: a bare `continue` no-op
+        end select
+    end procedure allocate_empty_storage
     !
     module procedure shrink_storage
         integer(int64) :: n""")

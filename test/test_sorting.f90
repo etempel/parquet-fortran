@@ -279,7 +279,9 @@ contains
             new_unittest("pf_match and pf_match_all handle every empty-input combination", &
                 test_match_empty), &
             new_unittest("two character arrays of different widths match on their content", &
-                test_match_string_widths) &
+                test_match_string_widths), &
+            new_unittest("a pf_sort_keys built from an EMPTY array reports zero rows", &
+                test_keys_empty_row_count) &
             ]
     end subroutine collect_tests_parquet_sorting
     !
@@ -7881,4 +7883,64 @@ contains
         call check(error, all(m == [2_int64, 1_int64, 0_int64]), &
             "the same must hold with the wide array on the left")
     end subroutine test_match_string_widths
+    !
+    !> A `pf_sort_keys` built from an EMPTY array must report zero rows, not one.
+    !>
+    !> The extractors allocate their value arrays with a `max(n, 1)` floor -- a one-element
+    !> buffer for a zero-row key -- so measuring the row count back from the buffer could not
+    !> tell an empty key from a one-row one, and reported ONE. `pf_argsort` then returned a
+    !> one-element permutation naming a row that does not exist and `group_offsets` claiming one
+    !> group, which is a wrong answer handed to a caller rather than an abort.
+    !>
+    !> **The array forms were never affected**, because they pass `size(values)` straight down --
+    !> which is what makes them the oracle here: the two forms must agree, and before the fix
+    !> they did not. `character` was likewise unaffected (its offsets array is genuinely `n+1`
+    !> long), so a single-type test would have missed the defect entirely.
+    subroutine test_keys_empty_row_count(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int64), allocatable :: none64(:), perm(:), go(:), aperm(:), ago(:)
+        real(real64), allocatable :: noneR(:)
+        character(len=4), allocatable :: noneC(:)
+        type(pf_sort_keys) :: keys
+
+        allocate(none64(0), noneR(0), noneC(0))
+        call pf_argsort(none64, aperm, group_offsets=ago)
+        call check(error, size(aperm) == 0 .and. size(ago) == 1, &
+            "the array form must give a zero-length permutation and the lone sentinel offset")
+        if (allocated(error)) return
+        call keys%add(none64)
+        call pf_argsort(keys, perm, group_offsets=go)
+        call check(error, size(perm) == 0, &
+            "an int64 pf_sort_keys over an empty array must give a zero-length permutation")
+        if (allocated(error)) return
+        call check(error, size(go) == 1 .and. go(1) == 1_int64, &
+            "an empty key has no groups, so group_offsets is the sentinel alone")
+        if (allocated(error)) return
+        call check(error, size(perm) == size(aperm) .and. size(go) == size(ago), &
+            "the keys form and the array form must agree about an empty array")
+        if (allocated(error)) return
+        ! The real family allocates the same way and was wrong the same way.
+        call keys%clear()
+        call keys%add(noneR)
+        call pf_argsort(keys, perm, group_offsets=go)
+        call check(error, size(perm) == 0 .and. size(go) == 1, &
+            "a real64 pf_sort_keys over an empty array must report zero rows too")
+        if (allocated(error)) return
+        ! And `character`, which was already right -- kept so a future change that unifies the
+        ! three families cannot regress the one that worked.
+        call keys%clear()
+        call keys%add(noneC)
+        call pf_argsort(keys, perm, group_offsets=go)
+        call check(error, size(perm) == 0 .and. size(go) == 1, &
+            "a character pf_sort_keys over an empty array must report zero rows")
+        if (allocated(error)) return
+        ! Two empty keys still agree with each other, so the row-count check does not start
+        ! refusing a legitimate multi-key sort over an empty table.
+        call keys%clear()
+        call keys%add(none64)
+        call keys%add(noneR)
+        call pf_argsort(keys, perm, group_offsets=go)
+        call check(error, size(perm) == 0 .and. size(go) == 1, &
+            "two empty keys must agree about their row count rather than aborting")
+    end subroutine test_keys_empty_row_count
 end module test_sorting

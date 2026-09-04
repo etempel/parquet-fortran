@@ -1133,9 +1133,17 @@ module parquet_sorting
             class(pf_sort_keys), intent(inout) :: self !! the key list.
         end subroutine keys_clear
         !> Appends `buf` to `self`, checking every key describes the same number of rows.
-        module subroutine keys_append(self, buf, proc)
+        module subroutine keys_append(self, buf, nrows, proc)
             class(pf_sort_keys), intent(inout) :: self          !! the key list.
             type(sort_key_buf), allocatable, intent(inout) :: buf(:) !! keys to append; moved from.
+            !> how many rows the key describes. Passed EXPLICITLY rather than measured from
+            !! `buf`, because the extractors allocate their value arrays with a `max(n, 1)`
+            !! floor -- so a zero-row key is indistinguishable from a one-row key once it is
+            !! built, and reading the size back reported ONE row for an empty array. That fed
+            !! `pf_argsort` a row count of 1 over no rows: a one-element permutation naming a
+            !! row that does not exist, and `group_offsets` claiming one group. The array
+            !! forms were never affected -- they pass `size(values)` straight down.
+            integer(int64), intent(in) :: nrows
             character(len=*), intent(in) :: proc                !! calling procedure, for messages.
         end subroutine keys_append
         !> Validates a `group_nkeys` request and translates it from CALLER keys to ENGINE keys.

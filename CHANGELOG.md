@@ -66,6 +66,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `parquet_open_table`, which its `%init`/`%init_slice` wrappers had always promised to do.
 - `parquet_table%append(other)` refuses to append a table to itself instead of performing the copy
   through two aliased references to one column.
+- `pf_argsort` over a `pf_sort_keys` built from an EMPTY array now returns a zero-length
+  permutation and a single sentinel `group_offsets` entry, as the array forms always did. It
+  previously reported one row, giving back a one-element permutation naming a row that does not
+  exist and claiming one group over no rows. `character` keys were unaffected.
 - Many other minor fixes and improvements.
 
 ## [v2.2.0] - 2026-09-03

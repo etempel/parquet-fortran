@@ -617,7 +617,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         call extract_i32(values, buf, desc, nlo, "pf_sort_keys%add", is_valid=is_valid)
-        call keys_append(self, buf, "pf_sort_keys%add")
+        call keys_append(self, buf, size(values, kind=int64), "pf_sort_keys%add")
     end procedure add_i32
     !
     module procedure add_i64
@@ -629,7 +629,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         call extract_i64(values, buf, desc, nlo, "pf_sort_keys%add", is_valid=is_valid)
-        call keys_append(self, buf, "pf_sort_keys%add")
+        call keys_append(self, buf, size(values, kind=int64), "pf_sort_keys%add")
     end procedure add_i64
     !
     module procedure add_f32
@@ -641,7 +641,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         call extract_f32(values, buf, desc, nlo, "pf_sort_keys%add", is_valid=is_valid)
-        call keys_append(self, buf, "pf_sort_keys%add")
+        call keys_append(self, buf, size(values, kind=int64), "pf_sort_keys%add")
     end procedure add_f32
     !
     module procedure add_f64
@@ -653,7 +653,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         call extract_f64(values, buf, desc, nlo, "pf_sort_keys%add", is_valid=is_valid)
-        call keys_append(self, buf, "pf_sort_keys%add")
+        call keys_append(self, buf, size(values, kind=int64), "pf_sort_keys%add")
     end procedure add_f64
     !
     module procedure add_bool
@@ -665,7 +665,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         call extract_bool(values, buf, desc, nlo, "pf_sort_keys%add", is_valid=is_valid)
-        call keys_append(self, buf, "pf_sort_keys%add")
+        call keys_append(self, buf, size(values, kind=int64), "pf_sort_keys%add")
     end procedure add_bool
     !
     module procedure add_chr
@@ -677,7 +677,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         call extract_chr(values, buf, desc, nlo, "pf_sort_keys%add", is_valid=is_valid)
-        call keys_append(self, buf, "pf_sort_keys%add")
+        call keys_append(self, buf, size(values, kind=int64), "pf_sort_keys%add")
     end procedure add_chr
     !
     module procedure add_date
@@ -689,7 +689,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         call extract_date(values, buf, desc, nlo, "pf_sort_keys%add")
-        call keys_append(self, buf, "pf_sort_keys%add")
+        call keys_append(self, buf, size(values, kind=int64), "pf_sort_keys%add")
     end procedure add_date
     !
     module procedure add_time
@@ -701,7 +701,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         call extract_time(values, buf, desc, nlo, "pf_sort_keys%add")
-        call keys_append(self, buf, "pf_sort_keys%add")
+        call keys_append(self, buf, size(values, kind=int64), "pf_sort_keys%add")
     end procedure add_time
     !
     module procedure add_ts
@@ -713,7 +713,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         call extract_ts(values, buf, desc, nlo, "pf_sort_keys%add")
-        call keys_append(self, buf, "pf_sort_keys%add")
+        call keys_append(self, buf, size(values, kind=int64), "pf_sort_keys%add")
     end procedure add_ts
     !
     module procedure add_strcol
@@ -725,7 +725,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         call extract_strcol(values, buf, desc, nlo, "pf_sort_keys%add")
-        call keys_append(self, buf, "pf_sort_keys%add")
+        call keys_append(self, buf, values%size(), "pf_sort_keys%add")
     end procedure add_strcol
     !
     module procedure add_col
@@ -737,7 +737,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         call extract_col(values, buf, desc, nlo, "pf_sort_keys%add")
-        call keys_append(self, buf, "pf_sort_keys%add")
+        call keys_append(self, buf, values%length(), "pf_sort_keys%add")
     end procedure add_col
     !
     module procedure keys_count
@@ -789,7 +789,9 @@ contains
         integer :: ik
         character(len=32) :: got_str, want_str
         !
-        n = key_rows(buf(1))
+        ! The caller's own count, NEVER `size(buf(1)%ints)`: see this procedure's interface for
+        ! what measuring it back from the buffer cost.
+        n = nrows
         if (self%nkeys == 0) then
             self%nrows = n
         else if (n /= self%nrows) then
@@ -835,20 +837,6 @@ contains
         if (allocated(src%data)) call move_alloc(src%data, dst%data)
         if (allocated(src%valid)) call move_alloc(src%valid, dst%valid)
     end subroutine move_key
-    !
-    !> How many rows one extracted key describes.
-    pure function key_rows(buf) result(n)
-        type(sort_key_buf), intent(in) :: buf !! the key.
-        integer(int64) :: n                   !! its row count.
-        select case (buf%family)
-        case (SK_REAL)
-            n = size(buf%reals, kind=int64)
-        case (SK_STR)
-            n = size(buf%offsets, kind=int64) - 1_int64
-        case default
-            n = size(buf%ints, kind=int64)
-        end select
-    end function key_rows
     !
     module procedure drive_engine_partial
         type(c_ptr) :: builder

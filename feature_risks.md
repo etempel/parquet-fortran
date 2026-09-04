@@ -246,6 +246,7 @@ something a reader is expected to have.
 | [Risk-178](#risk-178--the-values--1-contract-is-what-makes-an-empty-hash-slot-detectable) | The values-≥-1 contract is what makes an empty hash slot detectable | 4 — covered |
 | [Risk-179](#risk-179--a-dropped-parquet_index-guard-issues-one-index-to-two-owners) | A dropped `parquet_index` guard issues one index to two owners | 2 — proposed |
 | [Risk-180](#risk-180--the-matchs-two-null-skips-are-individually-redundant-and-jointly-load-bearing) | The match's two null skips are individually redundant and jointly load-bearing | 4 — covered |
+| [Risk-181](#risk-181--a-key-buffers-maxn-1-floor-is-not-its-row-count) | A key buffer's `max(n, 1)` floor is not its row count | 4 — covered |
 
 ---
 
@@ -1135,6 +1136,32 @@ Every entry here has a test behind it. What keeps it in the document is the seco
 whoever edits the area next. Read the entry for the area you are about to touch before you touch
 it — that is what this section is for, and it is why "covered" is not the same as "finished".
 
+
+### Risk-181 — A key buffer's `max(n, 1)` floor is not its row count
+
+Every `extract_*` in `parquet_sorting` allocates its value array with a **`max(n, 1)` floor** --
+deliberately, so the engine never receives a zero-sized array. That floor makes the buffer's own
+size useless as a row count: a zero-row key and a one-row key are byte-identical in shape, and
+anything that measures the count back from the buffer reports **one row for an empty array**.
+
+`pf_sort_keys%add` did exactly that, and `pf_argsort` then handed a caller a **one-element
+permutation naming a row that does not exist**, with `group_offsets` claiming one group over no
+rows. Nothing aborted. `%sort_by` on an empty table survived by luck -- its column rebuild is
+bounded by the row count rather than by `size(perm)` -- so the only visible symptom was
+`%argsort_by` returning `perm = [1]` for a table with no rows.
+
+**Three things made it hard to see, and all three recur.** The ARRAY forms were never affected,
+because they pass `size(values)` straight down -- so two forms of one generic disagreed, and only
+a test comparing them could say so. **`character` keys were already correct**, because a string
+key's offsets array is genuinely `n + 1` long, so a single-type test proves nothing here. And a
+zero-row sort is exactly the case a hand-written fixture omits.
+
+**Rule:** a row count is passed in, never measured back from a buffer that has a size floor. The
+helper that measured it (`key_rows`) was deleted rather than fixed, and its former site carries a
+comment saying why it must not come back.
+
+**Test:** `test_keys_empty_row_count` (`test/test_sorting.f90`), which asserts the int64, real64
+and character families and cross-checks the keys form against the array form.
 
 ### Risk-180 — The match's two null skips are individually redundant and jointly load-bearing
 

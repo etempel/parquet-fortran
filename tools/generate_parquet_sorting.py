@@ -1364,9 +1364,17 @@ module parquet_sorting
     w("            class(pf_sort_keys), intent(inout) :: self !! the key list.")
     w("        end subroutine keys_clear")
     w("        !> Appends `buf` to `self`, checking every key describes the same number of rows.")
-    w("        module subroutine keys_append(self, buf, proc)")
+    w("        module subroutine keys_append(self, buf, nrows, proc)")
     w("            class(pf_sort_keys), intent(inout) :: self          !! the key list.")
     w("            type(sort_key_buf), allocatable, intent(inout) :: buf(:) !! keys to append; moved from.")
+    w("            !> how many rows the key describes. Passed EXPLICITLY rather than measured from")
+    w("            !! `buf`, because the extractors allocate their value arrays with a `max(n, 1)`")
+    w("            !! floor -- so a zero-row key is indistinguishable from a one-row key once it is")
+    w("            !! built, and reading the size back reported ONE row for an empty array. That fed")
+    w("            !! `pf_argsort` a row count of 1 over no rows: a one-element permutation naming a")
+    w("            !! row that does not exist, and `group_offsets` claiming one group. The array")
+    w("            !! forms were never affected -- they pass `size(values)` straight down.")
+    w("            integer(int64), intent(in) :: nrows")
     w("            character(len=*), intent(in) :: proc                !! calling procedure, for messages.")
     w("        end subroutine keys_append")
     w("        !> Validates a `group_nkeys` request and translates it from CALLER keys to ENGINE keys.")
@@ -3637,7 +3645,7 @@ contains
         w("        if (present(nulls_first)) nlo = nulls_first")
         extra = ", is_valid=is_valid" if nulls == "arg" else ""
         w(f"        call extract_{tag}(values, buf, desc, nlo, \"pf_sort_keys%add\"{extra})")
-        w("        call keys_append(self, buf, \"pf_sort_keys%add\")")
+        w(f"        call keys_append(self, buf, {rows_expr(t)}, \"pf_sort_keys%add\")")
         w(f"    end procedure add_{tag}")
         w("    !")
 
@@ -3690,7 +3698,9 @@ contains
         integer :: ik
         character(len=32) :: got_str, want_str
         !
-        n = key_rows(buf(1))
+        ! The caller's own count, NEVER `size(buf(1)%ints)`: see this procedure's interface for
+        ! what measuring it back from the buffer cost.
+        n = nrows
         if (self%nkeys == 0) then
             self%nrows = n
         else if (n /= self%nrows) then
@@ -3737,19 +3747,10 @@ contains
         if (allocated(src%valid)) call move_alloc(src%valid, dst%valid)
     end subroutine move_key
     !
-    !> How many rows one extracted key describes.
-    pure function key_rows(buf) result(n)
-        type(sort_key_buf), intent(in) :: buf !! the key.
-        integer(int64) :: n                   !! its row count.
-        select case (buf%family)
-        case (SK_REAL)
-            n = size(buf%reals, kind=int64)
-        case (SK_STR)
-            n = size(buf%offsets, kind=int64) - 1_int64
-        case default
-            n = size(buf%ints, kind=int64)
-        end select
-    end function key_rows
+    ! `key_rows` was here, measuring a key's row count back from its own buffer. It was WRONG by
+    ! construction and is deliberately not replaced: the extractors allocate with a `max(n, 1)`
+    ! floor, so it could not tell a zero-row key from a one-row one, and every caller now passes
+    ! the count it already has. Do not reintroduce it -- see keys_append's interface.
     !
     module procedure valid_from_mask
         integer(int64) :: k, m

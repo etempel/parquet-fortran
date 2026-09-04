@@ -118,6 +118,8 @@ module parquet_tables
     public :: parquet_debug_table_set_inflight
     public :: parquet_debug_colread_block_rows
     public :: parquet_debug_table_drop_name_index
+    !> TEST-ONLY, and TEMPORARY -- it is removed when `%join`'s own `pairs=` output lands (S6 P3).
+    public :: parquet_debug_table_join_pairs
     !
     !> Error-message prefix for every `error stop` raised by this module.
     character(len=*), parameter :: EP = "parquet_table: "
@@ -6496,6 +6498,89 @@ module parquet_tables
             logical, intent(in), optional :: nulls_first(:) !! per key: .true. to put nulls first.
             integer(int64), allocatable, intent(out) :: perm(:) !! the selected rows, in key order.
         end subroutine table_build_top_n_permutation
+        !> Resolves ONE key column name to its slot, refusing every column that cannot be a key.
+        !!
+        !! A thin separate-module-procedure relay onto `sort_lookup_key`, which is a contained
+        !! procedure of `parquet_tables_sort` and so unreachable from a sibling submodule. It
+        !! exists so the JOIN resolves its key names through exactly the same code the sorts do
+        !! -- which brings the refusal of every unorderable kind, the lazy first touch of a key
+        !! column, and the file-naming message suffix with it. Two copies of "which columns can
+        !! be a key" is precisely the drift that would let a join accept a column `%sort_by`
+        !! rejects.
+        module subroutine table_lookup_sort_key(self, name, proc, idx)
+            class(parquet_table), intent(in) :: self !! the table.
+            character(len=*), intent(in) :: name     !! the key column's name.
+            character(len=*), intent(in) :: proc     !! calling procedure, for messages.
+            integer, intent(out) :: idx              !! its slot index.
+        end subroutine table_lookup_sort_key
+    end interface
+    !
+    ! ---- The join engine (parquet_tables_join -- HAND-WRITTEN, not generated) ----
+    interface
+        !> Builds the join's PAIR LIST: which left row meets which right row, and how many rows
+        !! the joined table will have. Does not touch a single value column.
+        !!
+        !! **This is the whole of the join's reasoning**, and it is deliberately separable from
+        !! the column rewrite that follows it: everything that can silently produce a wrong
+        !! ANSWER -- the null rule, the cardinality assertion, the output count, the ordering --
+        !! is decided here, over nothing but row indices, where it can be asserted directly.
+        !!
+        !! `il(o)` and `ir(o)` are the left and right rows contributing to output row `o`, with
+        !! **0 meaning "no counterpart on that side"**. `n_out` is `size(il)`, computed before
+        !! anything proportional to it is allocated, which is what lets `max_rows=` refuse a
+        !! join rather than run out of memory during one.
+        module subroutine table_join_pairs(self, other, on, other_on, how, require, order, &
+                max_rows, il, ir, n_out, matched, threads)
+            class(parquet_table), intent(in) :: self  !! the LEFT table.
+            class(parquet_table), intent(in) :: other !! the RIGHT table.
+            character(len=*), intent(in) :: on(:)     !! left key columns, primary first.
+            !> right key columns; absent means the same names as `on`. One entry per `on` entry.
+            character(len=*), intent(in), optional :: other_on(:)
+            !> "inner" (default), "left", "right", "outer", "semi" or "anti", case-insensitive.
+            character(len=*), intent(in), optional :: how
+            !> "m:m" (default, no assertion), "1:1", "1:m" or "m:1" -- read left-side-first, so
+            !! "m:1" is the lookup-table annotation and asserts the RIGHT key is unique.
+            character(len=*), intent(in), optional :: require
+            !> "left" (default: left rows in their own order) or "key" (the sort's own order).
+            character(len=*), intent(in), optional :: order
+            !> abort rather than build an output larger than this. Absent means no limit.
+            integer(int64), intent(in), optional :: max_rows
+            integer(int64), allocatable, intent(out) :: il(:) !! per output row: left row, or 0.
+            integer(int64), allocatable, intent(out) :: ir(:) !! per output row: right row, or 0.
+            integer(int64), intent(out) :: n_out              !! output rows; equals size(il).
+            !> per PRE-join left row: .true. when it found at least one counterpart. The only
+            !! coordinate system in which that question still has an answer after the mutation.
+            logical, allocatable, intent(out), optional :: matched(:)
+            integer, intent(in), optional :: threads !! forwarded to pf_argsort; absent = auto.
+        end subroutine table_join_pairs
+        !> TEST-ONLY -- exposes `table_join_pairs` so the engine can be asserted before any
+        !! column is rewritten. The leading marker must NOT be written `TEST-ONLY:`: FORD reads a
+        !! doc-comment's first line beginning `word:` as a metadata key and warns about it --
+        !! which is why every other hook here opens with a dash too.
+        !!
+        !! **Temporary** -- `%join`'s own `pairs=` output supersedes it at S6 P3, and a second
+        !! route to the same arrays is a second thing to keep correct.
+        !!
+        !! Public for the reason every Fortran-side debug hook here is: the engine is a submodule
+        !! procedure reached through a private interface, so a test has no other way in. Unlike
+        !! the C++ `parquet_debug_*` hooks, which a test reaches through its own local `bind(C)`
+        !! interface, there is no such escape hatch on this side.
+        module subroutine parquet_debug_table_join_pairs(left, right, on, other_on, how, &
+                require, order, max_rows, il, ir, n_out, matched, threads)
+            type(parquet_table), intent(in) :: left   !! the LEFT table.
+            type(parquet_table), intent(in) :: right  !! the RIGHT table.
+            character(len=*), intent(in) :: on(:)     !! left key columns, primary first.
+            character(len=*), intent(in), optional :: other_on(:) !! right key columns.
+            character(len=*), intent(in), optional :: how         !! join kind.
+            character(len=*), intent(in), optional :: require     !! cardinality assertion.
+            character(len=*), intent(in), optional :: order       !! output ordering.
+            integer(int64), intent(in), optional :: max_rows      !! output-size ceiling.
+            integer(int64), allocatable, intent(out) :: il(:)     !! per output row: left row, or 0.
+            integer(int64), allocatable, intent(out) :: ir(:)     !! per output row: right row, or 0.
+            integer(int64), intent(out) :: n_out                  !! output rows.
+            logical, allocatable, intent(out), optional :: matched(:) !! per pre-join left row.
+            integer, intent(in), optional :: threads              !! thread request.
+        end subroutine parquet_debug_table_join_pairs
     end interface
     !
     ! ---- Row selection (parquet_tables_slice, and the per-kind copies in ..._access) ----

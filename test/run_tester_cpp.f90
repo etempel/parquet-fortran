@@ -46,6 +46,7 @@ program run_tester_cpp
     use test_table_codegen, only : collect_tests_table_codegen
     use test_table_container, only : collect_tests_table_container
     use test_table_parallel, only : collect_tests_table_parallel
+    use test_table_join, only : collect_tests_table_join
     use test_temporal_cpp, only : collect_tests_parquet_temporal_cpp
     use test_writing, only : collect_tests_parquet_writing
     use parquet_bindings, only : parquet_warmup_memory_pool
@@ -84,6 +85,7 @@ program run_tester_cpp
         new_testsuite("table_parallel", collect_tests_table_parallel), &
         new_testsuite("table_codegen", collect_tests_table_codegen), &
         new_testsuite("table_container", collect_tests_table_container), &
+        new_testsuite("table_join", collect_tests_table_join), &
         new_testsuite("container_nested", collect_tests_container_nested), &
         new_testsuite("settings", collect_tests_parquet_settings), &
         new_testsuite("module_surface", collect_tests_module_surface), &

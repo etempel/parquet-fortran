@@ -542,6 +542,10 @@ contains
         end do
     end subroutine extract_bool_ser
     !
+    ! `key_rows` was here, measuring a key's row count back from its own buffer. It was WRONG by
+    ! construction and is deliberately not replaced: the extractors allocate with a `max(n, 1)`
+    ! floor, so it could not tell a zero-row key from a one-row one, and every caller now passes
+    ! the count it already has. Do not reintroduce it -- see keys_append's interface.
     module procedure valid_from_mask
         integer(int64) :: k, m
         character(len=32) :: got_str, want_str

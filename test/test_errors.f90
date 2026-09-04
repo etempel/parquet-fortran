@@ -360,6 +360,20 @@ contains
                 test_sorting_column_vector_aborts), &
             new_unittest("sorting: matching two columns of different kinds aborts", &
                 test_sorting_match_kind_mismatch_aborts), &
+            new_unittest("join: joining a table to itself aborts", &
+                test_join_self_aborts), &
+            new_unittest("join: two key columns of different kinds abort", &
+                test_join_kind_mismatch_aborts), &
+            new_unittest("join: require='m:1' on a duplicate right key aborts", &
+                test_join_require_m1_aborts), &
+            new_unittest("join: exceeding max_rows aborts", &
+                test_join_max_rows_aborts), &
+            new_unittest("join: an unrecognized how= token aborts", &
+                test_join_bad_how_aborts), &
+            new_unittest("join: a mismatched other_on= length aborts", &
+                test_join_other_on_size_aborts), &
+            new_unittest("join: a join with no key aborts", &
+                test_join_no_key_aborts), &
             new_unittest("sorting: searching unsorted input aborts", &
                 test_sorting_search_unsorted_aborts), &
             new_unittest("sorting: an over-long search target aborts", &
@@ -7334,6 +7348,76 @@ contains
             failure_message="a partial argsort of an empty key list was expected to abort", &
             required_stderr="this pf_sort_keys has no key")
     end subroutine test_sorting_partial_keys_empty_i64_aborts
+
+    !> join abort path: see scenario_join_self in test/error_scenarios.f90 for what it
+    !> does, and for the negative control that keeps this assertion honest.
+    subroutine test_join_self_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_self", expect_abort=.true., &
+            failure_message="joining a table to itself was expected to abort", &
+            required_stderr="a table cannot be joined to itself")
+    end subroutine test_join_self_aborts
+
+    !> join abort path: see scenario_join_kind_mismatch in test/error_scenarios.f90 for what it
+    !> does, and for the negative control that keeps this assertion honest.
+    subroutine test_join_kind_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_kind_mismatch", expect_abort=.true., &
+            failure_message="joining an int32 key to an int64 key was expected to abort", &
+            required_stderr="a join compares like with like")
+    end subroutine test_join_kind_mismatch_aborts
+
+    !> join abort path: see scenario_join_require_m1 in test/error_scenarios.f90 for what it
+    !> does, and for the negative control that keeps this assertion honest.
+    subroutine test_join_require_m1_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_require_m1", expect_abort=.true., &
+            failure_message="a duplicate right key under require='m:1' was expected to abort", &
+            required_stderr="asserts the right key is unique")
+    end subroutine test_join_require_m1_aborts
+
+    !> join abort path: see scenario_join_max_rows in test/error_scenarios.f90 for what it
+    !> does, and for the negative control that keeps this assertion honest.
+    subroutine test_join_max_rows_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_max_rows", expect_abort=.true., &
+            failure_message="a join over its max_rows ceiling was expected to abort", &
+            required_stderr="over the max_rows=")
+    end subroutine test_join_max_rows_aborts
+
+    !> join abort path: see scenario_join_bad_how in test/error_scenarios.f90 for what it
+    !> does, and for the negative control that keeps this assertion honest.
+    subroutine test_join_bad_how_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_bad_how", expect_abort=.true., &
+            failure_message="an unrecognized how= token was expected to abort", &
+            required_stderr="is not one of 'inner', 'left'")
+    end subroutine test_join_bad_how_aborts
+
+    !> join abort path: see scenario_join_other_on_size in test/error_scenarios.f90 for what it
+    !> does, and for the negative control that keeps this assertion honest.
+    subroutine test_join_other_on_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_other_on_size", expect_abort=.true., &
+            failure_message="a short other_on= was expected to abort", &
+            required_stderr="it takes one right-hand key name per left-hand one")
+    end subroutine test_join_other_on_size_aborts
+
+    !> join abort path: see scenario_join_no_key in test/error_scenarios.f90 for what it
+    !> does, and for the negative control that keeps this assertion honest.
+    subroutine test_join_no_key_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_no_key", expect_abort=.true., &
+            failure_message="a keyless join was expected to abort", &
+            required_stderr="no join key was given")
+    end subroutine test_join_no_key_aborts
 
     !> pf_match abort path: see scenario_sorting_match_kind_mismatch in test/error_scenarios.f90
     !> for the promotion this refusal exists to prevent, and for its negative control.

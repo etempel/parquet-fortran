@@ -305,6 +305,10 @@ contains
         end do
     end subroutine sort_collect_keys
     !
+    module procedure table_lookup_sort_key
+        call sort_lookup_key(self, name, proc, idx)
+    end procedure table_lookup_sort_key
+    !
     !> Resolves one key name to its slot, refusing every column that cannot be a sort key.
     !!
     !! **A key column that has not been read yet is read here**, by the ordinary lazy first touch

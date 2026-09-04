@@ -370,6 +370,20 @@ contains
                 test_join_require_m1_aborts), &
             new_unittest("join: exceeding max_rows aborts", &
                 test_join_max_rows_aborts), &
+            new_unittest("join: max_rows= on the array key form, int32, aborts", &
+                test_join_max_rows_arr_i32_aborts), &
+            new_unittest("join: max_rows= on the array key form, int64, aborts", &
+                test_join_max_rows_arr_i64_aborts), &
+            new_unittest("join: max_rows= on the string key form, int32, aborts", &
+                test_join_max_rows_str_i32_aborts), &
+            new_unittest("join: max_rows= on the string key form, int64, aborts", &
+                test_join_max_rows_str_i64_aborts), &
+            new_unittest("join: require='1:m' on a duplicate left key aborts", &
+                test_join_require_1m_aborts), &
+            new_unittest("join: an unrecognized require= token aborts", &
+                test_join_bad_require_aborts), &
+            new_unittest("join: an unrecognized order= token aborts", &
+                test_join_bad_order_aborts), &
             new_unittest("join: an unrecognized how= token aborts", &
                 test_join_bad_how_aborts), &
             new_unittest("join: a mismatched other_on= length aborts", &
@@ -7406,6 +7420,78 @@ contains
             failure_message="a join over its max_rows ceiling was expected to abort", &
             required_stderr="over the max_rows=")
     end subroutine test_join_max_rows_aborts
+
+    !> join abort path: see scenario_join_max_rows_form in test/error_scenarios.f90 for what the
+    !> four of these do, and for why each of `%join`'s ceiling-carrying specifics needs its own.
+    subroutine test_join_max_rows_arr_i32_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_max_rows_arr_i32", &
+            expect_abort=.true., &
+            failure_message="an int32 max_rows= on the array key form was expected to abort", &
+            required_stderr="over the max_rows=")
+    end subroutine test_join_max_rows_arr_i32_aborts
+
+    !> join abort path: see scenario_join_max_rows_form in test/error_scenarios.f90.
+    subroutine test_join_max_rows_arr_i64_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_max_rows_arr_i64", &
+            expect_abort=.true., &
+            failure_message="an int64 max_rows= on the array key form was expected to abort", &
+            required_stderr="over the max_rows=")
+    end subroutine test_join_max_rows_arr_i64_aborts
+
+    !> join abort path: see scenario_join_max_rows_form in test/error_scenarios.f90.
+    subroutine test_join_max_rows_str_i32_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_max_rows_str_i32", &
+            expect_abort=.true., &
+            failure_message="an int32 max_rows= on the string key form was expected to abort", &
+            required_stderr="over the max_rows=")
+    end subroutine test_join_max_rows_str_i32_aborts
+
+    !> join abort path: see scenario_join_max_rows_form in test/error_scenarios.f90.
+    subroutine test_join_max_rows_str_i64_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_max_rows_str_i64", &
+            expect_abort=.true., &
+            failure_message="an int64 max_rows= on the string key form was expected to abort", &
+            required_stderr="over the max_rows=")
+    end subroutine test_join_max_rows_str_i64_aborts
+
+    !> join abort path: see scenario_join_require_1m in test/error_scenarios.f90 for what it
+    !> does, and for the negative control that keeps this assertion honest.
+    subroutine test_join_require_1m_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_require_1m", expect_abort=.true., &
+            failure_message="a duplicate left key under require='1:m' was expected to abort", &
+            required_stderr="asserts the left key is unique")
+    end subroutine test_join_require_1m_aborts
+
+    !> join abort path: see scenario_join_bad_require in test/error_scenarios.f90 for what it
+    !> does, and for the negative control that keeps this assertion honest.
+    subroutine test_join_bad_require_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_bad_require", &
+            expect_abort=.true., &
+            failure_message="an unrecognized require= token was expected to abort", &
+            required_stderr="is not one of 'm:m', '1:1'")
+    end subroutine test_join_bad_require_aborts
+
+    !> join abort path: see scenario_join_bad_order in test/error_scenarios.f90 for what it
+    !> does, and for the negative control that keeps this assertion honest.
+    subroutine test_join_bad_order_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_bad_order", expect_abort=.true., &
+            failure_message="an unrecognized order= token was expected to abort", &
+            required_stderr="is not one of 'left' or 'key'")
+    end subroutine test_join_bad_order_aborts
 
     !> join abort path: see scenario_join_bad_how in test/error_scenarios.f90 for what it
     !> does, and for the negative control that keeps this assertion honest.

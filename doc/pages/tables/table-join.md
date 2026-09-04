@@ -24,7 +24,8 @@ detaching — are the ones [Changing a table](table-mutate.html) sets out, and i
 ## The call
 
 ```fortran
-call t%join(other, on [, other_on] [, how] [, columns] [, other_suffix] [, threads])
+call t%join(other, on [, other_on] [, how] [, columns] [, other_suffix] &
+                     [, require] [, order] [, max_rows] [, matched] [, threads])
 ```
 
 Square brackets mark an optional argument, and the comma sits outside the bracket; every bracketed
@@ -38,6 +39,10 @@ array of names — the two forms behave identically, and `other_on` takes whiche
 | `how` | `"inner"` (the default) or `"left"`; see [Which rows come out](#which-rows-come-out) |
 | `columns` | which of `other`'s non-key columns to bring over; see [What the join carries](#what-the-join-carries) |
 | `other_suffix` | the suffix an incoming name takes when it clashes. Default `"_2"` |
+| `require` | the cardinality you expect: `"m:m"` (the default), `"1:1"`, `"1:m"` or `"m:1"`; see [Saying what you expect](#saying-what-you-expect) |
+| `order` | `"left"` (the default) or `"key"`; see [Which rows come out](#which-rows-come-out) |
+| `max_rows` | refuse the join rather than build a result larger than this |
+| `matched` | out: one entry per row of **this** table as it was before the join |
 | `threads` | forwarded to the sort the join runs. Absent resolves automatically |
 
 **`%join` changes this table in place**, and detaches it unless every one of its rows survives
@@ -66,9 +71,70 @@ both sides produce one row each.
 `other`'s original order. So an array you computed against this table before the join still lines
 up row for row whenever the join was one-to-at-most-one.
 
+`order="key"` asks for the engine's own order instead: the rows grouped by key value, which is what
+astropy's join produces. The same pairs come out either way and only the sequence differs, so the
+default is the one to keep unless the grouping itself is what you want — an array computed against
+this table before the join no longer lines up under `"key"`.
+
 `"right"`, `"outer"`, `"semi"` and `"anti"` are recognised names and are refused for now: they need
 a rewrite that can null-fill *this* table's own columns, or remove its rows, which `%join` does not
 do yet. Asking for one says so rather than doing something else.
+
+## Saying what you expect
+
+A join's worst failure is not an error. It is a result of the wrong size that nothing complains
+about — a duplicated row in a lookup table, and every matching row of a 100-million-row catalogue
+silently doubled. Three arguments exist for that, and all three are settled from the counting pass,
+before a single value column is touched, so a join that will not do what you meant is refused rather
+than half-built.
+
+**`require=` is the assertion, and it reads left-side-first.**
+
+| token | asserts | fails when |
+|---|---|---|
+| `"m:1"` | many rows here may share a key, and each finds at most one row in `other` | `other` repeats a key |
+| `"1:m"` | each key appears at most once in **this** table | this table repeats a key |
+| `"1:m"` and `"m:1"` together, as `"1:1"` | neither side repeats a key | either side does |
+| `"m:m"` | nothing. The default | never |
+
+`require="m:1"` is the annotation for every lookup-table join, and it is worth writing by reflex —
+it is what turns a duplicated row in the lookup table into a named error instead of a result many
+times the size you expected.
+
+```fortran
+call cat%join(lut, "uberID", how = "left", require = "m:1")
+!  a repeated uberID in lut is now an error at this call, naming the two rows that share it
+```
+
+The message names the two offending rows and how many share their key, on the side that broke the
+assertion — a row index is something you can look up, where a key may be several columns of several
+types. Rows whose key is **null** are not counted: a null key matches nothing, so several of them
+are several rows whose key is *unknown* rather than several copies of one key, and counting them
+would refuse a join that was about to be correct.
+
+**`max_rows=` is the weaker form**, for when you know the scale but not the cardinality. It refuses
+the join when the counted output would be larger, and the message names the count, both row counts
+and the largest single key group — because "the join wanted four billion rows" is not actionable
+without "one key value contributes 64 000 of them". There is no default limit, and none is planned:
+a limit that fires on a legitimate join is worse than no limit at all.
+
+```fortran
+call a%join(b, "id", max_rows = 10000000)          ! a plain integer, or 10000000_int64
+```
+
+**`matched=` is the diagnostic**, and it is one entry per row of this table **as it was on entry** —
+the only coordinate system in which "did my object find a counterpart?" still has an answer once the
+join has changed the rows. `count(matched)` is the line a cross-match script prints.
+
+```fortran
+logical, allocatable :: matched(:)
+
+call a%join(b, "object_id", how = "inner", matched = matched)
+write (*, "(a,i0,a,i0)") "matched ", count(matched), " of ", size(matched)
+```
+
+None of the three changes what the join produces when it is satisfied: `require=` and `max_rows=`
+either abort or do nothing at all, and `matched=` is read-only.
 
 ## When the join detaches, and when it does not
 
@@ -207,9 +273,13 @@ call parquet_open_table(b, "survey_b.parquet")
 call a%materialize_all()          ! how="inner" drops rows, so `a` detaches: read what you want
 call b%materialize("mag_r_ref,mag_r_err_ref")
 
-call a%join(b, on = "object_id", how = "inner")
-write (*, "(a,i0)") "objects in both surveys: ", a%nrows()
+call a%join(b, on = "object_id", how = "inner", require = "1:1", matched = matched)
+write (*, "(a,i0,a,i0)") "objects in both surveys: ", count(matched), " of ", size(matched)
 ```
+
+`require="1:1"` is the right assertion here rather than `"m:1"`: an object identifier is expected to
+be unique in *both* surveys, and a repeat in either one means the input is not what it was taken to
+be.
 
 **A lookup-table enrichment**, the shape most catalogue work has:
 
@@ -219,7 +289,8 @@ call parquet_open_table(lut, "todd.parquet")
 call cat%materialize("uberID,ra,dec")   ! the columns to keep through the detach
 call lut%materialize_all()              ! the lookup table is small
 
-call cat%join(lut, on = "uberID", how = "left")
+call cat%join(lut, on = "uberID", how = "left", require = "m:1")
+!  m:1, so no row of `cat` moves: it keeps its file, and `ra`/`dec` stay where they were.
 ```
 
 ## Limitations
@@ -230,5 +301,3 @@ call cat%join(lut, on = "uberID", how = "left")
 - A table cannot be joined to itself. `call t%clone(other)` first and join the clone — Fortran
   forbids one variable reaching a procedure as two arguments when either is written to, and no
   compiler diagnoses it, so `%join` refuses it explicitly.
-- `%join` always detaches this table, including the case where it keeps every row in its original
-  order.

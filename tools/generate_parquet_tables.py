@@ -998,10 +998,15 @@ def gen_table_type():
         !> Keeps only the n best rows, in key order. Detaching.
         generic :: top_n => table_top_n, table_top_n_string
         procedure, private :: table_join              !! %join specific, array of key names.
+        procedure, private :: table_join_max_i32      !! %join specific, array names, int32 max_rows.
+        procedure, private :: table_join_max_i64      !! %join specific, array names, int64 max_rows.
         procedure, private :: table_join_string       !! %join specific, separated key string.
+        procedure, private :: table_join_string_max_i32 !! %join specific, key string, int32 max_rows.
+        procedure, private :: table_join_string_max_i64 !! %join specific, key string, int64 max_rows.
         !> Matches another table's rows against this one's and brings its columns over. Detaching,
         !! unless every row of this table survives exactly once and in place.
-        generic :: join => table_join, table_join_string
+        generic :: join => table_join, table_join_max_i32, table_join_max_i64, &
+            table_join_string, table_join_string_max_i32, table_join_string_max_i64
         ! --- the ORDER, without applying it: read-only, and they do NOT detach ---
         procedure, private :: table_argsort_by_i32    !! %argsort_by specific, int32 permutation.
         procedure, private :: table_argsort_by_i64    !! %argsort_by specific, int64 permutation.
@@ -1300,6 +1305,146 @@ def wrap_list(names, indent, first_prefix=0):
 # --------------------------------------------------------------------------------------
 # Interface bodies (module spec)
 # --------------------------------------------------------------------------------------
+def join_interface(name, rank, mkind):
+    """One `%join` specific's interface body.
+
+    Six of them differ only in how `on` is spelled (an array of names or one separated string)
+    and whether they carry a `max_rows=` ceiling -- and, if they do, in its integer kind. That
+    three-by-two shape is forced rather than chosen: CLAUDE.md's dual-kind rule wants both kinds
+    for a row count, and an OPTIONAL dummy differing only by kind cannot disambiguate a generic
+    (a call omitting it matches both), so the ceiling is REQUIRED in four of the six and the
+    no-ceiling case is a specific of its own. Emitting them from one function is what keeps the
+    other eleven arguments from being written out six times and drifting.
+    """
+    o = []
+    a = o.append
+    if mkind is None and rank == "array":
+        a("""        !> Matches `other`'s rows against this table's on one or more key columns, keeps the rows
+        !! `how` asks for, and brings `other`'s columns over.
+        !!
+        !! **`%join` MUTATES this table**, and detaches it from its file unless the result holds
+        !! every one of its rows exactly once and in its original order -- which is a property of
+        !! the DATA, not of `how`: a left join keeps every left row, but keeps it once only when
+        !! each matched key is unique in `other`. On that path nothing is rewritten, no unread
+        !! column becomes unreadable, the file stays open, and `%generation()` moves only if the
+        !! new columns had to grow the slot array, which `%reserve_columns` lets a caller avoid --
+        !! so an outstanding `%col` pointer can survive the whole operation. `%is_detached()`
+        !! reports which of the two happened. `call t%clone(out)` first is the non-mutating form
+        !! and needs no separate API -- a clone copies only the columns that are resident, so on a
+        !! lazy table it is nearly free.
+        !!
+        !! **Keys are NAMES, not sort keys.** `on` takes one column name per key, primary first,
+        !! and a direction token (`"-id"`, `"id desc"`) is refused: a join is an equality test, and
+        !! ordering the keys is the engine's business. `other_on` names the right-hand columns when
+        !! they differ; absent means the same names. Two keys must have exactly the same kind and
+        !! width -- nothing is promoted, because an identifier above 2**53 does not survive being
+        !! promoted to a real, so cast one side with `%cast` first.
+        !!
+        !! **A null key matches nothing, including another null**, on either side; a NaN key is an
+        !! ordinary value and matches every other NaN, which for a column full of NaNs is a
+        !! cartesian product. Both are what `%sort_by` already means by "equal", because this runs
+        !! the same engine over the same keys.
+        !!
+        !! **`columns=` absent carries every column of `other` that is already RESIDENT -- not
+        !! every column it has.** A freshly opened right table has none, so a join given neither
+        !! `columns=` nor a prior `%materialize_all()` brings no payload across at all. Naming a
+        !! column DOES read it, by the ordinary lazy first touch. The same rule governs THIS
+        !! table on a join that DETACHES: a column of it that has not been read is skipped rather
+        !! than read, and is then gone -- so materialize what you need before one. A join that
+        !! keeps every row where it was reads and skips nothing, and leaves every unread column
+        !! exactly as readable as it was.
+        !!
+        !! **The key column appears once**, taken from this table, when `on` and `other_on` name
+        !! the same thing. When they differ both are kept, because the right key really is a
+        !! different column. Any other incoming name that clashes takes `other_suffix` (default
+        !! `"_2"`), and only the INCOMING column is renamed -- renaming a caller's own column as a
+        !! side effect of adding one is a surprise a mutating API has no business springing. A
+        !! suffixed name that still clashes is an error naming both.
+        !!
+        !! **`require=` is the assertion worth reaching for**, and it is read LEFT-SIDE-FIRST:
+        !! `require="m:1"` says many rows here may share a key but each of them finds at most one
+        !! row in `other`, which is the lookup-table annotation and the one join a caller is most
+        !! likely to get silently wrong. It is checked before anything is allocated, so a
+        !! duplicated row in a lookup table becomes a named error rather than a result 40 times
+        !! the expected size. `max_rows=` is the weaker form for a caller who knows only the
+        !! scale, and refuses the join on the count alone -- also before the allocation.
+        !!
+        !! **`matched=` is the diagnostic**: one entry per row of this table AS IT WAS ON ENTRY,
+        !! which is the only coordinate system in which "did my object find a counterpart?" still
+        !! has an answer once the join has mutated the table. `count(matched)` is what a
+        !! cross-match script prints.
+        !!
+        !! Rows come out in this table's original order, and within each, that row's matches in
+        !! `other`'s original order, unless `order="key"` asks for the engine's own (key) order
+        !! instead. An incoming column keeps its own `%unit`; `%get_file_metadata` still answers
+        !! about this table's own file.""")
+    elif rank == "array":
+        a("""        !> %join with an `integer(<KIND>)` `max_rows=`; see `table_join` for everything else.
+        !!
+        !! A specific of its own because the ceiling is REQUIRED here: an optional dummy differing
+        !! only by kind cannot disambiguate a generic, so `table_join` carries the no-ceiling case
+        !! and these two carry the kinds.""".replace("<KIND>", mkind))
+    elif mkind is None:
+        a("""        !> %join over a separated key string ("id" or "ra,dec"); see `table_join` for everything
+        !! else. `other_on` is a separated string here too, with one name per `on` name.""")
+    else:
+        a("""        !> %join over a separated key string with an `integer(<KIND>)` `max_rows=`; see
+        !! `table_join` for everything else, and `table_join_max_i32` for why the ceiling is a
+        !! specific rather than an optional argument.""".replace("<KIND>", mkind))
+    args = ["self", "other", "on", "other_on", "how", "columns", "other_suffix", "require",
+            "order"]
+    if mkind is not None:
+        args.append("max_rows")
+    args += ["matched", "threads"]
+    head = "        module subroutine " + name + "("
+    a(head + wrap_list(args, 16, first_prefix=len(head)) + ")")
+    a("            class(parquet_table), intent(inout) :: self !! the LEFT table; mutated in place.")
+    a("            class(parquet_table), intent(in) :: other   !! the RIGHT table; only read from.")
+    if rank == "array":
+        a("            character(len=*), intent(in) :: on(:)       !! left key columns, primary first.")
+        a("            !> right key columns; absent means the same names as `on`. One entry per `on` entry.")
+        a("            character(len=*), intent(in), optional :: other_on(:)")
+    else:
+        a("            character(len=*), intent(in) :: on          !! left key columns, separated; primary first.")
+        a("            character(len=*), intent(in), optional :: other_on !! right key columns, separated.")
+    if mkind is None and rank == "array":
+        a("""            !> `"inner"` (the default) or `"left"`, case-insensitive. `"right"`, `"outer"`,
+            !! `"semi"` and `"anti"` are recognised but not carried out yet and are refused.
+            character(len=*), intent(in), optional :: how
+            !> which of `other`'s non-key columns to bring over, separated by commas and/or
+            !! semicolons. Absent carries the ones already resident; see above, because this is
+            !! the argument a caller is most likely to be caught by.
+            character(len=*), intent(in), optional :: columns
+            !> suffix for an incoming column whose name clashes with one here. Default `"_2"`.
+            character(len=*), intent(in), optional :: other_suffix
+            !> `"m:m"` (the default, no assertion), `"1:1"`, `"1:m"` or `"m:1"`, case-insensitive
+            !! and read left-side-first -- so `"m:1"` asserts that `other`'s key is unique.
+            character(len=*), intent(in), optional :: require
+            !> `"left"` (the default: this table's rows in their own order) or `"key"` (the sort's
+            !! own order), case-insensitive.
+            character(len=*), intent(in), optional :: order""")
+    else:
+        a("            character(len=*), intent(in), optional :: how      !! join kind; see `table_join`.")
+        a("            character(len=*), intent(in), optional :: columns  !! payload columns; see `table_join`.")
+        a("            character(len=*), intent(in), optional :: other_suffix !! clash suffix; default \"_2\".")
+        a("            character(len=*), intent(in), optional :: require  !! cardinality assertion; see `table_join`.")
+        a("            character(len=*), intent(in), optional :: order    !! output ordering; see `table_join`.")
+    if mkind is not None:
+        a("            !> refuse the join rather than build a result with more rows than this. Checked")
+        a("            !! against the counted output size before anything proportional to it is allocated.")
+        a("            integer(<KIND>), intent(in) :: max_rows".replace("<KIND>", mkind))
+    if mkind is None and rank == "array":
+        a("""            !> per row of this table AS IT WAS ON ENTRY: .true. when that row found at least one
+            !! counterpart in `other`. The only coordinate system the question still has an answer
+            !! in once the join has run.
+            logical, allocatable, intent(out), optional :: matched(:)""")
+    else:
+        a("            logical, allocatable, intent(out), optional :: matched(:) !! see `table_join`.")
+    a("            integer, intent(in), optional :: threads    !! forwarded to the sort; absent = auto.")
+    a("        end subroutine " + name)
+    return "\n".join(o)
+
+
 def gen_spec_interfaces():
     o = []
     w = o.append
@@ -3767,83 +3912,15 @@ def gen_spec_interfaces():
     end interface""")
     w("    !")
     w("""    ! ---- The join (parquet_tables_join -- HAND-WRITTEN, not generated) ----
-    interface
-        !> Matches `other`'s rows against this table's on one or more key columns, keeps the rows
-        !! `how` asks for, and brings `other`'s columns over.
-        !!
-        !! **`%join` MUTATES this table**, and detaches it from its file unless the result holds
-        !! every one of its rows exactly once and in its original order -- which is a property of
-        !! the DATA, not of `how`: a left join keeps every left row, but keeps it once only when
-        !! each matched key is unique in `other`. On that path nothing is rewritten, no unread
-        !! column becomes unreadable, the file stays open, and `%generation()` moves only if the
-        !! new columns had to grow the slot array, which `%reserve_columns` lets a caller avoid --
-        !! so an outstanding `%col` pointer can survive the whole operation. `%is_detached()`
-        !! reports which of the two happened. `call t%clone(out)` first is the non-mutating form
-        !! and needs no separate API -- a clone copies only the columns that are resident, so on a
-        !! lazy table it is nearly free.
-        !!
-        !! **Keys are NAMES, not sort keys.** `on` takes one column name per key, primary first,
-        !! and a direction token (`"-id"`, `"id desc"`) is refused: a join is an equality test, and
-        !! ordering the keys is the engine's business. `other_on` names the right-hand columns when
-        !! they differ; absent means the same names. Two keys must have exactly the same kind and
-        !! width -- nothing is promoted, because an identifier above 2**53 does not survive being
-        !! promoted to a real, so cast one side with `%cast` first.
-        !!
-        !! **A null key matches nothing, including another null**, on either side; a NaN key is an
-        !! ordinary value and matches every other NaN, which for a column full of NaNs is a
-        !! cartesian product. Both are what `%sort_by` already means by "equal", because this runs
-        !! the same engine over the same keys.
-        !!
-        !! **`columns=` absent carries every column of `other` that is already RESIDENT -- not
-        !! every column it has.** A freshly opened right table has none, so a join given neither
-        !! `columns=` nor a prior `%materialize_all()` brings no payload across at all. Naming a
-        !! column DOES read it, by the ordinary lazy first touch. The same rule governs THIS
-        !! table on a join that DETACHES: a column of it that has not been read is skipped rather
-        !! than read, and is then gone -- so materialize what you need before one. A join that
-        !! keeps every row where it was reads and skips nothing, and leaves every unread column
-        !! exactly as readable as it was.
-        !!
-        !! **The key column appears once**, taken from this table, when `on` and `other_on` name
-        !! the same thing. When they differ both are kept, because the right key really is a
-        !! different column. Any other incoming name that clashes takes `other_suffix` (default
-        !! `"_2"`), and only the INCOMING column is renamed -- renaming a caller's own column as a
-        !! side effect of adding one is a surprise a mutating API has no business springing. A
-        !! suffixed name that still clashes is an error naming both.
-        !!
-        !! Rows come out in this table's original order, and within each, that row's matches in
-        !! `other`'s original order. An incoming column keeps its own `%unit`; `%get_file_metadata`
-        !! still answers about this table's own file.
-        module subroutine table_join(self, other, on, other_on, how, columns, other_suffix, threads)
-            class(parquet_table), intent(inout) :: self !! the LEFT table; mutated in place.
-            class(parquet_table), intent(in) :: other   !! the RIGHT table; only read from.
-            character(len=*), intent(in) :: on(:)       !! left key columns, primary first.
-            !> right key columns; absent means the same names as `on`. One entry per `on` entry.
-            character(len=*), intent(in), optional :: other_on(:)
-            !> `"inner"` (the default) or `"left"`, case-insensitive. `"right"`, `"outer"`,
-            !! `"semi"` and `"anti"` are recognised but not carried out yet and are refused.
-            character(len=*), intent(in), optional :: how
-            !> which of `other`'s non-key columns to bring over, separated by commas and/or
-            !! semicolons. Absent carries the ones already resident; see above, because this is
-            !! the argument a caller is most likely to be caught by.
-            character(len=*), intent(in), optional :: columns
-            !> suffix for an incoming column whose name clashes with one here. Default `"_2"`.
-            character(len=*), intent(in), optional :: other_suffix
-            integer, intent(in), optional :: threads    !! forwarded to the sort; absent = auto.
-        end subroutine table_join
-        !> %join over a separated key string ("id" or "ra,dec"); see `table_join` for everything
-        !! else. `other_on` is a separated string here too, with one name per `on` name.
-        module subroutine table_join_string(self, other, on, other_on, how, columns, &
-                other_suffix, threads)
-            class(parquet_table), intent(inout) :: self !! the LEFT table; mutated in place.
-            class(parquet_table), intent(in) :: other   !! the RIGHT table; only read from.
-            character(len=*), intent(in) :: on          !! left key columns, separated; primary first.
-            character(len=*), intent(in), optional :: other_on !! right key columns, separated.
-            character(len=*), intent(in), optional :: how      !! join kind; see `table_join`.
-            character(len=*), intent(in), optional :: columns  !! payload columns; see `table_join`.
-            character(len=*), intent(in), optional :: other_suffix !! clash suffix; default "_2".
-            integer, intent(in), optional :: threads    !! forwarded to the sort; absent = auto.
-        end subroutine table_join_string
-        !> Builds the join's PAIR LIST: which left row meets which right row, and how many rows
+    interface""")
+    for spec, rank, mkind in (("table_join", "array", None),
+                              ("table_join_max_i32", "array", "int32"),
+                              ("table_join_max_i64", "array", "int64"),
+                              ("table_join_string", "string", None),
+                              ("table_join_string_max_i32", "string", "int32"),
+                              ("table_join_string_max_i64", "string", "int64")):
+        w(join_interface(spec, rank, mkind))
+    w("""        !> Builds the join's PAIR LIST: which left row meets which right row, and how many rows
         !! the joined table will have. Does not touch a single value column.
         !!
         !! **This is the whole of the join's reasoning**, and it is deliberately separable from

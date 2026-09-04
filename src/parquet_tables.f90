@@ -925,10 +925,15 @@ module parquet_tables
         !> Keeps only the n best rows, in key order. Detaching.
         generic :: top_n => table_top_n, table_top_n_string
         procedure, private :: table_join              !! %join specific, array of key names.
+        procedure, private :: table_join_max_i32      !! %join specific, array names, int32 max_rows.
+        procedure, private :: table_join_max_i64      !! %join specific, array names, int64 max_rows.
         procedure, private :: table_join_string       !! %join specific, separated key string.
+        procedure, private :: table_join_string_max_i32 !! %join specific, key string, int32 max_rows.
+        procedure, private :: table_join_string_max_i64 !! %join specific, key string, int64 max_rows.
         !> Matches another table's rows against this one's and brings its columns over. Detaching,
         !! unless every row of this table survives exactly once and in place.
-        generic :: join => table_join, table_join_string
+        generic :: join => table_join, table_join_max_i32, table_join_max_i64, &
+            table_join_string, table_join_string_max_i32, table_join_string_max_i64
         ! --- the ORDER, without applying it: read-only, and they do NOT detach ---
         procedure, private :: table_argsort_by_i32    !! %argsort_by specific, int32 permutation.
         procedure, private :: table_argsort_by_i64    !! %argsort_by specific, int64 permutation.
@@ -6595,10 +6600,24 @@ module parquet_tables
         !! side effect of adding one is a surprise a mutating API has no business springing. A
         !! suffixed name that still clashes is an error naming both.
         !!
+        !! **`require=` is the assertion worth reaching for**, and it is read LEFT-SIDE-FIRST:
+        !! `require="m:1"` says many rows here may share a key but each of them finds at most one
+        !! row in `other`, which is the lookup-table annotation and the one join a caller is most
+        !! likely to get silently wrong. It is checked before anything is allocated, so a
+        !! duplicated row in a lookup table becomes a named error rather than a result 40 times
+        !! the expected size. `max_rows=` is the weaker form for a caller who knows only the
+        !! scale, and refuses the join on the count alone -- also before the allocation.
+        !!
+        !! **`matched=` is the diagnostic**: one entry per row of this table AS IT WAS ON ENTRY,
+        !! which is the only coordinate system in which "did my object find a counterpart?" still
+        !! has an answer once the join has mutated the table. `count(matched)` is what a
+        !! cross-match script prints.
+        !!
         !! Rows come out in this table's original order, and within each, that row's matches in
-        !! `other`'s original order. An incoming column keeps its own `%unit`; `%get_file_metadata`
-        !! still answers about this table's own file.
-        module subroutine table_join(self, other, on, other_on, how, columns, other_suffix, threads)
+        !! `other`'s original order, unless `order="key"` asks for the engine's own (key) order
+        !! instead. An incoming column keeps its own `%unit`; `%get_file_metadata` still answers
+        !! about this table's own file.
+        module subroutine table_join(self, other, on, other_on, how, columns, other_suffix, require, order, matched, threads)
             class(parquet_table), intent(inout) :: self !! the LEFT table; mutated in place.
             class(parquet_table), intent(in) :: other   !! the RIGHT table; only read from.
             character(len=*), intent(in) :: on(:)       !! left key columns, primary first.
@@ -6613,12 +6632,68 @@ module parquet_tables
             character(len=*), intent(in), optional :: columns
             !> suffix for an incoming column whose name clashes with one here. Default `"_2"`.
             character(len=*), intent(in), optional :: other_suffix
+            !> `"m:m"` (the default, no assertion), `"1:1"`, `"1:m"` or `"m:1"`, case-insensitive
+            !! and read left-side-first -- so `"m:1"` asserts that `other`'s key is unique.
+            character(len=*), intent(in), optional :: require
+            !> `"left"` (the default: this table's rows in their own order) or `"key"` (the sort's
+            !! own order), case-insensitive.
+            character(len=*), intent(in), optional :: order
+            !> per row of this table AS IT WAS ON ENTRY: .true. when that row found at least one
+            !! counterpart in `other`. The only coordinate system the question still has an answer
+            !! in once the join has run.
+            logical, allocatable, intent(out), optional :: matched(:)
             integer, intent(in), optional :: threads    !! forwarded to the sort; absent = auto.
         end subroutine table_join
+        !> %join with an `integer(int32)` `max_rows=`; see `table_join` for everything else.
+        !!
+        !! A specific of its own because the ceiling is REQUIRED here: an optional dummy differing
+        !! only by kind cannot disambiguate a generic, so `table_join` carries the no-ceiling case
+        !! and these two carry the kinds.
+        module subroutine table_join_max_i32(self, other, on, other_on, how, columns, other_suffix, require, order, max_rows, &
+                matched, threads)
+            class(parquet_table), intent(inout) :: self !! the LEFT table; mutated in place.
+            class(parquet_table), intent(in) :: other   !! the RIGHT table; only read from.
+            character(len=*), intent(in) :: on(:)       !! left key columns, primary first.
+            !> right key columns; absent means the same names as `on`. One entry per `on` entry.
+            character(len=*), intent(in), optional :: other_on(:)
+            character(len=*), intent(in), optional :: how      !! join kind; see `table_join`.
+            character(len=*), intent(in), optional :: columns  !! payload columns; see `table_join`.
+            character(len=*), intent(in), optional :: other_suffix !! clash suffix; default "_2".
+            character(len=*), intent(in), optional :: require  !! cardinality assertion; see `table_join`.
+            character(len=*), intent(in), optional :: order    !! output ordering; see `table_join`.
+            !> refuse the join rather than build a result with more rows than this. Checked
+            !! against the counted output size before anything proportional to it is allocated.
+            integer(int32), intent(in) :: max_rows
+            logical, allocatable, intent(out), optional :: matched(:) !! see `table_join`.
+            integer, intent(in), optional :: threads    !! forwarded to the sort; absent = auto.
+        end subroutine table_join_max_i32
+        !> %join with an `integer(int64)` `max_rows=`; see `table_join` for everything else.
+        !!
+        !! A specific of its own because the ceiling is REQUIRED here: an optional dummy differing
+        !! only by kind cannot disambiguate a generic, so `table_join` carries the no-ceiling case
+        !! and these two carry the kinds.
+        module subroutine table_join_max_i64(self, other, on, other_on, how, columns, other_suffix, require, order, max_rows, &
+                matched, threads)
+            class(parquet_table), intent(inout) :: self !! the LEFT table; mutated in place.
+            class(parquet_table), intent(in) :: other   !! the RIGHT table; only read from.
+            character(len=*), intent(in) :: on(:)       !! left key columns, primary first.
+            !> right key columns; absent means the same names as `on`. One entry per `on` entry.
+            character(len=*), intent(in), optional :: other_on(:)
+            character(len=*), intent(in), optional :: how      !! join kind; see `table_join`.
+            character(len=*), intent(in), optional :: columns  !! payload columns; see `table_join`.
+            character(len=*), intent(in), optional :: other_suffix !! clash suffix; default "_2".
+            character(len=*), intent(in), optional :: require  !! cardinality assertion; see `table_join`.
+            character(len=*), intent(in), optional :: order    !! output ordering; see `table_join`.
+            !> refuse the join rather than build a result with more rows than this. Checked
+            !! against the counted output size before anything proportional to it is allocated.
+            integer(int64), intent(in) :: max_rows
+            logical, allocatable, intent(out), optional :: matched(:) !! see `table_join`.
+            integer, intent(in), optional :: threads    !! forwarded to the sort; absent = auto.
+        end subroutine table_join_max_i64
         !> %join over a separated key string ("id" or "ra,dec"); see `table_join` for everything
         !! else. `other_on` is a separated string here too, with one name per `on` name.
-        module subroutine table_join_string(self, other, on, other_on, how, columns, &
-                other_suffix, threads)
+        module subroutine table_join_string(self, other, on, other_on, how, columns, other_suffix, require, order, matched, &
+                threads)
             class(parquet_table), intent(inout) :: self !! the LEFT table; mutated in place.
             class(parquet_table), intent(in) :: other   !! the RIGHT table; only read from.
             character(len=*), intent(in) :: on          !! left key columns, separated; primary first.
@@ -6626,8 +6701,51 @@ module parquet_tables
             character(len=*), intent(in), optional :: how      !! join kind; see `table_join`.
             character(len=*), intent(in), optional :: columns  !! payload columns; see `table_join`.
             character(len=*), intent(in), optional :: other_suffix !! clash suffix; default "_2".
+            character(len=*), intent(in), optional :: require  !! cardinality assertion; see `table_join`.
+            character(len=*), intent(in), optional :: order    !! output ordering; see `table_join`.
+            logical, allocatable, intent(out), optional :: matched(:) !! see `table_join`.
             integer, intent(in), optional :: threads    !! forwarded to the sort; absent = auto.
         end subroutine table_join_string
+        !> %join over a separated key string with an `integer(int32)` `max_rows=`; see
+        !! `table_join` for everything else, and `table_join_max_i32` for why the ceiling is a
+        !! specific rather than an optional argument.
+        module subroutine table_join_string_max_i32(self, other, on, other_on, how, columns, other_suffix, require, order, &
+                max_rows, matched, threads)
+            class(parquet_table), intent(inout) :: self !! the LEFT table; mutated in place.
+            class(parquet_table), intent(in) :: other   !! the RIGHT table; only read from.
+            character(len=*), intent(in) :: on          !! left key columns, separated; primary first.
+            character(len=*), intent(in), optional :: other_on !! right key columns, separated.
+            character(len=*), intent(in), optional :: how      !! join kind; see `table_join`.
+            character(len=*), intent(in), optional :: columns  !! payload columns; see `table_join`.
+            character(len=*), intent(in), optional :: other_suffix !! clash suffix; default "_2".
+            character(len=*), intent(in), optional :: require  !! cardinality assertion; see `table_join`.
+            character(len=*), intent(in), optional :: order    !! output ordering; see `table_join`.
+            !> refuse the join rather than build a result with more rows than this. Checked
+            !! against the counted output size before anything proportional to it is allocated.
+            integer(int32), intent(in) :: max_rows
+            logical, allocatable, intent(out), optional :: matched(:) !! see `table_join`.
+            integer, intent(in), optional :: threads    !! forwarded to the sort; absent = auto.
+        end subroutine table_join_string_max_i32
+        !> %join over a separated key string with an `integer(int64)` `max_rows=`; see
+        !! `table_join` for everything else, and `table_join_max_i32` for why the ceiling is a
+        !! specific rather than an optional argument.
+        module subroutine table_join_string_max_i64(self, other, on, other_on, how, columns, other_suffix, require, order, &
+                max_rows, matched, threads)
+            class(parquet_table), intent(inout) :: self !! the LEFT table; mutated in place.
+            class(parquet_table), intent(in) :: other   !! the RIGHT table; only read from.
+            character(len=*), intent(in) :: on          !! left key columns, separated; primary first.
+            character(len=*), intent(in), optional :: other_on !! right key columns, separated.
+            character(len=*), intent(in), optional :: how      !! join kind; see `table_join`.
+            character(len=*), intent(in), optional :: columns  !! payload columns; see `table_join`.
+            character(len=*), intent(in), optional :: other_suffix !! clash suffix; default "_2".
+            character(len=*), intent(in), optional :: require  !! cardinality assertion; see `table_join`.
+            character(len=*), intent(in), optional :: order    !! output ordering; see `table_join`.
+            !> refuse the join rather than build a result with more rows than this. Checked
+            !! against the counted output size before anything proportional to it is allocated.
+            integer(int64), intent(in) :: max_rows
+            logical, allocatable, intent(out), optional :: matched(:) !! see `table_join`.
+            integer, intent(in), optional :: threads    !! forwarded to the sort; absent = auto.
+        end subroutine table_join_string_max_i64
         !> Builds the join's PAIR LIST: which left row meets which right row, and how many rows
         !! the joined table will have. Does not touch a single value column.
         !!

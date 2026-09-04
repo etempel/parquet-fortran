@@ -4745,6 +4745,129 @@ def check_test_runner_partition():
     return problems
 
 
+JOIN_SPEC_FILE = SRC / "parquet_tables.f90"
+JOIN_BODY_FILE = SRC / "parquet_tables_join.f90"
+
+
+def _join_generic_specifics():
+    """The specific names behind `generic :: join => ...`, from the type body that declares it."""
+    if not JOIN_SPEC_FILE.exists():
+        return []
+    flat = re.sub(r"&\s*\n\s*", "", JOIN_SPEC_FILE.read_text())
+    found = re.search(r"generic :: join =>([^\n!]*)", flat)
+    if not found:
+        return []
+    return [n.strip() for n in found.group(1).split(",") if n.strip()]
+
+
+def _join_specific_interfaces(names):
+    """The named `module subroutine`s' dummy lists, as {name: [dummy names]}."""
+    flat = re.sub(r"&\s*\n\s*", "", JOIN_SPEC_FILE.read_text())
+    out = {}
+    for name in names:
+        found = re.search(r"module subroutine %s\(([^)]*)\)" % name, flat)
+        if found:
+            out[name] = [a.strip() for a in found.group(1).split(",") if a.strip()]
+    return out
+
+
+def _forwarding_calls(body):
+    """Each `call join_impl(...)`/`call join_from_strings(...)`'s argument text in one body.
+
+    Scanned with a paren counter rather than a `[^)]*` regex: `max_rows=int(max_rows, int64)`
+    nests, and a regex that stops at the first `)` reports the arguments after it as missing --
+    which is exactly the false alarm this check exists not to raise.
+    """
+    flat = re.sub(r"&\s*\n\s*", "", body)
+    out = []
+    for found in re.finditer(r"call (?:join_impl|join_from_strings)\(", flat):
+        k, depth = found.end(), 1
+        while k < len(flat) and depth > 0:
+            if flat[k] == "(":
+                depth += 1
+            elif flat[k] == ")":
+                depth -= 1
+            k += 1
+        out.append(flat[found.end():k - 1])
+    return out
+
+
+def check_join_specifics_forward_every_argument():
+    """`%join`'s six specifics must each pass on every argument they take.
+
+    They exist only because `max_rows=` needs both integer kinds and `on` has two spellings --
+    none of the six differs in BEHAVIOUR, so each is a three-line forward onto `join_impl` (or
+    onto `join_from_strings`, which forwards again). An argument silently dropped from one of
+    those lists is the hardest defect in the area to test for: `require=` and `max_rows=` are
+    observable only when they ABORT, so a ceiling that never arrives refuses nothing and every
+    in-process assertion about the result still holds. There are eight forwarding sites and one
+    error scenario can observe one abort, so covering them all by scenario is not proportionate.
+    Comparing each forward against its own interface is, and it does not go stale: both sides are
+    read out of the source.
+    """
+    if not JOIN_SPEC_FILE.exists() or not JOIN_BODY_FILE.exists():
+        return ["%s / %s: not found -- this check needs updating"
+                % (JOIN_SPEC_FILE, JOIN_BODY_FILE)]
+    names = _join_generic_specifics()
+    if len(names) < 2:
+        return ["%s: found %d specific(s) behind `generic :: join` -- this check has gone blind"
+                % (JOIN_SPEC_FILE.relative_to(REPO_ROOT), len(names))]
+    interfaces = _join_specific_interfaces(names)
+    missing = [n for n in names if n not in interfaces]
+    if missing:
+        return ["%s: no `module subroutine %s` interface found -- this check has gone blind"
+                % (JOIN_SPEC_FILE.relative_to(REPO_ROOT), n) for n in missing]
+    text = JOIN_BODY_FILE.read_text()
+    problems = []
+    seen = set()
+    for name, args in sorted(interfaces.items()):
+        found = re.search(r"^    module procedure %s\n(.*?)^    end procedure %s$"
+                          % (name, name), text, re.S | re.M)
+        if not found:
+            problems.append("%s: no `module procedure %s` body found -- this check has gone blind"
+                            % (JOIN_BODY_FILE.relative_to(REPO_ROOT), name))
+            continue
+        seen.add(name)
+        calls = _forwarding_calls(found.group(1))
+        if len(calls) != 1:
+            problems.append("%s: %s must forward through exactly one join_impl/join_from_strings "
+                            "call, found %d" % (JOIN_BODY_FILE.relative_to(REPO_ROOT), name,
+                                                len(calls)))
+            continue
+        for dummy in args:
+            if dummy in ("self", "other", "on"):
+                continue          # passed positionally, and checked by the compiler
+            if not re.search(r"\b%s\s*=" % dummy, calls[0]):
+                problems.append("%s: %s takes `%s` and does not forward it -- an argument dropped "
+                                "here is silent, see this check's docstring"
+                                % (JOIN_BODY_FILE.relative_to(REPO_ROOT), name, dummy))
+    if len(seen) != len(names):
+        problems.append("%s: matched %d of the %d specifics behind `generic :: join` -- this "
+                        "check has gone blind"
+                        % (JOIN_BODY_FILE.relative_to(REPO_ROOT), len(seen), len(names)))
+    # join_from_strings forwards a second time, in two branches, and both must be complete.
+    worker = re.search(r"^    subroutine join_from_strings\(([^)]*(?:&\s*\n\s*[^)]*)*)\)\n"
+                       r"(.*?)^    end subroutine join_from_strings$", text, re.S | re.M)
+    if not worker:
+        problems.append("%s: no `join_from_strings` found -- this check has gone blind"
+                        % JOIN_BODY_FILE.relative_to(REPO_ROOT))
+    else:
+        args = [a.strip() for a in re.sub(r"&\s*\n\s*", "", worker.group(1)).split(",")
+                if a.strip()]
+        calls = _forwarding_calls(worker.group(2))
+        if len(calls) != 2:
+            problems.append("%s: join_from_strings must forward in both of its other_on branches, "
+                            "found %d call(s)" % (JOIN_BODY_FILE.relative_to(REPO_ROOT), len(calls)))
+        for k, call in enumerate(calls):
+            for dummy in args:
+                if dummy in ("self", "other", "on", "other_on"):
+                    continue      # `on` is split into names first; `other_on` only in one branch
+                if not re.search(r"\b%s\s*=" % dummy, call):
+                    problems.append("%s: join_from_strings' branch %d does not forward `%s`"
+                                    % (JOIN_BODY_FILE.relative_to(REPO_ROOT), k + 1, dummy))
+    return problems
+
+
 CHECKS = (
     ("threads= is forwarded to every callee that takes it", check_threads_are_forwarded),
     ("generated table types forward every parquet_open_table argument",
@@ -4822,6 +4945,8 @@ CHECKS = (
     ("the affinity clamp's area names are documented", check_affinity_areas_documented),
     ("every %view call site declares its column target",
      check_view_call_sites_declare_target),
+    ("every %join specific forwards every argument it takes",
+     check_join_specifics_forward_every_argument),
 )
 
 

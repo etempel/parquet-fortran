@@ -4108,6 +4108,14 @@ covered before anyone updates the expectation. **The lesson beyond this check: a
 obvious place for a static check to go stale, and a regex encoding one binding's spelling is the
 non-obvious one.** Both were wrong here and only the first is the documented failure mode.
 
+**A third place a lint regex goes wrong is `[^)]*` over an argument list, and it fails LOUDLY rather
+than blindly — which is its own trap.** A forwarded argument list routinely contains a call
+(`max_rows=int(max_rows, int64)`), so a pattern that stops at the first `)` reports every argument
+after it as missing. The first run of `check_join_specifics_forward_every_argument` raised four such
+false alarms against correct code, which is exactly what a real defect looks like. Scan with a paren
+counter, and **verify a new check against a known-good tree before reading its first output as a
+finding**.
+
 **What the remaining checks found is worth the trouble: four real standard violations, all the
 same shape — a ZERO-SIZED thing referenced where the standard forbids it.** Each was invisible under
 gfortran, which no-ops all four:
@@ -5177,6 +5185,19 @@ Three things about doing it *here* specifically:
   destination, a zero-length input): an internal caller usually hits one shape only. Enumerate the
   argument's presence/absence and the destination's empty/non-empty states deliberately when adding
   the test, rather than testing the path the library happens to take.
+- **An argument that only FORWARDS through a layer is the one whose test is most likely vacuous,
+  and an ABORT-ONLY argument makes it worse.** The inner layer's own test passes whether or not the
+  outer layer passes the argument on, so a guard tested at the engine says nothing about the public
+  entry point that is supposed to reach it. When the argument's only observable is an `error stop` —
+  a ceiling, an assertion, a refusal — it gets worse in two ways: a ceiling that never arrives
+  *refuses nothing*, so every in-process assertion about the result still holds, and a process
+  aborts once, so **one error scenario can check exactly one forwarding site**. A generic with N
+  specifics therefore needs N scenarios, and a chain of workers behind them needs more still —
+  `%join`'s `require=` has eight forwarding sites. Measured here: dropping `max_rows=` from one of
+  four specifics survived the whole suite while the other three were covered. Count the sites
+  before assuming one scenario covers the argument; where the count makes scenarios
+  disproportionate, **compare each forward against its own dummy list statically**
+  (`check_join_specifics_forward_every_argument`) rather than trusting the shape.
 - **A surviving mutation is not automatically a coverage gap.** It may be *masked*: by a redundant
   sibling guard (removing either alone changes nothing — see `column_has_nulls_from_footer`'s
   `is_stats_set()`/`HasNullCount()` pair, where removing both segfaults), or by a later check that

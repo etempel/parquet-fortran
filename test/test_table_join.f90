@@ -99,7 +99,17 @@ contains
             new_unittest("a slice joined in place keeps its own rows and its own scope", &
                 test_join_no_detach_slice), &
             new_unittest("an incoming column keeps its own unit", &
-                test_join_units) &
+                test_join_units), &
+            new_unittest("matched= is one entry per PRE-join left row", &
+                test_join_applies_matched), &
+            new_unittest("order=key rewrites the columns in the engine's own order", &
+                test_join_applies_order_key), &
+            new_unittest("require= accepts every cardinality that holds and changes nothing", &
+                test_join_applies_require), &
+            new_unittest("max_rows= at exactly the output size is accepted, in both kinds", &
+                test_join_applies_max_rows), &
+            new_unittest("the string key form honours require=, order=, matched= and max_rows=", &
+                test_join_string_form_new_args) &
             ]
     end subroutine collect_tests_table_join
     !
@@ -1002,5 +1012,265 @@ contains
         call a%unit("mag", u)
         call check(error, u == "mag", "an incoming column must keep its own unit")
     end subroutine test_join_units
+
+    !
+    !> `%join(matched=)` answers over the rows this table had ON ENTRY, which is the only
+    !! coordinate system in which the question survives the mutation: a left join against `RKEY`
+    !! emits seven rows from five, so a mask sized to the RESULT could not say which of the five
+    !! found nothing.
+    !!
+    !! Checked twice on purpose. Against the ENGINE's own mask, which says the argument reaches
+    !! the engine at all -- a `%join` that quietly dropped it would return an unallocated mask,
+    !! and one that built its own would be a second answer to keep correct. And against the
+    !! literal expectation, which says the engine's answer is the right one. The literal is mixed,
+    !! so it is its own negative control: a mask filled with a constant fails it either way round.
+    subroutine test_join_applies_matched(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b
+        integer(int64), allocatable :: il(:), ir(:)
+        logical, allocatable :: want(:), got(:)
+        integer(int64) :: n_out
+        !
+        call build(a, "id", LKEY)
+        call build(b, "id", RKEY)
+        call parquet_debug_table_join_pairs(a, b, ["id"], how="left", il=il, ir=ir, &
+            n_out=n_out, matched=want)
+        call a%join(b, ["id"], how="left", matched=got)
+        call check(error, allocated(got), "%join must allocate matched= when it is asked for")
+        if (allocated(error)) return
+        call check(error, size(got, kind=int64) == size(LKEY, kind=int64), &
+            "matched= must hold one entry per PRE-join left row, not per output row")
+        if (allocated(error)) return
+        ! Without this the size assertion above proves nothing -- it would hold just as well for a
+        ! mask over the OUTPUT rows if the two counts happened to agree, which for this library's
+        ! other join fixture (LKEY against RKEY, inner) they do.
+        call check(error, a%nrows() /= size(LKEY, kind=int64), &
+            "the fixture must change the row count, or the size assertion above is satisfied twice")
+        if (allocated(error)) return
+        call check(error, all(got .eqv. want), &
+            "%join's matched= must be the engine's own, not a second computation of it")
+        if (allocated(error)) return
+        call check(error, all(got .eqv. [.false., .true., .false., .true., .true.]), &
+            "and must mark exactly the left rows whose key appears in the right table")
+    end subroutine test_join_applies_matched
+    !
+    !> `order="key"` reaches the column rewrite, not only the pair list: the joined table's rows
+    !! come out in the engine's own (key) order.
+    !!
+    !! The two orders hold the SAME pairs, so a comparison of row counts, or of any per-column
+    !! aggregate, is satisfied by both -- which is why this asserts the exact sequence each order
+    !! produces and then asserts that the two sequences DIFFER. Without that last check an
+    !! `order=` that never reached the engine would pass every assertion above it.
+    subroutine test_join_applies_order_key(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b, c
+        integer(int64), allocatable :: il(:), ir(:), lp(:), rp(:), lp2(:)
+        integer(int64) :: n_out, k
+        logical :: ok
+        !
+        call build(a, "id", LKEY)
+        call build(b, "id", RKEY)
+        call parquet_debug_table_join_pairs(a, b, ["id"], order="key", il=il, ir=ir, n_out=n_out)
+        call build(c, "id", LKEY)
+        call c%join(b, ["id"], order="key")
+        call check(error, c%nrows() == n_out, "order=key must emit the counted number of rows")
+        if (allocated(error)) return
+        call c%get("payload", lp)
+        call c%get("payload_2", rp)
+        ok = .true.
+        do k = 1_int64, n_out
+            if (lp(k) /= il(k)) ok = .false.
+            if (rp(k) /= ir(k)) ok = .false.
+        end do
+        call check(error, ok, "every row must carry left row il(k) beside right row ir(k)")
+        if (allocated(error)) return
+        ! The same join in the default order. Same pairs, different sequence -- and the difference
+        ! is the whole of what order= does, so it has to be asserted rather than assumed.
+        call build(c, "id", LKEY)
+        call c%join(b, ["id"])
+        call c%get("payload", lp2)
+        call check(error, size(lp2, kind=int64) == size(lp, kind=int64), &
+            "the two orderings must hold the same number of rows")
+        if (allocated(error)) return
+        call check(error, .not. all(lp2 == lp), &
+            "order=key must not leave the rows in the order order=left produces")
+    end subroutine test_join_applies_order_key
+    !
+    !> `require=` accepts every cardinality that actually holds, and changes nothing when it does.
+    !!
+    !! This is the negative control the assertion needs: the abort paths live in
+    !! `test/error_scenarios.f90` (`join_require_m1`, `join_require_1m`, `join_bad_require`), and
+    !! a check that fired unconditionally would pass every one of them. Each arm therefore joins
+    !! twice -- once with the assertion and once without -- and requires the two results to be
+    !! identical, which a `require=` that silently dropped rows or reordered them would fail.
+    !!
+    !! The last arm is the flagship shape: a file-backed left table, `how="left"`, a unique right
+    !! key, and `require="m:1"` -- the lookup-table join the guide page leads with. It must still
+    !! take the non-detaching path, because an assertion is not a mutation.
+    subroutine test_join_applies_require(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: f = "test_run/join_p5_require.parquet"
+        type(parquet_table) :: src, a, b, u, c
+        logical, allocatable :: m(:)
+        !
+        call build(b, "id", RKEY)
+        call build(u, "id", UKEY)
+        ! m:1 -- many rows here may share a key, each finds at most one there. UKEY has no
+        ! duplicate; LKEY repeats 10, which is exactly what "m" on the left permits.
+        call build(a, "id", LKEY)
+        call a%join(u, ["id"], how="left", require="m:1")
+        call build(c, "id", LKEY)
+        call c%join(u, ["id"], how="left")
+        call same_join(error, a, c, "require='m:1' on a unique right key")
+        if (allocated(error)) return
+        ! 1:m -- the mirror. LKEY(1:4) has no duplicate; RKEY repeats 10.
+        call build(a, "id", LKEY(1:4))
+        call a%join(b, ["id"], require="1:m")
+        call build(c, "id", LKEY(1:4))
+        call c%join(b, ["id"])
+        call same_join(error, a, c, "require='1:m' on a unique left key")
+        if (allocated(error)) return
+        ! 1:1 -- both at once, against a fixture where neither side repeats a matched key.
+        call build(a, "id", LKEY(1:4))
+        call a%join(u, ["id"], require="1:1")
+        call build(c, "id", LKEY(1:4))
+        call c%join(u, ["id"])
+        call same_join(error, a, c, "require='1:1' on two unique keys")
+        if (allocated(error)) return
+        ! m:m -- the default spelled out, over the fixture that violates all three others.
+        call build(a, "id", LKEY)
+        call a%join(b, ["id"], require="m:m")
+        call build(c, "id", LKEY)
+        call c%join(b, ["id"])
+        call same_join(error, a, c, "require='m:m' asserts nothing")
+        if (allocated(error)) return
+        ! The flagship: an assertion must not cost the non-detaching path.
+        call build(src, "id", LKEY)
+        call parquet_write_table(src, f, overwrite=.true.)
+        call parquet_open_table(a, f)
+        call a%join(u, "id", how="left", columns="payload", require="m:1", matched=m)
+        call check(error, .not. a%is_detached(), &
+            "require= must not stop a join that moves no row from keeping its file")
+        if (allocated(error)) return
+        call check(error, count(m) == 3, &
+            "and matched= must still report over the pre-join rows beside it")
+    end subroutine test_join_applies_require
+    !
+    !> Two joined tables hold the same rows: the row count, and both payload columns in order.
+    !!
+    !! Enough for the `require=`/`max_rows=` controls above, whose failure mode is a guard that
+    !! drops or duplicates rows rather than one that corrupts a value: `payload` is this table's
+    !! own row number and `payload_2` the other's, so the pair identifies the source row of every
+    !! output row exactly.
+    subroutine same_join(error, got, want, what)
+        type(error_type), allocatable, intent(out) :: error !! set when they differ.
+        type(parquet_table), intent(inout) :: got  !! the table joined with the argument under test.
+        type(parquet_table), intent(inout) :: want !! the same join without it.
+        character(len=*), intent(in) :: what       !! names the argument, for the message.
+        integer(int64), allocatable :: gl(:), gr(:), wl(:), wr(:)
+        !
+        call check(error, got%nrows() == want%nrows(), what // " must not change the row count")
+        if (allocated(error)) return
+        call got%get("payload", gl)
+        call got%get("payload_2", gr)
+        call want%get("payload", wl)
+        call want%get("payload_2", wr)
+        call check(error, all(gl == wl), what // " must not change which left rows are emitted")
+        if (allocated(error)) return
+        call check(error, all(gr == wr), what // " must not change which right rows are emitted")
+    end subroutine same_join
+    !
+    !> `max_rows=` at EXACTLY the output size is accepted, in both integer kinds.
+    !!
+    !! Two things at once, and neither is reachable from the abort scenario. The boundary pins the
+    !! comparison as `>` rather than `>=`, which is the one place an off-by-one would refuse a
+    !! join that fits. And writing the ceiling as a plain literal and again as `_int64` is what
+    !! exercises both specifics of the generic -- the whole reason there are six of them.
+    subroutine test_join_applies_max_rows(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b, c
+        integer(int64), allocatable :: il(:), ir(:)
+        logical, allocatable :: am(:), wm(:)
+        integer(int64) :: n_out
+        !
+        call build(a, "id", LKEY)
+        call build(b, "id", RKEY)
+        call parquet_debug_table_join_pairs(a, b, ["id"], il=il, ir=ir, n_out=n_out)
+        call check(error, n_out == 5_int64, &
+            "the fixture must emit five rows, or the literal ceilings below are not the boundary")
+        if (allocated(error)) return
+        call build(c, "id", LKEY)
+        call c%join(b, ["id"], how="left", require="m:m", order="key", matched=wm)
+        ! int32: a plain literal, which is the kind a caller reaches for without thinking about it.
+        ! Every other P5 argument travels with it, because a ceiling-carrying specific forwards
+        ! them on its own line and dropping one there is invisible to the tests that use the
+        ! ceiling-free specific -- which is every other test in this file.
+        call build(a, "id", LKEY)
+        call a%join(b, ["id"], how="left", require="m:m", order="key", max_rows=7, matched=am)
+        call same_join(error, a, c, "an int32 max_rows= beside the other three arguments")
+        if (allocated(error)) return
+        call check(error, all(am .eqv. wm), "the int32 ceiling's specific must forward matched=")
+        if (allocated(error)) return
+        ! int64: the kind a row count above 2**31 has to be written in.
+        call build(a, "id", LKEY)
+        call a%join(b, ["id"], how="left", require="m:m", order="key", max_rows=7_int64, matched=am)
+        call same_join(error, a, c, "an int64 max_rows= beside the other three arguments")
+        if (allocated(error)) return
+        call check(error, all(am .eqv. wm), "the int64 ceiling's specific must forward matched=")
+        if (allocated(error)) return
+        ! And at EXACTLY the inner join's five rows, in both kinds: the boundary is where an
+        ! off-by-one would refuse a join that fits.
+        call build(c, "id", LKEY)
+        call c%join(b, ["id"])
+        call build(a, "id", LKEY)
+        call a%join(b, ["id"], max_rows=5)
+        call same_join(error, a, c, "an int32 max_rows= at exactly the output size")
+        if (allocated(error)) return
+        call build(a, "id", LKEY)
+        call a%join(b, ["id"], max_rows=5_int64)
+        call same_join(error, a, c, "an int64 max_rows= at exactly the output size")
+    end subroutine test_join_applies_max_rows
+    !
+    !> The separated-string key form carries all four of P5's arguments through to the same place
+    !! the array form does, in both `max_rows=` kinds and with `other_on=` present and absent.
+    !!
+    !! The string specifics are a separate three-way split of the generic, each forwarding through
+    !! its own path, so a wiring gap here is invisible to every test above.
+    subroutine test_join_string_form_new_args(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b, r, c
+        logical, allocatable :: ms(:), ma(:)
+        !
+        call build(b, "id", RKEY)
+        call build(r, "rid", RKEY)
+        ! The array form's answer, with every P5 argument set.
+        call build(c, "id", LKEY)
+        call c%join(b, ["id"], how="left", require="m:m", order="key", matched=ma)
+        ! ... and the string form's, plus an int32 ceiling well clear of the seven rows emitted.
+        call build(a, "id", LKEY)
+        call a%join(b, "id", how="left", require="m:m", order="key", max_rows=99, matched=ms)
+        call same_join(error, a, c, "the string key form with require=, order= and max_rows=")
+        if (allocated(error)) return
+        call check(error, all(ms .eqv. ma), &
+            "the string form's matched= must be the array form's")
+        if (allocated(error)) return
+        ! The int64 ceiling, through the same path.
+        call build(a, "id", LKEY)
+        call a%join(b, "id", how="left", require="m:m", order="key", max_rows=99_int64)
+        call same_join(error, a, c, "the string key form with an int64 max_rows=")
+        if (allocated(error)) return
+        ! And with other_on= present, which is join_from_strings' other branch: two name splits
+        ! rather than one, and every optional argument forwarded across it.
+        call build(a, "id", LKEY)
+        call a%join(r, "id", other_on="rid", how="left", require="m:m", order="key", &
+            max_rows=99_int64, matched=ms)
+        call check(error, a%nrows() == c%nrows(), &
+            "a differing right key name must not change which rows are emitted")
+        if (allocated(error)) return
+        call check(error, all(ms .eqv. ma), "nor which pre-join left rows matched")
+        if (allocated(error)) return
+        call check(error, a%has_column("rid"), &
+            "and a right key whose name differs must arrive as a column of its own")
+    end subroutine test_join_string_form_new_args
 
 end module test_table_join

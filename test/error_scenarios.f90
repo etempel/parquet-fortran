@@ -864,6 +864,20 @@ program error_scenarios
         call scenario_join_require_m1()
     case ("join_max_rows")
         call scenario_join_max_rows()
+    case ("join_max_rows_arr_i32")
+        call scenario_join_max_rows_form(1)
+    case ("join_max_rows_arr_i64")
+        call scenario_join_max_rows_form(2)
+    case ("join_max_rows_str_i32")
+        call scenario_join_max_rows_form(3)
+    case ("join_max_rows_str_i64")
+        call scenario_join_max_rows_form(4)
+    case ("join_require_1m")
+        call scenario_join_require_1m()
+    case ("join_bad_require")
+        call scenario_join_bad_require()
+    case ("join_bad_order")
+        call scenario_join_bad_order()
     case ("join_bad_how")
         call scenario_join_bad_how()
     case ("join_other_on_size")
@@ -17639,6 +17653,88 @@ contains
         call parquet_debug_table_join_pairs(a, b, ["id"], max_rows=8_int64, il=il, ir=ir, n_out=n_out)
         print '(a,i0)', "unexpectedly built an over-sized join, rows=", n_out
     end subroutine scenario_join_max_rows
+
+    !> `max_rows=` reaches the counting pass from EACH of `%join`'s four ceiling-carrying
+    !! specifics: the array and separated-string key forms, in both integer kinds.
+    !!
+    !! **Four scenarios rather than one, because four entry points forward the same argument
+    !! independently and a forward that is simply missing is invisible to every in-process test.**
+    !! A ceiling that never arrives refuses nothing, so the join it was meant to stop succeeds and
+    !! every assertion about the result still holds; the abort is the only observable, and a
+    !! process can only abort once. Mutation confirmed it: dropping the argument from one specific
+    !! survived the whole suite while the other three were covered.
+    !!
+    !! Every form runs first at EXACTLY the nine rows the join emits, which is the negative
+    !! control -- and also pins the comparison as `>` rather than `>=`, the one place an
+    !! off-by-one would refuse a join that fits.
+    subroutine scenario_join_max_rows_form(form)
+        integer, intent(in) :: form !! 1 array/int32, 2 array/int64, 3 string/int32, 4 string/int64
+        type(parquet_table) :: a, b
+        call join_fixture(b, [10_int64, 10_int64, 10_int64])
+        call join_fixture(a, [10_int64, 10_int64, 10_int64])
+        call a%join(b, ["id"], max_rows=9)
+        call join_fixture(a, [10_int64, 10_int64, 10_int64])
+        call a%join(b, ["id"], max_rows=9_int64)
+        call join_fixture(a, [10_int64, 10_int64, 10_int64])
+        call a%join(b, "id", max_rows=9)
+        call join_fixture(a, [10_int64, 10_int64, 10_int64])
+        call a%join(b, "id", max_rows=9_int64)
+        print '(a,i0)', "every form ran at exactly its ceiling, rows=", a%nrows()
+        call join_fixture(a, [10_int64, 10_int64, 10_int64])
+        select case (form)
+        case (1)
+            call a%join(b, ["id"], max_rows=8)       ! -> aborts (9 rows over an 8-row ceiling)
+        case (2)
+            call a%join(b, ["id"], max_rows=8_int64) ! -> aborts
+        case (3)
+            call a%join(b, "id", max_rows=8)         ! -> aborts
+        case default
+            call a%join(b, "id", max_rows=8_int64)   ! -> aborts
+        end select
+        print '(a,i0)', "unexpectedly built an over-sized join, rows=", a%nrows()
+    end subroutine scenario_join_max_rows_form
+
+    !> `require="1:m"` asserts the LEFT key is unique -- the mirror of `join_require_m1`, and the
+    !! branch that scenario cannot reach, since the two sides are separate call sites. A left
+    !! table with no duplicate is the control.
+    subroutine scenario_join_require_1m()
+        type(parquet_table) :: a, b
+        call join_fixture(a, [10_int64, 20_int64])
+        call join_fixture(b, [10_int64, 10_int64])
+        call a%join(b, "id", require="1:m")
+        print '(a,i0)', "a unique left key satisfied require=1:m, rows=", a%nrows()
+        call join_fixture(a, [10_int64, 10_int64, 20_int64])
+        call a%join(b, "id", require="1:m")   ! -> aborts (two left rows share key 10)
+        print '(a,i0)', "unexpectedly accepted a duplicate left key, rows=", a%nrows()
+    end subroutine scenario_join_require_1m
+
+    !> An unrecognized `require=` token aborts naming every accepted value, rather than falling
+    !! back to no assertion -- which would be the worst available answer, since a caller who
+    !! wrote `require=` has said the cardinality matters. An upper-cased recognized token is the
+    !! control, and exercises the case folding at the same time.
+    subroutine scenario_join_bad_require()
+        type(parquet_table) :: a, b
+        call join_fixture(a, [10_int64, 20_int64, 10_int64])
+        call join_fixture(b, [10_int64, 20_int64])
+        call a%join(b, "id", require="M:1")
+        print '(a,i0)', "require=M:1 folded and ran, rows=", a%nrows()
+        call join_fixture(a, [10_int64, 20_int64, 10_int64])
+        call a%join(b, "id", require="1:2")   ! -> aborts (not one of the four tokens)
+        print '(a,i0)', "unexpectedly accepted require=1:2, rows=", a%nrows()
+    end subroutine scenario_join_bad_require
+
+    !> An unrecognized `order=` token aborts naming both accepted values rather than silently
+    !! leaving the default ordering in place. The upper-cased recognized token is the control.
+    subroutine scenario_join_bad_order()
+        type(parquet_table) :: a, b
+        call join_fixture(a, [10_int64, 20_int64])
+        call join_fixture(b, [10_int64, 20_int64])
+        call a%join(b, "id", order="KEY")
+        print '(a,i0)', "order=KEY folded and ran, rows=", a%nrows()
+        call join_fixture(a, [10_int64, 20_int64])
+        call a%join(b, "id", order="middle")   ! -> aborts (not 'left' or 'key')
+        print '(a,i0)', "unexpectedly accepted order=middle, rows=", a%nrows()
+    end subroutine scenario_join_bad_order
 
     !> An unrecognized `how=` token aborts naming every accepted value, rather than falling back
     !! to a default the caller did not ask for. A recognized token is the control.

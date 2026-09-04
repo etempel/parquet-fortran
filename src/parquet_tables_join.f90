@@ -96,6 +96,67 @@ contains
     end procedure parquet_debug_table_join_pairs
     !
     module procedure table_join
+        call join_impl(self, other, on, other_on=other_on, how=how, columns=columns, &
+            other_suffix=other_suffix, require=require, order=order, matched=matched, &
+            threads=threads)
+    end procedure table_join
+    !
+    module procedure table_join_max_i32
+        ! Widened here rather than given a worker of its own: `max_rows` is compared against a
+        ! row count, every int32 value is an int64 one, so the conversion cannot change what the
+        ! ceiling means. The two string forms below widen the same way.
+        call join_impl(self, other, on, other_on=other_on, how=how, columns=columns, &
+            other_suffix=other_suffix, require=require, order=order, &
+            max_rows=int(max_rows, int64), matched=matched, threads=threads)
+    end procedure table_join_max_i32
+    !
+    module procedure table_join_max_i64
+        call join_impl(self, other, on, other_on=other_on, how=how, columns=columns, &
+            other_suffix=other_suffix, require=require, order=order, max_rows=max_rows, &
+            matched=matched, threads=threads)
+    end procedure table_join_max_i64
+    !
+    module procedure table_join_string
+        call join_from_strings(self, other, on, other_on=other_on, how=how, columns=columns, &
+            other_suffix=other_suffix, require=require, order=order, matched=matched, &
+            threads=threads)
+    end procedure table_join_string
+    !
+    module procedure table_join_string_max_i32
+        call join_from_strings(self, other, on, other_on=other_on, how=how, columns=columns, &
+            other_suffix=other_suffix, require=require, order=order, &
+            max_rows=int(max_rows, int64), matched=matched, threads=threads)
+    end procedure table_join_string_max_i32
+    !
+    module procedure table_join_string_max_i64
+        call join_from_strings(self, other, on, other_on=other_on, how=how, columns=columns, &
+            other_suffix=other_suffix, require=require, order=order, max_rows=max_rows, &
+            matched=matched, threads=threads)
+    end procedure table_join_string_max_i64
+    !
+    !> The whole of `%join`, once the six specifics above have agreed on how `on` was spelled and
+    !! what kind the ceiling was written in.
+    !!
+    !! There are six of them because `max_rows=` has to exist in both integer kinds (CLAUDE.md's
+    !! dual-kind rule -- it bounds a row count) and an OPTIONAL dummy differing only by kind
+    !! cannot disambiguate a generic, so the ceiling is required in four and absent in two. None
+    !! of that is a difference in BEHAVIOUR, so none of it belongs below this line: every specific
+    !! is three statements long and this procedure is the only place the order of the phases is
+    !! written down.
+    subroutine join_impl(self, other, on, other_on, how, columns, other_suffix, require, order, &
+            max_rows, matched, threads)
+        class(parquet_table), intent(inout) :: self !! the LEFT table; mutated in place.
+        class(parquet_table), intent(in) :: other   !! the RIGHT table; only read from.
+        character(len=*), intent(in) :: on(:)       !! left key columns, primary first.
+        character(len=*), intent(in), optional :: other_on(:)  !! right key columns.
+        character(len=*), intent(in), optional :: how          !! join kind.
+        character(len=*), intent(in), optional :: columns      !! payload column list.
+        character(len=*), intent(in), optional :: other_suffix !! clash suffix; default "_2".
+        character(len=*), intent(in), optional :: require      !! cardinality assertion.
+        character(len=*), intent(in), optional :: order        !! output ordering.
+        integer(int64), intent(in), optional :: max_rows       !! output-size ceiling.
+        logical, allocatable, intent(out), optional :: matched(:) !! per PRE-join left row.
+        integer, intent(in), optional :: threads    !! forwarded to the sort; absent = auto.
         character(len=*), parameter :: PROC = "join"
         integer(int64), allocatable :: il(:), ir(:), ridx(:)
         logical, allocatable :: rvalid(:)
@@ -120,18 +181,36 @@ contains
         ! clashes -- and none of them is worth an O(n log n) sort first. It reads nothing.
         call join_plan_payload(self, other, on, other_on, columns, other_suffix, sslots, dnames)
         ! The engine. Every remaining refusal is here: the self-join, the key kinds and widths,
-        ! and any key column that cannot be a key at all.
-        call table_join_pairs(self, other, on, other_on=other_on, how=how, il=il, ir=ir, &
-            n_out=n_out, threads=threads)
+        ! any key column that cannot be a key at all, the `require=` assertion and the `max_rows=`
+        ! ceiling -- the last two both settled from the counting pass, so a join too big to build
+        ! is named rather than attempted. `matched=` is filled here for the same reason it is
+        ! documented as being over the PRE-join rows: this is the last point at which they exist.
+        call table_join_pairs(self, other, on, other_on=other_on, how=how, require=require, &
+            order=order, max_rows=max_rows, il=il, ir=ir, n_out=n_out, matched=matched, &
+            threads=threads)
         ! Reads the payload columns that are not resident yet -- AFTER the engine, so a join that
         ! was going to be refused does not read a column first. A column already resident, which
         ! is every column the `columns=`-absent default selects, returns immediately.
         call join_touch_payload(other, sslots)
         call join_gather_index(ir, n_out, ridx, rvalid)
         call join_apply(self, other, il, ridx, rvalid, n_out, sslots, dnames)
-    end procedure table_join
+    end subroutine join_impl
     !
-    module procedure table_join_string
+    !> The separated-string specifics' shared body: split each key string into names, then join.
+    subroutine join_from_strings(self, other, on, other_on, how, columns, other_suffix, &
+            require, order, max_rows, matched, threads)
+        class(parquet_table), intent(inout) :: self !! the LEFT table; mutated in place.
+        class(parquet_table), intent(in) :: other   !! the RIGHT table; only read from.
+        character(len=*), intent(in) :: on          !! left key columns, separated.
+        character(len=*), intent(in), optional :: other_on     !! right key columns, separated.
+        character(len=*), intent(in), optional :: how          !! join kind.
+        character(len=*), intent(in), optional :: columns      !! payload column list.
+        character(len=*), intent(in), optional :: other_suffix !! clash suffix; default "_2".
+        character(len=*), intent(in), optional :: require      !! cardinality assertion.
+        character(len=*), intent(in), optional :: order        !! output ordering.
+        integer(int64), intent(in), optional :: max_rows       !! output-size ceiling.
+        logical, allocatable, intent(out), optional :: matched(:) !! per PRE-join left row.
+        integer, intent(in), optional :: threads    !! forwarded to the sort; absent = auto.
         character(len=:), allocatable :: onames(:), ronames(:)
         !
         call join_split_names(on, "on", onames)
@@ -140,13 +219,15 @@ contains
         ! the right answer here but reads as an accident rather than a decision.
         if (present(other_on)) then
             call join_split_names(other_on, "other_on", ronames)
-            call table_join(self, other, onames, other_on=ronames, how=how, columns=columns, &
-                other_suffix=other_suffix, threads=threads)
+            call join_impl(self, other, onames, other_on=ronames, how=how, columns=columns, &
+                other_suffix=other_suffix, require=require, order=order, max_rows=max_rows, &
+                matched=matched, threads=threads)
         else
-            call table_join(self, other, onames, how=how, columns=columns, &
-                other_suffix=other_suffix, threads=threads)
+            call join_impl(self, other, onames, how=how, columns=columns, &
+                other_suffix=other_suffix, require=require, order=order, max_rows=max_rows, &
+                matched=matched, threads=threads)
         end if
-    end procedure table_join_string
+    end subroutine join_from_strings
     !
     !> Refuses a table joined to itself.
     !!

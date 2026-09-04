@@ -276,8 +276,6 @@ module parquet_tables
     public :: parquet_debug_table_set_inflight
     public :: parquet_debug_colread_block_rows
     public :: parquet_debug_table_drop_name_index
-    !> TEST-ONLY, and TEMPORARY -- it is removed when `%join`'s own `pairs=` output lands (S6 P3).
-    public :: parquet_debug_table_join_pairs
     !
     !> Error-message prefix for every `error stop` raised by this module.
     character(len=*), parameter :: EP = "parquet_table: "
@@ -1391,6 +1389,14 @@ def join_interface(name, rank, mkind):
         !! has an answer once the join has mutated the table. `count(matched)` is what a
         !! cross-match script prints.
         !!
+        !! **`pairs=` and `other_pairs=` hand back the match itself** -- one entry each per output
+        !! row, naming the row of this table (numbered as on entry, like `matched=`) and the row of
+        !! `other` that produced it, with **0 for "no counterpart on that side"**. That is the whole
+        !! intermediate representation the join reasons over, and it is what applies the same match
+        !! to something this table does not hold: an array of a derived type, a second table keyed
+        !! the same way. It is the shape `pf_spatial_index%pairs_within` already returns for the
+        !! positional case, and it costs nothing when not asked for.
+        !!
         !! Rows come out in this table's original order, and within each, that row's matches in
         !! `other`'s original order, unless `order="key"` asks for the engine's own (key) order
         !! instead. An incoming column keeps its own `%unit`; `%get_file_metadata` still answers
@@ -1412,7 +1418,7 @@ def join_interface(name, rank, mkind):
             "order"]
     if mkind is not None:
         args.append("max_rows")
-    args += ["matched", "threads"]
+    args += ["matched", "pairs", "other_pairs", "threads"]
     head = "        module subroutine " + name + "("
     a(head + wrap_list(args, 16, first_prefix=len(head)) + ")")
     a("            class(parquet_table), intent(inout) :: self !! the LEFT table; mutated in place.")
@@ -1455,9 +1461,19 @@ def join_interface(name, rank, mkind):
         a("""            !> per row of this table AS IT WAS ON ENTRY: .true. when that row found at least one
             !! counterpart in `other`. The only coordinate system the question still has an answer
             !! in once the join has run.
-            logical, allocatable, intent(out), optional :: matched(:)""")
+            logical, allocatable, intent(out), optional :: matched(:)
+            !> per output row: the row of THIS table that produced it, numbered as the rows were on
+            !! entry, or 0 when the output row has no counterpart here. The join's own
+            !! intermediate representation; see above.
+            integer(int64), allocatable, intent(out), optional :: pairs(:)
+            !> per output row: the row of `other` that produced it, or 0 when there is none.
+            !! `pairs`'s counterpart, and the same length.
+            integer(int64), allocatable, intent(out), optional :: other_pairs(:)""")
     else:
         a("            logical, allocatable, intent(out), optional :: matched(:) !! see `table_join`.")
+        a("            integer(int64), allocatable, intent(out), optional :: pairs(:) !! see `table_join`.")
+        a("            !> per output row: `other`'s row, or 0; see `table_join`.")
+        a("            integer(int64), allocatable, intent(out), optional :: other_pairs(:)")
     a("            integer, intent(in), optional :: threads    !! forwarded to the sort; absent = auto.")
     a("        end subroutine " + name)
     return "\n".join(o)
@@ -3974,34 +3990,6 @@ def gen_spec_interfaces():
             logical, allocatable, intent(out), optional :: matched(:)
             integer, intent(in), optional :: threads !! forwarded to pf_argsort; absent = auto.
         end subroutine table_join_pairs
-        !> TEST-ONLY -- exposes `table_join_pairs` so the engine can be asserted before any
-        !! column is rewritten. The leading marker must NOT be written `TEST-ONLY:`: FORD reads a
-        !! doc-comment's first line beginning `word:` as a metadata key and warns about it --
-        !! which is why every other hook here opens with a dash too.
-        !!
-        !! **Temporary** -- `%join`'s own `pairs=` output supersedes it at S6 P3, and a second
-        !! route to the same arrays is a second thing to keep correct.
-        !!
-        !! Public for the reason every Fortran-side debug hook here is: the engine is a submodule
-        !! procedure reached through a private interface, so a test has no other way in. Unlike
-        !! the C++ `parquet_debug_*` hooks, which a test reaches through its own local `bind(C)`
-        !! interface, there is no such escape hatch on this side.
-        module subroutine parquet_debug_table_join_pairs(left, right, on, other_on, how, &
-                require, order, max_rows, il, ir, n_out, matched, threads)
-            type(parquet_table), intent(in) :: left   !! the LEFT table.
-            type(parquet_table), intent(in) :: right  !! the RIGHT table.
-            character(len=*), intent(in) :: on(:)     !! left key columns, primary first.
-            character(len=*), intent(in), optional :: other_on(:) !! right key columns.
-            character(len=*), intent(in), optional :: how         !! join kind.
-            character(len=*), intent(in), optional :: require     !! cardinality assertion.
-            character(len=*), intent(in), optional :: order       !! output ordering.
-            integer(int64), intent(in), optional :: max_rows      !! output-size ceiling.
-            integer(int64), allocatable, intent(out) :: il(:)     !! per output row: left row, or 0.
-            integer(int64), allocatable, intent(out) :: ir(:)     !! per output row: right row, or 0.
-            integer(int64), intent(out) :: n_out                  !! output rows.
-            logical, allocatable, intent(out), optional :: matched(:) !! per pre-join left row.
-            integer, intent(in), optional :: threads              !! thread request.
-        end subroutine parquet_debug_table_join_pairs
     end interface""")
     w("    !")
     w("    ! ---- Row selection (parquet_tables_slice, and the per-kind copies in ..._access) ----")

@@ -89,16 +89,10 @@ contains
         end if
     end procedure table_join_pairs
     !
-    module procedure parquet_debug_table_join_pairs
-        call table_join_pairs(left, right, on, other_on=other_on, how=how, require=require, &
-            order=order, max_rows=max_rows, il=il, ir=ir, n_out=n_out, matched=matched, &
-            threads=threads)
-    end procedure parquet_debug_table_join_pairs
-    !
     module procedure table_join
         call join_impl(self, other, on, other_on=other_on, how=how, columns=columns, &
             other_suffix=other_suffix, require=require, order=order, matched=matched, &
-            threads=threads)
+            pairs=pairs, other_pairs=other_pairs, threads=threads)
     end procedure table_join
     !
     module procedure table_join_max_i32
@@ -107,31 +101,33 @@ contains
         ! ceiling means. The two string forms below widen the same way.
         call join_impl(self, other, on, other_on=other_on, how=how, columns=columns, &
             other_suffix=other_suffix, require=require, order=order, &
-            max_rows=int(max_rows, int64), matched=matched, threads=threads)
+            max_rows=int(max_rows, int64), matched=matched, pairs=pairs, &
+            other_pairs=other_pairs, threads=threads)
     end procedure table_join_max_i32
     !
     module procedure table_join_max_i64
         call join_impl(self, other, on, other_on=other_on, how=how, columns=columns, &
             other_suffix=other_suffix, require=require, order=order, max_rows=max_rows, &
-            matched=matched, threads=threads)
+            matched=matched, pairs=pairs, other_pairs=other_pairs, threads=threads)
     end procedure table_join_max_i64
     !
     module procedure table_join_string
         call join_from_strings(self, other, on, other_on=other_on, how=how, columns=columns, &
             other_suffix=other_suffix, require=require, order=order, matched=matched, &
-            threads=threads)
+            pairs=pairs, other_pairs=other_pairs, threads=threads)
     end procedure table_join_string
     !
     module procedure table_join_string_max_i32
         call join_from_strings(self, other, on, other_on=other_on, how=how, columns=columns, &
             other_suffix=other_suffix, require=require, order=order, &
-            max_rows=int(max_rows, int64), matched=matched, threads=threads)
+            max_rows=int(max_rows, int64), matched=matched, pairs=pairs, &
+            other_pairs=other_pairs, threads=threads)
     end procedure table_join_string_max_i32
     !
     module procedure table_join_string_max_i64
         call join_from_strings(self, other, on, other_on=other_on, how=how, columns=columns, &
             other_suffix=other_suffix, require=require, order=order, max_rows=max_rows, &
-            matched=matched, threads=threads)
+            matched=matched, pairs=pairs, other_pairs=other_pairs, threads=threads)
     end procedure table_join_string_max_i64
     !
     !> The whole of `%join`, once the six specifics above have agreed on how `on` was spelled and
@@ -144,7 +140,7 @@ contains
     !! is three statements long and this procedure is the only place the order of the phases is
     !! written down.
     subroutine join_impl(self, other, on, other_on, how, columns, other_suffix, require, order, &
-            max_rows, matched, threads)
+            max_rows, matched, pairs, other_pairs, threads)
         class(parquet_table), intent(inout) :: self !! the LEFT table; mutated in place.
         class(parquet_table), intent(in) :: other   !! the RIGHT table; only read from.
         character(len=*), intent(in) :: on(:)       !! left key columns, primary first.
@@ -156,6 +152,8 @@ contains
         character(len=*), intent(in), optional :: order        !! output ordering.
         integer(int64), intent(in), optional :: max_rows       !! output-size ceiling.
         logical, allocatable, intent(out), optional :: matched(:) !! per PRE-join left row.
+        integer(int64), allocatable, intent(out), optional :: pairs(:)       !! per output row.
+        integer(int64), allocatable, intent(out), optional :: other_pairs(:) !! per output row.
         integer, intent(in), optional :: threads    !! forwarded to the sort; absent = auto.
         character(len=*), parameter :: PROC = "join"
         integer(int64), allocatable :: il(:), ir(:)
@@ -199,11 +197,17 @@ contains
         ! is every column the `columns=`-absent default selects, returns immediately.
         call join_touch_payload(other, sslots)
         call join_apply(self, other, il, ir, n_out, sslots, dnames, mlslots, mrslots)
+        ! Handed over rather than copied, and AFTER the rewrite because the rewrite reads both.
+        ! `il`/`ir` are dead from here, so move_alloc makes `pairs=` cost nothing at all on a
+        ! join whose output is larger than either input -- which is the shape a caller asking
+        ! for the pair list is most likely to be in.
+        if (present(pairs)) call move_alloc(il, pairs)
+        if (present(other_pairs)) call move_alloc(ir, other_pairs)
     end subroutine join_impl
     !
     !> The separated-string specifics' shared body: split each key string into names, then join.
     subroutine join_from_strings(self, other, on, other_on, how, columns, other_suffix, &
-            require, order, max_rows, matched, threads)
+            require, order, max_rows, matched, pairs, other_pairs, threads)
         class(parquet_table), intent(inout) :: self !! the LEFT table; mutated in place.
         class(parquet_table), intent(in) :: other   !! the RIGHT table; only read from.
         character(len=*), intent(in) :: on          !! left key columns, separated.
@@ -215,6 +219,8 @@ contains
         character(len=*), intent(in), optional :: order        !! output ordering.
         integer(int64), intent(in), optional :: max_rows       !! output-size ceiling.
         logical, allocatable, intent(out), optional :: matched(:) !! per PRE-join left row.
+        integer(int64), allocatable, intent(out), optional :: pairs(:)       !! per output row.
+        integer(int64), allocatable, intent(out), optional :: other_pairs(:) !! per output row.
         integer, intent(in), optional :: threads    !! forwarded to the sort; absent = auto.
         character(len=:), allocatable :: onames(:), ronames(:)
         !
@@ -226,11 +232,11 @@ contains
             call join_split_names(other_on, "other_on", ronames)
             call join_impl(self, other, onames, other_on=ronames, how=how, columns=columns, &
                 other_suffix=other_suffix, require=require, order=order, max_rows=max_rows, &
-                matched=matched, threads=threads)
+                matched=matched, pairs=pairs, other_pairs=other_pairs, threads=threads)
         else
             call join_impl(self, other, onames, how=how, columns=columns, &
                 other_suffix=other_suffix, require=require, order=order, max_rows=max_rows, &
-                matched=matched, threads=threads)
+                matched=matched, pairs=pairs, other_pairs=other_pairs, threads=threads)
         end if
     end subroutine join_from_strings
     !
@@ -318,8 +324,8 @@ contains
     end subroutine join_check_left_containers
     !
     !> Checks the key-name arguments alone: how many there are, and that none of them is a SORT
-    !! key. Reached from both `%join` entry points and from `join_build_keys`, so the debug hook
-    !! and the public surface raise identical messages.
+    !! key. Reached from `join_impl` before the sort AND from `join_build_keys` inside it, so a
+    !! caller who reaches the engine by either route gets the identical message.
     subroutine join_check_key_args(on, other_on)
         character(len=*), intent(in) :: on(:)                 !! left key columns.
         character(len=*), intent(in), optional :: other_on(:) !! right key columns.
@@ -840,8 +846,8 @@ contains
         integer :: j, li, ri
         character(len=:), allocatable :: rname
         !
-        ! Also reached from %join before the sort, so the debug hook and the public entry point
-        ! raise the identical messages for the identical arguments.
+        ! Also called by join_impl before the sort, so a malformed key list is refused before an
+        ! O(n log n) sort as well as here, and both routes raise the identical message.
         call join_check_key_args(on, other_on)
         allocate(kc(size(on, kind=int64)))
         do j = 1, size(on)
@@ -927,16 +933,28 @@ contains
         allocate(lg_idx(max(nl, 0_int64)), rg_idx(max(nr, 0_int64)))
         lg_off(1) = 1_int64
         rg_off(1) = 1_int64
+        ! ONE pass, not two. `lg_off(g)` and `rg_off(g)` are already final when group `g` is
+        ! entered -- the previous iteration set them -- so each group can fill its own slice of
+        ! `lg_idx`/`rg_idx` as it counts, instead of a second walk re-reading `perm` afterwards.
+        ! `perm(t)` is a scattered read over nl+nr elements, so the second walk was a full extra
+        ! random-access pass over the whole concatenation; removing it is worth several percent
+        ! of the join on a high-cardinality key, where there is nearly one group per row.
         do g = 1_int64, ngroups
             cl = 0_int64
             cr = 0_int64
+            lc = lg_off(g) - 1_int64
+            rc = rg_off(g) - 1_int64
             do t = go(g), go(g + 1_int64) - 1_int64
                 p = perm(t)
                 if (p <= nl) then
                     cl = cl + 1_int64
                     group_of_left(p) = g
+                    lc = lc + 1_int64
+                    lg_idx(lc) = p
                 else
                     cr = cr + 1_int64
+                    rc = rc + 1_int64
+                    rg_idx(rc) = p - nl
                 end if
             end do
             nleft(g) = cl
@@ -955,20 +973,6 @@ contains
             rmatched(g) = (.not. isnull) .and. cl > 0_int64
             lg_off(g + 1_int64) = lg_off(g) + cl
             rg_off(g + 1_int64) = rg_off(g) + cr
-        end do
-        do g = 1_int64, ngroups
-            lc = lg_off(g) - 1_int64
-            rc = rg_off(g) - 1_int64
-            do t = go(g), go(g + 1_int64) - 1_int64
-                p = perm(t)
-                if (p <= nl) then
-                    lc = lc + 1_int64
-                    lg_idx(lc) = p
-                else
-                    rc = rc + 1_int64
-                    rg_idx(rc) = p - nl
-                end if
-            end do
         end do
     end subroutine join_classify
     !

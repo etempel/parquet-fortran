@@ -25,7 +25,8 @@ detaching — are the ones [Changing a table](table-mutate.html) sets out, and i
 
 ```fortran
 call t%join(other, on [, other_on] [, how] [, columns] [, other_suffix] &
-                     [, require] [, order] [, max_rows] [, matched] [, threads])
+                     [, require] [, order] [, max_rows] [, matched] &
+                     [, pairs] [, other_pairs] [, threads])
 ```
 
 Square brackets mark an optional argument, and the comma sits outside the bracket; every bracketed
@@ -36,13 +37,15 @@ array of names — the two forms behave identically, and `other_on` takes whiche
 |---|---|
 | `on` | the key columns of **this** table, primary first |
 | `other_on` | the key columns of `other`, when their names differ. One name per `on` name |
-| `how` | `"inner"` (the default) or `"left"`; see [Which rows come out](#which-rows-come-out) |
+| `how` | `"inner"` (the default), `"left"`, `"right"`, `"outer"`, `"semi"` or `"anti"`; see [Which rows come out](#which-rows-come-out) |
 | `columns` | which of `other`'s non-key columns to bring over; see [What the join carries](#what-the-join-carries) |
 | `other_suffix` | the suffix an incoming name takes when it clashes. Default `"_2"` |
 | `require` | the cardinality you expect: `"m:m"` (the default), `"1:1"`, `"1:m"` or `"m:1"`; see [Saying what you expect](#saying-what-you-expect) |
 | `order` | `"left"` (the default) or `"key"`; see [Which rows come out](#which-rows-come-out) |
 | `max_rows` | refuse the join rather than build a result larger than this |
 | `matched` | out: one entry per row of **this** table as it was before the join |
+| `pairs` | out: one entry per output row — the row of **this** table it came from, or 0; see [The match itself](#the-match-itself) |
+| `other_pairs` | out: the same for `other`'s rows |
 | `threads` | forwarded to the sort the join runs. Absent resolves automatically |
 
 **`%join` changes this table in place**, and detaches it unless every one of its rows survives
@@ -169,6 +172,44 @@ write (*, "(a,i0,a,i0)") "matched ", count(matched), " of ", size(matched)
 
 None of the three changes what the join produces when it is satisfied: `require=` and `max_rows=`
 either abort or do nothing at all, and `matched=` is read-only.
+
+## The match itself
+
+`pairs=` and `other_pairs=` hand back what the join worked from: one entry each per row of the
+result, naming the row of this table and the row of `other` that produced it, with **0 for "no
+counterpart on that side"**. Both are `integer(int64), allocatable`, both are the length of the
+joined table, and either can be asked for without the other.
+
+Both number the rows **as they were on entry**, like `matched=`. That is the point of them: by the
+time you read them the join has already rewritten this table, so an index into the rows it has *now*
+would answer a question nobody asked.
+
+This is what applies the same match to something the table does not hold — an array of a derived
+type, a second table keyed the same way, a file you are about to write beside this one:
+
+```fortran
+real(real64), allocatable :: exptime(:), joined(:)   ! parallel to `a`'s rows, but not columns of it
+integer(int64), allocatable :: il(:)
+integer(int64) :: k
+
+call a%join(b, "object_id", how = "left", pairs = il)
+allocate(joined(a%nrows()))
+joined = -1.0_real64
+do k = 1, a%nrows()
+    if (il(k) /= 0) joined(k) = exptime(il(k))        ! il(k) numbers the rows `a` had on entry
+end do
+```
+
+Under `how="inner"` and `how="left"` every output row has a left row, so `pairs` is never 0 there
+and the guard above is pure defence; it earns its place under `"right"` and `"outer"`, which can
+emit a row this table contributed nothing to. `other_pairs` is never 0 under `"inner"` and
+`"right"`, and is 0 on every row of a `"semi"` or `"anti"` join, which carry nothing from `other`
+at all.
+
+The same two arrays are what [`pf_spatial_index%pairs_within`](../utilities/spatial.html) returns
+for the positional case, so a positional cross-match and an exact-key one hand back the same shape,
+and code that consumes one consumes the other. Asking for neither costs nothing; asking for either
+costs nothing either, since the join hands its own arrays over rather than copying them.
 
 ## When the join detaches, and when it does not
 

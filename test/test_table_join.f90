@@ -2,14 +2,15 @@
 ! Author: Elmo Tempel (elmo.tempel@ut.ee)
 !===========================================
 !
-!> Unit tests for the JOIN: the engine (`table_join_pairs`, reached through the temporary
-!! `parquet_debug_table_join_pairs` hook) and `%join`'s own column rewrite on top of it.
+!> Unit tests for the JOIN: the engine (`table_join_pairs`, reached through `%join`'s own
+!! `pairs=`/`other_pairs=` output) and `%join`'s own column rewrite on top of it.
 !!
-!! **The engine is tested before any column is rewritten, and that separation is the point.**
-!! Everything that can make a join produce a silent wrong answer -- the null rule, the output
-!! count, the cardinality assertion, the ordering -- is arithmetic on row indices, so it can be
-!! asserted directly here rather than inferred from a joined table two phases later. When
-!! `%join`'s own `pairs=` output lands the hook goes away and these tests move onto it.
+!! **The engine is asserted over row indices, not over a joined table, and that separation is the
+!! point.** Everything that can make a join produce a silent wrong answer -- the null rule, the
+!! output count, the cardinality assertion, the ordering -- is arithmetic on row indices, so it
+!! can be asserted directly rather than inferred from the columns two phases later. `pairs=` is
+!! what makes that reachable without a test-only hook; `pairs_of` below is how these tests get
+!! at it without the mutation `%join` performs alongside.
 !!
 !! Three things shape the suite:
 !!
@@ -125,7 +126,11 @@ contains
             new_unittest("a right join onto an empty table gives all-null rows", &
                 test_join_right_empty_left), &
             new_unittest("a semi join that keeps every row does not detach; anti does", &
-                test_join_semi_no_detach) &
+                test_join_semi_no_detach), &
+            new_unittest("pairs= and other_pairs= name the rows the output was built from", &
+                test_join_pairs_output), &
+            new_unittest("pairs= can be asked for on its own, and costs the join nothing", &
+                test_join_pairs_alone) &
             ]
     end subroutine collect_tests_table_join
     !
@@ -145,6 +150,43 @@ contains
         call t%add_column(name, keys)
         call t%add_column("payload", payload)
     end subroutine build
+    !
+    !> The pair list `%join` worked from, read off a THROWAWAY CLONE of the left table.
+    !!
+    !! `%join` mutates its left table, and most tests below assert several joins over one
+    !! fixture -- so the clone is what keeps that fixture the constant it is meant to be. It is
+    !! also the non-mutating form the guide page tells a caller to use, so the engine assertions
+    !! exercise the documented idiom rather than a route of their own.
+    !!
+    !! `%join` is the ONLY way in: `table_join_pairs` is a submodule procedure behind a private
+    !! interface, so nothing here can call the engine directly, and a test-only hook that could
+    !! would be a second route to one pair list -- a second thing to keep correct, and public API
+    !! in `parquet_tables` for every user of the library, since a Fortran-side debug hook has
+    !! nowhere else to live.
+    !!
+    !! There is deliberately no `max_rows=` here: `%join`'s ceiling lives in REQUIRED dummies on
+    !! four of the six specifics, so an absent optional cannot be forwarded into one. The ceiling
+    !! is asserted where it belongs -- `test_join_applies_max_rows` and the four `join_max_rows_*`
+    !! error scenarios, each of which names its specific.
+    subroutine pairs_of(a, b, on, il, ir, n_out, other_on, how, order, require, matched)
+        type(parquet_table), intent(in) :: a  !! the LEFT table; cloned, never mutated.
+        type(parquet_table), intent(in) :: b  !! the RIGHT table.
+        character(len=*), intent(in) :: on(:) !! left key columns.
+        integer(int64), allocatable, intent(out) :: il(:) !! per output row: left row, or 0.
+        integer(int64), allocatable, intent(out) :: ir(:) !! per output row: right row, or 0.
+        integer(int64), intent(out) :: n_out  !! output rows; `size(il)`.
+        character(len=*), intent(in), optional :: other_on(:) !! right key columns.
+        character(len=*), intent(in), optional :: how     !! join kind.
+        character(len=*), intent(in), optional :: order   !! output ordering.
+        character(len=*), intent(in), optional :: require !! cardinality assertion.
+        logical, allocatable, intent(out), optional :: matched(:) !! per PRE-join left row.
+        type(parquet_table) :: w
+        !
+        call a%clone(w)
+        call w%join(b, on, other_on=other_on, how=how, order=order, require=require, &
+            matched=matched, pairs=il, other_pairs=ir)
+        n_out = size(il, kind=int64)
+    end subroutine pairs_of
     !
     !> Whether the pair list holds exactly `want`, in exactly that order.
     logical function seq_is(il, ir, want) result(ok)
@@ -174,7 +216,7 @@ contains
         !
         call build(a, "id", LKEY)
         call build(b, "id", RKEY)
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="inner", il=il, ir=ir, n_out=n_out)
+        call pairs_of(a, b, ["id"], il, ir, n_out, how="inner")
         ! Oracle: every (i, j) with LKEY(i) == RKEY(j), counted independently of the engine.
         want = 0_int64
         do i = 1_int64, size(LKEY, kind=int64)
@@ -215,33 +257,33 @@ contains
         !
         call build(a, "id", LKEY)
         call build(b, "id", RKEY)
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="left", il=il, ir=ir, n_out=n_out)
+        call pairs_of(a, b, ["id"], il, ir, n_out, how="left")
         call check(error, seq_is(il, ir, reshape([1_int64, 0_int64, 2_int64, 2_int64, &
             2_int64, 4_int64, 3_int64, 0_int64, 4_int64, 1_int64, 5_int64, 2_int64, &
             5_int64, 4_int64], [2, 7])), "how=left must keep every left row, matched or not")
         if (allocated(error)) return
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="right", il=il, ir=ir, n_out=n_out)
+        call pairs_of(a, b, ["id"], il, ir, n_out, how="right")
         call check(error, seq_is(il, ir, reshape([2_int64, 2_int64, 2_int64, 4_int64, &
             4_int64, 1_int64, 5_int64, 2_int64, 5_int64, 4_int64, 0_int64, 3_int64], [2, 6])), &
             "how=right must append the unmatched right rows in right-table order")
         if (allocated(error)) return
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="outer", il=il, ir=ir, n_out=n_out)
+        call pairs_of(a, b, ["id"], il, ir, n_out, how="outer")
         call check(error, seq_is(il, ir, reshape([1_int64, 0_int64, 2_int64, 2_int64, &
             2_int64, 4_int64, 3_int64, 0_int64, 4_int64, 1_int64, 5_int64, 2_int64, &
             5_int64, 4_int64, 0_int64, 3_int64], [2, 8])), &
             "how=outer must keep every row from both sides")
         if (allocated(error)) return
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="semi", il=il, ir=ir, n_out=n_out)
+        call pairs_of(a, b, ["id"], il, ir, n_out, how="semi")
         call check(error, seq_is(il, ir, reshape([2_int64, 0_int64, 4_int64, 0_int64, &
             5_int64, 0_int64], [2, 3])), &
             "how=semi must emit each matching left row ONCE, however many matches it has")
         if (allocated(error)) return
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="anti", il=il, ir=ir, n_out=n_out)
+        call pairs_of(a, b, ["id"], il, ir, n_out, how="anti")
         call check(error, seq_is(il, ir, reshape([1_int64, 0_int64, 3_int64, 0_int64], [2, 2])), &
             "how=anti must emit exactly the left rows with no counterpart")
         if (allocated(error)) return
         ! The default is "inner", and an unrecognized token aborts (a join_* error scenario).
-        call parquet_debug_table_join_pairs(a, b, ["id"], il=il, ir=ir, n_out=n_out)
+        call pairs_of(a, b, ["id"], il, ir, n_out)
         call check(error, n_out == 5_int64, "how= absent must mean inner")
     end subroutine test_join_how_variants
     !
@@ -256,7 +298,7 @@ contains
         ! Control first: with no nulls at all, all three rows match one-to-one.
         call build(a, "id", SAME)
         call build(b, "id", SAME)
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="inner", il=il, ir=ir, n_out=n_out)
+        call pairs_of(a, b, ["id"], il, ir, n_out, how="inner")
         call check(error, n_out == 3_int64, &
             "the control: three equal keys on each side must give three pairs")
         if (allocated(error)) return
@@ -265,18 +307,18 @@ contains
         ! are nulled below, null-vs-null.
         call a%set_null("id", 2_int64)
         call b%set_null("id", 3_int64)
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="inner", il=il, ir=ir, n_out=n_out)
+        call pairs_of(a, b, ["id"], il, ir, n_out, how="inner")
         call check(error, seq_is(il, ir, reshape([1_int64, 1_int64], [2, 1])), &
             "a null key must match nothing: only row 1 is valid on both sides")
         if (allocated(error)) return
         ! Null the SAME row on both sides: two nulls of what was the same value must not match.
         call b%set_null("id", 2_int64)
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="inner", il=il, ir=ir, n_out=n_out)
+        call pairs_of(a, b, ["id"], il, ir, n_out, how="inner")
         call check(error, seq_is(il, ir, reshape([1_int64, 1_int64], [2, 1])), &
             "two nulls must not match each other -- unknown is not equal to unknown")
         if (allocated(error)) return
         ! And a null-keyed left row is an UNMATCHED left row, not a dropped one.
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="left", il=il, ir=ir, n_out=n_out)
+        call pairs_of(a, b, ["id"], il, ir, n_out, how="left")
         call check(error, seq_is(il, ir, reshape([1_int64, 1_int64, 2_int64, 0_int64, &
             3_int64, 0_int64], [2, 3])), &
             "how=left must keep a null-keyed left row, with no counterpart")
@@ -286,7 +328,7 @@ contains
         ! whether a right row matched, so dropping the null test on that side is invisible to
         ! them -- confirmed by mutation. Right rows 2 and 3 are both null here (the null tier
         ! collects them whatever value they used to hold), so both must come back unmatched.
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="outer", il=il, ir=ir, n_out=n_out)
+        call pairs_of(a, b, ["id"], il, ir, n_out, how="outer")
         call check(error, seq_is(il, ir, reshape([1_int64, 1_int64, 2_int64, 0_int64, &
             3_int64, 0_int64, 0_int64, 2_int64, 0_int64, 3_int64], [2, 5])), &
             "a null-keyed RIGHT row must be reported as unmatched, not silently dropped")
@@ -308,15 +350,14 @@ contains
         !
         call build(a, "id", [10_int64, 20_int64])
         call build(b, "id", [20_int64, 99_int64, 10_int64, 40_int64])
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="right", il=il, ir=ir, n_out=n_out)
+        call pairs_of(a, b, ["id"], il, ir, n_out, how="right")
         call check(error, seq_is(il, ir, reshape([1_int64, 3_int64, 2_int64, 1_int64, &
             0_int64, 2_int64, 0_int64, 4_int64], [2, 4])), &
             "order=left must append the unmatched right rows in right-table order, not key order")
         if (allocated(error)) return
         ! order=key is where the other sequence is correct: each unmatched right row sits in its
         ! own group's place, so 40 precedes 99.
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="right", order="key", &
-            il=il, ir=ir, n_out=n_out)
+        call pairs_of(a, b, ["id"], il, ir, n_out, how="right", order="key")
         call check(error, seq_is(il, ir, reshape([1_int64, 3_int64, 2_int64, 1_int64, &
             0_int64, 4_int64, 0_int64, 2_int64], [2, 4])), &
             "order=key must place each unmatched right row in its own group's position")
@@ -332,8 +373,7 @@ contains
         !
         call build(a, "id", LKEY)
         call build(b, "id", RKEY)
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="inner", order="key", &
-            il=il, ir=ir, n_out=n_out)
+        call pairs_of(a, b, ["id"], il, ir, n_out, how="inner", order="key")
         call check(error, n_out == 5_int64, "order= must not change how many rows a join emits")
         if (allocated(error)) return
         ! Key order for this fixture: 10 (left rows 2 and 5) before 20 (left row 4). So the
@@ -360,8 +400,7 @@ contains
         !
         call build(a, "id", LKEY)
         call build(b, "id", RKEY)
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="inner", il=il, ir=ir, &
-            n_out=n_out, matched=matched)
+        call pairs_of(a, b, ["id"], il, ir, n_out, how="inner", matched=matched)
         call check(error, size(matched) == size(LKEY), &
             "matched= must have one entry per PRE-join left row, not per output row")
         if (allocated(error)) return
@@ -371,8 +410,7 @@ contains
         call check(error, count(matched) == 3, "three of the five left rows have a counterpart")
         if (allocated(error)) return
         ! It does not depend on `how`: the question is about the left table, not the output.
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="anti", il=il, ir=ir, &
-            n_out=n_out, matched=matched)
+        call pairs_of(a, b, ["id"], il, ir, n_out, how="anti", matched=matched)
         call check(error, all(matched .eqv. [.false., .true., .false., .true., .true.]), &
             "matched= must not depend on which rows the how= happened to emit")
     end subroutine test_join_matched
@@ -390,7 +428,7 @@ contains
         call parquet_new_table(b)
         call b%add_column("f", [1_int64, 2_int64, 1_int64])
         call b%add_column("g", [20_int64, 20_int64, 10_int64])
-        call parquet_debug_table_join_pairs(a, b, ["f", "g"], how="inner", il=il, ir=ir, n_out=n_out)
+        call pairs_of(a, b, ["f", "g"], il, ir, n_out, how="inner")
         ! (1,10) meets right row 3; (1,20) meets right row 1; (2,10) meets nothing -- right row 2
         ! is (2,20), which agrees on `f` alone and must NOT match.
         call check(error, seq_is(il, ir, reshape([1_int64, 3_int64, 2_int64, 1_int64], [2, 2])), &
@@ -398,7 +436,7 @@ contains
         if (allocated(error)) return
         ! The control: on `f` alone the same fixture matches far more widely, so the assertion
         ! above is about the second key rather than about the fixture being sparse.
-        call parquet_debug_table_join_pairs(a, b, ["f"], how="inner", il=il, ir=ir, n_out=n_out)
+        call pairs_of(a, b, ["f"], il, ir, n_out, how="inner")
         call check(error, n_out == 5_int64, "on `f` alone the same rows must match five ways")
     end subroutine test_join_multikey
     !
@@ -411,14 +449,13 @@ contains
         !
         call build(a, "id", LKEY)
         call build(b, "ref_id", RKEY)
-        call parquet_debug_table_join_pairs(a, b, ["id"], other_on=["ref_id"], how="inner", &
-            il=il, ir=ir, n_out=n_out)
+        call pairs_of(a, b, ["id"], il, ir, n_out, other_on=["ref_id"], how="inner")
         call check(error, n_out == 5_int64, "other_on= must resolve the right table's own name")
         if (allocated(error)) return
         ! Identical to the same-name join, which is the only way to show other_on= changed the
         ! lookup and nothing else.
         call build(b, "id", RKEY)
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="inner", il=il2, ir=ir2, n_out=n2)
+        call pairs_of(a, b, ["id"], il2, ir2, n2, how="inner")
         call check(error, n2 == n_out .and. all(il == il2) .and. all(ir == ir2), &
             "renaming the right key must not change a single emitted pair")
     end subroutine test_join_other_on
@@ -435,12 +472,11 @@ contains
         allocate(none(0))
         call build(a, "id", LKEY)
         call build(b, "id", none)
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="inner", il=il, ir=ir, n_out=n_out)
+        call pairs_of(a, b, ["id"], il, ir, n_out, how="inner")
         call check(error, n_out == 0_int64 .and. size(il) == 0, &
             "nothing can match against an empty right table")
         if (allocated(error)) return
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="left", il=il, ir=ir, &
-            n_out=n_out, matched=matched)
+        call pairs_of(a, b, ["id"], il, ir, n_out, how="left", matched=matched)
         call check(error, n_out == size(LKEY, kind=int64), &
             "how=left against an empty right table must keep every left row")
         if (allocated(error)) return
@@ -448,12 +484,12 @@ contains
         if (allocated(error)) return
         call build(a, "id", none)
         call build(b, "id", RKEY)
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="outer", il=il, ir=ir, n_out=n_out)
+        call pairs_of(a, b, ["id"], il, ir, n_out, how="outer")
         call check(error, n_out == size(RKEY, kind=int64), &
             "an empty left table under how=outer must leave the right rows unmatched")
         if (allocated(error)) return
         call build(b, "id", none)
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="outer", il=il, ir=ir, n_out=n_out)
+        call pairs_of(a, b, ["id"], il, ir, n_out, how="outer")
         call check(error, n_out == 0_int64, "two empty tables must join to nothing")
     end subroutine test_join_empty
     !
@@ -473,21 +509,18 @@ contains
         ! [30, 10, 99, 20, 10] repeat only on 10 -- which has no counterpart here.
         call build(a, "id", LKEY)
         call build(b, "id", [20_int64, 40_int64])
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="left", require="m:1", &
-            il=il, ir=ir, n_out=n_out)
+        call pairs_of(a, b, ["id"], il, ir, n_out, how="left", require="m:1")
         call check(error, n_out == 5_int64, "require='m:1' must accept a unique right key")
         if (allocated(error)) return
         ! Case folding, and the same assertion spelled the other way round.
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="left", require="M:1", &
-            il=il, ir=ir, n_out=n_out)
+        call pairs_of(a, b, ["id"], il, ir, n_out, how="left", require="M:1")
         call check(error, n_out == 5_int64, "require= must be matched case-insensitively")
         if (allocated(error)) return
         ! Two NULL right keys are not a duplicate key: neither can match anything.
         call build(b, "id", [20_int64, 40_int64, 50_int64])
         call b%set_null("id", 2_int64)
         call b%set_null("id", 3_int64)
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="left", require="m:1", &
-            il=il, ir=ir, n_out=n_out)
+        call pairs_of(a, b, ["id"], il, ir, n_out, how="left", require="m:1")
         call check(error, n_out == 5_int64, &
             "two null right keys must not trip require='m:1' -- neither can match anything")
         if (allocated(error)) return
@@ -495,7 +528,7 @@ contains
         ! abort is join_require_m1 in test/error_scenarios.f90; here we only prove the fixture
         ! above is one edit away from tripping it, by showing the duplicate really is joinable.
         call build(b, "id", [20_int64, 20_int64])
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="left", il=il, ir=ir, n_out=n_out)
+        call pairs_of(a, b, ["id"], il, ir, n_out, how="left")
         call check(error, n_out == 6_int64, &
             "the duplicate right key really does multiply the output when it is not refused")
     end subroutine test_join_require_ok
@@ -521,7 +554,7 @@ contains
         !
         call build(a, "id", LKEY)
         call build(b, "id", RKEY)
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="inner", il=il, ir=ir, n_out=n_out)
+        call pairs_of(a, b, ["id"], il, ir, n_out, how="inner")
         call build(c, "id", LKEY)
         gen = c%generation()
         call c%join(b, ["id"])
@@ -560,8 +593,8 @@ contains
         !
         call build(a, "id", LKEY)
         call build(b, "id", RKEY)
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="left", il=il, ir=ir, n_out=n_out)
-        call a%join(b, ["id"], how="left")
+        call a%join(b, ["id"], how="left", pairs=il, other_pairs=ir)
+        n_out = size(il, kind=int64)
         call check(error, a%nrows() == n_out, "a left join must emit the counted number of rows")
         if (allocated(error)) return
         call a%get("payload", lp)
@@ -1049,8 +1082,7 @@ contains
         !
         call build(a, "id", LKEY)
         call build(b, "id", RKEY)
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="left", il=il, ir=ir, &
-            n_out=n_out, matched=want)
+        call pairs_of(a, b, ["id"], il, ir, n_out, how="left", matched=want)
         call a%join(b, ["id"], how="left", matched=got)
         call check(error, allocated(got), "%join must allocate matched= when it is asked for")
         if (allocated(error)) return
@@ -1086,7 +1118,7 @@ contains
         !
         call build(a, "id", LKEY)
         call build(b, "id", RKEY)
-        call parquet_debug_table_join_pairs(a, b, ["id"], order="key", il=il, ir=ir, n_out=n_out)
+        call pairs_of(a, b, ["id"], il, ir, n_out, order="key")
         call build(c, "id", LKEY)
         call c%join(b, ["id"], order="key")
         call check(error, c%nrows() == n_out, "order=key must emit the counted number of rows")
@@ -1211,7 +1243,7 @@ contains
         !
         call build(a, "id", LKEY)
         call build(b, "id", RKEY)
-        call parquet_debug_table_join_pairs(a, b, ["id"], il=il, ir=ir, n_out=n_out)
+        call pairs_of(a, b, ["id"], il, ir, n_out)
         call check(error, n_out == 5_int64, &
             "the fixture must emit five rows, or the literal ceilings below are not the boundary")
         if (allocated(error)) return
@@ -1308,8 +1340,8 @@ contains
         !
         call build(a, "id", LKEY)
         call build(b, "id", RKEY)
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="right", il=il, ir=ir, n_out=n_out)
-        call a%join(b, ["id"], how="right")
+        call a%join(b, ["id"], how="right", pairs=il, other_pairs=ir)
+        n_out = size(il, kind=int64)
         call check(error, a%nrows() == n_out, "a right join must emit the counted number of rows")
         if (allocated(error)) return
         call check(error, a%ncols() == 3, "the merged key must leave three columns, not four")
@@ -1360,18 +1392,18 @@ contains
         !
         call build(a, "id", LKEY)
         call build(b, "id", RKEY)
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="inner", il=il, ir=ir, n_out=n_inner)
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="left", il=il, ir=ir, n_out=n_left)
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="right", il=il, ir=ir, n_out=n_right)
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="outer", il=il, ir=ir, n_out=n_outer)
+        call pairs_of(a, b, ["id"], il, ir, n_inner, how="inner")
+        call pairs_of(a, b, ["id"], il, ir, n_left, how="left")
+        call pairs_of(a, b, ["id"], il, ir, n_right, how="right")
+        call pairs_of(a, b, ["id"], il, ir, n_outer, how="outer")
         call check(error, n_inner < n_left .and. n_inner < n_right, &
             "the fixture must have an unmatched row on each side, or the identity below is trivial")
         if (allocated(error)) return
         call check(error, n_outer == n_left + n_right - n_inner, &
             "outer must hold the pairs once and each side's unmatched rows once")
         if (allocated(error)) return
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="outer", il=il, ir=ir, n_out=n_outer)
-        call a%join(b, ["id"], how="outer")
+        call a%join(b, ["id"], how="outer", pairs=il, other_pairs=ir)
+        n_outer = size(il, kind=int64)
         call check(error, a%nrows() == n_outer, "an outer join must emit the counted rows")
         if (allocated(error)) return
         call check(error, outer_rows_ok(a, il, ir, n_outer, seen_l, seen_r), &
@@ -1385,9 +1417,8 @@ contains
         ! built at all: a fix that patched a contiguous range would pass the arm above and fail
         ! this one, so the two together are what pin the index-based rebuild.
         call build(a, "id", LKEY)
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="outer", order="key", &
-            il=il, ir=ir, n_out=n_outer)
-        call a%join(b, ["id"], how="outer", order="key")
+        call a%join(b, ["id"], how="outer", order="key", pairs=il, other_pairs=ir)
+        n_outer = size(il, kind=int64)
         call check(error, a%nrows() == n_outer, "order=key must not change how many rows come out")
         if (allocated(error)) return
         call check(error, il(1) == 0_int64 .or. ir(1) == 0_int64 .or. il(n_outer) /= 0_int64, &
@@ -1496,9 +1527,8 @@ contains
         !
         call build(a, "id", LKEY)
         call build(b, "rid", RKEY)
-        call parquet_debug_table_join_pairs(a, b, ["id"], other_on=["rid"], how="right", &
-            il=il, ir=ir, n_out=n_out)
-        call a%join(b, ["id"], other_on=["rid"], how="right")
+        call a%join(b, ["id"], other_on=["rid"], how="right", pairs=il, other_pairs=ir)
+        n_out = size(il, kind=int64)
         call check(error, a%nrows() == n_out, "a right join must emit the counted number of rows")
         if (allocated(error)) return
         call check(error, a%ncols() == 4, &
@@ -1591,4 +1621,111 @@ contains
             "and having dropped every row, it must detach like any other row mutation")
     end subroutine test_join_semi_no_detach
 
+    !> `pairs=`/`other_pairs=` name the rows of the two tables AS THEY WERE ON ENTRY.
+    !!
+    !! That is the whole contract, and it is the one a caller applying the same match to an array
+    !! the table does not hold depends on: by the time they read `pairs`, `%join` has already
+    !! rewritten the left table, so an index into the POST-join rows would be useless and, worse,
+    !! would look plausible. The payload column is `k` at pre-join row `k`, which is what pins the
+    !! numbering rather than merely being consistent with it.
+    !!
+    !! `matched=` is the independent cross-check: two separate outputs of one call, computed by
+    !! different passes, have to agree about which left rows found a counterpart. Neither can be
+    !! satisfied by the other being wrong the same way.
+    subroutine test_join_pairs_output(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b
+        integer(int64), allocatable :: il(:), ir(:), lp(:), rp(:)
+        logical, allocatable :: m(:), seen(:)
+        integer(int64) :: n, k
+        logical :: ok, seen_l0, seen_r0
+        !
+        call build(a, "id", LKEY)
+        call build(b, "id", RKEY)
+        call a%join(b, ["id"], how="outer", pairs=il, other_pairs=ir, matched=m)
+        n = a%nrows()
+        call check(error, allocated(il) .and. allocated(ir), &
+            "%join must allocate both halves of the pair list when they are asked for")
+        if (allocated(error)) return
+        call check(error, size(il, kind=int64) == n .and. size(ir, kind=int64) == n, &
+            "both halves must hold one entry per row of the joined table")
+        if (allocated(error)) return
+        ! Every index is in range for the table it names, or 0.
+        ok = .true.
+        seen_l0 = .false.
+        seen_r0 = .false.
+        do k = 1_int64, n
+            if (il(k) < 0_int64 .or. il(k) > size(LKEY, kind=int64)) ok = .false.
+            if (ir(k) < 0_int64 .or. ir(k) > size(RKEY, kind=int64)) ok = .false.
+            if (il(k) == 0_int64) seen_l0 = .true.
+            if (ir(k) == 0_int64) seen_r0 = .true.
+        end do
+        call check(error, ok, "every pair index must name a row of its own table, or be 0")
+        if (allocated(error)) return
+        call check(error, seen_l0 .and. seen_r0, &
+            "the fixture must contain an unmatched row on EACH side, or the 0 convention is " // &
+            "untested on one of them")
+        if (allocated(error)) return
+        ! The numbering is the PRE-join one: payload was k at pre-join row k on both sides.
+        call a%get("payload", lp)
+        call a%get("payload_2", rp)
+        ok = .true.
+        do k = 1_int64, n
+            if (il(k) == 0_int64) then
+                if (.not. a%is_null("payload", k)) ok = .false.
+            else if (lp(k) /= il(k)) then
+                ok = .false.
+            end if
+            if (ir(k) == 0_int64) then
+                if (.not. a%is_null("payload_2", k)) ok = .false.
+            else if (rp(k) /= ir(k)) then
+                ok = .false.
+            end if
+        end do
+        call check(error, ok, &
+            "output row k must carry pre-join left row pairs(k) beside right row other_pairs(k)")
+        if (allocated(error)) return
+        ! Cross-check against matched=, which the counting pass fills independently.
+        allocate(seen(size(LKEY)))
+        seen = .false.
+        do k = 1_int64, n
+            if (il(k) /= 0_int64 .and. ir(k) /= 0_int64) seen(il(k)) = .true.
+        end do
+        call check(error, all(seen .eqv. m), &
+            "a left row is matched= exactly when the pair list gives it a counterpart")
+    end subroutine test_join_pairs_output
+    !
+    !> Either half can be asked for alone, and asking changes nothing about the joined table.
+    !!
+    !! Both are handed over with `move_alloc` after the rewrite rather than copied, so a caller
+    !! who wants only one still gets it -- and a caller who wants neither pays nothing. The
+    !! same-table comparison is what says the request is inert: without it, a `pairs=` that
+    !! quietly reordered the output would satisfy every assertion above.
+    subroutine test_join_pairs_alone(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b, c, d
+        integer(int64), allocatable :: il(:), ir(:), both_l(:), both_r(:)
+        !
+        call build(b, "id", RKEY)
+        call build(a, "id", LKEY)
+        call a%join(b, ["id"], how="left", pairs=il)
+        call build(c, "id", LKEY)
+        call c%join(b, ["id"], how="left", other_pairs=ir)
+        call build(d, "id", LKEY)
+        call d%join(b, ["id"], how="left", pairs=both_l, other_pairs=both_r)
+        call check(error, allocated(il) .and. allocated(ir), &
+            "each half must be allocated by a call that asked for it alone")
+        if (allocated(error)) return
+        call check(error, size(il, kind=int64) == size(both_l, kind=int64) .and. &
+            all(il == both_l), "pairs= alone must hold what it holds beside other_pairs=")
+        if (allocated(error)) return
+        call check(error, size(ir, kind=int64) == size(both_r, kind=int64) .and. &
+            all(ir == both_r), "other_pairs= alone must hold what it holds beside pairs=")
+        if (allocated(error)) return
+        ! Asking for the pair list must not change the table the join builds.
+        call same_join(error, a, d, "a join asked for only half the pair list")
+        if (allocated(error)) return
+        call same_join(error, c, d, "a join asked for only the other half")
+    end subroutine test_join_pairs_alone
+    !
 end module test_table_join

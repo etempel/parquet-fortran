@@ -47,25 +47,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   targets cost `O(n + m log n)` where *m* separate calls cost `O(m*n)`. Results are one entry per
   target; a result array of the wrong length is an error and zero targets returns nothing.
 - **Matching and joining.** `parquet_table%join(other, on [, other_on] [, how] [, columns] [,
-  other_suffix] [, require] [, order] [, max_rows] [, matched] [, threads])` matches another table's
-  rows against this one's on one or more key columns and brings that table's columns over, mutating
-  this table in place and detaching it unless every one of its rows survives exactly once and in
-  place — the m:1 left join, which keeps its file, its unread columns and its `%generation()`;
-  `how=` is `"inner"`, `"left"`, `"right"`, `"outer"`, `"semi"` or `"anti"`; the two one-sided forms
-  null-fill whichever table had no counterpart, and `"semi"`/`"anti"` select rows of this table and
-  carry nothing, so `columns=` is refused with them. The key column appears once when both sides
-  name it the same -- taking `other`'s value on a row this table had no counterpart for -- and only
-  an incoming name that clashes is suffixed (`other_suffix=`, default `"_2"`). `columns=` absent
-  carries the columns of `other` that are already resident, and naming one reads it; a container
-  column cannot be carried, nor held on this side of a `"right"`/`"outer"` join, and a table cannot
-  be joined to itself. `require=` asserts the cardinality (`"m:m"`, `"1:1"`, `"1:m"`, `"m:1"`, read
-  left-side-first) and `max_rows=` the output size, both before anything is allocated; `matched=`
-  reports which rows of this table found a counterpart, over the rows it had on entry. Rows come out
-  in this table's order, and within each, its matches in the other table's order, or in key order
-  under `order="key"`. At the array level `pf_match`, `pf_match_all` and `pf_in` answer the same
-  question over plain arrays, for all eleven element types including `parquet_column`: one matching
-  index per element and 0 where there is none, every match as an offsets/matches CSR pair, and
-  elementwise membership, with neither array needing to be sorted. Throughout, a key must be of
+  other_suffix] [, require] [, order] [, max_rows] [, matched] [, pairs] [, other_pairs] [,
+  threads])` matches another table's rows against this one's on one or more key columns and brings
+  that table's columns over, mutating this table in place and detaching it unless every one of its
+  rows survives exactly once and in place — the m:1 left join, which keeps its file, its unread
+  columns and its `%generation()`; `how=` is `"inner"`, `"left"`, `"right"`, `"outer"`, `"semi"` or
+  `"anti"`; the two one-sided forms null-fill whichever table had no counterpart, and
+  `"semi"`/`"anti"` select rows of this table and carry nothing, so `columns=` is refused with them.
+  The key column appears once when both sides name it the same -- taking `other`'s value on a row
+  this table had no counterpart for -- and only an incoming name that clashes is suffixed
+  (`other_suffix=`, default `"_2"`). `columns=` absent carries the columns of `other` that are
+  already resident, and naming one reads it; a container column cannot be carried, nor held on this
+  side of a `"right"`/`"outer"` join, and a table cannot be joined to itself. `require=` asserts the
+  cardinality (`"m:m"`, `"1:1"`, `"1:m"`, `"m:1"`, read left-side-first) and `max_rows=` the output
+  size, both before anything is allocated; `matched=` reports which rows of this table found a
+  counterpart, and `pairs=`/`other_pairs=` hand back the match itself as one row index per side per
+  output row (0 where there is no counterpart), both over the rows this table had on entry. Rows
+  come out in this table's order, and within each, its matches in the other table's order, or in key
+  order under `order="key"`. At the array level `pf_match`, `pf_match_all` and `pf_in` answer the
+  same question over plain arrays, for all eleven element types including `parquet_column`: one
+  matching index per element and 0 where there is none, every match as an offsets/matches CSR pair,
+  and elementwise membership, with neither array needing to be sorted. Throughout, a key must be of
   exactly the same kind on both sides — nothing is promoted — a null matches nothing including
   another null, and a NaN is a value and does match. See [Joining two
   tables](doc/pages/tables/table-join.md).

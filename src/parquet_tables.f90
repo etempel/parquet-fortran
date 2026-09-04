@@ -118,8 +118,6 @@ module parquet_tables
     public :: parquet_debug_table_set_inflight
     public :: parquet_debug_colread_block_rows
     public :: parquet_debug_table_drop_name_index
-    !> TEST-ONLY, and TEMPORARY -- it is removed when `%join`'s own `pairs=` output lands (S6 P3).
-    public :: parquet_debug_table_join_pairs
     !
     !> Error-message prefix for every `error stop` raised by this module.
     character(len=*), parameter :: EP = "parquet_table: "
@@ -6630,11 +6628,20 @@ module parquet_tables
         !! has an answer once the join has mutated the table. `count(matched)` is what a
         !! cross-match script prints.
         !!
+        !! **`pairs=` and `other_pairs=` hand back the match itself** -- one entry each per output
+        !! row, naming the row of this table (numbered as on entry, like `matched=`) and the row of
+        !! `other` that produced it, with **0 for "no counterpart on that side"**. That is the whole
+        !! intermediate representation the join reasons over, and it is what applies the same match
+        !! to something this table does not hold: an array of a derived type, a second table keyed
+        !! the same way. It is the shape `pf_spatial_index%pairs_within` already returns for the
+        !! positional case, and it costs nothing when not asked for.
+        !!
         !! Rows come out in this table's original order, and within each, that row's matches in
         !! `other`'s original order, unless `order="key"` asks for the engine's own (key) order
         !! instead. An incoming column keeps its own `%unit`; `%get_file_metadata` still answers
         !! about this table's own file.
-        module subroutine table_join(self, other, on, other_on, how, columns, other_suffix, require, order, matched, threads)
+        module subroutine table_join(self, other, on, other_on, how, columns, other_suffix, require, order, matched, pairs, &
+                other_pairs, threads)
             class(parquet_table), intent(inout) :: self !! the LEFT table; mutated in place.
             class(parquet_table), intent(in) :: other   !! the RIGHT table; only read from.
             character(len=*), intent(in) :: on(:)       !! left key columns, primary first.
@@ -6660,6 +6667,13 @@ module parquet_tables
             !! counterpart in `other`. The only coordinate system the question still has an answer
             !! in once the join has run.
             logical, allocatable, intent(out), optional :: matched(:)
+            !> per output row: the row of THIS table that produced it, numbered as the rows were on
+            !! entry, or 0 when the output row has no counterpart here. The join's own
+            !! intermediate representation; see above.
+            integer(int64), allocatable, intent(out), optional :: pairs(:)
+            !> per output row: the row of `other` that produced it, or 0 when there is none.
+            !! `pairs`'s counterpart, and the same length.
+            integer(int64), allocatable, intent(out), optional :: other_pairs(:)
             integer, intent(in), optional :: threads    !! forwarded to the sort; absent = auto.
         end subroutine table_join
         !> %join with an `integer(int32)` `max_rows=`; see `table_join` for everything else.
@@ -6668,7 +6682,7 @@ module parquet_tables
         !! only by kind cannot disambiguate a generic, so `table_join` carries the no-ceiling case
         !! and these two carry the kinds.
         module subroutine table_join_max_i32(self, other, on, other_on, how, columns, other_suffix, require, order, max_rows, &
-                matched, threads)
+                matched, pairs, other_pairs, threads)
             class(parquet_table), intent(inout) :: self !! the LEFT table; mutated in place.
             class(parquet_table), intent(in) :: other   !! the RIGHT table; only read from.
             character(len=*), intent(in) :: on(:)       !! left key columns, primary first.
@@ -6683,6 +6697,9 @@ module parquet_tables
             !! against the counted output size before anything proportional to it is allocated.
             integer(int32), intent(in) :: max_rows
             logical, allocatable, intent(out), optional :: matched(:) !! see `table_join`.
+            integer(int64), allocatable, intent(out), optional :: pairs(:) !! see `table_join`.
+            !> per output row: `other`'s row, or 0; see `table_join`.
+            integer(int64), allocatable, intent(out), optional :: other_pairs(:)
             integer, intent(in), optional :: threads    !! forwarded to the sort; absent = auto.
         end subroutine table_join_max_i32
         !> %join with an `integer(int64)` `max_rows=`; see `table_join` for everything else.
@@ -6691,7 +6708,7 @@ module parquet_tables
         !! only by kind cannot disambiguate a generic, so `table_join` carries the no-ceiling case
         !! and these two carry the kinds.
         module subroutine table_join_max_i64(self, other, on, other_on, how, columns, other_suffix, require, order, max_rows, &
-                matched, threads)
+                matched, pairs, other_pairs, threads)
             class(parquet_table), intent(inout) :: self !! the LEFT table; mutated in place.
             class(parquet_table), intent(in) :: other   !! the RIGHT table; only read from.
             character(len=*), intent(in) :: on(:)       !! left key columns, primary first.
@@ -6706,12 +6723,15 @@ module parquet_tables
             !! against the counted output size before anything proportional to it is allocated.
             integer(int64), intent(in) :: max_rows
             logical, allocatable, intent(out), optional :: matched(:) !! see `table_join`.
+            integer(int64), allocatable, intent(out), optional :: pairs(:) !! see `table_join`.
+            !> per output row: `other`'s row, or 0; see `table_join`.
+            integer(int64), allocatable, intent(out), optional :: other_pairs(:)
             integer, intent(in), optional :: threads    !! forwarded to the sort; absent = auto.
         end subroutine table_join_max_i64
         !> %join over a separated key string ("id" or "ra,dec"); see `table_join` for everything
         !! else. `other_on` is a separated string here too, with one name per `on` name.
         module subroutine table_join_string(self, other, on, other_on, how, columns, other_suffix, require, order, matched, &
-                threads)
+                pairs, other_pairs, threads)
             class(parquet_table), intent(inout) :: self !! the LEFT table; mutated in place.
             class(parquet_table), intent(in) :: other   !! the RIGHT table; only read from.
             character(len=*), intent(in) :: on          !! left key columns, separated; primary first.
@@ -6722,13 +6742,16 @@ module parquet_tables
             character(len=*), intent(in), optional :: require  !! cardinality assertion; see `table_join`.
             character(len=*), intent(in), optional :: order    !! output ordering; see `table_join`.
             logical, allocatable, intent(out), optional :: matched(:) !! see `table_join`.
+            integer(int64), allocatable, intent(out), optional :: pairs(:) !! see `table_join`.
+            !> per output row: `other`'s row, or 0; see `table_join`.
+            integer(int64), allocatable, intent(out), optional :: other_pairs(:)
             integer, intent(in), optional :: threads    !! forwarded to the sort; absent = auto.
         end subroutine table_join_string
         !> %join over a separated key string with an `integer(int32)` `max_rows=`; see
         !! `table_join` for everything else, and `table_join_max_i32` for why the ceiling is a
         !! specific rather than an optional argument.
         module subroutine table_join_string_max_i32(self, other, on, other_on, how, columns, other_suffix, require, order, &
-                max_rows, matched, threads)
+                max_rows, matched, pairs, other_pairs, threads)
             class(parquet_table), intent(inout) :: self !! the LEFT table; mutated in place.
             class(parquet_table), intent(in) :: other   !! the RIGHT table; only read from.
             character(len=*), intent(in) :: on          !! left key columns, separated; primary first.
@@ -6742,13 +6765,16 @@ module parquet_tables
             !! against the counted output size before anything proportional to it is allocated.
             integer(int32), intent(in) :: max_rows
             logical, allocatable, intent(out), optional :: matched(:) !! see `table_join`.
+            integer(int64), allocatable, intent(out), optional :: pairs(:) !! see `table_join`.
+            !> per output row: `other`'s row, or 0; see `table_join`.
+            integer(int64), allocatable, intent(out), optional :: other_pairs(:)
             integer, intent(in), optional :: threads    !! forwarded to the sort; absent = auto.
         end subroutine table_join_string_max_i32
         !> %join over a separated key string with an `integer(int64)` `max_rows=`; see
         !! `table_join` for everything else, and `table_join_max_i32` for why the ceiling is a
         !! specific rather than an optional argument.
         module subroutine table_join_string_max_i64(self, other, on, other_on, how, columns, other_suffix, require, order, &
-                max_rows, matched, threads)
+                max_rows, matched, pairs, other_pairs, threads)
             class(parquet_table), intent(inout) :: self !! the LEFT table; mutated in place.
             class(parquet_table), intent(in) :: other   !! the RIGHT table; only read from.
             character(len=*), intent(in) :: on          !! left key columns, separated; primary first.
@@ -6762,6 +6788,9 @@ module parquet_tables
             !! against the counted output size before anything proportional to it is allocated.
             integer(int64), intent(in) :: max_rows
             logical, allocatable, intent(out), optional :: matched(:) !! see `table_join`.
+            integer(int64), allocatable, intent(out), optional :: pairs(:) !! see `table_join`.
+            !> per output row: `other`'s row, or 0; see `table_join`.
+            integer(int64), allocatable, intent(out), optional :: other_pairs(:)
             integer, intent(in), optional :: threads    !! forwarded to the sort; absent = auto.
         end subroutine table_join_string_max_i64
         !> Builds the join's PAIR LIST: which left row meets which right row, and how many rows
@@ -6800,34 +6829,6 @@ module parquet_tables
             logical, allocatable, intent(out), optional :: matched(:)
             integer, intent(in), optional :: threads !! forwarded to pf_argsort; absent = auto.
         end subroutine table_join_pairs
-        !> TEST-ONLY -- exposes `table_join_pairs` so the engine can be asserted before any
-        !! column is rewritten. The leading marker must NOT be written `TEST-ONLY:`: FORD reads a
-        !! doc-comment's first line beginning `word:` as a metadata key and warns about it --
-        !! which is why every other hook here opens with a dash too.
-        !!
-        !! **Temporary** -- `%join`'s own `pairs=` output supersedes it at S6 P3, and a second
-        !! route to the same arrays is a second thing to keep correct.
-        !!
-        !! Public for the reason every Fortran-side debug hook here is: the engine is a submodule
-        !! procedure reached through a private interface, so a test has no other way in. Unlike
-        !! the C++ `parquet_debug_*` hooks, which a test reaches through its own local `bind(C)`
-        !! interface, there is no such escape hatch on this side.
-        module subroutine parquet_debug_table_join_pairs(left, right, on, other_on, how, &
-                require, order, max_rows, il, ir, n_out, matched, threads)
-            type(parquet_table), intent(in) :: left   !! the LEFT table.
-            type(parquet_table), intent(in) :: right  !! the RIGHT table.
-            character(len=*), intent(in) :: on(:)     !! left key columns, primary first.
-            character(len=*), intent(in), optional :: other_on(:) !! right key columns.
-            character(len=*), intent(in), optional :: how         !! join kind.
-            character(len=*), intent(in), optional :: require     !! cardinality assertion.
-            character(len=*), intent(in), optional :: order       !! output ordering.
-            integer(int64), intent(in), optional :: max_rows      !! output-size ceiling.
-            integer(int64), allocatable, intent(out) :: il(:)     !! per output row: left row, or 0.
-            integer(int64), allocatable, intent(out) :: ir(:)     !! per output row: right row, or 0.
-            integer(int64), intent(out) :: n_out                  !! output rows.
-            logical, allocatable, intent(out), optional :: matched(:) !! per pre-join left row.
-            integer, intent(in), optional :: threads              !! thread request.
-        end subroutine parquet_debug_table_join_pairs
     end interface
     !
     ! ---- Row selection (parquet_tables_slice, and the per-kind copies in ..._access) ----

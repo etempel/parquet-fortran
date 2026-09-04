@@ -17596,15 +17596,22 @@ contains
     !! tables first is the negative control -- a guard that refused every join would pass this
     !! scenario just as happily while making the feature unusable.
     subroutine scenario_join_self()
-        type(parquet_table) :: a, b
-        integer(int64), allocatable :: il(:), ir(:)
-        integer(int64) :: n_out
+        type(parquet_table) :: a, b, w
         call join_fixture(a, [10_int64, 20_int64, 30_int64])
         call join_fixture(b, [20_int64, 30_int64])
-        call parquet_debug_table_join_pairs(a, b, ["id"], il=il, ir=ir, n_out=n_out)
-        print '(a,i0)', "two different tables joined ok, rows=", n_out
-        call parquet_debug_table_join_pairs(a, a, ["id"], il=il, ir=ir, n_out=n_out)
-        print '(a,i0)', "unexpectedly joined a table to itself, rows=", n_out
+        ! The control joins a CLONE, so `a` reaches the failing call in the state it was built
+        ! in -- %join mutates its left table, and a control that spent the fixture would leave
+        ! the assertion below about a table the scenario never described.
+        !
+        ! The failing call below really does make the association the standard forbids, which is
+        ! the point: it is what a caller writes, and the guard fires before either dummy is
+        ! defined, so nothing is written through the alias. Reproducing it any other way would
+        ! test a guard against a call nobody makes.
+        call a%clone(w)
+        call w%join(b, ["id"])
+        print '(a,i0)', "two different tables joined ok, rows=", w%nrows()
+        call a%join(a, ["id"])
+        print '(a,i0)', "unexpectedly joined a table to itself, rows=", a%nrows()
     end subroutine scenario_join_self
 
     !> Two key columns of different kinds are refused rather than promoted. Both reach the sort
@@ -17612,48 +17619,45 @@ contains
     !! is astropy's promotion, and what loses a catalogue identifier above 2**53. The same-kind
     !! join first is the control.
     subroutine scenario_join_kind_mismatch()
-        type(parquet_table) :: a, b, c
-        integer(int64), allocatable :: il(:), ir(:)
-        integer(int64) :: n_out
+        type(parquet_table) :: a, b, c, w
         call join_fixture(a, [10_int64, 20_int64, 30_int64])
         call join_fixture(c, [20_int64, 30_int64])
-        call parquet_debug_table_join_pairs(a, c, ["id"], il=il, ir=ir, n_out=n_out)
-        print '(a,i0)', "same-kind keys joined ok, rows=", n_out
+        call a%clone(w)
+        call w%join(c, ["id"])
+        print '(a,i0)', "same-kind keys joined ok, rows=", w%nrows()
         call parquet_new_table(b)
         call b%add_column("id", [20_int32, 30_int32])
-        call parquet_debug_table_join_pairs(a, b, ["id"], il=il, ir=ir, n_out=n_out)
-        print '(a,i0)', "unexpectedly joined two key kinds, rows=", n_out
+        call a%join(b, ["id"])
+        print '(a,i0)', "unexpectedly joined two key kinds, rows=", a%nrows()
     end subroutine scenario_join_kind_mismatch
 
     !> `require="m:1"` asserts the RIGHT key is unique -- the lookup-table annotation, and the one
     !! that turns "the output is 40x the size you expected" into a named error at the call site.
     !! The unique right key first is the control.
     subroutine scenario_join_require_m1()
-        type(parquet_table) :: a, b
-        integer(int64), allocatable :: il(:), ir(:)
-        integer(int64) :: n_out
+        type(parquet_table) :: a, b, w
         call join_fixture(a, [10_int64, 20_int64, 30_int64])
         call join_fixture(b, [20_int64, 30_int64])
-        call parquet_debug_table_join_pairs(a, b, ["id"], require="m:1", il=il, ir=ir, n_out=n_out)
-        print '(a,i0)', "a unique right key satisfied require=m:1, rows=", n_out
+        call a%clone(w)
+        call w%join(b, ["id"], require="m:1")
+        print '(a,i0)', "a unique right key satisfied require=m:1, rows=", w%nrows()
         call join_fixture(b, [20_int64, 20_int64])
-        call parquet_debug_table_join_pairs(a, b, ["id"], require="m:1", il=il, ir=ir, n_out=n_out)
-        print '(a,i0)', "unexpectedly accepted a duplicate right key, rows=", n_out
+        call a%join(b, ["id"], require="m:1")
+        print '(a,i0)', "unexpectedly accepted a duplicate right key, rows=", a%nrows()
     end subroutine scenario_join_require_m1
 
     !> `max_rows=` refuses a join whose size is known before anything is allocated -- the counting
     !! pass runs first precisely so this can abort rather than run out of memory. A ceiling the
     !! join fits under is the control.
     subroutine scenario_join_max_rows()
-        type(parquet_table) :: a, b
-        integer(int64), allocatable :: il(:), ir(:)
-        integer(int64) :: n_out
+        type(parquet_table) :: a, b, w
         call join_fixture(a, [10_int64, 10_int64, 10_int64])
         call join_fixture(b, [10_int64, 10_int64, 10_int64])
-        call parquet_debug_table_join_pairs(a, b, ["id"], max_rows=9_int64, il=il, ir=ir, n_out=n_out)
-        print '(a,i0)', "the join fitted under its ceiling, rows=", n_out
-        call parquet_debug_table_join_pairs(a, b, ["id"], max_rows=8_int64, il=il, ir=ir, n_out=n_out)
-        print '(a,i0)', "unexpectedly built an over-sized join, rows=", n_out
+        call a%clone(w)
+        call w%join(b, ["id"], max_rows=9_int64)
+        print '(a,i0)', "the join fitted under its ceiling, rows=", w%nrows()
+        call a%join(b, ["id"], max_rows=8_int64)
+        print '(a,i0)', "unexpectedly built an over-sized join, rows=", a%nrows()
     end subroutine scenario_join_max_rows
 
     !> `max_rows=` reaches the counting pass from EACH of `%join`'s four ceiling-carrying
@@ -17741,51 +17745,46 @@ contains
     !> An unrecognized `how=` token aborts naming every accepted value, rather than falling back
     !! to a default the caller did not ask for. A recognized token is the control.
     subroutine scenario_join_bad_how()
-        type(parquet_table) :: a, b
-        integer(int64), allocatable :: il(:), ir(:)
-        integer(int64) :: n_out
+        type(parquet_table) :: a, b, w
         call join_fixture(a, [10_int64, 20_int64])
         call join_fixture(b, [20_int64])
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="OUTER", il=il, ir=ir, n_out=n_out)
-        print '(a,i0)', "how=OUTER folded and ran, rows=", n_out
-        call parquet_debug_table_join_pairs(a, b, ["id"], how="cross", il=il, ir=ir, n_out=n_out)
-        print '(a,i0)', "unexpectedly accepted how=cross, rows=", n_out
+        call a%clone(w)
+        call w%join(b, ["id"], how="OUTER")
+        print '(a,i0)', "how=OUTER folded and ran, rows=", w%nrows()
+        call a%join(b, ["id"], how="cross")
+        print '(a,i0)', "unexpectedly accepted how=cross, rows=", a%nrows()
     end subroutine scenario_join_bad_how
 
     !> `other_on=` takes one right-hand key name per left-hand one; a mismatched length aborts
     !! rather than pairing what it can. The matching length is the control.
     subroutine scenario_join_other_on_size()
-        type(parquet_table) :: a, b
-        integer(int64), allocatable :: il(:), ir(:)
-        integer(int64) :: n_out
+        type(parquet_table) :: a, b, w
         call parquet_new_table(a)
         call a%add_column("f", [1_int64, 2_int64])
         call a%add_column("g", [3_int64, 4_int64])
         call parquet_new_table(b)
         call b%add_column("p", [1_int64])
         call b%add_column("q", [3_int64])
-        call parquet_debug_table_join_pairs(a, b, ["f", "g"], other_on=["p", "q"], &
-            il=il, ir=ir, n_out=n_out)
-        print '(a,i0)', "two keys against two other_on names joined ok, rows=", n_out
-        call parquet_debug_table_join_pairs(a, b, ["f", "g"], other_on=["p"], &
-            il=il, ir=ir, n_out=n_out)
-        print '(a,i0)', "unexpectedly accepted a short other_on=, rows=", n_out
+        call a%clone(w)
+        call w%join(b, ["f", "g"], other_on=["p", "q"])
+        print '(a,i0)', "two keys against two other_on names joined ok, rows=", w%nrows()
+        call a%join(b, ["f", "g"], other_on=["p"])
+        print '(a,i0)', "unexpectedly accepted a short other_on=, rows=", a%nrows()
     end subroutine scenario_join_other_on_size
 
     !> A join with no key at all is refused. There is no useful default -- a keyless join is a
     !! cross product, which this library does not offer and would not offer by accident.
     subroutine scenario_join_no_key()
-        type(parquet_table) :: a, b
-        integer(int64), allocatable :: il(:), ir(:)
-        integer(int64) :: n_out
+        type(parquet_table) :: a, b, w
         character(len=8), allocatable :: nokeys(:)
         call join_fixture(a, [10_int64, 20_int64])
         call join_fixture(b, [20_int64])
-        call parquet_debug_table_join_pairs(a, b, ["id"], il=il, ir=ir, n_out=n_out)
-        print '(a,i0)', "one key joined ok, rows=", n_out
+        call a%clone(w)
+        call w%join(b, ["id"])
+        print '(a,i0)', "one key joined ok, rows=", w%nrows()
         allocate(nokeys(0))
-        call parquet_debug_table_join_pairs(a, b, nokeys, il=il, ir=ir, n_out=n_out)
-        print '(a,i0)', "unexpectedly joined with no key, rows=", n_out
+        call a%join(b, nokeys)
+        print '(a,i0)', "unexpectedly joined with no key, rows=", a%nrows()
     end subroutine scenario_join_no_key
 
     !> `columns=` is refused with `how='semi'` and `how='anti'`: those two keep or drop rows of

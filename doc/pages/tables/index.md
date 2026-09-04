@@ -4,6 +4,7 @@ ordered_subpage: table.md
 ordered_subpage: table-open.md
 ordered_subpage: table-write.md
 ordered_subpage: table-mutate.md
+ordered_subpage: table-join.md
 ---
 
 The high-level layer: one `parquet_open_table` call presents a whole parquet file as a
@@ -26,3 +27,6 @@ it can equally be built from scratch in memory and written back out through an o
 - [Changing a table](table-mutate.html) — replacing values, editing nulls, adding and dropping
   columns, filtering/sorting/ranking/appending rows and the detach rule they share, plus searching
   and ranking a column through a `%col` pointer.
+- [Joining two tables](table-join.html) — matching another table's rows against this one's on one
+  or more key columns and bringing its columns over: which rows come out, what counts as a match,
+  what the join carries and what the result is called.

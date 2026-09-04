@@ -80,7 +80,7 @@ contains
         ! check_testsuite_continuation_lines (tools/check_source_conventions.py) fails the lint
         ! stage before nagfor ever sees it.
         type(unittest_type), allocatable :: p1(:), p2(:), p3(:), p4(:), p5(:), p6(:), p7(:), &
-                                            p8(:), p9(:), p10(:), p11(:), p12(:)
+                                            p8(:), p9(:), p10(:), p11(:), p12(:), p13(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -359,7 +359,9 @@ contains
             new_unittest("sorting: a vector column key aborts", &
                 test_sorting_column_vector_aborts), &
             new_unittest("sorting: matching two columns of different kinds aborts", &
-                test_sorting_match_kind_mismatch_aborts), &
+                test_sorting_match_kind_mismatch_aborts) &
+            ]
+        p13 = [ &
             new_unittest("join: joining a table to itself aborts", &
                 test_join_self_aborts), &
             new_unittest("join: two key columns of different kinds abort", &
@@ -374,6 +376,22 @@ contains
                 test_join_other_on_size_aborts), &
             new_unittest("join: a join with no key aborts", &
                 test_join_no_key_aborts), &
+            new_unittest("join: a how= the rewrite cannot carry out yet aborts", &
+                test_join_how_unsupported_aborts), &
+            new_unittest("join: a sort key given as a join key aborts", &
+                test_join_key_direction_aborts), &
+            new_unittest("join: the -name sort-key shorthand as a join key aborts", &
+                test_join_key_direction_dash_aborts), &
+            new_unittest("join: carrying a container column across aborts", &
+                test_join_container_payload_aborts), &
+            new_unittest("join: an unknown columns= name aborts", &
+                test_join_columns_unknown_aborts), &
+            new_unittest("join: a suffixed incoming name that still clashes aborts", &
+                test_join_suffix_clash_aborts), &
+            new_unittest("join: a blank other_suffix= aborts", &
+                test_join_blank_suffix_aborts), &
+            new_unittest("join: reading a left column the join skipped aborts", &
+                test_join_detached_column_aborts), &
             new_unittest("sorting: searching unsorted input aborts", &
                 test_sorting_search_unsorted_aborts), &
             new_unittest("sorting: an over-long search target aborts", &
@@ -1993,7 +2011,7 @@ contains
             new_unittest("a bounded soft qc violation warns and returns every row", &
                 test_bounded_qc_soft_warns) &
             ]
-        testsuite = [p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12]
+        testsuite = [p1, p2, p13, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12]
     end subroutine collect_tests_parquet_errors
 
 
@@ -7418,6 +7436,86 @@ contains
             failure_message="a keyless join was expected to abort", &
             required_stderr="no join key was given")
     end subroutine test_join_no_key_aborts
+
+    !> join abort path: see scenario_join_how_unsupported in test/error_scenarios.f90 for what it
+    !> does, for the negative control, and for what this must assert once the refusal lifts.
+    subroutine test_join_how_unsupported_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_how_unsupported", expect_abort=.true., &
+            failure_message="how=right was expected to abort until the rewrite carries it out", &
+            required_stderr="recognised but not carried out yet")
+    end subroutine test_join_how_unsupported_aborts
+
+    !> join abort path: see scenario_join_key_direction in test/error_scenarios.f90 for what it
+    !> does, and for the negative control that keeps this assertion honest.
+    subroutine test_join_key_direction_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_key_direction", expect_abort=.true., &
+            failure_message="a sort key given as a join key was expected to abort", &
+            required_stderr="a join key has no direction")
+    end subroutine test_join_key_direction_aborts
+
+    !> join abort path: see scenario_join_key_direction_dash in test/error_scenarios.f90 for what
+    !> it does, why it is a separate scenario, and for its negative control.
+    subroutine test_join_key_direction_dash_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_key_direction_dash", expect_abort=.true., &
+            failure_message="the -name shorthand as a join key was expected to abort", &
+            required_stderr="a join key has no direction")
+    end subroutine test_join_key_direction_dash_aborts
+
+    !> join abort path: see scenario_join_container_payload in test/error_scenarios.f90 for what
+    !> it does, and for the negative control that keeps this assertion honest.
+    subroutine test_join_container_payload_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_container_payload", expect_abort=.true., &
+            failure_message="carrying a list column across a join was expected to abort", &
+            required_stderr="cannot be carried across a join")
+    end subroutine test_join_container_payload_aborts
+
+    !> join abort path: see scenario_join_columns_unknown in test/error_scenarios.f90 for what it
+    !> does, and for the negative control that keeps this assertion honest.
+    subroutine test_join_columns_unknown_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_columns_unknown", expect_abort=.true., &
+            failure_message="an unknown columns= name was expected to abort", &
+            required_stderr="has no column of")
+    end subroutine test_join_columns_unknown_aborts
+
+    !> join abort path: see scenario_join_suffix_clash in test/error_scenarios.f90 for what it
+    !> does, and for the negative control that keeps this assertion honest.
+    subroutine test_join_suffix_clash_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_suffix_clash", expect_abort=.true., &
+            failure_message="a doubly-clashing incoming name was expected to abort", &
+            required_stderr="clashes with a column already here")
+    end subroutine test_join_suffix_clash_aborts
+
+    !> join abort path: see scenario_join_blank_suffix in test/error_scenarios.f90 for what it
+    !> does, and for the negative control that keeps this assertion honest.
+    subroutine test_join_blank_suffix_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_blank_suffix", expect_abort=.true., &
+            failure_message="a blank other_suffix= was expected to abort", &
+            required_stderr="other_suffix= is blank")
+    end subroutine test_join_blank_suffix_aborts
+
+    !> join abort path: see scenario_join_detached_column in test/error_scenarios.f90 for what it
+    !> does, and for the negative control that keeps this assertion honest.
+    subroutine test_join_detached_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_detached_column", expect_abort=.true., &
+            failure_message="reading a column the join skipped was expected to abort", &
+            required_stderr="has been detached")
+    end subroutine test_join_detached_column_aborts
 
     !> pf_match abort path: see scenario_sorting_match_kind_mismatch in test/error_scenarios.f90
     !> for the promotion this refusal exists to prevent, and for its negative control.

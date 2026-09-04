@@ -46,11 +46,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is extracted and order-checked once and every target is answered against that one key, so *m*
   targets cost `O(n + m log n)` where *m* separate calls cost `O(m*n)`. Results are one entry per
   target; a result array of the wrong length is an error and zero targets returns nothing.
-- **`pf_match`, `pf_match_all` and `pf_in`**: which elements of one array occur in another, over all
-  eleven element types including `parquet_column`. `pf_match` gives one matching index per element
-  and 0 where there is none, `pf_match_all` gives every match as an offsets/matches CSR pair, and
-  `pf_in` gives elementwise membership. Neither array has to be sorted. A null matches nothing on
-  either side, including another null; a NaN is a value and does match.
+- **Matching and joining.** `parquet_table%join(other, on [, other_on] [, how] [, columns]
+  [, other_suffix] [, threads])` matches another table's rows against this one's on one or more key
+  columns and brings that table's columns over, mutating this table in place and detaching it;
+  `how=` is `"inner"` or `"left"`. The key column appears once when both sides name it the same,
+  and only an incoming name that clashes is suffixed (`other_suffix=`, default `"_2"`). `columns=`
+  absent carries the columns of `other` that are already resident, and naming one reads it; a
+  container column cannot be carried, and a table cannot be joined to itself. Rows come out in this
+  table's order, and within each, its matches in the other table's order. At the array level
+  `pf_match`, `pf_match_all` and `pf_in` answer the same question over plain arrays, for all eleven
+  element types including `parquet_column`: one matching index per element and 0 where there is
+  none, every match as an offsets/matches CSR pair, and elementwise membership, with neither array
+  needing to be sorted. Throughout, a key must be of exactly the same kind on both sides — nothing
+  is promoted — a null matches nothing including another null, and a NaN is a value and does match.
+  See [Joining two tables](doc/pages/tables/table-join.md).
 - **`parquet_open_table(..., bounded=.true.)` reads a filtered file larger than memory.** The
   filter is evaluated one row group at a time and every column is assembled from per-row-group
   chunks, so the peak is one row group's worth of one column rather than one whole column. Opt-in,

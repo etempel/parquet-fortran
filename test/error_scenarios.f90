@@ -870,6 +870,22 @@ program error_scenarios
         call scenario_join_other_on_size()
     case ("join_no_key")
         call scenario_join_no_key()
+    case ("join_how_unsupported")
+        call scenario_join_how_unsupported()
+    case ("join_key_direction")
+        call scenario_join_key_direction()
+    case ("join_key_direction_dash")
+        call scenario_join_key_direction_dash()
+    case ("join_container_payload")
+        call scenario_join_container_payload()
+    case ("join_columns_unknown")
+        call scenario_join_columns_unknown()
+    case ("join_suffix_clash")
+        call scenario_join_suffix_clash()
+    case ("join_blank_suffix")
+        call scenario_join_blank_suffix()
+    case ("join_detached_column")
+        call scenario_join_detached_column()
     case ("sorting_search_unsorted")
         call scenario_sorting_search_unsorted()
     case ("sorting_search_target_too_long")
@@ -17673,6 +17689,139 @@ contains
         call parquet_debug_table_join_pairs(a, b, nokeys, il=il, ir=ir, n_out=n_out)
         print '(a,i0)', "unexpectedly joined with no key, rows=", n_out
     end subroutine scenario_join_no_key
+
+    !> `%join` accepts every `how` token the engine does, but only carries out two of them yet --
+    !! so the other four are refused by name rather than silently doing something else.
+    !!
+    !! **This scenario is meant to be DELETED**, together with the refusal it asserts: when the
+    !! column rewrite learns to null-fill this table's own columns (`right`, `outer`) and to
+    !! remove rows (`semi`, `anti`), what this should assert instead is that `%join(how="right")`
+    !! produces the table `parquet_debug_table_join_pairs(..., how="right")` describes -- which is
+    !! the shape `test_join_apply_inner` already has. The 'left' join first is the control.
+    subroutine scenario_join_how_unsupported()
+        type(parquet_table) :: a, b
+        call join_fixture(a, [10_int64, 20_int64])
+        call join_fixture(b, [20_int64])
+        call a%join(b, "id", how="left")
+        print '(a,i0)', "how=left joined ok, rows=", a%nrows()
+        call join_fixture(a, [10_int64, 20_int64])
+        call a%join(b, "id", how="right")   ! -> aborts (recognized, not carried out yet)
+        print '(a,i0)', "unexpectedly ran how=right, rows=", a%nrows()
+    end subroutine scenario_join_how_unsupported
+
+    !> A join key is a column NAME and has no direction: `on="-id"` is a sort key, and accepting
+    !! it would silently join on a column called "-id" that does not exist, or worse would look
+    !! like the ordering mattered. The plain name first is the control.
+    subroutine scenario_join_key_direction()
+        type(parquet_table) :: a, b
+        call join_fixture(a, [10_int64, 20_int64])
+        call join_fixture(b, [20_int64])
+        call a%join(b, "id", how="left")
+        print '(a,i0)', "a plain key name joined ok, rows=", a%nrows()
+        call join_fixture(a, [10_int64, 20_int64])
+        call a%join(b, "id desc", how="left")   ! -> aborts (a join key has no direction)
+        print '(a,i0)', "unexpectedly accepted a sort key as a join key, rows=", a%nrows()
+    end subroutine scenario_join_key_direction
+
+    !> The `-name` shorthand is refused for the same reason `"name desc"` is, and it needs its own
+    !! scenario because the two spellings reach the refusal down separate arms of one test: drop
+    !! the leading-dash arm and every assertion about the trailing-word arm still passes. Confirmed
+    !! by mutation. The plain key name first is the control.
+    subroutine scenario_join_key_direction_dash()
+        type(parquet_table) :: a, b
+        call join_fixture(a, [10_int64, 20_int64])
+        call join_fixture(b, [20_int64])
+        call a%join(b, "id", how="left")
+        print '(a,i0)', "a plain key name joined ok, rows=", a%nrows()
+        call join_fixture(a, [10_int64, 20_int64])
+        call a%join(b, "-id", how="left")   ! -> aborts (a join key has no direction)
+        print '(a,i0)', "unexpectedly accepted the -name shorthand as a join key, rows=", a%nrows()
+    end subroutine scenario_join_key_direction_dash
+
+    !> A container column cannot be carried across a join. An output row with no counterpart has
+    !! to be null-filled, and a container's own row gather has no established behaviour for that
+    !! -- so the refusal is by KIND and side, never by whether this particular join happens to
+    !! have an unmatched row, or a program's join would start failing when its input changed.
+    !! The same join without the container is the control.
+    subroutine scenario_join_container_payload()
+        type(parquet_table) :: a, b
+        type(parquet_list_column) :: lc
+        call join_fixture(a, [10_int64, 20_int64])
+        call join_fixture(b, [20_int64])
+        call a%join(b, "id", how="left")
+        print '(a,i0)', "a scalar payload came across ok, rows=", a%nrows()
+        call lc%init(PK_INT32)
+        call lc%append_row([1_int32, 2_int32])
+        call b%add_column("tags", lc)
+        call join_fixture(a, [10_int64, 20_int64])
+        call a%join(b, "id", how="left")   ! -> aborts (a list column cannot be carried)
+        print '(a,i0)', "unexpectedly carried a container column across, cols=", a%ncols()
+    end subroutine scenario_join_container_payload
+
+    !> `columns=` naming a column the right table does not have is a mistake worth hearing about:
+    !! skipping it would leave the caller believing a column had arrived, and a join keeps no link
+    !! to the right table's file, so a column that did not come across is gone. The real name is
+    !! the control.
+    subroutine scenario_join_columns_unknown()
+        type(parquet_table) :: a, b
+        call join_fixture(a, [10_int64, 20_int64])
+        call join_fixture(b, [20_int64])
+        call a%join(b, "id", how="left", columns="payload")
+        print '(a,i0)', "columns=payload came across ok, cols=", a%ncols()
+        call join_fixture(a, [10_int64, 20_int64])
+        call a%join(b, "id", how="left", columns="mag_r")   ! -> aborts (no such column)
+        print '(a,i0)', "unexpectedly accepted an unknown columns= name, cols=", a%ncols()
+    end subroutine scenario_join_columns_unknown
+
+    !> A suffixed incoming name that STILL clashes is an error naming both, not a second suffix:
+    !! `payload_2_2` is a name nobody asked for, and quietly renaming twice hides the collision
+    !! the caller needs to know about. The single collision, which the suffix resolves, is the
+    !! control.
+    subroutine scenario_join_suffix_clash()
+        type(parquet_table) :: a, b
+        call join_fixture(a, [10_int64, 20_int64])
+        call join_fixture(b, [20_int64])
+        call a%join(b, "id", how="left")
+        print '(a,i0)', "one collision took the suffix ok, cols=", a%ncols()
+        call join_fixture(a, [10_int64, 20_int64])
+        call a%add_column("payload_2", [7_int64, 8_int64])
+        call a%join(b, "id", how="left")   ! -> aborts (payload and payload_2 both taken)
+        print '(a,i0)', "unexpectedly resolved a doubly-clashing name, cols=", a%ncols()
+    end subroutine scenario_join_suffix_clash
+
+    !> A blank `other_suffix=` leaves a clashing incoming column no name to take, so it is refused
+    !! up front rather than reported later as a name that collides with itself. A real suffix is
+    !! the control.
+    subroutine scenario_join_blank_suffix()
+        type(parquet_table) :: a, b
+        call join_fixture(a, [10_int64, 20_int64])
+        call join_fixture(b, [20_int64])
+        call a%join(b, "id", how="left", other_suffix="_r")
+        print '(a,i0)', "other_suffix=_r joined ok, cols=", a%ncols()
+        call join_fixture(a, [10_int64, 20_int64])
+        call a%join(b, "id", how="left", other_suffix="")   ! -> aborts (nothing to suffix with)
+        print '(a,i0)', "unexpectedly accepted a blank other_suffix, cols=", a%ncols()
+    end subroutine scenario_join_blank_suffix
+
+    !> A left column that was never read is SKIPPED by the join's gather, and the table has
+    !! detached -- so reading it afterwards is the detach guard's named error rather than a column
+    !! of the wrong length silently aligned to nothing. This is the loud half of the residency
+    !! rule, and the reason the guide tells a caller to materialize what they need first. Reading
+    !! the key column, which the join itself read, is the control.
+    subroutine scenario_join_detached_column()
+        character(len=*), parameter :: f = "test_run/scen_join_detached.parquet"
+        type(parquet_table) :: src, a, b
+        integer(int64), allocatable :: got(:)
+        call join_fixture(src, [10_int64, 20_int64])
+        call parquet_write_table(src, f, overwrite=.true.)
+        call parquet_open_table(a, f)
+        call join_fixture(b, [20_int64])
+        call a%join(b, "id", how="left")
+        call a%get("id", got)
+        print '(a,i0)', "the key column the join read is still readable, rows=", size(got)
+        call a%get("payload", got)   ! -> aborts (never read, and the table has detached)
+        print '(a,i0)', "unexpectedly read a skipped column after a join, rows=", size(got)
+    end subroutine scenario_join_detached_column
 
     !> Builds the two-column table every join_* scenario joins: an int64 "id" plus a payload.
     subroutine join_fixture(t, keys)

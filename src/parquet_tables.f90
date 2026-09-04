@@ -924,6 +924,10 @@ module parquet_tables
         procedure, private :: table_top_n_string      !! %top_n specific, separated key string.
         !> Keeps only the n best rows, in key order. Detaching.
         generic :: top_n => table_top_n, table_top_n_string
+        procedure, private :: table_join              !! %join specific, array of key names.
+        procedure, private :: table_join_string       !! %join specific, separated key string.
+        !> Matches another table's rows against this one's and brings its columns over. Detaching.
+        generic :: join => table_join, table_join_string
         ! --- the ORDER, without applying it: read-only, and they do NOT detach ---
         procedure, private :: table_argsort_by_i32    !! %argsort_by specific, int32 permutation.
         procedure, private :: table_argsort_by_i64    !! %argsort_by specific, int64 permutation.
@@ -3869,6 +3873,37 @@ module parquet_tables
             type(parquet_table_cache), intent(inout) :: dst        !! the destination column store.
             integer, intent(in) :: slots(:)                        !! resident slots to copy, in order.
         end subroutine table_colwork_clone
+        !> Carries `sslots` of one column store over into `dslots` of another, gathering each by
+        !! `idx` and marking the rows `valid` says have no counterpart null. The JOIN's per-column
+        !! rewrite, and `table_colwork_clone`'s sibling: two stores again, and again a separate
+        !! entry point rather than another `PCW_*` op for the reason given there.
+        !!
+        !! Three shipped bindings, in this order, and no new per-kind primitive at all: a
+        !! `deep_copy` into the destination slot, a `%gather` naming the source row for each
+        !! output row, and -- only where something is unmatched -- a `%set_validity` marking those
+        !! rows null. `%set_validity` never CLEARS a null, so the source column's own nulls
+        !! survive the gather untouched and no read-back of the mask is needed.
+        !!
+        !! `idx` therefore names a real source row for EVERY output row, unmatched ones included
+        !! (they are given row 1, whose values the mask then declares null and which nothing may
+        !! read). The one case that cannot express is a source column with no rows at all, where
+        !! there is no row 1 to name: those columns are built by appending `size(idx)` null rows
+        !! to the empty copy instead.
+        !!
+        !! The destination slots must already exist -- `table_new_slot` reallocates the slot
+        !! array, which cannot happen while threads hold descriptors into it.
+        module subroutine table_colwork_join(src, dst, sslots, dslots, idx, valid)
+            type(parquet_table_cache), intent(in) :: src           !! the source (right) column store.
+            type(parquet_table_cache), intent(inout) :: dst        !! the destination (left) column store.
+            integer, intent(in) :: sslots(:)                       !! source slots to carry, in order.
+            integer, intent(in) :: dslots(:)                       !! destination slot for each, same size.
+            integer(int64), intent(in) :: idx(:)                   !! per output row: source row, never 0.
+            !> per output row: .false. where that row has no counterpart and must become null.
+            !! Pass an UNALLOCATED array when nothing is unmatched -- an unallocated allocatable
+            !! actual makes an optional dummy absent (F2018 15.5.2.12), which is how an inner join
+            !! skips the whole `%set_validity` pass without the caller branching.
+            logical, intent(in), optional :: valid(:)
+        end subroutine table_colwork_join
         !> Resolves a `width_pending` column's kind and width, then clears the flag. A no-op for
         !! every other column, so callers can invoke it unconditionally.
         !!
@@ -6515,8 +6550,75 @@ module parquet_tables
         end subroutine table_lookup_sort_key
     end interface
     !
-    ! ---- The join engine (parquet_tables_join -- HAND-WRITTEN, not generated) ----
+    ! ---- The join (parquet_tables_join -- HAND-WRITTEN, not generated) ----
     interface
+        !> Matches `other`'s rows against this table's on one or more key columns, keeps the rows
+        !! `how` asks for, and brings `other`'s columns over.
+        !!
+        !! **`%join` MUTATES this table and DETACHES it**, like every other row-structural
+        !! operation here. `call t%clone(out)` first is the non-mutating form and needs no separate
+        !! API -- a clone copies only the columns that are resident, so on a lazy table it is
+        !! nearly free.
+        !!
+        !! **Keys are NAMES, not sort keys.** `on` takes one column name per key, primary first,
+        !! and a direction token (`"-id"`, `"id desc"`) is refused: a join is an equality test, and
+        !! ordering the keys is the engine's business. `other_on` names the right-hand columns when
+        !! they differ; absent means the same names. Two keys must have exactly the same kind and
+        !! width -- nothing is promoted, because an identifier above 2**53 does not survive being
+        !! promoted to a real, so cast one side with `%cast` first.
+        !!
+        !! **A null key matches nothing, including another null**, on either side; a NaN key is an
+        !! ordinary value and matches every other NaN, which for a column full of NaNs is a
+        !! cartesian product. Both are what `%sort_by` already means by "equal", because this runs
+        !! the same engine over the same keys.
+        !!
+        !! **`columns=` absent carries every column of `other` that is already RESIDENT -- not
+        !! every column it has.** A freshly opened right table has none, so a join given neither
+        !! `columns=` nor a prior `%materialize_all()` brings no payload across at all. Naming a
+        !! column DOES read it, by the ordinary lazy first touch. The same rule governs THIS
+        !! table: a column of it that has not been read is skipped rather than read, and once the
+        !! join has detached, that column is gone -- so materialize what you need first.
+        !!
+        !! **The key column appears once**, taken from this table, when `on` and `other_on` name
+        !! the same thing. When they differ both are kept, because the right key really is a
+        !! different column. Any other incoming name that clashes takes `other_suffix` (default
+        !! `"_2"`), and only the INCOMING column is renamed -- renaming a caller's own column as a
+        !! side effect of adding one is a surprise a mutating API has no business springing. A
+        !! suffixed name that still clashes is an error naming both.
+        !!
+        !! Rows come out in this table's original order, and within each, that row's matches in
+        !! `other`'s original order. An incoming column keeps its own `%unit`; `%get_file_metadata`
+        !! still answers about this table's own file.
+        module subroutine table_join(self, other, on, other_on, how, columns, other_suffix, threads)
+            class(parquet_table), intent(inout) :: self !! the LEFT table; mutated in place.
+            class(parquet_table), intent(in) :: other   !! the RIGHT table; only read from.
+            character(len=*), intent(in) :: on(:)       !! left key columns, primary first.
+            !> right key columns; absent means the same names as `on`. One entry per `on` entry.
+            character(len=*), intent(in), optional :: other_on(:)
+            !> `"inner"` (the default) or `"left"`, case-insensitive. `"right"`, `"outer"`,
+            !! `"semi"` and `"anti"` are recognised but not carried out yet and are refused.
+            character(len=*), intent(in), optional :: how
+            !> which of `other`'s non-key columns to bring over, separated by commas and/or
+            !! semicolons. Absent carries the ones already resident; see above, because this is
+            !! the argument a caller is most likely to be caught by.
+            character(len=*), intent(in), optional :: columns
+            !> suffix for an incoming column whose name clashes with one here. Default `"_2"`.
+            character(len=*), intent(in), optional :: other_suffix
+            integer, intent(in), optional :: threads    !! forwarded to the sort; absent = auto.
+        end subroutine table_join
+        !> %join over a separated key string ("id" or "ra,dec"); see `table_join` for everything
+        !! else. `other_on` is a separated string here too, with one name per `on` name.
+        module subroutine table_join_string(self, other, on, other_on, how, columns, &
+                other_suffix, threads)
+            class(parquet_table), intent(inout) :: self !! the LEFT table; mutated in place.
+            class(parquet_table), intent(in) :: other   !! the RIGHT table; only read from.
+            character(len=*), intent(in) :: on          !! left key columns, separated; primary first.
+            character(len=*), intent(in), optional :: other_on !! right key columns, separated.
+            character(len=*), intent(in), optional :: how      !! join kind; see `table_join`.
+            character(len=*), intent(in), optional :: columns  !! payload columns; see `table_join`.
+            character(len=*), intent(in), optional :: other_suffix !! clash suffix; default "_2".
+            integer, intent(in), optional :: threads    !! forwarded to the sort; absent = auto.
+        end subroutine table_join_string
         !> Builds the join's PAIR LIST: which left row meets which right row, and how many rows
         !! the joined table will have. Does not touch a single value column.
         !!

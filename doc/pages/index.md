@@ -65,7 +65,7 @@ point in the library.
 
 ### Every page at a glance
 
-All 34 pages, in reading order. (This list, each group's own page list and the
+All 35 pages, in reading order. (This list, each group's own page list and the
 `ordered_subpage:` frontmatter are kept consistent by
 `tools/check_source_conventions.py`, which fails the CI lint stage when they drift.)
 
@@ -97,6 +97,7 @@ All 34 pages, in reading order. (This list, each group's own page list and the
 - [Opening a table: slices, filters and renaming](tables/table-open.html)
 - [Building a table and writing it out](tables/table-write.html)
 - [Changing a table](tables/table-mutate.html)
+- [Joining two tables](tables/table-join.html)
 
 **Utilities and code generation**
 

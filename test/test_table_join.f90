@@ -2,8 +2,8 @@
 ! Author: Elmo Tempel (elmo.tempel@ut.ee)
 !===========================================
 !
-!> Unit tests for the JOIN ENGINE -- `table_join_pairs`, reached through the temporary
-!! `parquet_debug_table_join_pairs` hook.
+!> Unit tests for the JOIN: the engine (`table_join_pairs`, reached through the temporary
+!! `parquet_debug_table_join_pairs` hook) and `%join`'s own column rewrite on top of it.
 !!
 !! **The engine is tested before any column is rewritten, and that separation is the point.**
 !! Everything that can make a join produce a silent wrong answer -- the null rule, the output
@@ -21,8 +21,13 @@
 !! * **Nulls carry a negative control.** The same fixture without the nulls must match everywhere,
 !!   or every null assertion would also pass against an engine that matched nothing at all.
 !!
+!! The rewrite's own tests sit at the end of the file and add a fourth rule: **the engine is
+!! the oracle for the rewrite**, applied by hand to the source arrays, so an agreement says the
+!! columns really carry the rows the pair list named rather than that two joins agree.
+!!
 !! Abort paths live in test/error_scenarios.f90 as `join_*` scenarios, since they kill the
-!! process. Nothing here writes a file, so no test needs its own fixture path.
+!! process. Two tests here write a fixture, each to its own path -- the suite runs its tests
+!! concurrently, so a shared one would be truncated out from under the other.
 module test_table_join
     use parquet
     use iso_fortran_env, only : int32, int64
@@ -63,7 +68,25 @@ contains
             new_unittest("an empty table on either side joins to nothing", &
                 test_join_empty), &
             new_unittest("require= accepts a unique key and ignores null-keyed duplicates", &
-                test_join_require_ok) &
+                test_join_require_ok), &
+            new_unittest("%join(inner) builds the table the pair list describes", &
+                test_join_apply_inner), &
+            new_unittest("%join(left) nulls the incoming columns of an unmatched row", &
+                test_join_apply_left), &
+            new_unittest("the incoming column's own nulls survive the join", &
+                test_join_carries_source_nulls), &
+            new_unittest("the merged key, the carried key and the suffix rule", &
+                test_join_names), &
+            new_unittest("the separated-string key form joins as the array form does", &
+                test_join_string_form), &
+            new_unittest("columns= and residency, all four combinations", &
+                test_join_columns_residency), &
+            new_unittest("a join detaches, and skips a left column that was never read", &
+                test_join_detaches), &
+            new_unittest("a zero-row right table joins to all-nulls", &
+                test_join_empty_right), &
+            new_unittest("an incoming column keeps its own unit", &
+                test_join_units) &
             ]
     end subroutine collect_tests_table_join
     !
@@ -438,4 +461,348 @@ contains
             "the duplicate right key really does multiply the output when it is not refused")
     end subroutine test_join_require_ok
     !
+    !
+    ! ======================================================================================
+    !  %join -- the column rewrite
+    ! ======================================================================================
+    !
+    !> `%join(how="inner")` builds exactly the table the pair list describes.
+    !!
+    !! **The oracle is the ENGINE, applied by hand**, which is the one comparison that says the
+    !! rewrite is faithful: the pair list is itself asserted against a brute-force nested loop
+    !! further up this file, so agreement here means the columns really do carry left row `il(k)`
+    !! beside right row `ir(k)`. Comparing one joined table against another would compare the
+    !! rewrite with itself.
+    subroutine test_join_apply_inner(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b, c
+        integer(int64), allocatable :: il(:), ir(:), lp(:), rp(:), key(:)
+        integer(int64) :: n_out, k, gen
+        logical :: ok
+        !
+        call build(a, "id", LKEY)
+        call build(b, "id", RKEY)
+        call parquet_debug_table_join_pairs(a, b, ["id"], how="inner", il=il, ir=ir, n_out=n_out)
+        call build(c, "id", LKEY)
+        gen = c%generation()
+        call c%join(b, ["id"])
+        ! Every column was gathered, so every %col pointer and row handle taken before the call is
+        ! dead -- and the generation counter is the documented way a caller finds that out.
+        call check(error, c%generation() > gen, "%join must advance the generation counter")
+        if (allocated(error)) return
+        call check(error, c%nrows() == n_out, "%join must emit the row count the pair list counted")
+        if (allocated(error)) return
+        ! Three columns, not four: `id` and `payload` are this table's own and `payload_2` is the
+        ! incoming one under the default suffix -- the merged key appears ONCE.
+        call check(error, c%ncols() == 3, "a merged key must leave three columns, not four")
+        if (allocated(error)) return
+        call check(error, .not. c%has_column("id_2"), "a merged key must not also arrive as id_2")
+        if (allocated(error)) return
+        call c%get("id", key)
+        call c%get("payload", lp)
+        call c%get("payload_2", rp)
+        ok = .true.
+        do k = 1_int64, n_out
+            if (key(k) /= LKEY(il(k))) ok = .false.
+            if (lp(k) /= il(k)) ok = .false.
+            if (rp(k) /= ir(k)) ok = .false.
+        end do
+        call check(error, ok, "every joined row must carry left row il(k) beside right row ir(k)")
+    end subroutine test_join_apply_inner
+    !
+    !> `%join(how="left")` keeps every left row and nulls the INCOMING columns of the rows that
+    !! found no counterpart, leaving this table's own columns of those rows alone.
+    subroutine test_join_apply_left(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b
+        integer(int64), allocatable :: il(:), ir(:), lp(:), rp(:)
+        integer(int64) :: n_out, k
+        logical :: ok, seen_unmatched
+        !
+        call build(a, "id", LKEY)
+        call build(b, "id", RKEY)
+        call parquet_debug_table_join_pairs(a, b, ["id"], how="left", il=il, ir=ir, n_out=n_out)
+        call a%join(b, ["id"], how="left")
+        call check(error, a%nrows() == n_out, "a left join must emit the counted number of rows")
+        if (allocated(error)) return
+        call a%get("payload", lp)
+        call a%get("payload_2", rp)
+        ok = .true.
+        seen_unmatched = .false.
+        do k = 1_int64, n_out
+            ! This table's own column is never nulled: a left join always has a left row.
+            if (a%is_null("payload", k)) ok = .false.
+            if (lp(k) /= il(k)) ok = .false.
+            if (ir(k) == 0_int64) then
+                seen_unmatched = .true.
+                if (.not. a%is_null("payload_2", k)) ok = .false.
+            else
+                if (a%is_null("payload_2", k)) ok = .false.
+                if (rp(k) /= ir(k)) ok = .false.
+            end if
+        end do
+        call check(error, seen_unmatched, &
+            "the fixture must contain an unmatched left row, or the assertion below is vacuous")
+        if (allocated(error)) return
+        call check(error, ok, "an unmatched left row must be null in the incoming columns only")
+    end subroutine test_join_apply_left
+    !
+    !> An incoming column's OWN nulls survive the join, and the unmatched rows are ADDED to them.
+    !!
+    !! This is the property the whole rewrite rests on. `%set_validity` only ever adds nulls, so
+    !! the mask handed to it may describe the unmatched rows and nothing else, and the source
+    !! column's validity never has to be read back. Turn its `ior` into an assignment and this is
+    !! the test that notices: the right table said row 2's payload was null, and after the join
+    !! the rows that matched it come back holding a value.
+    subroutine test_join_carries_source_nulls(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b
+        integer(int64), allocatable :: key(:)
+        integer(int64) :: k
+        logical :: ok, seen_source_null, seen_unmatched_null
+        !
+        call build(a, "id", LKEY)
+        call build(b, "id", RKEY)
+        ! Right row 2 holds key 10, which left rows 2 and 5 both match -- so this null travels
+        ! into rows the join DID match, which is where an unmatched-row mask could have put it.
+        call b%set_null("payload", 2_int64)
+        call a%join(b, ["id"], how="left")
+        call a%get("id", key)
+        ok = .true.
+        seen_source_null = .false.
+        seen_unmatched_null = .false.
+        do k = 1_int64, a%nrows()
+            if (.not. a%is_null("payload_2", k)) cycle
+            if (key(k) == 10_int64) then
+                seen_source_null = .true.
+            else
+                seen_unmatched_null = .true.
+            end if
+            if (a%is_null("id", k) .or. a%is_null("payload", k)) ok = .false.
+        end do
+        call check(error, seen_source_null, &
+            "a null the incoming column already held must survive the gather")
+        if (allocated(error)) return
+        call check(error, seen_unmatched_null, &
+            "an unmatched row must be null too -- the negative control for the assertion above")
+        if (allocated(error)) return
+        call check(error, ok, "a join must null no column of this table's own")
+    end subroutine test_join_carries_source_nulls
+    !
+    !> Keys whose names DIFFER keep both columns; a clashing payload name takes the suffix, and
+    !! only the incoming column is ever renamed.
+    subroutine test_join_names(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b, c
+        integer(int64), allocatable :: rid(:)
+        integer(int64) :: k, lrow
+        logical :: ok
+        !
+        call build(a, "id", LKEY)
+        call build(b, "rid", RKEY)
+        call a%join(b, ["id"], other_on=["rid"], how="left")
+        call check(error, a%has_column("rid"), &
+            "a right key under a different name is a different column and must come across")
+        if (allocated(error)) return
+        call check(error, a%has_column("payload_2"), &
+            "a clashing payload name must take the default _2 suffix")
+        if (allocated(error)) return
+        ! EXACTLY four columns: `id` and `payload` are this table's own, `rid` is the carried
+        ! right key and `payload_2` the suffixed payload. The count is the assertion that stops a
+        ! differing key being carried TWICE -- once for being a key and once by the residency
+        ! default -- which would arrive silently as `rid` beside `rid_2`.
+        call check(error, a%ncols() == 4 .and. .not. a%has_column("rid_2"), &
+            "a carried right key must come across exactly once")
+        if (allocated(error)) return
+        call a%get("rid", rid)
+        ok = .true.
+        do k = 1_int64, a%nrows()
+            if (a%is_null("rid", k)) cycle
+            call a%get_element("payload", k, lrow)
+            if (rid(k) /= LKEY(lrow)) ok = .false.
+        end do
+        call check(error, ok, "the carried right key must hold the value that matched")
+        if (allocated(error)) return
+        call build(c, "id", LKEY)
+        call c%join(b, ["id"], other_on=["rid"], other_suffix="_r")
+        call check(error, c%has_column("payload_r") .and. c%has_column("payload"), &
+            "other_suffix= must rename the incoming column and leave this table's own alone")
+    end subroutine test_join_names
+    !
+    !> The separated-string key form joins exactly as the array form does.
+    subroutine test_join_string_form(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b, c
+        integer(int64), allocatable :: p1(:), p2(:)
+        integer(int64) :: k
+        logical :: ok
+        !
+        call build(a, "id", LKEY)
+        call build(b, "id", RKEY)
+        call build(c, "id", LKEY)
+        call a%join(b, ["id"], how="left")
+        call c%join(b, "id", how="left")
+        call check(error, a%nrows() == c%nrows(), &
+            "the string and array key forms must join identically")
+        if (allocated(error)) return
+        call a%get("payload_2", p1)
+        call c%get("payload_2", p2)
+        ok = .true.
+        do k = 1_int64, a%nrows()
+            if (a%is_null("payload_2", k) .neqv. c%is_null("payload_2", k)) ok = .false.
+            if (a%is_null("payload_2", k)) cycle
+            if (p1(k) /= p2(k)) ok = .false.
+        end do
+        call check(error, ok, "the two key forms must produce the same incoming column")
+    end subroutine test_join_string_form
+    !
+    !> `columns=` and residency, all four combinations.
+    !!
+    !! The rule a caller is most likely to be caught by, and the one whose default failure is
+    !! SILENT (`feature_risks.md` R-f): a join that carried no payload, followed by a schema-less
+    !! `parquet_write_table`, emits a valid file quietly missing columns. Case (3) is the negative
+    !! control that stops "carry everything" passing as "carry what is resident".
+    subroutine test_join_columns_residency(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: f = "test_run/join_residency.parquet"
+        type(parquet_table) :: src, a, b
+        integer(int64), allocatable :: extra(:)
+        integer(int64) :: k, want
+        logical :: ok, seen
+        !
+        call build(src, "id", RKEY)
+        allocate(extra(size(RKEY)))
+        do k = 1_int64, size(RKEY, kind=int64)
+            extra(k) = 100_int64 * k
+        end do
+        call src%add_column("extra", extra)
+        call parquet_write_table(src, f, overwrite=.true.)
+        ! (1) freshly opened: nothing is resident, so nothing comes across.
+        call build(a, "id", LKEY)
+        call parquet_open_table(b, f)
+        call a%join(b, "id", how="left")
+        call check(error, a%ncols() == 2, &
+            "columns= absent against an unread right table must carry no payload at all")
+        if (allocated(error)) return
+        ! (2) %materialize_all first: everything comes across.
+        call build(a, "id", LKEY)
+        call parquet_open_table(b, f)
+        call b%materialize_all()
+        call a%join(b, "id", how="left")
+        call check(error, a%has_column("payload_2") .and. a%has_column("extra"), &
+            "columns= absent after materialize_all must carry every column")
+        if (allocated(error)) return
+        ! (3) exactly one materialized: exactly that one.
+        call build(a, "id", LKEY)
+        call parquet_open_table(b, f)
+        call b%materialize("extra")
+        call a%join(b, "id", how="left")
+        call check(error, a%has_column("extra") .and. .not. a%has_column("payload_2"), &
+            "columns= absent must carry the resident columns only, not all of them")
+        if (allocated(error)) return
+        ! (4) columns= naming a column that is not resident READS it, and carries only it.
+        call build(a, "id", LKEY)
+        call parquet_open_table(b, f)
+        call a%join(b, "id", how="left", columns="extra")
+        call check(error, a%has_column("extra") .and. .not. a%has_column("payload_2"), &
+            "columns= must read a column it names, and carry only what it names")
+        if (allocated(error)) return
+        ! ... and its VALUES arrive, not merely its name. Without this the join could carry an
+        ! unread column across as a column of nulls -- which is exactly what would happen if the
+        ! first touch were skipped, since a zero-row source takes the all-null path.
+        call a%get("extra", extra)
+        ok = .true.
+        seen = .false.
+        do k = 1_int64, a%nrows()
+            if (a%is_null("extra", k)) cycle
+            seen = .true.
+            call a%get_element("id", k, want)
+            ! `extra` is 100*r for right row r, so the value names the row it came from -- and
+            ! that row's key must be this row's key. Exact even where two right rows share a key.
+            if (mod(extra(k), 100_int64) /= 0_int64 .or. extra(k) < 100_int64 .or. &
+                    extra(k) > 100_int64 * size(RKEY, kind=int64)) then
+                ok = .false.
+            else if (RKEY(extra(k) / 100_int64) /= want) then
+                ok = .false.
+            end if
+        end do
+        call check(error, seen, "some row must have matched, or the assertion below is vacuous")
+        if (allocated(error)) return
+        call check(error, ok, "a column columns= named must arrive holding its own values")
+    end subroutine test_join_columns_residency
+    !
+    !> A join detaches, and a left column that was never read is skipped rather than read.
+    !!
+    !! The skipped column is then unreadable for good, which fails LOUDLY through the detach
+    !! guard -- the difference between this table's side, where a lost column is an error at the
+    !! point of use, and the right table's, where a column that never came across is simply
+    !! absent. Only the residency is asserted here; the guard's abort is an error scenario.
+    subroutine test_join_detaches(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: f = "test_run/join_detach.parquet"
+        type(parquet_table) :: src, a, b
+        integer(int64), allocatable :: got(:)
+        !
+        call build(src, "id", LKEY)
+        call parquet_write_table(src, f, overwrite=.true.)
+        call parquet_open_table(a, f)
+        call build(b, "id", RKEY)
+        call a%join(b, "id", how="left")
+        call check(error, a%is_detached(), "a join that rewrites the row set must detach")
+        if (allocated(error)) return
+        call check(error, a%residency("payload") == RES_EMPTY, &
+            "a left column that was never read must be skipped by the gather, not read")
+        if (allocated(error)) return
+        call check(error, a%has_column("payload"), &
+            "a skipped column is still a column; it is only unreadable")
+        if (allocated(error)) return
+        ! The key column WAS read, by the join's own lazy first touch, so it survives.
+        call a%get("id", got)
+        call check(error, size(got, kind=int64) == a%nrows(), &
+            "the key column the join read must still be readable, at the new row count")
+    end subroutine test_join_detaches
+    !
+    !> A zero-row right table joins to all-nulls -- the one path that cannot gather at all,
+    !! because there is no row 1 for the unmatched rows to be pointed at.
+    subroutine test_join_empty_right(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b
+        integer(int64) :: empty(0)
+        integer(int64) :: k
+        logical :: ok
+        !
+        call build(a, "id", LKEY)
+        call build(b, "id", empty)
+        call a%join(b, "id", how="left")
+        call check(error, a%nrows() == size(LKEY, kind=int64), &
+            "a left join against an empty table must keep every left row exactly once")
+        if (allocated(error)) return
+        call check(error, a%has_column("payload_2"), &
+            "an empty right column still arrives -- as a column of nulls")
+        if (allocated(error)) return
+        ok = .true.
+        do k = 1_int64, a%nrows()
+            if (.not. a%is_null("payload_2", k)) ok = .false.
+        end do
+        call check(error, ok, "every row carried from an empty table must be null")
+    end subroutine test_join_empty_right
+    !
+    !> An incoming column keeps its own unit.
+    subroutine test_join_units(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b
+        character(len=:), allocatable :: u
+        integer(int64) :: mag(size(RKEY))
+        integer(int64) :: k
+        !
+        call build(a, "id", LKEY)
+        call parquet_new_table(b)
+        call b%add_column("id", RKEY)
+        mag = [(10_int64 * k, k = 1_int64, size(RKEY, kind=int64))]
+        call b%add_column("mag", mag, unit="mag")
+        call a%join(b, "id", how="left")
+        call a%unit("mag", u)
+        call check(error, u == "mag", "an incoming column must keep its own unit")
+    end subroutine test_join_units
+
 end module test_table_join

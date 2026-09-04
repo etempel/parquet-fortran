@@ -962,7 +962,12 @@ module parquet_columns
         !! materializer and every `%set(..., is_valid=)` was doing; this writes the bitmap a word at
         !! a time instead. `valid` must have exactly `nrows` entries.
         !!
-        !! Only ever ADDS nulls, on the same terms as the rank-2 form.
+        !! Only ever ADDS nulls, on the same terms as the rank-2 form -- and `parquet_table%join`
+        !! DEPENDS on that, one module away and invisible from here: it hands in a mask describing
+        !! the unmatched output rows alone and relies on the incoming column's own nulls, carried
+        !! across by the gather, surviving untouched. Making this assign rather than add would
+        !! leave a join silently returning values for rows the source file said were null
+        !! (`feature_risks.md` Risk-182).
         module subroutine set_validity_rows(self, valid)
             class(parquet_column), intent(inout) :: self !! the column.
             logical, intent(in) :: valid(:)              !! one entry per row; .false. marks the row null.

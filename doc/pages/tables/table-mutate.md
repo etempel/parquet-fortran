@@ -129,6 +129,7 @@ individual procedure:
 | **cell** — `%set_element`, `%set_null`, `%clear_null` | changes values in place | no |
 | **column** — `%add_column`, `%drop_column`, `%rename_column`, `%copy_column`, `%cast` | changes which columns exist, or a column's kind | no |
 | **row** — `%filter_rows`, `%sort_by`, `%top_n`, `%delete_rows`, `%truncate`, `%append`, `%append_null_rows` | changes which rows exist | **yes, when it changes one** |
+| **row** — `%join` | matches another table's rows against this one's and brings its columns over | **yes** |
 
 ```fortran
 call t%materialize("mass,age,zphot")     ! read what you want to keep, first
@@ -136,6 +137,10 @@ call t%filter_rows(mass > 1.0e10_real64) ! keep the rows a mask selects
 call t%sort_by("-mass")                  ! or sort_by(["mass"], descending=[.true.])
 call t%drop_column("scratch")
 ```
+
+`%join` has a page of its own — see [Joining two tables](table-join.html) — because it is the one
+row-changing operation that takes a second table, and most of what there is to say about it is
+about which of *that* table's columns come across.
 
 Two of the five are explained on the neighbouring page rather than here, because both are really
 about a column's *type* rather than about mutating a table: `%cast` converts a column to another

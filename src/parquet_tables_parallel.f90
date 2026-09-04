@@ -334,6 +334,65 @@ contains
         !$omp end parallel do
     end procedure table_colwork_clone
     !
+    module procedure table_colwork_join
+        integer :: j, nt
+        !
+        ! Gated on the SOURCE, exactly as the clone is and for the same reason: the destination
+        ! slots have just been created and hold nothing, while the work per column is one full
+        ! copy of a source column followed by a gather over it.
+        nt = colwork_threads(src, sslots)
+        ! Noted on both paths, serial included -- see table_colwork's own note.
+        call parquet_debug_note_table_threads(int(nt, int64))
+        if (nt <= 1) then
+            do j = 1, size(sslots)
+                call join_one_column(src, dst, sslots(j), dslots(j), idx, valid)
+            end do
+            return
+        end if
+        ! Each iteration reads one source column and writes one destination column, both named by
+        ! their own entry of two arrays of DISTINCT slots, so no two iterations touch the same
+        ! allocation in either store. `idx` and `valid` are only read. The source table is a
+        ! different table from the destination -- a self-join is refused before anything reaches
+        ! here -- so the two stores are distinct objects and not merely distinct slots.
+        !
+        ! `schedule(dynamic)` for the reason both siblings use it: a PK_STRING column's copy and
+        ! gather rebuild a whole packed payload where a float64 column's are two memcpys.
+        !$omp parallel do default(shared) private(j) schedule(dynamic) num_threads(nt)
+        do j = 1, size(sslots)
+            call join_one_column(src, dst, sslots(j), dslots(j), idx, valid)
+        end do
+        !$omp end parallel do
+    end procedure table_colwork_join
+    !
+    !> Carries ONE column across: the whole body of both loops above, so the two cannot drift.
+    !!
+    !! **The three lines are shipped bindings and the order matters.** `deep_copy` gives the
+    !! destination its own storage, kind, width, unit and the source's own nulls; `%gather` then
+    !! selects one source row per output row; `%set_validity` marks the output rows that had no
+    !! counterpart. That last call only ever ADDS nulls -- it never clears one -- which is what
+    !! lets the mask describe the unmatched rows alone and leaves the nulls the source column
+    !! already had exactly where the gather put them.
+    subroutine join_one_column(src, dst, sslot, dslot, idx, valid)
+        type(parquet_table_cache), intent(in) :: src      !! the source column store.
+        type(parquet_table_cache), intent(inout) :: dst   !! the destination column store.
+        integer, intent(in) :: sslot                      !! source slot.
+        integer, intent(in) :: dslot                      !! destination slot.
+        integer(int64), intent(in) :: idx(:)              !! per output row: source row, never 0.
+        logical, intent(in), optional :: valid(:)         !! per output row: .false. to null it.
+        !
+        call src%cols(sslot)%values%deep_copy(dst%cols(dslot)%values)
+        ! A source column with no rows has no row 1 for `idx` to have named, so it cannot be
+        ! gathered at all -- every output row is unmatched by construction. Appending null rows to
+        ! the empty copy gives the same result and keeps the kind, width and unit `deep_copy` just
+        ! carried across. Reachable whenever a zero-row right table is joined with how="left".
+        if (src%cols(sslot)%values%length() < 1_int64) then
+            call dst%cols(dslot)%values%append_nulls(size(idx, kind=int64))
+            return
+        end if
+        call dst%cols(dslot)%values%gather(idx)
+        if (present(valid)) call dst%cols(dslot)%values%set_validity(valid)
+    end subroutine join_one_column
+    !
     !> How many threads this mutation may use: 1 (serial) or more.
     !!
     !! **Deliberately conservative, and it picks a DEFAULT rather than refusing anything** -- the

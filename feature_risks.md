@@ -247,6 +247,8 @@ something a reader is expected to have.
 | [Risk-179](#risk-179--a-dropped-parquet_index-guard-issues-one-index-to-two-owners) | A dropped `parquet_index` guard issues one index to two owners | 2 — proposed |
 | [Risk-180](#risk-180--the-matchs-two-null-skips-are-individually-redundant-and-jointly-load-bearing) | The match's two null skips are individually redundant and jointly load-bearing | 4 — covered |
 | [Risk-181](#risk-181--a-key-buffers-maxn-1-floor-is-not-its-row-count) | A key buffer's `max(n, 1)` floor is not its row count | 4 — covered |
+| [Risk-182](#risk-182--set_validitys-add-only-behaviour-is-what-a-joins-null-fill-rests-on) | `%set_validity`'s add-only behaviour is what a join's null-fill rests on | 4 — covered |
+| [Risk-183](#risk-183--a-join-carries-only-the-resident-right-columns-and-a-schema-less-write-then-loses-them) | A join carries only the resident right columns, and a schema-less write then loses them | 2 — proposed |
 
 ---
 
@@ -259,6 +261,31 @@ written in prose — state what breaks and why the failure is quiet, and leave t
 whoever triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
+
+### Risk-183 — A join carries only the resident right columns, and a schema-less write then loses them
+
+`%join` with no `columns=` brings over the columns of the right table that are **already resident**,
+which for a freshly opened table is none at all. `parquet_write_table(t, out)` with no schema writes
+the columns that are **resident**. Both are documented, both are right on their own, and composed
+they emit a valid parquet file, with the correct row count, quietly missing columns the caller
+believed were in it.
+
+**This is the one path in the residency rule that does not fail at the point of use.** Everywhere
+else a column that did not come across is an error the moment something asks for it: the left side
+detaches, so a skipped column's next read is `table_check_not_detached`'s named message, and a right
+column named in `columns=` that does not exist is refused outright. Here nothing asks. Only a reader
+who already knows which columns to expect notices, and by then the file has been written.
+
+**Rule:** neither half may become quieter. `columns=` must keep refusing a name the right table does
+not have rather than skipping it, the join must keep reading a column it was told to read, and the
+guide page must keep leading with `%materialize_all()` on the right table as the way to say "all of
+it". A future `columns="*"` or a default of "every column" would remove the hazard and is the only
+change that should.
+
+**Proposed test:** join a freshly opened right table with no `columns=`, `parquet_write_table` the
+result with no schema, reopen it and assert that `parquet_get_column_names` lists only the left
+table's columns -- pinning the composition rather than each half. The negative control is the same
+sequence with `%materialize_all()` on the right table first, which must list the payload columns.
 
 ### Risk-133 — A missing domain tag puts a generic back in another generic's word space, silently
 
@@ -1131,6 +1158,31 @@ rows' elements.
 
 
 ## 4. Risks already covered, kept for what they still forbid
+
+### Risk-182 — `%set_validity`'s add-only behaviour is what a join's null-fill rests on
+
+The join builds each incoming column with three shipped bindings and nothing else: `deep_copy`,
+`%gather` naming a source row for every output row, and `%set_validity` marking the rows that had no
+counterpart. **That last call is correct only because `%set_validity` never CLEARS a null** -- both
+specifics return early on an all-true mask, the bitmap arm ORs its word in rather than assigning it,
+and the temporal and string arms call `set_null` only where the mask is `.false.`. So the mask handed
+in may describe the unmatched rows and nothing else, and the source column's own validity never has
+to be read back.
+
+**Turn that `ior` into an assignment and the join silently loses every null the right table already
+held**, in the rows it DID match -- a full table of the right size, with values where the file said
+there were none. `parquet_columns_validity.f90` carries the comment; the join is now a second caller
+that depends on it, one module away, which is exactly the coupling a later "optimisation" cannot see.
+
+**Rule:** `%set_validity` adds nulls and never removes one. A caller that needs the opposite needs
+`%clear_null`, not a changed `%set_validity`. And the join must not be "simplified" into reading the
+source mask back and writing a combined one, which would work today and would stop working the
+moment the add-only rule was relaxed.
+
+**Test:** `test_join_carries_source_nulls` (`test/test_table_join.f90`), which nulls a right-hand
+row that TWO left rows match, then requires both a surviving source null and an unmatched-row null
+in the same result -- the second being the negative control, without which a join that nulled
+everything would pass.
 
 Every entry here has a test behind it. What keeps it in the document is the second half: a rule for
 whoever edits the area next. Read the entry for the area you are about to touch before you touch

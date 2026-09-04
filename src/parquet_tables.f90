@@ -6572,6 +6572,22 @@ module parquet_tables
         !! and needs no separate API -- a clone copies only the columns that are resident, so on a
         !! lazy table it is nearly free.
         !!
+        !! **`how=` chooses which rows survive.** `"inner"` keeps only the rows that found a
+        !! counterpart; `"left"` keeps every row of this table; `"right"` keeps every row of
+        !! `other`; `"outer"` keeps both; `"semi"` keeps the rows of this table that matched and
+        !! `"anti"` the ones that did not. All six are case-insensitive.
+        !!
+        !! **`"right"` and `"outer"` can emit a row with no counterpart HERE**, so this table's
+        !! own columns are filled with nulls at those rows -- which means every column here has to
+        !! be null-fillable, and a container column (list, map, struct) is refused under those two
+        !! `how` values for the same reason an incoming one always is. Where `on` and `other_on`
+        !! name the same column, the merged key takes `other`'s value at such a row, since this
+        !! table has none to give.
+        !!
+        !! **`"semi"` and `"anti"` bring NOTHING across.** They answer a question about this
+        !! table's own rows -- did each one find a counterpart -- so no column of `other` is
+        !! carried, no name can clash, and `columns=` is refused rather than ignored.
+        !!
         !! **Keys are NAMES, not sort keys.** `on` takes one column name per key, primary first,
         !! and a direction token (`"-id"`, `"id desc"`) is refused: a join is an equality test, and
         !! ordering the keys is the engine's business. `other_on` names the right-hand columns when
@@ -6585,7 +6601,8 @@ module parquet_tables
         !! the same engine over the same keys.
         !!
         !! **`columns=` absent carries every column of `other` that is already RESIDENT -- not
-        !! every column it has.** A freshly opened right table has none, so a join given neither
+        !! every column it has**, on the four `how` values that carry anything at all. A freshly
+        !! opened right table has none, so a join given neither
         !! `columns=` nor a prior `%materialize_all()` brings no payload across at all. Naming a
         !! column DOES read it, by the ordinary lazy first touch. The same rule governs THIS
         !! table on a join that DETACHES: a column of it that has not been read is skipped rather
@@ -6623,12 +6640,13 @@ module parquet_tables
             character(len=*), intent(in) :: on(:)       !! left key columns, primary first.
             !> right key columns; absent means the same names as `on`. One entry per `on` entry.
             character(len=*), intent(in), optional :: other_on(:)
-            !> `"inner"` (the default) or `"left"`, case-insensitive. `"right"`, `"outer"`,
-            !! `"semi"` and `"anti"` are recognised but not carried out yet and are refused.
+            !> `"inner"` (the default), `"left"`, `"right"`, `"outer"`, `"semi"` or `"anti"`,
+            !! case-insensitive. See above for which rows each keeps.
             character(len=*), intent(in), optional :: how
             !> which of `other`'s non-key columns to bring over, separated by commas and/or
             !! semicolons. Absent carries the ones already resident; see above, because this is
-            !! the argument a caller is most likely to be caught by.
+            !! the argument a caller is most likely to be caught by. Refused with `how="semi"`
+            !! and `how="anti"`, which carry no columns at all.
             character(len=*), intent(in), optional :: columns
             !> suffix for an incoming column whose name clashes with one here. Default `"_2"`.
             character(len=*), intent(in), optional :: other_suffix

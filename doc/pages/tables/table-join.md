@@ -55,13 +55,28 @@ gain four.
 
 ## Which rows come out
 
-`how="inner"` keeps only the rows that found a counterpart. `how="left"` keeps every row of this
-table and fills the incoming columns with nulls where there was no counterpart.
+`how=` picks which rows survive, and there are six:
+
+| `how` | keeps |
+|---|---|
+| `"inner"` | the default. Only the rows that found a counterpart |
+| `"left"` | every row of this table; the incoming columns are null where there was none |
+| `"right"` | every row of `other`; **this table's own** columns are null where there was none |
+| `"outer"` | both, so either half of a row may be null |
+| `"semi"` | the rows of this table that matched, and no column from `other` at all |
+| `"anti"` | the rows of this table that did **not** match, and no column from `other` |
 
 ```fortran
-call a%join(b, "id")                 ! inner: only the matches
-call a%join(b, "id", how = "left")   ! every row of `a`, nulls where `b` had nothing
+call a%join(b, "id")                  ! inner: only the matches
+call a%join(b, "id", how = "left")    ! every row of `a`, nulls where `b` had nothing
+call a%join(b, "id", how = "outer")   ! both sides, nulls on whichever half is missing
+call a%join(b, "id", how = "semi")    ! `a` filtered down to the rows `b` knows about
 ```
+
+**`"semi"` and `"anti"` are row selections, not joins in the usual sense**: they answer "did this
+row find a counterpart?" and keep or drop it accordingly, bringing nothing across. Nothing is
+duplicated by them either, however many counterparts a row has. `columns=` is refused with both,
+rather than ignored — there would be no column for it to name.
 
 A key value that appears twice on one side and three times on the other produces six rows, which is
 what "join" means and is also the way a join gets unexpectedly large. Two keys that are unique on
@@ -76,9 +91,28 @@ astropy's join produces. The same pairs come out either way and only the sequenc
 default is the one to keep unless the grouping itself is what you want — an array computed against
 this table before the join no longer lines up under `"key"`.
 
-`"right"`, `"outer"`, `"semi"` and `"anti"` are recognised names and are refused for now: they need
-a rewrite that can null-fill *this* table's own columns, or remove its rows, which `%join` does not
-do yet. Asking for one says so rather than doing something else.
+## When a row has no counterpart here
+
+`"right"` and `"outer"` are the two that can emit a row this table contributed nothing to, and two
+things follow that the other four never have to deal with.
+
+**This table's own columns are null at such a row**, exactly as the incoming ones are under
+`"left"`. So every column here has to be *fillable with nulls* — which a container column (list,
+map, struct) is not, and one is refused under those two `how` values with a message saying so. The
+refusal is by kind and by side rather than by whether this particular join happens to have an
+unmatched row, so that a join does not start failing the day its input gains one.
+
+**The merged key takes `other`'s value there.** Where `on` and `other_on` name the same column the
+result holds one key column, and at a row with no counterpart here it is `other`'s key that fills
+it — this table has none to give. So the key column of a `"right"` or `"outer"` join is never null
+on account of the join itself, and remains the column you can group or match on afterwards. When
+the two key names *differ* nothing is merged, both columns are kept, and this table's own key is
+null at such a row like the rest of its row.
+
+```fortran
+call a%join(b, "id", how = "outer")
+!  a row only `b` had: `a`'s own columns are null, and `id` holds `b`'s value
+```
 
 ## Saying what you expect
 
@@ -155,6 +189,11 @@ call cat%join(lut, "uberID", how = "left")
 !  uberID repeated in lut ->  those rows are duplicated, so cat detaches
 ```
 
+The same rule covers the other four with no clause of its own. A `"semi"` join whose key matches
+every row here is a filter that removes nothing, so it keeps its file; one that removes a row
+detaches, as `%filter_rows` does. A `"right"` or `"outer"` join detaches as soon as a row of
+`other` has no counterpart here, because that row is one this table did not have.
+
 So the rule to plan against is the one on this page's [What the join
 carries](#what-the-join-carries): read the columns you want to keep *before* a join, unless you know
 the key is unique on the other side. `%is_detached()` answers afterwards.
@@ -199,6 +238,11 @@ keys are compared in is the library's business rather than yours.
 
 Every scalar column that can be a sort key can be a join key: the nine orderable kinds. A vector
 column and a container column cannot, for the same reason they cannot be sorted by.
+
+A container column cannot be **carried across** a join either, on any `how`, nor held on this side
+of a `"right"`/`"outer"` one — see [When a row has no counterpart
+here](#when-a-row-has-no-counterpart-here). Every other column kind, vectors included, is carried
+and filled normally.
 
 ## What the join carries
 
@@ -295,9 +339,9 @@ call cat%join(lut, on = "uberID", how = "left", require = "m:1")
 
 ## Limitations
 
-- `how=` accepts `"inner"` and `"left"`. `"right"`, `"outer"`, `"semi"` and `"anti"` are recognised
-  and refused for now.
-- A container column cannot be carried across a join, and cannot be a key.
+- A container column cannot be carried across a join, cannot be a key, and cannot be held on this
+  side of a `"right"` or `"outer"` one.
+- `columns=` is refused with `how="semi"` and `how="anti"`, which carry no columns at all.
 - A table cannot be joined to itself. `call t%clone(other)` first and join the clone — Fortran
   forbids one variable reaching a procedure as two arguments when either is written to, and no
   compiler diagnoses it, so `%join` refuses it explicitly.

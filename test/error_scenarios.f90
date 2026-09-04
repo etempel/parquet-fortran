@@ -884,8 +884,10 @@ program error_scenarios
         call scenario_join_other_on_size()
     case ("join_no_key")
         call scenario_join_no_key()
-    case ("join_how_unsupported")
-        call scenario_join_how_unsupported()
+    case ("join_columns_with_semi")
+        call scenario_join_columns_with_semi()
+    case ("join_left_container_outer")
+        call scenario_join_left_container_outer()
     case ("join_key_direction")
         call scenario_join_key_direction()
     case ("join_key_direction_dash")
@@ -17786,24 +17788,57 @@ contains
         print '(a,i0)', "unexpectedly joined with no key, rows=", n_out
     end subroutine scenario_join_no_key
 
-    !> `%join` accepts every `how` token the engine does, but only carries out two of them yet --
-    !! so the other four are refused by name rather than silently doing something else.
+    !> `columns=` is refused with `how='semi'` and `how='anti'`: those two keep or drop rows of
+    !! the left table and carry no column at all, so a list naming columns is a request the call
+    !! cannot honour, and ignoring it would leave the caller believing columns had arrived. The
+    !! same `how` without `columns=` is the control, and so is the same `columns=` with a `how`
+    !! that does carry payload.
     !!
-    !! **This scenario is meant to be DELETED**, together with the refusal it asserts: when the
-    !! column rewrite learns to null-fill this table's own columns (`right`, `outer`) and to
-    !! remove rows (`semi`, `anti`), what this should assert instead is that `%join(how="right")`
-    !! produces the table `parquet_debug_table_join_pairs(..., how="right")` describes -- which is
-    !! the shape `test_join_apply_inner` already has. The 'left' join first is the control.
-    subroutine scenario_join_how_unsupported()
+    !! Replaced `scenario_join_how_unsupported`, which asserted that `right`/`outer`/`semi`/`anti`
+    !! were refused by name until the column rewrite could carry them out. It said in its own
+    !! comment that it was meant to be deleted along with that refusal; S6 P6 did both.
+    subroutine scenario_join_columns_with_semi()
         type(parquet_table) :: a, b
         call join_fixture(a, [10_int64, 20_int64])
         call join_fixture(b, [20_int64])
-        call a%join(b, "id", how="left")
-        print '(a,i0)', "how=left joined ok, rows=", a%nrows()
+        call a%join(b, "id", how="semi")
+        print '(a,i0)', "how=semi selected rows without columns=, rows=", a%nrows()
         call join_fixture(a, [10_int64, 20_int64])
-        call a%join(b, "id", how="right")   ! -> aborts (recognized, not carried out yet)
-        print '(a,i0)', "unexpectedly ran how=right, rows=", a%nrows()
-    end subroutine scenario_join_how_unsupported
+        call a%join(b, "id", how="left", columns="payload")
+        print '(a,i0)', "columns= carried payload on a how that has one, cols=", a%ncols()
+        call join_fixture(a, [10_int64, 20_int64])
+        call a%join(b, "id", how="anti", columns="payload")   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted columns= with how=anti, cols=", a%ncols()
+    end subroutine scenario_join_columns_with_semi
+
+    !> A container column on the LEFT is refused under `how='right'`/`'outer'` -- the mirror of
+    !! `join_container_payload`'s refusal on the incoming side, and for the same reason: those two
+    !! `how` values emit rows with no counterpart here, so every column here has to be fillable
+    !! with nulls and `%set_validity` has no arm for a container kind.
+    !!
+    !! The refusal is by KIND and SIDE, never by whether this particular join has an unmatched
+    !! row, so the fixture below deliberately matches every row -- and is still refused. Both
+    !! controls matter: the same table joins fine under `how='left'`, and a `how='outer'` join of
+    !! a table WITHOUT a container column runs.
+    subroutine scenario_join_left_container_outer()
+        type(parquet_table) :: a, b
+        type(parquet_list_column) :: lc
+        call join_fixture(b, [10_int64, 20_int64])
+        call join_fixture(a, [10_int64, 20_int64])
+        call a%join(b, "id", how="outer")
+        print '(a,i0)', "how=outer on a container-free table ran, rows=", a%nrows()
+        call lc%init(PK_INT32)
+        call lc%append_row([1_int32, 2_int32])
+        call lc%append_row([3_int32])
+        call join_fixture(a, [10_int64, 20_int64])
+        call a%add_column("tags", lc)
+        call a%join(b, "id", how="left")
+        print '(a,i0)', "a container column survived a how=left join, cols=", a%ncols()
+        call join_fixture(a, [10_int64, 20_int64])
+        call a%add_column("tags", lc)
+        call a%join(b, "id", how="outer")   ! -> aborts (a list column cannot be null-filled)
+        print '(a,i0)', "unexpectedly outer-joined over a container column, rows=", a%nrows()
+    end subroutine scenario_join_left_container_outer
 
     !> A join key is a column NAME and has no direction: `on="-id"` is a sort key, and accepting
     !! it would silently join on a column called "-id" that does not exist, or worse would look

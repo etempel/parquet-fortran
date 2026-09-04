@@ -158,11 +158,11 @@ contains
         logical, allocatable, intent(out), optional :: matched(:) !! per PRE-join left row.
         integer, intent(in), optional :: threads    !! forwarded to the sort; absent = auto.
         character(len=*), parameter :: PROC = "join"
-        integer(int64), allocatable :: il(:), ir(:), ridx(:)
-        logical, allocatable :: rvalid(:)
-        integer, allocatable :: sslots(:)
+        integer(int64), allocatable :: il(:), ir(:)
+        integer, allocatable :: sslots(:), mlslots(:), mrslots(:)
         character(len=:), allocatable :: dnames(:)
         integer(int64) :: n_out
+        integer :: how_id
         !
         ! VALIDATE EVERYTHING, THEN MUTATE EVERYTHING -- parquet_tables_rowmutate.f90's first
         ! rule, and a join has more chance to break it than anything already there because it
@@ -175,11 +175,17 @@ contains
         ! the sooner it says so the less it does first.
         call join_check_not_self(self, other)
         call join_check_key_args(on, other_on)
-        call join_check_how_supported(how)
+        ! Resolved HERE as well as in the engine, because `how` decides three NAME questions the
+        ! plan below has to answer: whether there is a payload at all, whether a container column
+        ! on THIS side is refusable, and whether a merged key can take its value from `other`.
+        ! Folding a token twice costs nothing; deriving those answers from `how` twice would not.
+        call join_resolve_how(how, how_id)
+        call join_check_left_containers(self, how_id)
         ! Planned before the sort, because every refusal it raises is a NAME question -- a column
         ! that is not there, a container that cannot be carried, a suffixed name that still
         ! clashes -- and none of them is worth an O(n log n) sort first. It reads nothing.
-        call join_plan_payload(self, other, on, other_on, columns, other_suffix, sslots, dnames)
+        call join_plan_payload(self, other, on, other_on, columns, other_suffix, how_id, &
+            sslots, dnames, mlslots, mrslots)
         ! The engine. Every remaining refusal is here: the self-join, the key kinds and widths,
         ! any key column that cannot be a key at all, the `require=` assertion and the `max_rows=`
         ! ceiling -- the last two both settled from the counting pass, so a join too big to build
@@ -192,8 +198,7 @@ contains
         ! was going to be refused does not read a column first. A column already resident, which
         ! is every column the `columns=`-absent default selects, returns immediately.
         call join_touch_payload(other, sslots)
-        call join_gather_index(ir, n_out, ridx, rvalid)
-        call join_apply(self, other, il, ridx, rvalid, n_out, sslots, dnames)
+        call join_apply(self, other, il, ir, n_out, sslots, dnames, mlslots, mrslots)
     end subroutine join_impl
     !
     !> The separated-string specifics' shared body: split each key string into names, then join.
@@ -247,33 +252,70 @@ contains
         end if
     end subroutine join_check_not_self
     !
-    !> Refuses a `how` the engine understands but the column rewrite cannot carry out yet.
+    !> Turns `how=` into its HOW_* token, naming every accepted value when it is not one of them.
     !!
-    !! **This is a refusal to DELETE, not to keep.** `table_join_pairs` already produces a correct
-    !! pair list for all six, and each of the four below is asserted against a golden vector at the
-    !! engine level. What is missing is on the rewrite side: `right` and `outer` emit output rows
-    !! with no LEFT counterpart, which needs this table's own columns null-filled and brings the
-    !! container refusal onto the left side with it, and `semi`/`anti` remove left rows and carry no
-    !! payload at all, so `columns=` has to be refused with them. When those land, this whole
-    !! procedure goes -- `join_resolve_tokens` accepts every token already, so nothing else changes.
-    !!
-    !! An unrecognised token falls through untouched, so a typo still gets the six-value message
-    !! from `join_resolve_tokens` rather than this one.
-    subroutine join_check_how_supported(how)
+    !! Split out of `join_resolve_tokens` because `%join` needs this answer BEFORE the engine
+    !! runs, while the other two vocabulary arguments are the engine's own business. It replaced
+    !! a `join_check_how_supported` that refused `right`/`outer`/`semi`/`anti` by name until the
+    !! column rewrite could carry them out; that refusal is gone, and so is its error scenario.
+    subroutine join_resolve_how(how, how_id)
         character(len=*), intent(in), optional :: how !! the caller's `how=`, if any.
+        integer, intent(out) :: how_id                !! HOW_* token; HOW_INNER when absent.
         character(len=:), allocatable :: tok
         !
+        how_id = HOW_INNER
         if (.not. present(how)) return
         call join_fold(how, tok)
         select case (tok)
-        case ("right", "outer", "semi", "anti")
-            error stop EP // "join: how='" // tok // "' is recognised but not carried out yet; " // &
-                "%join performs 'inner' and 'left'. The pair list behind all six already " // &
-                "exists; what is missing is the column rewrite -- 'right' and 'outer' need an " // &
-                "output row with no left-hand counterpart to be null-filled, and 'semi' and " // &
-                "'anti' remove rows rather than adding columns."
+        case ("inner")
+            how_id = HOW_INNER
+        case ("left")
+            how_id = HOW_LEFT
+        case ("right")
+            how_id = HOW_RIGHT
+        case ("outer")
+            how_id = HOW_OUTER
+        case ("semi")
+            how_id = HOW_SEMI
+        case ("anti")
+            how_id = HOW_ANTI
+        case default
+            error stop EP // "join: how='" // tok // "' is not one of 'inner', 'left', " // &
+                "'right', 'outer', 'semi' or 'anti'"
         end select
-    end subroutine join_check_how_supported
+    end subroutine join_resolve_how
+    !
+    !> Refuses a container column on THIS side of a `right`/`outer` join.
+    !!
+    !! Those two are the only `how` values that emit a row with no counterpart *here*, so they
+    !! are the only ones that have to null-fill this table's own columns -- and `%set_validity`
+    !! has no arm for a container kind, whose null state is the container's own business rather
+    !! than a bitmap's. The mirror of the refusal `join_plan_payload` raises for an incoming
+    !! container, and stated the same way: by KIND and SIDE, never by whether this particular
+    !! join happens to have an unmatched row, so that a program's join does not start failing the
+    !! day its input gains one.
+    !!
+    !! A column that has not been READ is not checked, for the same reason it is not rewritten:
+    !! `table_mutable_slots` skips it, so it never reaches the gather at all.
+    subroutine join_check_left_containers(self, how_id)
+        class(parquet_table), intent(in) :: self !! the left table.
+        integer, intent(in) :: how_id            !! HOW_* token.
+        character(len=:), allocatable :: kname, ctx
+        integer :: i, kd
+        !
+        if (how_id /= HOW_RIGHT .and. how_id /= HOW_OUTER) return
+        do i = 1, self%cache%ncols
+            if (.not. table_mutable_column(self, i)) cycle
+            kd = self%cache%cols(i)%declared_kind
+            if (.not. parquet_kind_is_container(kd)) cycle
+            call parquet_kind_name(kd, kname)
+            call table_context_suffix(self%cache, trim(self%cache%cols(i)%name), ctx)
+            error stop EP // "join: how='right' and how='outer' can emit a row with no " // &
+                "counterpart in this table, so every column here has to be fillable with " // &
+                "nulls -- and a " // kname // " column is not. Use how='inner' or how='left', " // &
+                "or drop the column first" // ctx
+        end do
+    end subroutine join_check_left_containers
     !
     !> Checks the key-name arguments alone: how many there are, and that none of them is a SORT
     !! key. Reached from both `%join` entry points and from `join_build_keys`, so the debug hook
@@ -362,19 +404,42 @@ contains
     !! `id` holding the same values. A right key whose name DIFFERS is genuinely another column
     !! and is carried whatever `columns=` says, because the key it holds is not otherwise in the
     !! result at all.
-    subroutine join_plan_payload(self, other, on, other_on, columns, other_suffix, sslots, dnames)
+    subroutine join_plan_payload(self, other, on, other_on, columns, other_suffix, how_id, &
+            sslots, dnames, mlslots, mrslots)
         class(parquet_table), intent(in) :: self  !! the left table, for the name clashes.
         class(parquet_table), intent(in) :: other !! the right table.
         character(len=*), intent(in) :: on(:)     !! left key columns.
         character(len=*), intent(in), optional :: other_on(:)  !! right key columns.
         character(len=*), intent(in), optional :: columns      !! separated payload column list.
         character(len=*), intent(in), optional :: other_suffix !! clash suffix; default "_2".
+        integer, intent(in) :: how_id                          !! HOW_* token.
         integer, allocatable, intent(out) :: sslots(:)         !! right slots to carry, in order.
         character(len=:), allocatable, intent(out) :: dnames(:) !! this table's name for each.
+        !> per MERGED key (one `on`/`other_on` pair naming the same column on both sides): this
+        !! table's slot and `other`'s. Empty unless the two names match. `join_apply` needs both
+        !! because an output row with no counterpart here has to take that key's value from
+        !! `other` -- the one place the merge is not a free simplification.
+        integer, allocatable, intent(out) :: mlslots(:)
+        integer, allocatable, intent(out) :: mrslots(:)         !! ... and `other`'s slot for it.
         character(len=:), allocatable :: toks(:), sfx, nm, nm2, ctx, kname
         logical, allocatable :: merged(:)
-        integer :: i, j, np, idx, wid, kd
+        integer :: i, j, np, nm_pairs, idx, lidx, wid, kd
         !
+        ! `semi` and `anti` answer a question about THIS table's rows and carry no payload at
+        ! all, so a `columns=` list is a request the call cannot honour. Refused rather than
+        ! ignored: a caller who named columns and got none would have no way to tell.
+        if (how_id == HOW_SEMI .or. how_id == HOW_ANTI) then
+            if (present(columns)) then
+                error stop EP // "join: columns= cannot be used with how='semi' or how='anti'. " // &
+                    "Those two keep or drop rows of this table and bring nothing across, so " // &
+                    "there is no column for the list to name. Use how='inner' or how='left' to " // &
+                    "carry columns, or drop columns= to select rows only."
+            end if
+            allocate(sslots(0))
+            allocate(character(len=1) :: dnames(0))
+            allocate(mlslots(0), mrslots(0))
+            return
+        end if
         sfx = "_2"
         if (present(other_suffix)) sfx = trim(other_suffix)
         if (len(sfx) < 1) then
@@ -384,21 +449,31 @@ contains
         allocate(merged(max(other%cache%ncols, 1)))
         merged = .false.
         allocate(sslots(max(other%cache%ncols, 1)))
+        allocate(mlslots(size(on, kind=int64)), mrslots(size(on, kind=int64)))
         np = 0
+        nm_pairs = 0
         do j = 1, size(on)
             nm = trim(on(j))
             if (present(other_on)) nm = trim(other_on(j))
             idx = table_find(other, nm)
             ! A key name the right table does not have is left for the engine to report: its
             ! message names the table and the file, and duplicating it here would be a second
-            ! copy to keep in step.
+            ! copy to keep in step. The same goes for one THIS table does not have, below.
             if (idx < 1) cycle
             if (nm == trim(on(j))) then
                 merged(idx) = .true.
+                lidx = table_find(self, trim(on(j)))
+                if (lidx >= 1) then
+                    nm_pairs = nm_pairs + 1
+                    mlslots(nm_pairs) = lidx
+                    mrslots(nm_pairs) = idx
+                end if
             else
                 call join_push_slot(sslots, np, idx)
             end if
         end do
+        mlslots = mlslots(1:nm_pairs)
+        mrslots = mrslots(1:nm_pairs)
         if (present(columns)) then
             call parquet_split_name_list(columns, toks)
             do i = 1, size(toks)
@@ -510,41 +585,43 @@ contains
         end do
     end subroutine join_touch_payload
     !
-    !> Turns the pair list's right half into a gather index and, where anything is unmatched, the
-    !! validity mask that nulls those rows.
+    !> Turns one half of the pair list into a gather index and, where anything on that side is
+    !! unmatched, the validity mask that nulls those rows. Used for BOTH halves: the right half
+    !! drives the incoming columns, the left half this table's own under `how="right"`/`"outer"`.
     !!
     !! An unmatched output row is given source row 1, whose values the mask then declares null and
     !! which nothing may read (a null row's value bytes are unspecified by `%init`'s contract). The
     !! alternative -- a gather that understood index 0 -- would be a new primitive across all
     !! eighteen kinds for a case two shipped bindings already express.
-    subroutine join_gather_index(ir, n_out, ridx, rvalid)
-        integer(int64), intent(in) :: ir(:)                     !! per output row: right row, or 0.
+    subroutine join_side_index(side, n_out, idx, valid)
+        integer(int64), intent(in) :: side(:)                   !! per output row: that side's row, or 0.
         integer(int64), intent(in) :: n_out                     !! output rows.
-        integer(int64), allocatable, intent(out) :: ridx(:)     !! per output row: right row, never 0.
+        integer(int64), allocatable, intent(out) :: idx(:)      !! per output row: a row, never 0.
         !> per output row: .false. where it has no counterpart. LEFT UNALLOCATED when every output
         !! row matched -- an unallocated allocatable actual makes an optional dummy absent (F2018
         !! 15.5.2.12), so an inner join skips the whole %set_validity pass with no branch at the
-        !! call site. `allocated(rvalid)` is part of this procedure's contract.
-        logical, allocatable, intent(out) :: rvalid(:)
+        !! call site. `allocated(valid)` is part of this procedure's contract, and on the LEFT side
+        !! it is also what tells `join_apply` whether a merged key needs rebuilding at all.
+        logical, allocatable, intent(out) :: valid(:)
         integer(int64) :: o
         logical :: any_unmatched
         !
-        allocate(ridx(n_out))
+        allocate(idx(n_out))
         any_unmatched = .false.
         do o = 1_int64, n_out
-            if (ir(o) == 0_int64) then
-                ridx(o) = 1_int64
+            if (side(o) == 0_int64) then
+                idx(o) = 1_int64
                 any_unmatched = .true.
             else
-                ridx(o) = ir(o)
+                idx(o) = side(o)
             end if
         end do
         if (.not. any_unmatched) return
-        allocate(rvalid(n_out))
+        allocate(valid(n_out))
         do o = 1_int64, n_out
-            rvalid(o) = ir(o) /= 0_int64
+            valid(o) = side(o) /= 0_int64
         end do
-    end subroutine join_gather_index
+    end subroutine join_side_index
     !
     !> Whether the output leaves every one of this table's rows exactly where it was -- the
     !! computed condition the non-detaching join turns on.
@@ -574,39 +651,57 @@ contains
     !
     !> The rewrite: this table's own columns gathered by `il`, then `other`'s carried in beside
     !! them. The only procedure here that writes to `self`, which is what makes "validate
-    !! everything, then mutate everything" checkable by looking at the call order in `table_join`.
-    subroutine join_apply(self, other, il, ridx, rvalid, n_out, sslots, dnames)
+    !! everything, then mutate everything" checkable by looking at the call order in `join_impl`.
+    subroutine join_apply(self, other, il, ir, n_out, sslots, dnames, mlslots, mrslots)
         class(parquet_table), intent(inout) :: self  !! the left table.
         class(parquet_table), intent(in) :: other    !! the right table.
-        integer(int64), intent(in) :: il(:)          !! per output row: left row, never 0 here.
-        integer(int64), intent(in) :: ridx(:)        !! per output row: right row, never 0.
-        logical, allocatable, intent(in) :: rvalid(:) !! unmatched-row mask, or unallocated.
+        integer(int64), intent(in) :: il(:)          !! per output row: left row, or 0.
+        integer(int64), intent(in) :: ir(:)          !! per output row: right row, or 0.
         integer(int64), intent(in) :: n_out          !! output rows.
         integer, intent(in) :: sslots(:)             !! right slots to carry.
         character(len=*), intent(in) :: dnames(:)    !! this table's name for each.
+        integer, intent(in) :: mlslots(:)            !! merged keys: this table's slots.
+        integer, intent(in) :: mrslots(:)            !! merged keys: `other`'s slots.
+        type(parquet_column), allocatable :: mkcols(:)
+        integer(int64), allocatable :: lidx(:), ridx(:)
+        logical, allocatable :: lvalid(:), rvalid(:)
         integer, allocatable :: lslots(:), dslots(:)
+        integer(int64) :: nl
         integer :: j
         logical :: rebuilt
         !
+        nl = self%row_count
+        call join_side_index(il, n_out, lidx, lvalid)
+        call join_side_index(ir, n_out, ridx, rvalid)
+        ! THE MERGED KEYS FIRST, and that ordering is the whole of why this is a separate step:
+        ! it reads this table's key columns while they still hold their OWN rows, before the
+        ! gather below rewrites them. Only reachable when some output row has no left counterpart,
+        ! i.e. under how='right'/'outer' with an unmatched right row -- everywhere else the key a
+        ! merge would produce is the key the gather already produces.
+        if (allocated(lvalid)) then
+            call join_build_merged_keys(self, other, il, ir, n_out, nl, mlslots, mrslots, mkcols)
+        end if
         ! THE ONE DECISION IN THIS PROCEDURE. When the output holds every one of this table's rows
         ! exactly once and in order, the join adds columns and changes nothing else: no row moves,
         ! so no column is rewritten, no unread column becomes unreadable, the slice scope still
         ! means what it did, and the file stays open. When it does not, this is a row-structural
         ! mutation like any other in parquet_tables_rowmutate.f90 and behaves like one.
-        rebuilt = .not. join_keeps_left_rows(il, n_out, self%row_count)
+        rebuilt = .not. join_keeps_left_rows(il, n_out, nl)
         if (rebuilt) then
-            ! THIS TABLE'S OWN COLUMNS FIRST, and in place: on both joins this carries out every
-            ! output row has a left row, so `il` names a real row for every one of them -- there is
-            ! nothing to null-fill and no deep_copy to make. %gather rewrites each column where it
-            ! stands, exactly as %top_n's does, and its own range check is what would catch a 0.
-            !
             ! A column that has not been READ is skipped rather than read (table_mutable_slots),
             ! which is this file's approved policy and the reason the guide tells a caller to
             ! materialize what they need before a join that detaches: afterwards the detach guard
             ! is what answers. On the other branch there is nothing to skip and nothing to lose.
             call table_mutable_slots(self, lslots)
-            if (size(lslots) > 0) call table_colwork(self%cache, PCW_GATHER, lslots, rows=il)
+            if (size(lslots) > 0) call join_rewrite_left(self, lslots, lidx, lvalid, n_out, nl)
             self%row_count = n_out
+        end if
+        if (allocated(mkcols)) then
+            ! After the gather, never before: the gather would otherwise overwrite the merged
+            ! column with the very rows it was built to replace.
+            do j = 1, size(mkcols)
+                call self%cache%cols(mlslots(j))%values%move_from(mkcols(j))
+            end do
         end if
         ! Every slot created SERIALLY and all of them before anything is written into one:
         ! table_new_slot reallocates cols(:) when it grows, which no thread may be holding a
@@ -639,6 +734,90 @@ contains
         ! outstanding %col pointer can survive a join at all. Bumping here as well would take that
         ! back for every caller, since a join always adds at least as many slots as it carries.
     end subroutine join_apply
+    !
+    !> This table's own columns, gathered by `lidx` and null-filled where the row had no left
+    !! counterpart. Two shipped bindings, in that order, and the second only under
+    !! `how="right"`/`"outer"`.
+    !!
+    !! **The null fill is deliberately SERIAL where the gather is threaded**, which is not an
+    !! oversight: `%gather` rebuilds a whole column's storage and `%set_validity` writes one bit
+    !! per row into a bitmap, so the two are orders of magnitude apart and only the first is worth
+    !! `table_colwork`'s plumbing. `%set_validity` only ever ADDS nulls, which is what leaves this
+    !! table's own nulls exactly where the gather put them.
+    subroutine join_rewrite_left(self, lslots, lidx, lvalid, n_out, nl)
+        class(parquet_table), intent(inout) :: self   !! the left table.
+        integer, intent(in) :: lslots(:)              !! its rewritable slots.
+        integer(int64), intent(in) :: lidx(:)         !! per output row: left row, never 0.
+        logical, allocatable, intent(in) :: lvalid(:) !! unmatched-row mask, or unallocated.
+        integer(int64), intent(in) :: n_out           !! output rows.
+        integer(int64), intent(in) :: nl              !! this table's rows before the join.
+        integer :: j
+        !
+        if (nl < 1_int64) then
+            ! A table with no rows has no row 1 for `lidx` to have named, so it cannot be gathered
+            ! at all -- every output row is unmatched by construction. Appending null rows gives
+            ! the same result and keeps each column's kind, width and unit. Reachable whenever an
+            ! EMPTY left table is joined with how='right' or how='outer', which is the mirror of
+            ! join_one_column's own zero-row guard on the incoming side.
+            if (n_out > 0_int64) then
+                do j = 1, size(lslots)
+                    call self%cache%cols(lslots(j))%values%append_nulls(n_out)
+                end do
+            end if
+            return
+        end if
+        call table_colwork(self%cache, PCW_GATHER, lslots, rows=lidx)
+        if (.not. allocated(lvalid)) return
+        do j = 1, size(lslots)
+            call self%cache%cols(lslots(j))%values%set_validity(lvalid)
+        end do
+    end subroutine join_rewrite_left
+    !
+    !> One merged key column per `on`/`other_on` pair naming the same column on both sides, taking
+    !! this table's value where the output row has one and `other`'s where it does not.
+    !!
+    !! **Built by gathering the CONCATENATION of the two key columns**, which is the same object
+    !! `join_build_keys` hands the sort: left rows 1..nl followed by right rows nl+1..nl+nr. An
+    !! output row's merged index is then `il(o)` or `nl + ir(o)`, and one `%gather` produces the
+    !! whole column -- with each row's nulls carried across for free, which matters because an
+    !! unmatched right row may perfectly well have a null key. The alternative, patching the
+    !! gathered left column at scattered positions, has no primitive at all: `%paste` copies a
+    !! contiguous range, and the unmatched rows are contiguous only under `order="left"`.
+    !!
+    !! Reached only when some output row has no left counterpart, so an inner or left join pays
+    !! nothing for it.
+    subroutine join_build_merged_keys(self, other, il, ir, n_out, nl, mlslots, mrslots, mkcols)
+        class(parquet_table), intent(in) :: self  !! the left table.
+        class(parquet_table), intent(in) :: other !! the right table.
+        integer(int64), intent(in) :: il(:)       !! per output row: left row, or 0.
+        integer(int64), intent(in) :: ir(:)       !! per output row: right row, or 0.
+        integer(int64), intent(in) :: n_out       !! output rows.
+        integer(int64), intent(in) :: nl          !! this table's rows before the join.
+        integer, intent(in) :: mlslots(:)         !! merged keys: this table's slots.
+        integer, intent(in) :: mrslots(:)         !! merged keys: `other`'s slots.
+        !> one rebuilt key column per pair, in the same order. LEFT UNALLOCATED when there is no
+        !! merged key at all, which `allocated()` is what the caller tests.
+        type(parquet_column), allocatable, intent(out) :: mkcols(:)
+        integer(int64), allocatable :: mi(:)
+        integer(int64) :: o
+        integer :: k
+        !
+        if (size(mlslots) < 1) return
+        allocate(mi(n_out))
+        do o = 1_int64, n_out
+            if (il(o) /= 0_int64) then
+                mi(o) = il(o)
+            else
+                mi(o) = nl + ir(o)
+            end if
+        end do
+        allocate(mkcols(size(mlslots, kind=int64)))
+        do k = 1, size(mlslots)
+            call self%cache%cols(mlslots(k))%values%deep_copy(mkcols(k))
+            call mkcols(k)%append(other%cache%cols(mrslots(k))%values)
+            call mkcols(k)%gather(mi)
+        end do
+    end subroutine join_build_merged_keys
     !
     !> Phase A: one concatenated `parquet_column` per join key, added to `skeys` in order.
     !!
@@ -1094,27 +1273,7 @@ contains
         integer, intent(out) :: ord_id                    !! ORD_* token.
         character(len=:), allocatable :: tok
         !
-        how_id = HOW_INNER
-        if (present(how)) then
-            call join_fold(how, tok)
-            select case (tok)
-            case ("inner")
-                how_id = HOW_INNER
-            case ("left")
-                how_id = HOW_LEFT
-            case ("right")
-                how_id = HOW_RIGHT
-            case ("outer")
-                how_id = HOW_OUTER
-            case ("semi")
-                how_id = HOW_SEMI
-            case ("anti")
-                how_id = HOW_ANTI
-            case default
-                error stop EP // "join: how='" // tok // "' is not one of 'inner', 'left', " // &
-                    "'right', 'outer', 'semi' or 'anti'"
-            end select
-        end if
+        call join_resolve_how(how, how_id)
         req_id = REQ_MM
         if (present(require)) then
             call join_fold(require, tok)

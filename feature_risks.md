@@ -250,6 +250,7 @@ something a reader is expected to have.
 | [Risk-182](#risk-182--set_validitys-add-only-behaviour-is-what-a-joins-null-fill-rests-on) | `%set_validity`'s add-only behaviour is what a join's null-fill rests on | 4 — covered |
 | [Risk-183](#risk-183--a-join-carries-only-the-resident-right-columns-and-a-schema-less-write-then-loses-them) | A join carries only the resident right columns, and a schema-less write then loses them | 2 — proposed |
 | [Risk-184](#risk-184--the-non-detaching-join-is-a-computed-condition-and-both-halves-of-it-are-load-bearing) | The non-detaching join is a computed condition, and BOTH halves of it are load-bearing | 4 — covered |
+| [Risk-185](#risk-185--the-merged-key-of-a-rightouter-join-cannot-be-patched-into-place) | The merged key of a right/outer join cannot be PATCHED into place | 4 — covered |
 
 ---
 
@@ -7384,3 +7385,33 @@ turned "the branch is unreachable" from a guess into a result. And `fpm` reporte
 to date"** after `touch src/parquet_argsort_engine.f90`, so one mutation round ran against a binary
 that did not contain the mutation and reported it as survived; `fpm clean --skip` is the only
 reliable answer, per CLAUDE.md's stale-cache note.
+
+### Risk-185 — The merged key of a right/outer join cannot be PATCHED into place
+
+**What breaks.** Under `how="right"` or `how="outer"` an output row may have no counterpart in the
+left table, and the contract says the single merged key column takes `other`'s value at that row —
+this table has none to give. Get that wrong and the key column of a joined table is **null exactly
+where a real key exists**, which is a silent wrong answer of the worst kind: every row count is
+right, every other column's null mask is right, and the one column a caller will group, match or
+re-join on is quietly unusable. Nothing else in the result disagrees with it.
+
+**Why the obvious fix is the trap.** The natural implementation is to gather this table's key column
+like every other, then patch the unmatched rows from `other`. Under the DEFAULT `order="left"` those
+rows are contiguous — `join_emit_unmatched_right` appends them all at the end — so `%paste`, which
+copies a contiguous range, appears to be exactly the primitive for the job. It is not: under
+`order="key"` the unmatched right rows are **interleaved by group**, and there is no scatter
+primitive on `parquet_column` at all. A patch-based fix therefore passes every left-ordered test and
+produces a wrong key column the moment someone passes `order="key"`.
+
+**What it is instead.** `join_build_merged_keys` (`src/parquet_tables_join.f90`) rebuilds the
+concatenation the sort already uses — this table's key rows `1..nl` followed by `other`'s
+`nl+1..nl+nr` — and gathers it by `il(o)` or `nl + ir(o)`. One `%gather`, order-independent by
+construction, with each row's own nulls carried across, which matters because an unmatched right row
+may perfectly well have a null key.
+
+**Covered by** `test_join_apply_right` (the merged key equals `RKEY(ir(k))` at a row with no left
+half, with `seen_unmatched` as the control) and `test_join_apply_outer`, whose **second arm exists
+for this entry alone**: it repeats every assertion under `order="key"`, which is the only arrangement
+that can tell an index-based rebuild from a contiguous-range patch. Do not delete that arm as a
+duplicate of the first. Mutation-confirmed in both directions — suppressing the rebuild fails three
+tests, and dropping the `nl` offset from the merged index fails two.

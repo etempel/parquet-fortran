@@ -390,8 +390,10 @@ contains
                 test_join_other_on_size_aborts), &
             new_unittest("join: a join with no key aborts", &
                 test_join_no_key_aborts), &
-            new_unittest("join: a how= the rewrite cannot carry out yet aborts", &
-                test_join_how_unsupported_aborts), &
+            new_unittest("join: columns= with how='anti' aborts", &
+                test_join_columns_with_semi_aborts), &
+            new_unittest("join: a container column here under how='outer' aborts", &
+                test_join_left_container_outer_aborts), &
             new_unittest("join: a sort key given as a join key aborts", &
                 test_join_key_direction_aborts), &
             new_unittest("join: the -name sort-key shorthand as a join key aborts", &
@@ -7523,15 +7525,27 @@ contains
             required_stderr="no join key was given")
     end subroutine test_join_no_key_aborts
 
-    !> join abort path: see scenario_join_how_unsupported in test/error_scenarios.f90 for what it
-    !> does, for the negative control, and for what this must assert once the refusal lifts.
-    subroutine test_join_how_unsupported_aborts(error)
+    !> join abort path: see scenario_join_columns_with_semi in test/error_scenarios.f90 for what
+    !> it does, and for the two negative controls that keep this assertion honest.
+    subroutine test_join_columns_with_semi_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
-        call check_scenario_exit_status_and_stderr(error, "join_how_unsupported", expect_abort=.true., &
-            failure_message="how=right was expected to abort until the rewrite carries it out", &
-            required_stderr="recognised but not carried out yet")
-    end subroutine test_join_how_unsupported_aborts
+        call check_scenario_exit_status_and_stderr(error, "join_columns_with_semi", &
+            expect_abort=.true., &
+            failure_message="columns= with how='anti' was expected to abort", &
+            required_stderr="columns= cannot be used with how='semi' or how='anti'")
+    end subroutine test_join_columns_with_semi_aborts
+
+    !> join abort path: see scenario_join_left_container_outer in test/error_scenarios.f90 for
+    !> what it does, and for the two negative controls that keep this assertion honest.
+    subroutine test_join_left_container_outer_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_left_container_outer", &
+            expect_abort=.true., &
+            failure_message="a container column here under how='outer' was expected to abort", &
+            required_stderr="has to be fillable with nulls")
+    end subroutine test_join_left_container_outer_aborts
 
     !> join abort path: see scenario_join_key_direction in test/error_scenarios.f90 for what it
     !> does, and for the negative control that keeps this assertion honest.

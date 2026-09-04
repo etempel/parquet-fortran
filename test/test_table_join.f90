@@ -42,6 +42,10 @@ module test_table_join
     integer(int64), parameter :: LKEY(5) = [30_int64, 10_int64, 99_int64, 20_int64, 10_int64]
     !> The shared fixture's right key column: one unmatched (40) and one duplicated (10).
     integer(int64), parameter :: RKEY(4) = [20_int64, 10_int64, 40_int64, 10_int64]
+    !> A right key holding EVERY value `LKEY` holds and nothing else, so a `how="semi"` join keeps
+    !! every left row and a `how="anti"` join keeps none. The two are what let one fixture assert
+    !! both ends of the partition, and the detach behaviour at both ends with it.
+    integer(int64), parameter :: ALLKEY(4) = [30_int64, 10_int64, 99_int64, 20_int64]
     !> A right key with NO duplicate, so a left join against it leaves every left row exactly
     !! where it was. `RKEY` is the same fixture with 10 repeated, which is what makes the two a
     !! matched pair: the non-detaching tests below use this one and their negative controls use
@@ -109,7 +113,19 @@ contains
             new_unittest("max_rows= at exactly the output size is accepted, in both kinds", &
                 test_join_applies_max_rows), &
             new_unittest("the string key form honours require=, order=, matched= and max_rows=", &
-                test_join_string_form_new_args) &
+                test_join_string_form_new_args), &
+            new_unittest("%join(right) nulls this table's columns and merges the key from there", &
+                test_join_apply_right), &
+            new_unittest("%join(outer) keeps both sides, and the three counts add up", &
+                test_join_apply_outer), &
+            new_unittest("semi and anti partition this table and carry no column", &
+                test_join_apply_semi_anti), &
+            new_unittest("a right join with a differing key name keeps both keys", &
+                test_join_right_other_on), &
+            new_unittest("a right join onto an empty table gives all-null rows", &
+                test_join_right_empty_left), &
+            new_unittest("a semi join that keeps every row does not detach; anti does", &
+                test_join_semi_no_detach) &
             ]
     end subroutine collect_tests_table_join
     !
@@ -1272,5 +1288,307 @@ contains
         call check(error, a%has_column("rid"), &
             "and a right key whose name differs must arrive as a column of its own")
     end subroutine test_join_string_form_new_args
+
+    !
+    !> `%join(how="right")` keeps every row of the OTHER table, so an output row can have no
+    !! counterpart here -- and this table's own columns are then null at that row, while the
+    !! merged key takes its value from the other side.
+    !!
+    !! **The merged key is the assertion this test exists for.** Every other column of an
+    !! unmatched row is simply null, which a gather plus a validity mask produces; the key is the
+    !! one column that must hold a real value the other table supplied, and it is the one place
+    !! the key merge is not a free simplification. `seen_unmatched` is the control: without an
+    !! unmatched row in the fixture every assertion below the branch is vacuous.
+    subroutine test_join_apply_right(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b
+        integer(int64), allocatable :: il(:), ir(:), key(:), lp(:), rp(:)
+        integer(int64) :: n_out, k
+        logical :: ok, seen_unmatched
+        !
+        call build(a, "id", LKEY)
+        call build(b, "id", RKEY)
+        call parquet_debug_table_join_pairs(a, b, ["id"], how="right", il=il, ir=ir, n_out=n_out)
+        call a%join(b, ["id"], how="right")
+        call check(error, a%nrows() == n_out, "a right join must emit the counted number of rows")
+        if (allocated(error)) return
+        call check(error, a%ncols() == 3, "the merged key must leave three columns, not four")
+        if (allocated(error)) return
+        call a%get("id", key)
+        call a%get("payload", lp)
+        call a%get("payload_2", rp)
+        ok = .true.
+        seen_unmatched = .false.
+        do k = 1_int64, n_out
+            ! Every output row of a right join has a right row, so the incoming column is never
+            ! null and `ir` never 0 -- asserted rather than assumed, since it is what makes the
+            ! reads below safe.
+            if (ir(k) == 0_int64) ok = .false.
+            if (a%is_null("payload_2", k)) ok = .false.
+            if (rp(k) /= ir(k)) ok = .false.
+            if (a%is_null("id", k)) ok = .false.
+            if (il(k) == 0_int64) then
+                seen_unmatched = .true.
+                if (.not. a%is_null("payload", k)) ok = .false.
+                ! ... and the key comes from the OTHER table, which is the whole point.
+                if (key(k) /= RKEY(ir(k))) ok = .false.
+            else
+                if (a%is_null("payload", k)) ok = .false.
+                if (lp(k) /= il(k)) ok = .false.
+                if (key(k) /= LKEY(il(k))) ok = .false.
+            end if
+        end do
+        call check(error, seen_unmatched, &
+            "the fixture must contain a right row with no counterpart here, or this is vacuous")
+        if (allocated(error)) return
+        call check(error, ok, "a right join must null this table's columns and merge the key")
+    end subroutine test_join_apply_right
+    !
+    !> `%join(how="outer")` keeps both sides, so BOTH halves of a row can be missing -- and the
+    !! merged key is non-null on every row of the result whichever half that is.
+    !!
+    !! Also the counting property the design document asks for: `outer = left + right - inner` on
+    !! any fixture, because the two one-sided joins each hold the pairs plus their own unmatched
+    !! rows. Four independent runs of the counting pass have to agree on one identity, which no
+    !! single one of them can be satisfied by alone.
+    subroutine test_join_apply_outer(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b
+        integer(int64), allocatable :: il(:), ir(:)
+        integer(int64) :: n_inner, n_left, n_right, n_outer
+        logical :: seen_l, seen_r
+        !
+        call build(a, "id", LKEY)
+        call build(b, "id", RKEY)
+        call parquet_debug_table_join_pairs(a, b, ["id"], how="inner", il=il, ir=ir, n_out=n_inner)
+        call parquet_debug_table_join_pairs(a, b, ["id"], how="left", il=il, ir=ir, n_out=n_left)
+        call parquet_debug_table_join_pairs(a, b, ["id"], how="right", il=il, ir=ir, n_out=n_right)
+        call parquet_debug_table_join_pairs(a, b, ["id"], how="outer", il=il, ir=ir, n_out=n_outer)
+        call check(error, n_inner < n_left .and. n_inner < n_right, &
+            "the fixture must have an unmatched row on each side, or the identity below is trivial")
+        if (allocated(error)) return
+        call check(error, n_outer == n_left + n_right - n_inner, &
+            "outer must hold the pairs once and each side's unmatched rows once")
+        if (allocated(error)) return
+        call parquet_debug_table_join_pairs(a, b, ["id"], how="outer", il=il, ir=ir, n_out=n_outer)
+        call a%join(b, ["id"], how="outer")
+        call check(error, a%nrows() == n_outer, "an outer join must emit the counted rows")
+        if (allocated(error)) return
+        call check(error, outer_rows_ok(a, il, ir, n_outer, seen_l, seen_r), &
+            "an outer join must null whichever half of a row is absent")
+        if (allocated(error)) return
+        call check(error, seen_l .and. seen_r, &
+            "the fixture must reach a row missing on each side, or half of this is vacuous")
+        if (allocated(error)) return
+        ! And again in KEY order, where the unmatched rows are INTERLEAVED by group rather than
+        ! appended at the end. That is the arrangement that decides how the merged key can be
+        ! built at all: a fix that patched a contiguous range would pass the arm above and fail
+        ! this one, so the two together are what pin the index-based rebuild.
+        call build(a, "id", LKEY)
+        call parquet_debug_table_join_pairs(a, b, ["id"], how="outer", order="key", &
+            il=il, ir=ir, n_out=n_outer)
+        call a%join(b, ["id"], how="outer", order="key")
+        call check(error, a%nrows() == n_outer, "order=key must not change how many rows come out")
+        if (allocated(error)) return
+        call check(error, il(1) == 0_int64 .or. ir(1) == 0_int64 .or. il(n_outer) /= 0_int64, &
+            "key order must not simply append the unmatched right rows, or this repeats the arm above")
+        if (allocated(error)) return
+        call check(error, outer_rows_ok(a, il, ir, n_outer, seen_l, seen_r), &
+            "an outer join in key order must null and merge exactly as in left order")
+    end subroutine test_join_apply_outer
+    !
+    !> Every row of an outer-joined table against the pair list that produced it: the half that
+    !! is absent is null, the half that is present carries its own row, and the merged key is
+    !! never null because one side or the other always supplied it.
+    !!
+    !! A function rather than four inline blocks: the same assertions are made in both orderings,
+    !! and two copies would let one be tightened and the other left behind.
+    logical function outer_rows_ok(a, il, ir, n, seen_l, seen_r) result(ok)
+        type(parquet_table), intent(inout) :: a  !! the joined table.
+        integer(int64), intent(in) :: il(:)      !! per output row: left row, or 0.
+        integer(int64), intent(in) :: ir(:)      !! per output row: right row, or 0.
+        integer(int64), intent(in) :: n          !! output rows.
+        logical, intent(out) :: seen_l           !! a row with no left half was reached.
+        logical, intent(out) :: seen_r           !! a row with no right half was reached.
+        integer(int64), allocatable :: key(:), lp(:), rp(:)
+        integer(int64) :: k
+        !
+        call a%get("id", key)
+        call a%get("payload", lp)
+        call a%get("payload_2", rp)
+        ok = .true.
+        seen_l = .false.
+        seen_r = .false.
+        do k = 1_int64, n
+            ! The key is never null: every output row came from a row on one side or the other,
+            ! and that row's key is what the merge takes.
+            if (a%is_null("id", k)) ok = .false.
+            if (il(k) == 0_int64) then
+                seen_l = .true.
+                if (.not. a%is_null("payload", k)) ok = .false.
+                if (key(k) /= RKEY(ir(k))) ok = .false.
+            else
+                if (a%is_null("payload", k)) ok = .false.
+                if (lp(k) /= il(k)) ok = .false.
+                if (key(k) /= LKEY(il(k))) ok = .false.
+            end if
+            if (ir(k) == 0_int64) then
+                seen_r = .true.
+                if (.not. a%is_null("payload_2", k)) ok = .false.
+            else
+                if (a%is_null("payload_2", k)) ok = .false.
+                if (rp(k) /= ir(k)) ok = .false.
+            end if
+        end do
+    end function outer_rows_ok
+    !
+    !> `how="semi"` keeps the rows of this table that matched and `how="anti"` the ones that did
+    !! not, and neither brings a single column across.
+    !!
+    !! **They partition this table**, which is the design document's property test and is what
+    !! makes the two assertions here more than a pair of row counts: a rule that put a row in
+    !! both, or in neither, satisfies each count on its own and fails the sum. The column count is
+    !! asserted for both, because "carries no payload" is the other half of what these two mean.
+    subroutine test_join_apply_semi_anti(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, c, b
+        integer(int64), allocatable :: sp(:), ap(:)
+        !
+        call build(b, "id", RKEY)
+        call build(a, "id", LKEY)
+        call a%join(b, ["id"], how="semi")
+        call build(c, "id", LKEY)
+        call c%join(b, ["id"], how="anti")
+        call check(error, a%nrows() + c%nrows() == size(LKEY, kind=int64), &
+            "semi and anti must partition this table's rows between them")
+        if (allocated(error)) return
+        call check(error, a%nrows() > 0_int64 .and. c%nrows() > 0_int64, &
+            "the fixture must put rows on both sides of the partition, or the sum is trivial")
+        if (allocated(error)) return
+        call check(error, a%ncols() == 2 .and. c%ncols() == 2, &
+            "neither semi nor anti may carry a column across")
+        if (allocated(error)) return
+        call a%get("payload", sp)
+        call c%get("payload", ap)
+        ! LKEY rows 2, 4 and 5 have a counterpart in RKEY; rows 1 and 3 do not. Written out rather
+        ! than derived from the engine, because a row SET is what these two select and the engine
+        ! would be answering the same question with the same code.
+        call check(error, all(sp == [2_int64, 4_int64, 5_int64]), &
+            "semi must keep exactly the rows whose key appears in the other table, in order")
+        if (allocated(error)) return
+        call check(error, all(ap == [1_int64, 3_int64]), &
+            "anti must keep exactly the rows whose key does not, in order")
+    end subroutine test_join_apply_semi_anti
+    !
+    !> A right join whose key names DIFFER keeps both key columns: nothing is merged, so this
+    !! table's own key is null where the row has no counterpart here and the incoming key carries
+    !! the value.
+    !!
+    !! The negative half of `test_join_apply_right`: there the key had to hold the other table's
+    !! value at an unmatched row, and here it must not, because the two columns are genuinely
+    !! different columns rather than one column named twice.
+    subroutine test_join_right_other_on(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b
+        integer(int64), allocatable :: il(:), ir(:), rk(:)
+        integer(int64) :: n_out, k
+        logical :: ok, seen_unmatched
+        !
+        call build(a, "id", LKEY)
+        call build(b, "rid", RKEY)
+        call parquet_debug_table_join_pairs(a, b, ["id"], other_on=["rid"], how="right", &
+            il=il, ir=ir, n_out=n_out)
+        call a%join(b, ["id"], other_on=["rid"], how="right")
+        call check(error, a%nrows() == n_out, "a right join must emit the counted number of rows")
+        if (allocated(error)) return
+        call check(error, a%ncols() == 4, &
+            "two differently named keys are two columns, so nothing is merged away")
+        if (allocated(error)) return
+        call a%get("rid", rk)
+        ok = .true.
+        seen_unmatched = .false.
+        do k = 1_int64, n_out
+            if (rk(k) /= RKEY(ir(k))) ok = .false.
+            if (il(k) == 0_int64) then
+                seen_unmatched = .true.
+                ! Unmerged, so this table's key is as absent as the rest of its row.
+                if (.not. a%is_null("id", k)) ok = .false.
+            else
+                if (a%is_null("id", k)) ok = .false.
+            end if
+        end do
+        call check(error, seen_unmatched, &
+            "the fixture must contain a right row with no counterpart here, or this is vacuous")
+        if (allocated(error)) return
+        call check(error, ok, "an unmerged left key must be null where the row has no left half")
+    end subroutine test_join_right_other_on
+    !
+    !> A right join onto a table with NO rows: every output row is unmatched here, so there is no
+    !! row 1 for the gather to have named at all.
+    !!
+    !! This is the mirror of the zero-row guard the incoming side has had since P3, and it is
+    !! reachable by an ordinary program -- an output catalogue built empty and then filled from a
+    !! reference table. The merged key still has to work, and it is built from a concatenation
+    !! whose left half is empty.
+    subroutine test_join_right_empty_left(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b
+        integer(int64), allocatable :: none(:), key(:), rp(:)
+        integer(int64) :: k
+        logical :: ok
+        !
+        allocate(none(0))
+        call build(a, "id", none)
+        call build(b, "id", RKEY)
+        call a%join(b, ["id"], how="right")
+        call check(error, a%nrows() == size(RKEY, kind=int64), &
+            "a right join onto an empty table must keep every row of the other one")
+        if (allocated(error)) return
+        call a%get("id", key)
+        call a%get("payload_2", rp)
+        ok = .true.
+        do k = 1_int64, a%nrows()
+            ! Never read: this table contributed no row, so `payload`'s value bytes are whatever
+            ! %init left there and only its null state means anything.
+            if (.not. a%is_null("payload", k)) ok = .false.
+            if (a%is_null("id", k)) ok = .false.
+            if (key(k) /= RKEY(k)) ok = .false.
+            if (rp(k) /= k) ok = .false.
+        end do
+        call check(error, ok, "every row must be null here, and carry the other table's own")
+    end subroutine test_join_right_empty_left
+    !
+    !> `how="semi"` and `how="anti"` are row selections, so the computed detach condition governs
+    !! them exactly as it governs a left join -- with no clause of their own anywhere.
+    !!
+    !! Both arms are needed and each is the other's control. A semi join against a key that covers
+    !! every row here selects all of them, which is a `%filter_rows` with an all-true mask: no row
+    !! moves, so the table keeps its file. The anti join of the same pair selects none, which
+    !! plainly does change the row set. A rule written in terms of `how` rather than of the pair
+    !! list would have to get both of those wrong to pass either.
+    subroutine test_join_semi_no_detach(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: f = "test_run/join_p6_semi.parquet"
+        type(parquet_table) :: src, a, b
+        !
+        call build(src, "id", LKEY)
+        call parquet_write_table(src, f, overwrite=.true.)
+        call build(b, "id", ALLKEY)
+        call parquet_open_table(a, f)
+        call a%join(b, "id", how="semi")
+        call check(error, a%nrows() == size(LKEY, kind=int64), &
+            "a semi join against a key covering every row must keep every row")
+        if (allocated(error)) return
+        call check(error, .not. a%is_detached(), &
+            "and having moved no row, it must keep its file")
+        if (allocated(error)) return
+        call parquet_open_table(a, f)
+        call a%join(b, "id", how="anti")
+        call check(error, a%nrows() == 0_int64, &
+            "the anti join of the same pair must keep no row at all")
+        if (allocated(error)) return
+        call check(error, a%is_detached(), &
+            "and having dropped every row, it must detach like any other row mutation")
+    end subroutine test_join_semi_no_detach
 
 end module test_table_join

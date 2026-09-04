@@ -3633,7 +3633,11 @@ contains
         integer :: c                  !! comparison of the midpoint row against the target.
         logical :: before             !! .true. when the midpoint is ordered before the answer.
         !
+        ! One extracted key can carry many appended targets, so which one to search for is the
+        ! caller's to name. Absent, it is the row just past the searched range -- the single-target
+        ! case every scalar search passes, and the shape this procedure originally had.
         target = n_search + 1_int64
+        if (present(target_row)) target = target_row
         lo = 0_int64
         hi = max(n_search, 0_int64)
         do while (lo < hi)

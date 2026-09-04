@@ -42,6 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pf_toml_save` writes the effective configuration back out and `pf_toml_dump` writes the document
   as parsed. Every public procedure is safe to call from inside an OpenMP parallel region. See
   [Configuration files](doc/pages/utilities/configuration-files.md).
+- **`pf_lower_bound`, `pf_upper_bound` and `pf_equal_range` accept an ARRAY of targets.** The array
+  is extracted and order-checked once and every target is answered against that one key, so *m*
+  targets cost `O(n + m log n)` where *m* separate calls cost `O(m*n)`. Results are one entry per
+  target; a result array of the wrong length is an error and zero targets returns nothing.
 - **`parquet_open_table(..., bounded=.true.)` reads a filtered file larger than memory.** The
   filter is evaluated one row group at a time and every column is assembled from per-row-group
   chunks, so the peak is one row group's worth of one column rather than one whole column. Opt-in,

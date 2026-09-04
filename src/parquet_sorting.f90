@@ -524,6 +524,26 @@ module parquet_sorting
         module procedure lower_bound_ts_i64
         module procedure lower_bound_strcol_i32
         module procedure lower_bound_strcol_i64
+        module procedure lower_bound_i32_i32_many
+        module procedure lower_bound_i32_i64_many
+        module procedure lower_bound_i64_i32_many
+        module procedure lower_bound_i64_i64_many
+        module procedure lower_bound_f32_i32_many
+        module procedure lower_bound_f32_i64_many
+        module procedure lower_bound_f64_i32_many
+        module procedure lower_bound_f64_i64_many
+        module procedure lower_bound_bool_i32_many
+        module procedure lower_bound_bool_i64_many
+        module procedure lower_bound_chr_i32_many
+        module procedure lower_bound_chr_i64_many
+        module procedure lower_bound_date_i32_many
+        module procedure lower_bound_date_i64_many
+        module procedure lower_bound_time_i32_many
+        module procedure lower_bound_time_i64_many
+        module procedure lower_bound_ts_i32_many
+        module procedure lower_bound_ts_i64_many
+        module procedure lower_bound_strcol_i32_many
+        module procedure lower_bound_strcol_i64_many
     end interface pf_lower_bound
     !
     !> The first position at which `target` is ordered BEFORE the element there -- i.e. one
@@ -553,6 +573,26 @@ module parquet_sorting
         module procedure upper_bound_ts_i64
         module procedure upper_bound_strcol_i32
         module procedure upper_bound_strcol_i64
+        module procedure upper_bound_i32_i32_many
+        module procedure upper_bound_i32_i64_many
+        module procedure upper_bound_i64_i32_many
+        module procedure upper_bound_i64_i64_many
+        module procedure upper_bound_f32_i32_many
+        module procedure upper_bound_f32_i64_many
+        module procedure upper_bound_f64_i32_many
+        module procedure upper_bound_f64_i64_many
+        module procedure upper_bound_bool_i32_many
+        module procedure upper_bound_bool_i64_many
+        module procedure upper_bound_chr_i32_many
+        module procedure upper_bound_chr_i64_many
+        module procedure upper_bound_date_i32_many
+        module procedure upper_bound_date_i64_many
+        module procedure upper_bound_time_i32_many
+        module procedure upper_bound_time_i64_many
+        module procedure upper_bound_ts_i32_many
+        module procedure upper_bound_ts_i64_many
+        module procedure upper_bound_strcol_i32_many
+        module procedure upper_bound_strcol_i64_many
     end interface pf_upper_bound
     !
     !> The INCLUSIVE range `first .. last` of elements equal to `target`, from one pass.
@@ -583,6 +623,26 @@ module parquet_sorting
         module procedure equal_range_ts_i64
         module procedure equal_range_strcol_i32
         module procedure equal_range_strcol_i64
+        module procedure equal_range_i32_i32_many
+        module procedure equal_range_i32_i64_many
+        module procedure equal_range_i64_i32_many
+        module procedure equal_range_i64_i64_many
+        module procedure equal_range_f32_i32_many
+        module procedure equal_range_f32_i64_many
+        module procedure equal_range_f64_i32_many
+        module procedure equal_range_f64_i64_many
+        module procedure equal_range_bool_i32_many
+        module procedure equal_range_bool_i64_many
+        module procedure equal_range_chr_i32_many
+        module procedure equal_range_chr_i64_many
+        module procedure equal_range_date_i32_many
+        module procedure equal_range_date_i64_many
+        module procedure equal_range_time_i32_many
+        module procedure equal_range_time_i64_many
+        module procedure equal_range_ts_i32_many
+        module procedure equal_range_ts_i64_many
+        module procedure equal_range_strcol_i32_many
+        module procedure equal_range_strcol_i64_many
     end interface pf_equal_range
     !
     !> How many DISTINCT non-null values `values` holds. `n_null` optionally reports how many
@@ -5676,6 +5736,902 @@ module parquet_sorting
             !! already established -- searching unsorted input answers with a plausible
             !! index and no symptom at all.
         end subroutine equal_range_strcol_i64
+        !> pf_lower_bound over a sorted 32-bit integer array for MANY targets at once, with
+        !! int32 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine lower_bound_i32_i32_many(values, targets, pos, descending, nulls_first, is_valid, assume_sorted)
+        integer(int32), intent(in) :: values(:)
+        integer(int32), intent(in) :: targets(:) !! the values to look for.
+            integer(int32), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_i32_i32_many
+        !> pf_lower_bound over a sorted 32-bit integer array for MANY targets at once, with
+        !! int64 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine lower_bound_i32_i64_many(values, targets, pos, descending, nulls_first, is_valid, assume_sorted)
+        integer(int32), intent(in) :: values(:)
+        integer(int32), intent(in) :: targets(:) !! the values to look for.
+            integer(int64), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_i32_i64_many
+        !> pf_lower_bound over a sorted 64-bit integer array for MANY targets at once, with
+        !! int32 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine lower_bound_i64_i32_many(values, targets, pos, descending, nulls_first, is_valid, assume_sorted)
+        integer(int64), intent(in) :: values(:)
+        integer(int64), intent(in) :: targets(:) !! the values to look for.
+            integer(int32), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_i64_i32_many
+        !> pf_lower_bound over a sorted 64-bit integer array for MANY targets at once, with
+        !! int64 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine lower_bound_i64_i64_many(values, targets, pos, descending, nulls_first, is_valid, assume_sorted)
+        integer(int64), intent(in) :: values(:)
+        integer(int64), intent(in) :: targets(:) !! the values to look for.
+            integer(int64), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_i64_i64_many
+        !> pf_lower_bound over a sorted 32-bit real array for MANY targets at once, with
+        !! int32 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine lower_bound_f32_i32_many(values, targets, pos, descending, nulls_first, is_valid, assume_sorted)
+        real(real32), intent(in) :: values(:)
+        real(real32), intent(in) :: targets(:) !! the values to look for.
+            integer(int32), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_f32_i32_many
+        !> pf_lower_bound over a sorted 32-bit real array for MANY targets at once, with
+        !! int64 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine lower_bound_f32_i64_many(values, targets, pos, descending, nulls_first, is_valid, assume_sorted)
+        real(real32), intent(in) :: values(:)
+        real(real32), intent(in) :: targets(:) !! the values to look for.
+            integer(int64), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_f32_i64_many
+        !> pf_lower_bound over a sorted 64-bit real array for MANY targets at once, with
+        !! int32 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine lower_bound_f64_i32_many(values, targets, pos, descending, nulls_first, is_valid, assume_sorted)
+        real(real64), intent(in) :: values(:)
+        real(real64), intent(in) :: targets(:) !! the values to look for.
+            integer(int32), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_f64_i32_many
+        !> pf_lower_bound over a sorted 64-bit real array for MANY targets at once, with
+        !! int64 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine lower_bound_f64_i64_many(values, targets, pos, descending, nulls_first, is_valid, assume_sorted)
+        real(real64), intent(in) :: values(:)
+        real(real64), intent(in) :: targets(:) !! the values to look for.
+            integer(int64), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_f64_i64_many
+        !> pf_lower_bound over a sorted logical array for MANY targets at once, with
+        !! int32 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine lower_bound_bool_i32_many(values, targets, pos, descending, nulls_first, is_valid, assume_sorted)
+        logical, intent(in) :: values(:)
+        logical, intent(in) :: targets(:) !! the values to look for.
+            integer(int32), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_bool_i32_many
+        !> pf_lower_bound over a sorted logical array for MANY targets at once, with
+        !! int64 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine lower_bound_bool_i64_many(values, targets, pos, descending, nulls_first, is_valid, assume_sorted)
+        logical, intent(in) :: values(:)
+        logical, intent(in) :: targets(:) !! the values to look for.
+            integer(int64), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_bool_i64_many
+        !> pf_lower_bound over a sorted string array for MANY targets at once, with
+        !! int32 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine lower_bound_chr_i32_many(values, targets, pos, descending, nulls_first, is_valid, assume_sorted)
+        character(len=*), intent(in) :: values(:)
+        character(len=*), intent(in) :: targets(:) !! the values to look for.
+            integer(int32), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_chr_i32_many
+        !> pf_lower_bound over a sorted string array for MANY targets at once, with
+        !! int64 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine lower_bound_chr_i64_many(values, targets, pos, descending, nulls_first, is_valid, assume_sorted)
+        character(len=*), intent(in) :: values(:)
+        character(len=*), intent(in) :: targets(:) !! the values to look for.
+            integer(int64), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_chr_i64_many
+        !> pf_lower_bound over a sorted date array for MANY targets at once, with
+        !! int32 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine lower_bound_date_i32_many(values, targets, pos, descending, nulls_first, assume_sorted)
+        type(parquet_date), intent(in) :: values(:)
+        type(parquet_date), intent(in) :: targets(:) !! the values to look for.
+            integer(int32), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_date_i32_many
+        !> pf_lower_bound over a sorted date array for MANY targets at once, with
+        !! int64 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine lower_bound_date_i64_many(values, targets, pos, descending, nulls_first, assume_sorted)
+        type(parquet_date), intent(in) :: values(:)
+        type(parquet_date), intent(in) :: targets(:) !! the values to look for.
+            integer(int64), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_date_i64_many
+        !> pf_lower_bound over a sorted time array for MANY targets at once, with
+        !! int32 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine lower_bound_time_i32_many(values, targets, pos, descending, nulls_first, assume_sorted)
+        type(parquet_time), intent(in) :: values(:)
+        type(parquet_time), intent(in) :: targets(:) !! the values to look for.
+            integer(int32), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_time_i32_many
+        !> pf_lower_bound over a sorted time array for MANY targets at once, with
+        !! int64 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine lower_bound_time_i64_many(values, targets, pos, descending, nulls_first, assume_sorted)
+        type(parquet_time), intent(in) :: values(:)
+        type(parquet_time), intent(in) :: targets(:) !! the values to look for.
+            integer(int64), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_time_i64_many
+        !> pf_lower_bound over a sorted timestamp array for MANY targets at once, with
+        !! int32 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine lower_bound_ts_i32_many(values, targets, pos, descending, nulls_first, assume_sorted)
+        type(parquet_timestamp), intent(in) :: values(:)
+        type(parquet_timestamp), intent(in) :: targets(:) !! the values to look for.
+            integer(int32), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_ts_i32_many
+        !> pf_lower_bound over a sorted timestamp array for MANY targets at once, with
+        !! int64 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine lower_bound_ts_i64_many(values, targets, pos, descending, nulls_first, assume_sorted)
+        type(parquet_timestamp), intent(in) :: values(:)
+        type(parquet_timestamp), intent(in) :: targets(:) !! the values to look for.
+            integer(int64), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_ts_i64_many
+        !> pf_lower_bound over a sorted packed string column array for MANY targets at once, with
+        !! int32 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine lower_bound_strcol_i32_many(values, targets, pos, descending, nulls_first, assume_sorted)
+        type(parquet_string_column), intent(in) :: values
+        character(len=*), intent(in) :: targets(:) !! the values to look for.
+            integer(int32), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_strcol_i32_many
+        !> pf_lower_bound over a sorted packed string column array for MANY targets at once, with
+        !! int64 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine lower_bound_strcol_i64_many(values, targets, pos, descending, nulls_first, assume_sorted)
+        type(parquet_string_column), intent(in) :: values
+        character(len=*), intent(in) :: targets(:) !! the values to look for.
+            integer(int64), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine lower_bound_strcol_i64_many
+        !> pf_upper_bound over a sorted 32-bit integer array for MANY targets at once, with
+        !! int32 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine upper_bound_i32_i32_many(values, targets, pos, descending, nulls_first, is_valid, assume_sorted)
+        integer(int32), intent(in) :: values(:)
+        integer(int32), intent(in) :: targets(:) !! the values to look for.
+            integer(int32), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_i32_i32_many
+        !> pf_upper_bound over a sorted 32-bit integer array for MANY targets at once, with
+        !! int64 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine upper_bound_i32_i64_many(values, targets, pos, descending, nulls_first, is_valid, assume_sorted)
+        integer(int32), intent(in) :: values(:)
+        integer(int32), intent(in) :: targets(:) !! the values to look for.
+            integer(int64), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_i32_i64_many
+        !> pf_upper_bound over a sorted 64-bit integer array for MANY targets at once, with
+        !! int32 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine upper_bound_i64_i32_many(values, targets, pos, descending, nulls_first, is_valid, assume_sorted)
+        integer(int64), intent(in) :: values(:)
+        integer(int64), intent(in) :: targets(:) !! the values to look for.
+            integer(int32), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_i64_i32_many
+        !> pf_upper_bound over a sorted 64-bit integer array for MANY targets at once, with
+        !! int64 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine upper_bound_i64_i64_many(values, targets, pos, descending, nulls_first, is_valid, assume_sorted)
+        integer(int64), intent(in) :: values(:)
+        integer(int64), intent(in) :: targets(:) !! the values to look for.
+            integer(int64), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_i64_i64_many
+        !> pf_upper_bound over a sorted 32-bit real array for MANY targets at once, with
+        !! int32 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine upper_bound_f32_i32_many(values, targets, pos, descending, nulls_first, is_valid, assume_sorted)
+        real(real32), intent(in) :: values(:)
+        real(real32), intent(in) :: targets(:) !! the values to look for.
+            integer(int32), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_f32_i32_many
+        !> pf_upper_bound over a sorted 32-bit real array for MANY targets at once, with
+        !! int64 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine upper_bound_f32_i64_many(values, targets, pos, descending, nulls_first, is_valid, assume_sorted)
+        real(real32), intent(in) :: values(:)
+        real(real32), intent(in) :: targets(:) !! the values to look for.
+            integer(int64), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_f32_i64_many
+        !> pf_upper_bound over a sorted 64-bit real array for MANY targets at once, with
+        !! int32 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine upper_bound_f64_i32_many(values, targets, pos, descending, nulls_first, is_valid, assume_sorted)
+        real(real64), intent(in) :: values(:)
+        real(real64), intent(in) :: targets(:) !! the values to look for.
+            integer(int32), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_f64_i32_many
+        !> pf_upper_bound over a sorted 64-bit real array for MANY targets at once, with
+        !! int64 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine upper_bound_f64_i64_many(values, targets, pos, descending, nulls_first, is_valid, assume_sorted)
+        real(real64), intent(in) :: values(:)
+        real(real64), intent(in) :: targets(:) !! the values to look for.
+            integer(int64), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_f64_i64_many
+        !> pf_upper_bound over a sorted logical array for MANY targets at once, with
+        !! int32 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine upper_bound_bool_i32_many(values, targets, pos, descending, nulls_first, is_valid, assume_sorted)
+        logical, intent(in) :: values(:)
+        logical, intent(in) :: targets(:) !! the values to look for.
+            integer(int32), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_bool_i32_many
+        !> pf_upper_bound over a sorted logical array for MANY targets at once, with
+        !! int64 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine upper_bound_bool_i64_many(values, targets, pos, descending, nulls_first, is_valid, assume_sorted)
+        logical, intent(in) :: values(:)
+        logical, intent(in) :: targets(:) !! the values to look for.
+            integer(int64), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_bool_i64_many
+        !> pf_upper_bound over a sorted string array for MANY targets at once, with
+        !! int32 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine upper_bound_chr_i32_many(values, targets, pos, descending, nulls_first, is_valid, assume_sorted)
+        character(len=*), intent(in) :: values(:)
+        character(len=*), intent(in) :: targets(:) !! the values to look for.
+            integer(int32), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_chr_i32_many
+        !> pf_upper_bound over a sorted string array for MANY targets at once, with
+        !! int64 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine upper_bound_chr_i64_many(values, targets, pos, descending, nulls_first, is_valid, assume_sorted)
+        character(len=*), intent(in) :: values(:)
+        character(len=*), intent(in) :: targets(:) !! the values to look for.
+            integer(int64), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_chr_i64_many
+        !> pf_upper_bound over a sorted date array for MANY targets at once, with
+        !! int32 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine upper_bound_date_i32_many(values, targets, pos, descending, nulls_first, assume_sorted)
+        type(parquet_date), intent(in) :: values(:)
+        type(parquet_date), intent(in) :: targets(:) !! the values to look for.
+            integer(int32), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_date_i32_many
+        !> pf_upper_bound over a sorted date array for MANY targets at once, with
+        !! int64 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine upper_bound_date_i64_many(values, targets, pos, descending, nulls_first, assume_sorted)
+        type(parquet_date), intent(in) :: values(:)
+        type(parquet_date), intent(in) :: targets(:) !! the values to look for.
+            integer(int64), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_date_i64_many
+        !> pf_upper_bound over a sorted time array for MANY targets at once, with
+        !! int32 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine upper_bound_time_i32_many(values, targets, pos, descending, nulls_first, assume_sorted)
+        type(parquet_time), intent(in) :: values(:)
+        type(parquet_time), intent(in) :: targets(:) !! the values to look for.
+            integer(int32), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_time_i32_many
+        !> pf_upper_bound over a sorted time array for MANY targets at once, with
+        !! int64 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine upper_bound_time_i64_many(values, targets, pos, descending, nulls_first, assume_sorted)
+        type(parquet_time), intent(in) :: values(:)
+        type(parquet_time), intent(in) :: targets(:) !! the values to look for.
+            integer(int64), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_time_i64_many
+        !> pf_upper_bound over a sorted timestamp array for MANY targets at once, with
+        !! int32 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine upper_bound_ts_i32_many(values, targets, pos, descending, nulls_first, assume_sorted)
+        type(parquet_timestamp), intent(in) :: values(:)
+        type(parquet_timestamp), intent(in) :: targets(:) !! the values to look for.
+            integer(int32), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_ts_i32_many
+        !> pf_upper_bound over a sorted timestamp array for MANY targets at once, with
+        !! int64 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine upper_bound_ts_i64_many(values, targets, pos, descending, nulls_first, assume_sorted)
+        type(parquet_timestamp), intent(in) :: values(:)
+        type(parquet_timestamp), intent(in) :: targets(:) !! the values to look for.
+            integer(int64), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_ts_i64_many
+        !> pf_upper_bound over a sorted packed string column array for MANY targets at once, with
+        !! int32 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine upper_bound_strcol_i32_many(values, targets, pos, descending, nulls_first, assume_sorted)
+        type(parquet_string_column), intent(in) :: values
+        character(len=*), intent(in) :: targets(:) !! the values to look for.
+            integer(int32), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_strcol_i32_many
+        !> pf_upper_bound over a sorted packed string column array for MANY targets at once, with
+        !! int64 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine upper_bound_strcol_i64_many(values, targets, pos, descending, nulls_first, assume_sorted)
+        type(parquet_string_column), intent(in) :: values
+        character(len=*), intent(in) :: targets(:) !! the values to look for.
+            integer(int64), intent(out) :: pos(:) !! per target: 1-based insertion point.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine upper_bound_strcol_i64_many
+        !> pf_equal_range over a sorted 32-bit integer array for MANY targets at once, with
+        !! int32 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine equal_range_i32_i32_many(values, targets, first, last, descending, nulls_first, is_valid, assume_sorted)
+        integer(int32), intent(in) :: values(:)
+        integer(int32), intent(in) :: targets(:) !! the values to look for.
+            integer(int32), intent(out) :: first(:) !! per target: first equal element.
+            integer(int32), intent(out) :: last(:)  !! per target: last one, `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_i32_i32_many
+        !> pf_equal_range over a sorted 32-bit integer array for MANY targets at once, with
+        !! int64 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine equal_range_i32_i64_many(values, targets, first, last, descending, nulls_first, is_valid, assume_sorted)
+        integer(int32), intent(in) :: values(:)
+        integer(int32), intent(in) :: targets(:) !! the values to look for.
+            integer(int64), intent(out) :: first(:) !! per target: first equal element.
+            integer(int64), intent(out) :: last(:)  !! per target: last one, `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_i32_i64_many
+        !> pf_equal_range over a sorted 64-bit integer array for MANY targets at once, with
+        !! int32 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine equal_range_i64_i32_many(values, targets, first, last, descending, nulls_first, is_valid, assume_sorted)
+        integer(int64), intent(in) :: values(:)
+        integer(int64), intent(in) :: targets(:) !! the values to look for.
+            integer(int32), intent(out) :: first(:) !! per target: first equal element.
+            integer(int32), intent(out) :: last(:)  !! per target: last one, `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_i64_i32_many
+        !> pf_equal_range over a sorted 64-bit integer array for MANY targets at once, with
+        !! int64 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine equal_range_i64_i64_many(values, targets, first, last, descending, nulls_first, is_valid, assume_sorted)
+        integer(int64), intent(in) :: values(:)
+        integer(int64), intent(in) :: targets(:) !! the values to look for.
+            integer(int64), intent(out) :: first(:) !! per target: first equal element.
+            integer(int64), intent(out) :: last(:)  !! per target: last one, `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_i64_i64_many
+        !> pf_equal_range over a sorted 32-bit real array for MANY targets at once, with
+        !! int32 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine equal_range_f32_i32_many(values, targets, first, last, descending, nulls_first, is_valid, assume_sorted)
+        real(real32), intent(in) :: values(:)
+        real(real32), intent(in) :: targets(:) !! the values to look for.
+            integer(int32), intent(out) :: first(:) !! per target: first equal element.
+            integer(int32), intent(out) :: last(:)  !! per target: last one, `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_f32_i32_many
+        !> pf_equal_range over a sorted 32-bit real array for MANY targets at once, with
+        !! int64 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine equal_range_f32_i64_many(values, targets, first, last, descending, nulls_first, is_valid, assume_sorted)
+        real(real32), intent(in) :: values(:)
+        real(real32), intent(in) :: targets(:) !! the values to look for.
+            integer(int64), intent(out) :: first(:) !! per target: first equal element.
+            integer(int64), intent(out) :: last(:)  !! per target: last one, `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_f32_i64_many
+        !> pf_equal_range over a sorted 64-bit real array for MANY targets at once, with
+        !! int32 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine equal_range_f64_i32_many(values, targets, first, last, descending, nulls_first, is_valid, assume_sorted)
+        real(real64), intent(in) :: values(:)
+        real(real64), intent(in) :: targets(:) !! the values to look for.
+            integer(int32), intent(out) :: first(:) !! per target: first equal element.
+            integer(int32), intent(out) :: last(:)  !! per target: last one, `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_f64_i32_many
+        !> pf_equal_range over a sorted 64-bit real array for MANY targets at once, with
+        !! int64 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine equal_range_f64_i64_many(values, targets, first, last, descending, nulls_first, is_valid, assume_sorted)
+        real(real64), intent(in) :: values(:)
+        real(real64), intent(in) :: targets(:) !! the values to look for.
+            integer(int64), intent(out) :: first(:) !! per target: first equal element.
+            integer(int64), intent(out) :: last(:)  !! per target: last one, `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_f64_i64_many
+        !> pf_equal_range over a sorted logical array for MANY targets at once, with
+        !! int32 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine equal_range_bool_i32_many(values, targets, first, last, descending, nulls_first, is_valid, assume_sorted)
+        logical, intent(in) :: values(:)
+        logical, intent(in) :: targets(:) !! the values to look for.
+            integer(int32), intent(out) :: first(:) !! per target: first equal element.
+            integer(int32), intent(out) :: last(:)  !! per target: last one, `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_bool_i32_many
+        !> pf_equal_range over a sorted logical array for MANY targets at once, with
+        !! int64 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine equal_range_bool_i64_many(values, targets, first, last, descending, nulls_first, is_valid, assume_sorted)
+        logical, intent(in) :: values(:)
+        logical, intent(in) :: targets(:) !! the values to look for.
+            integer(int64), intent(out) :: first(:) !! per target: first equal element.
+            integer(int64), intent(out) :: last(:)  !! per target: last one, `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_bool_i64_many
+        !> pf_equal_range over a sorted string array for MANY targets at once, with
+        !! int32 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine equal_range_chr_i32_many(values, targets, first, last, descending, nulls_first, is_valid, assume_sorted)
+        character(len=*), intent(in) :: values(:)
+        character(len=*), intent(in) :: targets(:) !! the values to look for.
+            integer(int32), intent(out) :: first(:) !! per target: first equal element.
+            integer(int32), intent(out) :: last(:)  !! per target: last one, `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_chr_i32_many
+        !> pf_equal_range over a sorted string array for MANY targets at once, with
+        !! int64 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine equal_range_chr_i64_many(values, targets, first, last, descending, nulls_first, is_valid, assume_sorted)
+        character(len=*), intent(in) :: values(:)
+        character(len=*), intent(in) :: targets(:) !! the values to look for.
+            integer(int64), intent(out) :: first(:) !! per target: first equal element.
+            integer(int64), intent(out) :: last(:)  !! per target: last one, `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_chr_i64_many
+        !> pf_equal_range over a sorted date array for MANY targets at once, with
+        !! int32 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine equal_range_date_i32_many(values, targets, first, last, descending, nulls_first, assume_sorted)
+        type(parquet_date), intent(in) :: values(:)
+        type(parquet_date), intent(in) :: targets(:) !! the values to look for.
+            integer(int32), intent(out) :: first(:) !! per target: first equal element.
+            integer(int32), intent(out) :: last(:)  !! per target: last one, `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_date_i32_many
+        !> pf_equal_range over a sorted date array for MANY targets at once, with
+        !! int64 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine equal_range_date_i64_many(values, targets, first, last, descending, nulls_first, assume_sorted)
+        type(parquet_date), intent(in) :: values(:)
+        type(parquet_date), intent(in) :: targets(:) !! the values to look for.
+            integer(int64), intent(out) :: first(:) !! per target: first equal element.
+            integer(int64), intent(out) :: last(:)  !! per target: last one, `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_date_i64_many
+        !> pf_equal_range over a sorted time array for MANY targets at once, with
+        !! int32 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine equal_range_time_i32_many(values, targets, first, last, descending, nulls_first, assume_sorted)
+        type(parquet_time), intent(in) :: values(:)
+        type(parquet_time), intent(in) :: targets(:) !! the values to look for.
+            integer(int32), intent(out) :: first(:) !! per target: first equal element.
+            integer(int32), intent(out) :: last(:)  !! per target: last one, `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_time_i32_many
+        !> pf_equal_range over a sorted time array for MANY targets at once, with
+        !! int64 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine equal_range_time_i64_many(values, targets, first, last, descending, nulls_first, assume_sorted)
+        type(parquet_time), intent(in) :: values(:)
+        type(parquet_time), intent(in) :: targets(:) !! the values to look for.
+            integer(int64), intent(out) :: first(:) !! per target: first equal element.
+            integer(int64), intent(out) :: last(:)  !! per target: last one, `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_time_i64_many
+        !> pf_equal_range over a sorted timestamp array for MANY targets at once, with
+        !! int32 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine equal_range_ts_i32_many(values, targets, first, last, descending, nulls_first, assume_sorted)
+        type(parquet_timestamp), intent(in) :: values(:)
+        type(parquet_timestamp), intent(in) :: targets(:) !! the values to look for.
+            integer(int32), intent(out) :: first(:) !! per target: first equal element.
+            integer(int32), intent(out) :: last(:)  !! per target: last one, `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_ts_i32_many
+        !> pf_equal_range over a sorted timestamp array for MANY targets at once, with
+        !! int64 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine equal_range_ts_i64_many(values, targets, first, last, descending, nulls_first, assume_sorted)
+        type(parquet_timestamp), intent(in) :: values(:)
+        type(parquet_timestamp), intent(in) :: targets(:) !! the values to look for.
+            integer(int64), intent(out) :: first(:) !! per target: first equal element.
+            integer(int64), intent(out) :: last(:)  !! per target: last one, `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_ts_i64_many
+        !> pf_equal_range over a sorted packed string column array for MANY targets at once, with
+        !! int32 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine equal_range_strcol_i32_many(values, targets, first, last, descending, nulls_first, assume_sorted)
+        type(parquet_string_column), intent(in) :: values
+        character(len=*), intent(in) :: targets(:) !! the values to look for.
+            integer(int32), intent(out) :: first(:) !! per target: first equal element.
+            integer(int32), intent(out) :: last(:)  !! per target: last one, `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_strcol_i32_many
+        !> pf_equal_range over a sorted packed string column array for MANY targets at once, with
+        !! int64 results. `values` is extracted and order-checked ONCE, so this
+        !! costs O(n + m log n) where m separate calls cost O(m*n).
+        module subroutine equal_range_strcol_i64_many(values, targets, first, last, descending, nulls_first, assume_sorted)
+        type(parquet_string_column), intent(in) :: values
+        character(len=*), intent(in) :: targets(:) !! the values to look for.
+            integer(int64), intent(out) :: first(:) !! per target: first equal element.
+            integer(int64), intent(out) :: last(:)  !! per target: last one, `first - 1` when absent.
+            logical, intent(in), optional :: descending !! .true. for high-to-low order.
+            logical, intent(in), optional :: nulls_first !! .true. when nulls come first.
+            logical, intent(in), optional :: assume_sorted
+            !! .true. skips the O(n) sortedness check. Only pass it for an order you have
+            !! already established -- searching unsorted input answers with a plausible
+            !! index and no symptom at all.
+        end subroutine equal_range_strcol_i64_many
     end interface
     !
     ! ---- Distinct values and ranks (parquet_sorting_unique) ----

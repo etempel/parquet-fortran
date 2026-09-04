@@ -168,6 +168,12 @@ contains
             new_unittest("pf_nth_quantile: every type x three index forms", test_quantile_every_specific), &
             new_unittest("searches agree with a counting oracle", test_search_linear_oracle), &
             new_unittest("equal_range brackets duplicates", test_equal_range_duplicates), &
+            new_unittest("the bulk searches agree with the scalar ones, target for target", &
+                test_search_many_matches_scalar), &
+            new_unittest("the bulk searches handle strings, nulls and a descending order", &
+                test_search_many_strings_and_nulls), &
+            new_unittest("a bulk search with no targets returns without touching the results", &
+                test_search_many_empty), &
             new_unittest("searches follow a descending order", test_search_descending), &
             new_unittest("searches respect the null tier", test_search_nulls), &
             new_unittest("assume_sorted changes no answer", test_search_assume_sorted), &
@@ -2312,6 +2318,104 @@ contains
         if (allocated(error)) return
         call check(error, first == 5, "an absent target's range must start at its insertion point")
     end subroutine test_equal_range_duplicates
+    !
+    !> The bulk forms exist to make m searches cost O(n + m log n) instead of O(m*n) -- every
+    !> `search_impl_*` re-extracts the whole array, so a LOOP of scalar searches is quadratic.
+    !>
+    !> **The scalar form is the oracle**, which is the strongest one available: the two run the same
+    !> comparator through the same binary search and differ only in where the target row sits, so any
+    !> disagreement is an indexing defect in the bulk path. Every target class is swept together --
+    !> below the array, above it, in a gap, on a duplicated value, and on the endpoints.
+    subroutine test_search_many_matches_scalar(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(9) = [10, 20, 20, 20, 30, 40, 40, 50, 60]
+        integer(int32) :: tg(13)
+        integer(int64) :: lo_m(13), hi_m(13), f_m(13), l_m(13)
+        integer(int64) :: lo1, hi1, f1, l1
+        integer :: k
+
+        do k = 1, 13
+            tg(k) = int(5*k, int32)
+        end do
+        call pf_lower_bound(v, tg, lo_m)
+        call pf_upper_bound(v, tg, hi_m)
+        call pf_equal_range(v, tg, f_m, l_m)
+        do k = 1, 13
+            call pf_lower_bound(v, tg(k), lo1)
+            call pf_upper_bound(v, tg(k), hi1)
+            call pf_equal_range(v, tg(k), f1, l1)
+            call check(error, lo_m(k) == lo1, "bulk pf_lower_bound must equal the scalar form")
+            if (allocated(error)) return
+            call check(error, hi_m(k) == hi1, "bulk pf_upper_bound must equal the scalar form")
+            if (allocated(error)) return
+            call check(error, f_m(k) == f1 .and. l_m(k) == l1, &
+                "bulk pf_equal_range must equal the scalar form")
+            if (allocated(error)) return
+        end do
+        ! An independent oracle as well, so a shared defect in both forms cannot hide here.
+        do k = 1, 13
+            call check(error, lo_m(k) == 1 + count(v < tg(k)), &
+                "bulk pf_lower_bound must equal 1 + count(v < target)")
+            if (allocated(error)) return
+        end do
+    end subroutine test_search_many_matches_scalar
+    !
+    !> The three cases the numeric sweep above cannot reach: a `character` array (whose targets are
+    !> padded to the ARRAY's element length, per target), a null-bearing array, and a descending
+    !> order. All three are checked against the scalar form, which is the same oracle.
+    subroutine test_search_many_strings_and_nulls(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=4) :: s(5) = ["aa  ", "bb  ", "bb  ", "cc  ", "dd  "]
+        character(len=2) :: st(3) = ["bb", "zz", "aa"]
+        integer(int32) :: d(5) = [50, 40, 30, 20, 10]
+        integer(int32) :: dt(2) = [35, 50]
+        ! The null sits LAST because nulls_first defaults to .false., so that is the order this
+        ! array has to already be in -- a null in the middle is genuinely unsorted and is refused.
+        integer(int32) :: nv(5) = [10, 20, 40, 50, 30]
+        logical :: ok(5) = [.true., .true., .true., .true., .false.]
+        integer(int32) :: nt(2) = [30, 40]
+        integer(int64) :: fm(3), lm(3), f1, l1, pm(2), p1
+        integer :: k
+
+        ! A shorter target than the array's element length: each is blank-padded to len(values).
+        call pf_equal_range(s, st, fm, lm)
+        do k = 1, 3
+            call pf_equal_range(s, st(k), f1, l1)
+            call check(error, fm(k) == f1 .and. lm(k) == l1, &
+                "bulk pf_equal_range on a character array must equal the scalar form")
+            if (allocated(error)) return
+        end do
+        call check(error, fm(1) == 2 .and. lm(1) == 3, "'bb' must bracket both of its elements")
+        if (allocated(error)) return
+        ! descending=.true. selects the comparison; it does not reorder anything.
+        call pf_lower_bound(d, dt, pm, descending=.true.)
+        do k = 1, 2
+            call pf_lower_bound(d, dt(k), p1, descending=.true.)
+            call check(error, pm(k) == p1, "bulk pf_lower_bound must equal the scalar form when descending")
+            if (allocated(error)) return
+        end do
+        ! A null is outside the value tier, so it must not shift a value's insertion point.
+        call pf_lower_bound(nv, nt, pm, is_valid=ok)
+        do k = 1, 2
+            call pf_lower_bound(nv, nt(k), p1, is_valid=ok)
+            call check(error, pm(k) == p1, "bulk pf_lower_bound must equal the scalar form with nulls")
+            if (allocated(error)) return
+        end do
+    end subroutine test_search_many_strings_and_nulls
+    !
+    !> Zero targets is a legitimate call, not an edge case to abort on -- a caller filtering a target
+    !> list can legitimately filter it empty. It must also not extract or order-check anything.
+    subroutine test_search_many_empty(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(3) = [1, 2, 3]
+        integer(int32) :: none(0)
+        integer(int64) :: pos(0), f(0), l(0)
+
+        call pf_lower_bound(v, none, pos)
+        call pf_equal_range(v, none, f, l)
+        call check(error, size(pos) == 0 .and. size(f) == 0, &
+            "a bulk search with no targets must return no results and not abort")
+    end subroutine test_search_many_empty
     !
     !> `descending` selects the comparison, it does not reorder anything -- so on a descending
     !> array the oracle flips to `count(v > t)`. Getting this wrong still passes on an ascending

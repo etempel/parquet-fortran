@@ -395,6 +395,14 @@ def tgt_decl(t, name="target"):
     return f"        {decl}, intent(in) :: {name}"
 
 
+def tgt_arr_decl(t, name="targets"):
+    """Declaration of an ARRAY of search targets of type `t`, as an intent(in) rank-1 array."""
+    tag, decl, what, family, nulls, _, _ = t
+    if family in ("chr", "strcol"):
+        return f"        character(len=*), intent(in) :: {name}(:)"
+    return f"        {decl}, intent(in) :: {name}(:)"
+
+
 def pval_decl(t, name="p_value"):
     """Declaration of ONE element of type `t`, as an intent(out) result."""
     tag, decl, what, family, nulls, _, _ = t
@@ -1265,6 +1273,14 @@ module parquet_sorting
                     continue
                 for ik, _, _ in IDX_KINDS:
                     w(f"        module procedure {base}_{t[0]}_{ik}")
+            # The BULK forms, distinguished from the scalar ones by the rank of `targets` and of
+            # the result. One extracted key serves every target, which is the whole point -- see
+            # the generic's own doc-comment.
+            for t in TYPES:
+                if not has_search(t):
+                    continue
+                for ik, _, _ in IDX_KINDS:
+                    w(f"        module procedure {base}_{t[0]}_{ik}_many")
         elif gname == "pf_unique_count":
             for t in TYPES:
                 for ik, _, _ in IDX_KINDS:
@@ -2168,6 +2184,32 @@ def emit_m3_interfaces(w):
                     w(VALID_DOC)
                 w(SORTED_DOC)
                 w(f"        end subroutine {base}_{tag}_{ik}")
+    # ---- the BULK forms: many targets, ONE extraction ----
+    for base, out in (("lower_bound", "lower"), ("upper_bound", "upper"), ("equal_range", "range")):
+        for t in TYPES:
+            if not has_search(t):
+                continue
+            tag, decl, what, family, nulls, _, _ = t
+            for ik, idecl, iname in IDX_KINDS:
+                res = "first, last" if out == "range" else "pos"
+                w(f"        !> pf_{base} over a sorted {what} array for MANY targets at once, with")
+                w(f"        !! {iname} results. `values` is extracted and order-checked ONCE, so this")
+                w("        !! costs O(n + m log n) where m separate calls cost O(m*n).")
+                w(f"        module subroutine {base}_{tag}_{ik}_many(values, targets, {res}, descending, " +
+                  f"nulls_first{', is_valid' if nulls == 'arg' else ''}, assume_sorted)")
+                w(val_decl(t, "in"))
+                w(tgt_arr_decl(t) + " !! the values to look for.")
+                if out == "range":
+                    w(f"            {idecl}, intent(out) :: first(:) !! per target: first equal element.")
+                    w(f"            {idecl}, intent(out) :: last(:)  !! per target: last one, `first - 1` when absent.")
+                else:
+                    w(f"            {idecl}, intent(out) :: pos(:) !! per target: 1-based insertion point.")
+                w(DESC_DOC)
+                w(NLO_DOC)
+                if nulls == "arg":
+                    w(VALID_DOC)
+                w(SORTED_DOC)
+                w(f"        end subroutine {base}_{tag}_{ik}_many")
     w("    end interface")
     w("    !")
     w("    ! ---- Distinct values and ranks (parquet_sorting_unique) ----")
@@ -2456,14 +2498,21 @@ def emit_engine_interfaces(w):
     w("            integer(int64), intent(inout) :: perm(:)   !! receives `n` 1-based row indices.")
     w("            integer(c_int8_t), intent(inout) :: tie(:) !! 1 where a row ties with its predecessor.")
     w("        end subroutine sort_build_runs_permutation")
-    w("        !> Binary search for the target row, which the caller APPENDED as row `n_search + 1`.")
+    w("        !> Binary search for a target row the caller APPENDED past the rows being searched.")
     w("        !!")
     w("        !! **Preserve the appending.** It is what removes any compare-a-row-against-a-value arm")
     w("        !! and so makes drift from the sort comparator structurally impossible — Risk-34.")
-    w("        module function sort_search_position(keys, n_search, upper) result(pos)")
-    w("            type(sort_key_buf), intent(in) :: keys(:) !! the keys; row n_search+1 is the target.")
+    w("        !!")
+    w("        !! `target_row` names which appended row to search for, so that ONE extracted key can")
+    w("        !! serve many searches: a caller appending m targets at rows `n_search+1 .. n_search+m`")
+    w("        !! searches each of them without rebuilding the key. Absent it is `n_search + 1`, the")
+    w("        !! single-target case, which is what every scalar search passes.")
+    w("        module function sort_search_position(keys, n_search, upper, target_row) result(pos)")
+    w("            type(sort_key_buf), intent(in) :: keys(:) !! the keys; the target is an appended row.")
     w("            integer(int64), intent(in) :: n_search    !! rows being searched.")
     w("            logical, intent(in) :: upper              !! .true. for upper_bound.")
+    w("            !> 1-based row of the target; absent means `n_search + 1`. Must be > `n_search`.")
+    w("            integer(int64), intent(in), optional :: target_row")
     w("            integer(int64) :: pos                     !! 1-based insertion point in 1..n_search+1.")
     w("        end function sort_search_position")
     w("        !> Merges the already-ordered ranges `1..na` and `na+1..n` into one permutation.")
@@ -4969,6 +5018,147 @@ contains
         w("        if (want /= SRCH_UPPER) call engine_search(buf, n + 1_int64, n, .false., proc, lo)")
         w("        if (want /= SRCH_LOWER) call engine_search(buf, n + 1_int64, n, .true., proc, hi)")
         w(f"    end subroutine search_impl_{tag}")
+        w("    !")
+
+    # ---- the BULK specifics ----
+    for base, want, res in (("lower_bound", "SRCH_LOWER", "pos"),
+                            ("upper_bound", "SRCH_UPPER", "pos"),
+                            ("equal_range", "SRCH_BOTH", "range")):
+        for t in TYPES:
+            if not has_search(t):
+                continue
+            tag, decl, what, family, nulls, _, _ = t
+            iv = ", is_valid=is_valid" if nulls == "arg" else ""
+            for ik, idecl, iname in IDX_KINDS:
+                out1 = "first" if res == "range" else "pos"
+                w(f"    module procedure {base}_{tag}_{ik}_many")
+                w("        integer(int64), allocatable :: lo(:), hi(:)")
+                w("        integer(int64) :: m, k")
+                w("        !")
+                w("        m = size(targets, kind=int64)")
+                w(f"        call check_many_size(size({out1}, kind=int64), m, \"pf_{base}\", \"{out1}\")")
+                if res == "range":
+                    w(f"        call check_many_size(size(last, kind=int64), m, \"pf_{base}\", \"last\")")
+                w("        allocate(lo(max(m, 1_int64)), hi(max(m, 1_int64)))")
+                w(f"        call search_many_impl_{tag}(values, targets, {want}, descending, nulls_first, &")
+                w(f"            assume_sorted, \"pf_{base}\", lo, hi{iv})")
+                w("        do k = 1_int64, m")
+                if res == "range":
+                    if ik == "i32":
+                        w(f"            call narrow_i64(lo(k), \"pf_{base}\", \"first matching index\", first(k))")
+                        w(f"            call narrow_i64(hi(k) - 1_int64, \"pf_{base}\", \"last matching index\", last(k))")
+                    else:
+                        w("            first(k) = lo(k)")
+                        w("            last(k) = hi(k) - 1_int64")
+                else:
+                    src = "lo" if want == "SRCH_LOWER" else "hi"
+                    if ik == "i32":
+                        w(f"            call narrow_i64({src}(k), \"pf_{base}\", \"insertion point\", pos(k))")
+                    else:
+                        w(f"            pos(k) = {src}(k)")
+                w("        end do")
+                w(f"    end procedure {base}_{tag}_{ik}_many")
+                w("    !")
+
+    w("    !> Refuses a result array that is not one entry per target, before anything is searched.")
+    w("    subroutine check_many_size(got, want, proc, what)")
+    w("        integer(int64), intent(in) :: got     !! entries the caller supplied.")
+    w("        integer(int64), intent(in) :: want    !! targets given.")
+    w("        character(len=*), intent(in) :: proc  !! calling procedure, for messages.")
+    w("        character(len=*), intent(in) :: what  !! the argument's name.")
+    w("        character(len=32) :: a_str, b_str")
+    w("        !")
+    w("        if (got /= want) then")
+    w("            write (a_str, \"(i0)\") got")
+    w("            write (b_str, \"(i0)\") want")
+    w("            error stop EP // proc // \": \" // what // \" has \" // trim(a_str) // &")
+    w("                \" entries but \" // trim(b_str) // \" targets were given; it takes one per target\"")
+    w("        end if")
+    w("    end subroutine check_many_size")
+    w("    !")
+
+    for t in TYPES:
+        if not has_search(t):
+            continue
+        tag, decl, what, family, nulls, _, _ = t
+        iv = ", is_valid=is_valid" if nulls == "arg" else ""
+        iarg = ", is_valid" if nulls == "arg" else ""
+        w(f"    !> Shared worker behind every BULK search specific for a {what} array.")
+        w("    !!")
+        w("    !! The whole reason this exists: `values` is extracted and order-checked ONCE and every")
+        w("    !! target is appended to that one key, so m searches cost O(n + m log n). The scalar")
+        w("    !! worker above re-extracts per call, which is O(n) each and is what makes a LOOP of")
+        w("    !! scalar searches quadratic.")
+        w("    !!")
+        w("    !! It reaches `sort_search_position` directly rather than through `engine_search`,")
+        w("    !! because the C++ oracle's entry point has no target-row argument -- it always searches")
+        w("    !! for the row just past the searched range. Nothing is lost: the oracle A/B still")
+        w("    !! covers the scalar path, which runs the same comparator and the same binary search,")
+        w("    !! and the bulk path is checked against the scalar one element for element.")
+        w(f"    subroutine search_many_impl_{tag}(values, targets, want, descending, nulls_first, &")
+        w(f"            assume_sorted, proc, lo, hi{iarg})")
+        w(val_decl(t, "in"))
+        w(tgt_arr_decl(t) + " !! the values to look for.")
+        w("        integer, intent(in) :: want                       !! SRCH_LOWER / SRCH_UPPER / SRCH_BOTH.")
+        w("        logical, intent(in), optional :: descending       !! .true. for high-to-low order.")
+        w("        logical, intent(in), optional :: nulls_first      !! .true. when nulls come first.")
+        w("        logical, intent(in), optional :: assume_sorted    !! .true. skips the order check.")
+        w("        character(len=*), intent(in) :: proc              !! calling procedure, for messages.")
+        w("        integer(int64), intent(out) :: lo(:)              !! per target: lower-bound answer.")
+        w("        integer(int64), intent(out) :: hi(:)              !! per target: upper-bound answer.")
+        if nulls == "arg":
+            w("        logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.")
+        w("        type(sort_key_buf), allocatable :: buf(:), tbuf(:)")
+        w("        integer(int64) :: n, m, k")
+        w("        logical :: desc, nlo, check")
+        if family == "chr":
+            w("        character(len=len(values)), allocatable :: padded(:)")
+            w("        character(len=32) :: a_str, b_str")
+        w("        !")
+        w("        desc = .false.")
+        w("        if (present(descending)) desc = descending")
+        w("        nlo = .false.")
+        w("        if (present(nulls_first)) nlo = nulls_first")
+        w("        check = .true.")
+        w("        if (present(assume_sorted)) check = .not. assume_sorted")
+        w(f"        n = {rows_expr(t)}")
+        w("        m = size(targets, kind=int64)")
+        w("        lo = 0_int64")
+        w("        hi = 0_int64")
+        w("        if (m < 1_int64) return")
+        w(f"        call extract_{tag}(values, buf, desc, nlo, proc{iv})")
+        w("        if (check) call check_sorted_input(buf, n, proc, \"values\")")
+        if family == "chr":
+            w("        ! Every target is compared at the ARRAY's element length, exactly as the scalar")
+            w("        ! form pads a single target -- see emit_target_extract's note. The two arrays may")
+            w("        ! legitimately have different declared lengths, so the padding is per target and")
+            w("        ! a target with non-blank characters past that length is refused rather than")
+            w("        ! silently truncated into a different value.")
+            w("        allocate(character(len=len(values)) :: padded(m))")
+            w("        do k = 1_int64, m")
+            w("            if (len_trim(targets(k)) > len(values)) then")
+            w("                write (a_str, \"(i0)\") len_trim(targets(k))")
+            w("                write (b_str, \"(i0)\") len(values)")
+            w("                error stop EP // proc // \": a target has \" // trim(a_str) // \" non-blank \" // &")
+            w("                    \"characters but values holds \" // trim(b_str) // \" per element, so no \" // &")
+            w("                    \"exact comparison exists; widen values or trim the target\"")
+            w("            end if")
+            w("            padded(k) = targets(k)")
+            w("        end do")
+            w("        call extract_chr(padded, tbuf, desc, nlo, proc)")
+        elif family == "strcol":
+            w("        ! A parquet_string_column stores bytes verbatim, so the targets are used verbatim")
+            w("        ! too -- trailing blanks included. There is no declared width to pad to.")
+            w("        call extract_chr(targets, tbuf, desc, nlo, proc)")
+        else:
+            w(f"        call extract_{tag}(targets, tbuf, desc, nlo, proc)")
+        w("        call buf_append(buf, n, tbuf, m, proc)")
+        w("        do k = 1_int64, m")
+        w("            ! Target k sits at row n+k of the one appended key.")
+        w("            if (want /= SRCH_UPPER) lo(k) = sort_search_position(buf, n, .false., target_row=n + k)")
+        w("            if (want /= SRCH_LOWER) hi(k) = sort_search_position(buf, n, .true., target_row=n + k)")
+        w("        end do")
+        w(f"    end subroutine search_many_impl_{tag}")
         w("    !")
 
     w("end submodule parquet_sorting_search ! GCOVR_EXCL_LINE")

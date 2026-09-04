@@ -1097,14 +1097,21 @@ module parquet_argsort
             integer(int64), intent(inout) :: perm(:)   !! receives `n` 1-based row indices.
             integer(c_int8_t), intent(inout) :: tie(:) !! 1 where a row ties with its predecessor.
         end subroutine sort_build_runs_permutation
-        !> Binary search for the target row, which the caller APPENDED as row `n_search + 1`.
+        !> Binary search for a target row the caller APPENDED past the rows being searched.
         !!
         !! **Preserve the appending.** It is what removes any compare-a-row-against-a-value arm
         !! and so makes drift from the sort comparator structurally impossible — Risk-34.
-        module function sort_search_position(keys, n_search, upper) result(pos)
-            type(sort_key_buf), intent(in) :: keys(:) !! the keys; row n_search+1 is the target.
+        !!
+        !! `target_row` names which appended row to search for, so that ONE extracted key can
+        !! serve many searches: a caller appending m targets at rows `n_search+1 .. n_search+m`
+        !! searches each of them without rebuilding the key. Absent it is `n_search + 1`, the
+        !! single-target case, which is what every scalar search passes.
+        module function sort_search_position(keys, n_search, upper, target_row) result(pos)
+            type(sort_key_buf), intent(in) :: keys(:) !! the keys; the target is an appended row.
             integer(int64), intent(in) :: n_search    !! rows being searched.
             logical, intent(in) :: upper              !! .true. for upper_bound.
+            !> 1-based row of the target; absent means `n_search + 1`. Must be > `n_search`.
+            integer(int64), intent(in), optional :: target_row
             integer(int64) :: pos                     !! 1-based insertion point in 1..n_search+1.
         end function sort_search_position
         !> Merges the already-ordered ranges `1..na` and `na+1..n` into one permutation.

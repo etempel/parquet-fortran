@@ -36,6 +36,7 @@ declares.
 | `pf_lower_bound(values, target, pos)` | where `target` belongs in an already-sorted array |
 | `pf_upper_bound(values, target, pos)` | one past the last element equal to `target` |
 | `pf_equal_range(values, target, first, last)` | both bounds, as an inclusive range |
+| `pf_lower_bound(values, targets(:), pos(:))` | the same three, for MANY targets in one pass |
 | `pf_unique_count(values, count, [n_null])` | how many distinct non-null values there are |
 | `pf_unique(values, distinct, [n_null])` | those values themselves, in order |
 | `pf_rank(values, ranks, [method])` | the rank of every element, in place order |
@@ -520,25 +521,50 @@ call pf_equal_range(v, 25_int32, first, last)   ! first = 5, last = 4  -- absent
 as an **inclusive** range from one pass. When the target is absent, `last == first - 1`, so
 `last - first + 1` is zero — **check that count before reading `values(first)`**.
 
-### Check the order once, not on every call
+### Many targets: pass them all at once
 
-By default each search runs an **O(n) sortedness check in front of an O(log n) search**. That
-default is deliberate and should not be flipped: searching unsorted input does not fail, it returns
-a plausible index with no abort and no symptom at all — the worst failure mode this module has.
-
-The cost is meant to be paid **once**, not per call:
+**All three searches take an ARRAY of targets, and that is the form to use for more than one.** The
+array is extracted and order-checked once and every target is answered against that one key, so *m*
+targets cost `O(N + m·log N)`:
 
 ```fortran
-call pf_is_sorted(v, ok)                        ! O(N), once
-if (.not. ok) call pf_sort(v, v)
+integer(int32) :: targets(m)
+integer(int64) :: pos(m), first(m), last(m)
 
+call pf_lower_bound(v, targets, pos)          ! one call, one pass over v
+call pf_equal_range(v, targets, first, last)  ! one result per target, same conventions
+```
+
+The results are one entry per target, in the targets' own order, and each obeys exactly the rules
+above — including `last == first - 1` for a target that is absent. A result array of the wrong length
+is an error rather than a partial answer, and zero targets is a legitimate call that returns nothing.
+
+**A loop of single-target calls is quadratic, and no argument makes it otherwise.** Each call rebuilds
+the whole array's internal key before it can search, so the per-call cost is `O(N)` however the order
+is established:
+
+```fortran
 do k = 1, m
-    call pf_lower_bound(v, targets(k), pos, assume_sorted=.true.)   ! O(log N) each
+    call pf_lower_bound(v, targets(k), pos)   ! O(N) EACH -- use the array form above
 end do
 ```
 
-Without `assume_sorted=.true.` in that loop, `m` searches cost `O(m·N)` rather than `O(m·log N)`
-and the feature looks broken. Only pass it for an order you have actually established.
+### Check the order once, not on every call
+
+By default each search runs an **O(n) sortedness check** before searching. That default is deliberate
+and should not be flipped: searching unsorted input does not fail, it returns a plausible index with
+no abort and no symptom at all — the worst failure mode this module has.
+
+`assume_sorted=.true.` skips that check for an order you have already established:
+
+```fortran
+call pf_is_sorted(v, ok)                     ! O(N), once
+if (.not. ok) call pf_sort(v, v)
+call pf_lower_bound(v, targets, pos, assume_sorted=.true.)
+```
+
+It saves the scan and nothing else — it does **not** make a single-target call cheaper than `O(N)`,
+so it is not a way to rescue the loop above. Only pass it for an order you have actually established.
 
 `descending=` and `nulls_first=` **select the comparison, they do not reorder anything** — they
 must describe the order the array is genuinely in, or the check rejects it. A null is ordered after

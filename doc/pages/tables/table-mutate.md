@@ -519,27 +519,24 @@ directly.
 
 ```fortran
 real(real64), pointer :: ra(:)
-integer(int64) :: first, last
-logical :: ok
+integer(int64) :: first(size(targets)), last(size(targets))
 
 call t%sort_by(["ra"])
 call t%col("ra", ra)
 
-call pf_is_sorted(ra, ok)                 ! O(n), once
-do i = 1, size(targets)
-    call pf_equal_range(ra, targets(i), first, last, assume_sorted=ok)
-    ! rows first .. last hold targets(i) -- INCLUSIVE
-end do
+call pf_equal_range(ra, targets, first, last)   ! every target, one pass over the column
+! rows first(i) .. last(i) hold targets(i) -- INCLUSIVE
 ```
 
 **`last` is inclusive, and an absent target comes back as `last == first - 1`** — so the count is
-`last - first + 1` and the test for "did I find anything" is `last >= first`, not `last > first`.
-Reading `ra(first)` without checking that count first reads a row that does not match.
+`last(i) - first(i) + 1` and the test for "did I find anything" is `last(i) >= first(i)`, not
+`last(i) > first(i)`. Reading `ra(first(i))` without checking that count first reads a row that does
+not match.
 
-**Check once, outside the loop.** `assume_sorted` defaults to `.false.`, which is the safe default —
-searching unsorted input returns a plausible index with no symptom — but it makes each search O(n)
-in front of an O(log n) operation. Hoisting one `pf_is_sorted` out of the loop turns *m* searches
-from O(m·n) into O(n + m log n).
+**Pass every target in one call rather than looping.** Each single-target search rebuilds the whole
+column's internal sort key before it can search, so a loop of them is `O(m·n)` — `assume_sorted=`
+skips the sortedness scan and not that rebuild. The array form extracts once and is `O(n + m log n)`;
+see [Searching a sorted array](../utilities/sorting.html#many-targets-pass-them-all-at-once).
 
 **Re-take the pointer after any row-changing operation**, per the warning above, and re-check
 sortedness after anything that could disturb the order. A table does *not* remember that it is

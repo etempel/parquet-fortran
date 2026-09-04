@@ -84,6 +84,9 @@ module parquet_sorting
     public :: pf_minmax
     public :: pf_argminmax
     public :: pf_merge
+    public :: pf_match
+    public :: pf_match_all
+    public :: pf_in
     !
     ! ---- Re-exported from parquet_argsort, so `use parquet_sorting` is unchanged ----
     !
@@ -492,13 +495,15 @@ module parquet_sorting
     !>
     !> **`values` is checked for sortedness first, and that check is O(n).** Searching an
     !> unsorted array returns a plausible index with no symptom at all, so the check is on by
-    !> default. Check once with `pf_is_sorted` and pass `assume_sorted=.true.` in a loop:
+    !> default; `assume_sorted=.true.` skips it once the caller knows the answer.
+    !>
+    !> **One call is O(n), not O(log n)**, because the whole array's sort key is extracted on
+    !> entry -- and `assume_sorted=` skips only the sortedness SCAN, never that extraction. A
+    !> loop of single-target calls is therefore quadratic. **Pass the targets as an ARRAY**,
+    !> which extracts once and answers all of them:
     !>
     !> ```fortran
-    !> call pf_is_sorted(v, ok)                       ! O(N), once
-    !> do k = 1, m
-    !>     call pf_lower_bound(v, targets(k), pos, assume_sorted=.true.)   ! O(log N) each
-    !> end do
+    !> call pf_lower_bound(v, targets, pos)     ! pos(1:size(targets)); O(n + m log n) in all
     !> ```
     !>
     !> `descending`/`nulls_first` must describe the order `values` is ACTUALLY in -- they
@@ -602,6 +607,9 @@ module parquet_sorting
     !> Do not read `values(first)` without checking that count first.
     !>
     !> Cheaper than calling the two bounds separately: the values are extracted once.
+    !>
+    !> `target` may also be an ARRAY, giving one `first`/`last` pair per target from a single
+    !> extraction -- the form to use in a lookup loop, for the reason `pf_lower_bound` states.
     interface pf_equal_range
         module procedure equal_range_i32_i32
         module procedure equal_range_i32_i64
@@ -837,6 +845,149 @@ module parquet_sorting
         module procedure merge_time
         module procedure merge_ts
     end interface pf_merge
+    !
+    !> For each element of `left`, ONE element of `right` equal to it -- the m:1 lookup.
+    !>
+    !> `match(i)` is the index into `right` of the first equal element, or **0 when there is
+    !> none** -- the same "0 means absent" protocol `pf_index_map%get` uses, and the reason
+    !> there is no separate `found` array to carry through a loop. `n_matched` optionally
+    !> reports how many elements of `left` found something.
+    !>
+    !> When `right` holds several equal elements, `match` names the one with the SMALLEST
+    !> index. `pf_match_all` is the m:m form that reports all of them.
+    !>
+    !> **Neither side has to be sorted, and there is nothing to hoist.** One call is one sort
+    !> of the two arrays concatenated, so the whole answer costs O((nl+nr) log(nl+nr)) --
+    !> there is no per-call setup a caller could lift out of a loop, because there is no loop:
+    !> pass the whole array.
+    !>
+    !> **A null matches nothing, on either side.** A null is UNKNOWN and `unknown = unknown` is
+    !> not true -- SQL's rule, and the one `eval_filter_clause` already applies on the read path.
+    !> So a null on the left finds nothing, and a null on the right is never found, including by
+    !> another null. **Pass `is_valid_*` whenever either side has nulls**: a null's stored value is
+    !> indistinguishable from a real one without the mask, and an unsupplied mask silently makes
+    !> nulls match each other.
+    !>
+    !> **A NaN is a VALUE and DOES match**, because the comparator treats every NaN as one value.
+    !> That is deliberate and consistent with every other equality question in this library, and it
+    !> is a hazard worth knowing: NaNs on both sides match WHOLESALE, so 1000 of them each is a
+    !> million pairs. `-0.0` and `+0.0` are likewise one value.
+    !>
+    !> Equality is the sort comparator's own, so it is EXACT on reals: `0.1 + 0.2` does not equal
+    !> `0.3`. On `character` the two arrays may have different declared lengths; both are compared
+    !> at the wider of the two, so trailing blanks do not make a shorter element unequal.
+    interface pf_match
+        module procedure match_i32_i32
+        module procedure match_i32_i64
+        module procedure match_i64_i32
+        module procedure match_i64_i64
+        module procedure match_f32_i32
+        module procedure match_f32_i64
+        module procedure match_f64_i32
+        module procedure match_f64_i64
+        module procedure match_bool_i32
+        module procedure match_bool_i64
+        module procedure match_chr_i32
+        module procedure match_chr_i64
+        module procedure match_date_i32
+        module procedure match_date_i64
+        module procedure match_time_i32
+        module procedure match_time_i64
+        module procedure match_ts_i32
+        module procedure match_ts_i64
+        module procedure match_strcol_i32
+        module procedure match_strcol_i64
+        module procedure match_col_i32
+        module procedure match_col_i64
+    end interface pf_match
+    !
+    !> EVERY match between `left` and `right`, as this library's CSR pair.
+    !>
+    !> `offsets` has length `size(left)+1` and `offsets(1) == 1`; the matches for element `i`
+    !> are `matches(offsets(i) : offsets(i+1)-1)`, an empty range when it has none. Same shape
+    !> `pf_spatial_index%neighbours_within` returns, for the same reason -- a per-element
+    !> variable-length answer with one allocation rather than nl of them.
+    !>
+    !> Within one element's range the right indices are ASCENDING.
+    !>
+    !> **`size(matches)` counts PAIRS, and a pair count is a product rather than a sum.** A
+    !> value appearing 1000 times on each side contributes a million pairs on its own. The
+    !> total is `offsets(size(left)+1) - 1`; read it before doing anything proportional to it.
+    !>
+    !> **A null matches nothing, on either side.** A null is UNKNOWN and `unknown = unknown` is
+    !> not true -- SQL's rule, and the one `eval_filter_clause` already applies on the read path.
+    !> So a null on the left finds nothing, and a null on the right is never found, including by
+    !> another null. **Pass `is_valid_*` whenever either side has nulls**: a null's stored value is
+    !> indistinguishable from a real one without the mask, and an unsupplied mask silently makes
+    !> nulls match each other.
+    !>
+    !> **A NaN is a VALUE and DOES match**, because the comparator treats every NaN as one value.
+    !> That is deliberate and consistent with every other equality question in this library, and it
+    !> is a hazard worth knowing: NaNs on both sides match WHOLESALE, so 1000 of them each is a
+    !> million pairs. `-0.0` and `+0.0` are likewise one value.
+    !>
+    !> Equality is the sort comparator's own, so it is EXACT on reals: `0.1 + 0.2` does not equal
+    !> `0.3`. On `character` the two arrays may have different declared lengths; both are compared
+    !> at the wider of the two, so trailing blanks do not make a shorter element unequal.
+    interface pf_match_all
+        module procedure match_all_i32_i32
+        module procedure match_all_i32_i64
+        module procedure match_all_i64_i32
+        module procedure match_all_i64_i64
+        module procedure match_all_f32_i32
+        module procedure match_all_f32_i64
+        module procedure match_all_f64_i32
+        module procedure match_all_f64_i64
+        module procedure match_all_bool_i32
+        module procedure match_all_bool_i64
+        module procedure match_all_chr_i32
+        module procedure match_all_chr_i64
+        module procedure match_all_date_i32
+        module procedure match_all_date_i64
+        module procedure match_all_time_i32
+        module procedure match_all_time_i64
+        module procedure match_all_ts_i32
+        module procedure match_all_ts_i64
+        module procedure match_all_strcol_i32
+        module procedure match_all_strcol_i64
+        module procedure match_all_col_i32
+        module procedure match_all_col_i64
+    end interface pf_match_all
+    !
+    !> Elementwise membership: `mask(i)` is `.true.` when `values(i)` equals at least one
+    !> element of `set`. pandas' `Series.isin`, and the cheapest of the three.
+    !>
+    !> Exactly `pf_match` with the answer reduced to "was there one", at the same cost -- one
+    !> sort of the concatenation -- so use this one wherever the index itself is not wanted.
+    !>
+    !> **A null matches nothing, on either side.** A null is UNKNOWN and `unknown = unknown` is
+    !> not true -- SQL's rule, and the one `eval_filter_clause` already applies on the read path.
+    !> So a null on the left finds nothing, and a null on the right is never found, including by
+    !> another null. **Pass `is_valid_*` whenever either side has nulls**: a null's stored value is
+    !> indistinguishable from a real one without the mask, and an unsupplied mask silently makes
+    !> nulls match each other.
+    !>
+    !> **A NaN is a VALUE and DOES match**, because the comparator treats every NaN as one value.
+    !> That is deliberate and consistent with every other equality question in this library, and it
+    !> is a hazard worth knowing: NaNs on both sides match WHOLESALE, so 1000 of them each is a
+    !> million pairs. `-0.0` and `+0.0` are likewise one value.
+    !>
+    !> Equality is the sort comparator's own, so it is EXACT on reals: `0.1 + 0.2` does not equal
+    !> `0.3`. On `character` the two arrays may have different declared lengths; both are compared
+    !> at the wider of the two, so trailing blanks do not make a shorter element unequal.
+    interface pf_in
+        module procedure isin_i32
+        module procedure isin_i64
+        module procedure isin_f32
+        module procedure isin_f64
+        module procedure isin_bool
+        module procedure isin_chr
+        module procedure isin_date
+        module procedure isin_time
+        module procedure isin_ts
+        module procedure isin_strcol
+        module procedure isin_col
+    end interface pf_in
     !
     ! ---- Key extraction, engine dispatch and the shared helpers ----
     interface
@@ -7738,6 +7889,1021 @@ module parquet_sorting
             logical, intent(in), optional :: assume_sorted
             !! .true. skips the O(n) sortedness check on BOTH inputs.
         end subroutine merge_ts
+    end interface
+    !
+    ! ---- Matching between two arrays (parquet_sorting_match) ----
+    interface
+        !> pf_match over two 32-bit integer arrays, with int32 indices.
+        module subroutine match_i32_i32(left, right, match, n_matched, is_valid_left, is_valid_right, threads)
+        integer(int32), intent(in) :: left(:)
+        integer(int32), intent(in) :: right(:)
+            integer(int32), allocatable, intent(out) :: match(:)
+            !! one per element of `left`: the index in `right` of the first equal
+            !! element, or 0 when there is none.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many elements of `left` matched. Deliberately int64 whatever kind
+            !! `match` has, exactly as `pf_unique_count`'s `n_null` is.
+            logical, intent(in), optional :: is_valid_left(:)
+            !! `left`'s validity; absent means it has no nulls.
+            logical, intent(in), optional :: is_valid_right(:)
+            !! `right`'s validity; absent means it has no nulls.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_i32_i32
+        !> pf_match over two 32-bit integer arrays, with int64 indices.
+        module subroutine match_i32_i64(left, right, match, n_matched, is_valid_left, is_valid_right, threads)
+        integer(int32), intent(in) :: left(:)
+        integer(int32), intent(in) :: right(:)
+            integer(int64), allocatable, intent(out) :: match(:)
+            !! one per element of `left`: the index in `right` of the first equal
+            !! element, or 0 when there is none.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many elements of `left` matched. Deliberately int64 whatever kind
+            !! `match` has, exactly as `pf_unique_count`'s `n_null` is.
+            logical, intent(in), optional :: is_valid_left(:)
+            !! `left`'s validity; absent means it has no nulls.
+            logical, intent(in), optional :: is_valid_right(:)
+            !! `right`'s validity; absent means it has no nulls.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_i32_i64
+        !> pf_match over two 64-bit integer arrays, with int32 indices.
+        module subroutine match_i64_i32(left, right, match, n_matched, is_valid_left, is_valid_right, threads)
+        integer(int64), intent(in) :: left(:)
+        integer(int64), intent(in) :: right(:)
+            integer(int32), allocatable, intent(out) :: match(:)
+            !! one per element of `left`: the index in `right` of the first equal
+            !! element, or 0 when there is none.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many elements of `left` matched. Deliberately int64 whatever kind
+            !! `match` has, exactly as `pf_unique_count`'s `n_null` is.
+            logical, intent(in), optional :: is_valid_left(:)
+            !! `left`'s validity; absent means it has no nulls.
+            logical, intent(in), optional :: is_valid_right(:)
+            !! `right`'s validity; absent means it has no nulls.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_i64_i32
+        !> pf_match over two 64-bit integer arrays, with int64 indices.
+        module subroutine match_i64_i64(left, right, match, n_matched, is_valid_left, is_valid_right, threads)
+        integer(int64), intent(in) :: left(:)
+        integer(int64), intent(in) :: right(:)
+            integer(int64), allocatable, intent(out) :: match(:)
+            !! one per element of `left`: the index in `right` of the first equal
+            !! element, or 0 when there is none.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many elements of `left` matched. Deliberately int64 whatever kind
+            !! `match` has, exactly as `pf_unique_count`'s `n_null` is.
+            logical, intent(in), optional :: is_valid_left(:)
+            !! `left`'s validity; absent means it has no nulls.
+            logical, intent(in), optional :: is_valid_right(:)
+            !! `right`'s validity; absent means it has no nulls.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_i64_i64
+        !> pf_match over two 32-bit real arrays, with int32 indices.
+        module subroutine match_f32_i32(left, right, match, n_matched, is_valid_left, is_valid_right, threads)
+        real(real32), intent(in) :: left(:)
+        real(real32), intent(in) :: right(:)
+            integer(int32), allocatable, intent(out) :: match(:)
+            !! one per element of `left`: the index in `right` of the first equal
+            !! element, or 0 when there is none.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many elements of `left` matched. Deliberately int64 whatever kind
+            !! `match` has, exactly as `pf_unique_count`'s `n_null` is.
+            logical, intent(in), optional :: is_valid_left(:)
+            !! `left`'s validity; absent means it has no nulls.
+            logical, intent(in), optional :: is_valid_right(:)
+            !! `right`'s validity; absent means it has no nulls.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_f32_i32
+        !> pf_match over two 32-bit real arrays, with int64 indices.
+        module subroutine match_f32_i64(left, right, match, n_matched, is_valid_left, is_valid_right, threads)
+        real(real32), intent(in) :: left(:)
+        real(real32), intent(in) :: right(:)
+            integer(int64), allocatable, intent(out) :: match(:)
+            !! one per element of `left`: the index in `right` of the first equal
+            !! element, or 0 when there is none.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many elements of `left` matched. Deliberately int64 whatever kind
+            !! `match` has, exactly as `pf_unique_count`'s `n_null` is.
+            logical, intent(in), optional :: is_valid_left(:)
+            !! `left`'s validity; absent means it has no nulls.
+            logical, intent(in), optional :: is_valid_right(:)
+            !! `right`'s validity; absent means it has no nulls.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_f32_i64
+        !> pf_match over two 64-bit real arrays, with int32 indices.
+        module subroutine match_f64_i32(left, right, match, n_matched, is_valid_left, is_valid_right, threads)
+        real(real64), intent(in) :: left(:)
+        real(real64), intent(in) :: right(:)
+            integer(int32), allocatable, intent(out) :: match(:)
+            !! one per element of `left`: the index in `right` of the first equal
+            !! element, or 0 when there is none.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many elements of `left` matched. Deliberately int64 whatever kind
+            !! `match` has, exactly as `pf_unique_count`'s `n_null` is.
+            logical, intent(in), optional :: is_valid_left(:)
+            !! `left`'s validity; absent means it has no nulls.
+            logical, intent(in), optional :: is_valid_right(:)
+            !! `right`'s validity; absent means it has no nulls.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_f64_i32
+        !> pf_match over two 64-bit real arrays, with int64 indices.
+        module subroutine match_f64_i64(left, right, match, n_matched, is_valid_left, is_valid_right, threads)
+        real(real64), intent(in) :: left(:)
+        real(real64), intent(in) :: right(:)
+            integer(int64), allocatable, intent(out) :: match(:)
+            !! one per element of `left`: the index in `right` of the first equal
+            !! element, or 0 when there is none.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many elements of `left` matched. Deliberately int64 whatever kind
+            !! `match` has, exactly as `pf_unique_count`'s `n_null` is.
+            logical, intent(in), optional :: is_valid_left(:)
+            !! `left`'s validity; absent means it has no nulls.
+            logical, intent(in), optional :: is_valid_right(:)
+            !! `right`'s validity; absent means it has no nulls.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_f64_i64
+        !> pf_match over two logical arrays, with int32 indices.
+        module subroutine match_bool_i32(left, right, match, n_matched, is_valid_left, is_valid_right, threads)
+        logical, intent(in) :: left(:)
+        logical, intent(in) :: right(:)
+            integer(int32), allocatable, intent(out) :: match(:)
+            !! one per element of `left`: the index in `right` of the first equal
+            !! element, or 0 when there is none.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many elements of `left` matched. Deliberately int64 whatever kind
+            !! `match` has, exactly as `pf_unique_count`'s `n_null` is.
+            logical, intent(in), optional :: is_valid_left(:)
+            !! `left`'s validity; absent means it has no nulls.
+            logical, intent(in), optional :: is_valid_right(:)
+            !! `right`'s validity; absent means it has no nulls.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_bool_i32
+        !> pf_match over two logical arrays, with int64 indices.
+        module subroutine match_bool_i64(left, right, match, n_matched, is_valid_left, is_valid_right, threads)
+        logical, intent(in) :: left(:)
+        logical, intent(in) :: right(:)
+            integer(int64), allocatable, intent(out) :: match(:)
+            !! one per element of `left`: the index in `right` of the first equal
+            !! element, or 0 when there is none.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many elements of `left` matched. Deliberately int64 whatever kind
+            !! `match` has, exactly as `pf_unique_count`'s `n_null` is.
+            logical, intent(in), optional :: is_valid_left(:)
+            !! `left`'s validity; absent means it has no nulls.
+            logical, intent(in), optional :: is_valid_right(:)
+            !! `right`'s validity; absent means it has no nulls.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_bool_i64
+        !> pf_match over two string arrays, with int32 indices.
+        module subroutine match_chr_i32(left, right, match, n_matched, is_valid_left, is_valid_right, threads)
+        character(len=*), intent(in) :: left(:)
+        character(len=*), intent(in) :: right(:)
+            integer(int32), allocatable, intent(out) :: match(:)
+            !! one per element of `left`: the index in `right` of the first equal
+            !! element, or 0 when there is none.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many elements of `left` matched. Deliberately int64 whatever kind
+            !! `match` has, exactly as `pf_unique_count`'s `n_null` is.
+            logical, intent(in), optional :: is_valid_left(:)
+            !! `left`'s validity; absent means it has no nulls.
+            logical, intent(in), optional :: is_valid_right(:)
+            !! `right`'s validity; absent means it has no nulls.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_chr_i32
+        !> pf_match over two string arrays, with int64 indices.
+        module subroutine match_chr_i64(left, right, match, n_matched, is_valid_left, is_valid_right, threads)
+        character(len=*), intent(in) :: left(:)
+        character(len=*), intent(in) :: right(:)
+            integer(int64), allocatable, intent(out) :: match(:)
+            !! one per element of `left`: the index in `right` of the first equal
+            !! element, or 0 when there is none.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many elements of `left` matched. Deliberately int64 whatever kind
+            !! `match` has, exactly as `pf_unique_count`'s `n_null` is.
+            logical, intent(in), optional :: is_valid_left(:)
+            !! `left`'s validity; absent means it has no nulls.
+            logical, intent(in), optional :: is_valid_right(:)
+            !! `right`'s validity; absent means it has no nulls.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_chr_i64
+        !> pf_match over two date arrays, with int32 indices.
+        module subroutine match_date_i32(left, right, match, n_matched, threads)
+        type(parquet_date), intent(in) :: left(:)
+        type(parquet_date), intent(in) :: right(:)
+            integer(int32), allocatable, intent(out) :: match(:)
+            !! one per element of `left`: the index in `right` of the first equal
+            !! element, or 0 when there is none.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many elements of `left` matched. Deliberately int64 whatever kind
+            !! `match` has, exactly as `pf_unique_count`'s `n_null` is.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_date_i32
+        !> pf_match over two date arrays, with int64 indices.
+        module subroutine match_date_i64(left, right, match, n_matched, threads)
+        type(parquet_date), intent(in) :: left(:)
+        type(parquet_date), intent(in) :: right(:)
+            integer(int64), allocatable, intent(out) :: match(:)
+            !! one per element of `left`: the index in `right` of the first equal
+            !! element, or 0 when there is none.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many elements of `left` matched. Deliberately int64 whatever kind
+            !! `match` has, exactly as `pf_unique_count`'s `n_null` is.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_date_i64
+        !> pf_match over two time arrays, with int32 indices.
+        module subroutine match_time_i32(left, right, match, n_matched, threads)
+        type(parquet_time), intent(in) :: left(:)
+        type(parquet_time), intent(in) :: right(:)
+            integer(int32), allocatable, intent(out) :: match(:)
+            !! one per element of `left`: the index in `right` of the first equal
+            !! element, or 0 when there is none.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many elements of `left` matched. Deliberately int64 whatever kind
+            !! `match` has, exactly as `pf_unique_count`'s `n_null` is.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_time_i32
+        !> pf_match over two time arrays, with int64 indices.
+        module subroutine match_time_i64(left, right, match, n_matched, threads)
+        type(parquet_time), intent(in) :: left(:)
+        type(parquet_time), intent(in) :: right(:)
+            integer(int64), allocatable, intent(out) :: match(:)
+            !! one per element of `left`: the index in `right` of the first equal
+            !! element, or 0 when there is none.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many elements of `left` matched. Deliberately int64 whatever kind
+            !! `match` has, exactly as `pf_unique_count`'s `n_null` is.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_time_i64
+        !> pf_match over two timestamp arrays, with int32 indices.
+        module subroutine match_ts_i32(left, right, match, n_matched, threads)
+        type(parquet_timestamp), intent(in) :: left(:)
+        type(parquet_timestamp), intent(in) :: right(:)
+            integer(int32), allocatable, intent(out) :: match(:)
+            !! one per element of `left`: the index in `right` of the first equal
+            !! element, or 0 when there is none.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many elements of `left` matched. Deliberately int64 whatever kind
+            !! `match` has, exactly as `pf_unique_count`'s `n_null` is.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_ts_i32
+        !> pf_match over two timestamp arrays, with int64 indices.
+        module subroutine match_ts_i64(left, right, match, n_matched, threads)
+        type(parquet_timestamp), intent(in) :: left(:)
+        type(parquet_timestamp), intent(in) :: right(:)
+            integer(int64), allocatable, intent(out) :: match(:)
+            !! one per element of `left`: the index in `right` of the first equal
+            !! element, or 0 when there is none.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many elements of `left` matched. Deliberately int64 whatever kind
+            !! `match` has, exactly as `pf_unique_count`'s `n_null` is.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_ts_i64
+        !> pf_match over two packed string column arrays, with int32 indices.
+        module subroutine match_strcol_i32(left, right, match, n_matched, threads)
+        type(parquet_string_column), intent(in) :: left
+        type(parquet_string_column), intent(in) :: right
+            integer(int32), allocatable, intent(out) :: match(:)
+            !! one per element of `left`: the index in `right` of the first equal
+            !! element, or 0 when there is none.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many elements of `left` matched. Deliberately int64 whatever kind
+            !! `match` has, exactly as `pf_unique_count`'s `n_null` is.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_strcol_i32
+        !> pf_match over two packed string column arrays, with int64 indices.
+        module subroutine match_strcol_i64(left, right, match, n_matched, threads)
+        type(parquet_string_column), intent(in) :: left
+        type(parquet_string_column), intent(in) :: right
+            integer(int64), allocatable, intent(out) :: match(:)
+            !! one per element of `left`: the index in `right` of the first equal
+            !! element, or 0 when there is none.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many elements of `left` matched. Deliberately int64 whatever kind
+            !! `match` has, exactly as `pf_unique_count`'s `n_null` is.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_strcol_i64
+        !> pf_match over two type-erased column arrays, with int32 indices.
+        module subroutine match_col_i32(left, right, match, n_matched, threads)
+        type(parquet_column), intent(in) :: left
+        type(parquet_column), intent(in) :: right
+            integer(int32), allocatable, intent(out) :: match(:)
+            !! one per element of `left`: the index in `right` of the first equal
+            !! element, or 0 when there is none.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many elements of `left` matched. Deliberately int64 whatever kind
+            !! `match` has, exactly as `pf_unique_count`'s `n_null` is.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_col_i32
+        !> pf_match over two type-erased column arrays, with int64 indices.
+        module subroutine match_col_i64(left, right, match, n_matched, threads)
+        type(parquet_column), intent(in) :: left
+        type(parquet_column), intent(in) :: right
+            integer(int64), allocatable, intent(out) :: match(:)
+            !! one per element of `left`: the index in `right` of the first equal
+            !! element, or 0 when there is none.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many elements of `left` matched. Deliberately int64 whatever kind
+            !! `match` has, exactly as `pf_unique_count`'s `n_null` is.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_col_i64
+        !> pf_match_all over two 32-bit integer arrays, with int32 indices.
+        module subroutine match_all_i32_i32(left, right, offsets, matches, is_valid_left, is_valid_right, threads)
+        integer(int32), intent(in) :: left(:)
+        integer(int32), intent(in) :: right(:)
+            integer(int32), allocatable, intent(out) :: offsets(:)
+            !! length `size(left)+1`, starting at 1: element `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1)-1)`.
+            integer(int32), allocatable, intent(out) :: matches(:)
+            !! every matching index in `right`, grouped by left element and ascending
+            !! within each group. Its length is the PAIR count.
+            logical, intent(in), optional :: is_valid_left(:)
+            !! `left`'s validity; absent means it has no nulls.
+            logical, intent(in), optional :: is_valid_right(:)
+            !! `right`'s validity; absent means it has no nulls.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_all_i32_i32
+        !> pf_match_all over two 32-bit integer arrays, with int64 indices.
+        module subroutine match_all_i32_i64(left, right, offsets, matches, is_valid_left, is_valid_right, threads)
+        integer(int32), intent(in) :: left(:)
+        integer(int32), intent(in) :: right(:)
+            integer(int64), allocatable, intent(out) :: offsets(:)
+            !! length `size(left)+1`, starting at 1: element `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1)-1)`.
+            integer(int64), allocatable, intent(out) :: matches(:)
+            !! every matching index in `right`, grouped by left element and ascending
+            !! within each group. Its length is the PAIR count.
+            logical, intent(in), optional :: is_valid_left(:)
+            !! `left`'s validity; absent means it has no nulls.
+            logical, intent(in), optional :: is_valid_right(:)
+            !! `right`'s validity; absent means it has no nulls.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_all_i32_i64
+        !> pf_match_all over two 64-bit integer arrays, with int32 indices.
+        module subroutine match_all_i64_i32(left, right, offsets, matches, is_valid_left, is_valid_right, threads)
+        integer(int64), intent(in) :: left(:)
+        integer(int64), intent(in) :: right(:)
+            integer(int32), allocatable, intent(out) :: offsets(:)
+            !! length `size(left)+1`, starting at 1: element `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1)-1)`.
+            integer(int32), allocatable, intent(out) :: matches(:)
+            !! every matching index in `right`, grouped by left element and ascending
+            !! within each group. Its length is the PAIR count.
+            logical, intent(in), optional :: is_valid_left(:)
+            !! `left`'s validity; absent means it has no nulls.
+            logical, intent(in), optional :: is_valid_right(:)
+            !! `right`'s validity; absent means it has no nulls.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_all_i64_i32
+        !> pf_match_all over two 64-bit integer arrays, with int64 indices.
+        module subroutine match_all_i64_i64(left, right, offsets, matches, is_valid_left, is_valid_right, threads)
+        integer(int64), intent(in) :: left(:)
+        integer(int64), intent(in) :: right(:)
+            integer(int64), allocatable, intent(out) :: offsets(:)
+            !! length `size(left)+1`, starting at 1: element `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1)-1)`.
+            integer(int64), allocatable, intent(out) :: matches(:)
+            !! every matching index in `right`, grouped by left element and ascending
+            !! within each group. Its length is the PAIR count.
+            logical, intent(in), optional :: is_valid_left(:)
+            !! `left`'s validity; absent means it has no nulls.
+            logical, intent(in), optional :: is_valid_right(:)
+            !! `right`'s validity; absent means it has no nulls.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_all_i64_i64
+        !> pf_match_all over two 32-bit real arrays, with int32 indices.
+        module subroutine match_all_f32_i32(left, right, offsets, matches, is_valid_left, is_valid_right, threads)
+        real(real32), intent(in) :: left(:)
+        real(real32), intent(in) :: right(:)
+            integer(int32), allocatable, intent(out) :: offsets(:)
+            !! length `size(left)+1`, starting at 1: element `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1)-1)`.
+            integer(int32), allocatable, intent(out) :: matches(:)
+            !! every matching index in `right`, grouped by left element and ascending
+            !! within each group. Its length is the PAIR count.
+            logical, intent(in), optional :: is_valid_left(:)
+            !! `left`'s validity; absent means it has no nulls.
+            logical, intent(in), optional :: is_valid_right(:)
+            !! `right`'s validity; absent means it has no nulls.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_all_f32_i32
+        !> pf_match_all over two 32-bit real arrays, with int64 indices.
+        module subroutine match_all_f32_i64(left, right, offsets, matches, is_valid_left, is_valid_right, threads)
+        real(real32), intent(in) :: left(:)
+        real(real32), intent(in) :: right(:)
+            integer(int64), allocatable, intent(out) :: offsets(:)
+            !! length `size(left)+1`, starting at 1: element `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1)-1)`.
+            integer(int64), allocatable, intent(out) :: matches(:)
+            !! every matching index in `right`, grouped by left element and ascending
+            !! within each group. Its length is the PAIR count.
+            logical, intent(in), optional :: is_valid_left(:)
+            !! `left`'s validity; absent means it has no nulls.
+            logical, intent(in), optional :: is_valid_right(:)
+            !! `right`'s validity; absent means it has no nulls.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_all_f32_i64
+        !> pf_match_all over two 64-bit real arrays, with int32 indices.
+        module subroutine match_all_f64_i32(left, right, offsets, matches, is_valid_left, is_valid_right, threads)
+        real(real64), intent(in) :: left(:)
+        real(real64), intent(in) :: right(:)
+            integer(int32), allocatable, intent(out) :: offsets(:)
+            !! length `size(left)+1`, starting at 1: element `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1)-1)`.
+            integer(int32), allocatable, intent(out) :: matches(:)
+            !! every matching index in `right`, grouped by left element and ascending
+            !! within each group. Its length is the PAIR count.
+            logical, intent(in), optional :: is_valid_left(:)
+            !! `left`'s validity; absent means it has no nulls.
+            logical, intent(in), optional :: is_valid_right(:)
+            !! `right`'s validity; absent means it has no nulls.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_all_f64_i32
+        !> pf_match_all over two 64-bit real arrays, with int64 indices.
+        module subroutine match_all_f64_i64(left, right, offsets, matches, is_valid_left, is_valid_right, threads)
+        real(real64), intent(in) :: left(:)
+        real(real64), intent(in) :: right(:)
+            integer(int64), allocatable, intent(out) :: offsets(:)
+            !! length `size(left)+1`, starting at 1: element `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1)-1)`.
+            integer(int64), allocatable, intent(out) :: matches(:)
+            !! every matching index in `right`, grouped by left element and ascending
+            !! within each group. Its length is the PAIR count.
+            logical, intent(in), optional :: is_valid_left(:)
+            !! `left`'s validity; absent means it has no nulls.
+            logical, intent(in), optional :: is_valid_right(:)
+            !! `right`'s validity; absent means it has no nulls.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_all_f64_i64
+        !> pf_match_all over two logical arrays, with int32 indices.
+        module subroutine match_all_bool_i32(left, right, offsets, matches, is_valid_left, is_valid_right, threads)
+        logical, intent(in) :: left(:)
+        logical, intent(in) :: right(:)
+            integer(int32), allocatable, intent(out) :: offsets(:)
+            !! length `size(left)+1`, starting at 1: element `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1)-1)`.
+            integer(int32), allocatable, intent(out) :: matches(:)
+            !! every matching index in `right`, grouped by left element and ascending
+            !! within each group. Its length is the PAIR count.
+            logical, intent(in), optional :: is_valid_left(:)
+            !! `left`'s validity; absent means it has no nulls.
+            logical, intent(in), optional :: is_valid_right(:)
+            !! `right`'s validity; absent means it has no nulls.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_all_bool_i32
+        !> pf_match_all over two logical arrays, with int64 indices.
+        module subroutine match_all_bool_i64(left, right, offsets, matches, is_valid_left, is_valid_right, threads)
+        logical, intent(in) :: left(:)
+        logical, intent(in) :: right(:)
+            integer(int64), allocatable, intent(out) :: offsets(:)
+            !! length `size(left)+1`, starting at 1: element `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1)-1)`.
+            integer(int64), allocatable, intent(out) :: matches(:)
+            !! every matching index in `right`, grouped by left element and ascending
+            !! within each group. Its length is the PAIR count.
+            logical, intent(in), optional :: is_valid_left(:)
+            !! `left`'s validity; absent means it has no nulls.
+            logical, intent(in), optional :: is_valid_right(:)
+            !! `right`'s validity; absent means it has no nulls.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_all_bool_i64
+        !> pf_match_all over two string arrays, with int32 indices.
+        module subroutine match_all_chr_i32(left, right, offsets, matches, is_valid_left, is_valid_right, threads)
+        character(len=*), intent(in) :: left(:)
+        character(len=*), intent(in) :: right(:)
+            integer(int32), allocatable, intent(out) :: offsets(:)
+            !! length `size(left)+1`, starting at 1: element `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1)-1)`.
+            integer(int32), allocatable, intent(out) :: matches(:)
+            !! every matching index in `right`, grouped by left element and ascending
+            !! within each group. Its length is the PAIR count.
+            logical, intent(in), optional :: is_valid_left(:)
+            !! `left`'s validity; absent means it has no nulls.
+            logical, intent(in), optional :: is_valid_right(:)
+            !! `right`'s validity; absent means it has no nulls.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_all_chr_i32
+        !> pf_match_all over two string arrays, with int64 indices.
+        module subroutine match_all_chr_i64(left, right, offsets, matches, is_valid_left, is_valid_right, threads)
+        character(len=*), intent(in) :: left(:)
+        character(len=*), intent(in) :: right(:)
+            integer(int64), allocatable, intent(out) :: offsets(:)
+            !! length `size(left)+1`, starting at 1: element `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1)-1)`.
+            integer(int64), allocatable, intent(out) :: matches(:)
+            !! every matching index in `right`, grouped by left element and ascending
+            !! within each group. Its length is the PAIR count.
+            logical, intent(in), optional :: is_valid_left(:)
+            !! `left`'s validity; absent means it has no nulls.
+            logical, intent(in), optional :: is_valid_right(:)
+            !! `right`'s validity; absent means it has no nulls.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_all_chr_i64
+        !> pf_match_all over two date arrays, with int32 indices.
+        module subroutine match_all_date_i32(left, right, offsets, matches, threads)
+        type(parquet_date), intent(in) :: left(:)
+        type(parquet_date), intent(in) :: right(:)
+            integer(int32), allocatable, intent(out) :: offsets(:)
+            !! length `size(left)+1`, starting at 1: element `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1)-1)`.
+            integer(int32), allocatable, intent(out) :: matches(:)
+            !! every matching index in `right`, grouped by left element and ascending
+            !! within each group. Its length is the PAIR count.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_all_date_i32
+        !> pf_match_all over two date arrays, with int64 indices.
+        module subroutine match_all_date_i64(left, right, offsets, matches, threads)
+        type(parquet_date), intent(in) :: left(:)
+        type(parquet_date), intent(in) :: right(:)
+            integer(int64), allocatable, intent(out) :: offsets(:)
+            !! length `size(left)+1`, starting at 1: element `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1)-1)`.
+            integer(int64), allocatable, intent(out) :: matches(:)
+            !! every matching index in `right`, grouped by left element and ascending
+            !! within each group. Its length is the PAIR count.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_all_date_i64
+        !> pf_match_all over two time arrays, with int32 indices.
+        module subroutine match_all_time_i32(left, right, offsets, matches, threads)
+        type(parquet_time), intent(in) :: left(:)
+        type(parquet_time), intent(in) :: right(:)
+            integer(int32), allocatable, intent(out) :: offsets(:)
+            !! length `size(left)+1`, starting at 1: element `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1)-1)`.
+            integer(int32), allocatable, intent(out) :: matches(:)
+            !! every matching index in `right`, grouped by left element and ascending
+            !! within each group. Its length is the PAIR count.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_all_time_i32
+        !> pf_match_all over two time arrays, with int64 indices.
+        module subroutine match_all_time_i64(left, right, offsets, matches, threads)
+        type(parquet_time), intent(in) :: left(:)
+        type(parquet_time), intent(in) :: right(:)
+            integer(int64), allocatable, intent(out) :: offsets(:)
+            !! length `size(left)+1`, starting at 1: element `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1)-1)`.
+            integer(int64), allocatable, intent(out) :: matches(:)
+            !! every matching index in `right`, grouped by left element and ascending
+            !! within each group. Its length is the PAIR count.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_all_time_i64
+        !> pf_match_all over two timestamp arrays, with int32 indices.
+        module subroutine match_all_ts_i32(left, right, offsets, matches, threads)
+        type(parquet_timestamp), intent(in) :: left(:)
+        type(parquet_timestamp), intent(in) :: right(:)
+            integer(int32), allocatable, intent(out) :: offsets(:)
+            !! length `size(left)+1`, starting at 1: element `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1)-1)`.
+            integer(int32), allocatable, intent(out) :: matches(:)
+            !! every matching index in `right`, grouped by left element and ascending
+            !! within each group. Its length is the PAIR count.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_all_ts_i32
+        !> pf_match_all over two timestamp arrays, with int64 indices.
+        module subroutine match_all_ts_i64(left, right, offsets, matches, threads)
+        type(parquet_timestamp), intent(in) :: left(:)
+        type(parquet_timestamp), intent(in) :: right(:)
+            integer(int64), allocatable, intent(out) :: offsets(:)
+            !! length `size(left)+1`, starting at 1: element `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1)-1)`.
+            integer(int64), allocatable, intent(out) :: matches(:)
+            !! every matching index in `right`, grouped by left element and ascending
+            !! within each group. Its length is the PAIR count.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_all_ts_i64
+        !> pf_match_all over two packed string column arrays, with int32 indices.
+        module subroutine match_all_strcol_i32(left, right, offsets, matches, threads)
+        type(parquet_string_column), intent(in) :: left
+        type(parquet_string_column), intent(in) :: right
+            integer(int32), allocatable, intent(out) :: offsets(:)
+            !! length `size(left)+1`, starting at 1: element `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1)-1)`.
+            integer(int32), allocatable, intent(out) :: matches(:)
+            !! every matching index in `right`, grouped by left element and ascending
+            !! within each group. Its length is the PAIR count.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_all_strcol_i32
+        !> pf_match_all over two packed string column arrays, with int64 indices.
+        module subroutine match_all_strcol_i64(left, right, offsets, matches, threads)
+        type(parquet_string_column), intent(in) :: left
+        type(parquet_string_column), intent(in) :: right
+            integer(int64), allocatable, intent(out) :: offsets(:)
+            !! length `size(left)+1`, starting at 1: element `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1)-1)`.
+            integer(int64), allocatable, intent(out) :: matches(:)
+            !! every matching index in `right`, grouped by left element and ascending
+            !! within each group. Its length is the PAIR count.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_all_strcol_i64
+        !> pf_match_all over two type-erased column arrays, with int32 indices.
+        module subroutine match_all_col_i32(left, right, offsets, matches, threads)
+        type(parquet_column), intent(in) :: left
+        type(parquet_column), intent(in) :: right
+            integer(int32), allocatable, intent(out) :: offsets(:)
+            !! length `size(left)+1`, starting at 1: element `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1)-1)`.
+            integer(int32), allocatable, intent(out) :: matches(:)
+            !! every matching index in `right`, grouped by left element and ascending
+            !! within each group. Its length is the PAIR count.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_all_col_i32
+        !> pf_match_all over two type-erased column arrays, with int64 indices.
+        module subroutine match_all_col_i64(left, right, offsets, matches, threads)
+        type(parquet_column), intent(in) :: left
+        type(parquet_column), intent(in) :: right
+            integer(int64), allocatable, intent(out) :: offsets(:)
+            !! length `size(left)+1`, starting at 1: element `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1)-1)`.
+            integer(int64), allocatable, intent(out) :: matches(:)
+            !! every matching index in `right`, grouped by left element and ascending
+            !! within each group. Its length is the PAIR count.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine match_all_col_i64
+        !> pf_in over a 32-bit integer array and a 32-bit integer set.
+        module subroutine isin_i32(values, set, mask, is_valid, is_valid_set, threads)
+        integer(int32), intent(in) :: values(:)
+        integer(int32), intent(in) :: set(:)
+            logical, allocatable, intent(out) :: mask(:)
+            !! one per element of `values`: .true. when `set` holds an equal element.
+            logical, intent(in), optional :: is_valid(:)
+            !! `values`' validity; absent means it has no nulls.
+            logical, intent(in), optional :: is_valid_set(:)
+            !! `set`'s validity; absent means it has no nulls.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine isin_i32
+        !> pf_in over a 64-bit integer array and a 64-bit integer set.
+        module subroutine isin_i64(values, set, mask, is_valid, is_valid_set, threads)
+        integer(int64), intent(in) :: values(:)
+        integer(int64), intent(in) :: set(:)
+            logical, allocatable, intent(out) :: mask(:)
+            !! one per element of `values`: .true. when `set` holds an equal element.
+            logical, intent(in), optional :: is_valid(:)
+            !! `values`' validity; absent means it has no nulls.
+            logical, intent(in), optional :: is_valid_set(:)
+            !! `set`'s validity; absent means it has no nulls.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine isin_i64
+        !> pf_in over a 32-bit real array and a 32-bit real set.
+        module subroutine isin_f32(values, set, mask, is_valid, is_valid_set, threads)
+        real(real32), intent(in) :: values(:)
+        real(real32), intent(in) :: set(:)
+            logical, allocatable, intent(out) :: mask(:)
+            !! one per element of `values`: .true. when `set` holds an equal element.
+            logical, intent(in), optional :: is_valid(:)
+            !! `values`' validity; absent means it has no nulls.
+            logical, intent(in), optional :: is_valid_set(:)
+            !! `set`'s validity; absent means it has no nulls.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine isin_f32
+        !> pf_in over a 64-bit real array and a 64-bit real set.
+        module subroutine isin_f64(values, set, mask, is_valid, is_valid_set, threads)
+        real(real64), intent(in) :: values(:)
+        real(real64), intent(in) :: set(:)
+            logical, allocatable, intent(out) :: mask(:)
+            !! one per element of `values`: .true. when `set` holds an equal element.
+            logical, intent(in), optional :: is_valid(:)
+            !! `values`' validity; absent means it has no nulls.
+            logical, intent(in), optional :: is_valid_set(:)
+            !! `set`'s validity; absent means it has no nulls.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine isin_f64
+        !> pf_in over a logical array and a logical set.
+        module subroutine isin_bool(values, set, mask, is_valid, is_valid_set, threads)
+        logical, intent(in) :: values(:)
+        logical, intent(in) :: set(:)
+            logical, allocatable, intent(out) :: mask(:)
+            !! one per element of `values`: .true. when `set` holds an equal element.
+            logical, intent(in), optional :: is_valid(:)
+            !! `values`' validity; absent means it has no nulls.
+            logical, intent(in), optional :: is_valid_set(:)
+            !! `set`'s validity; absent means it has no nulls.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine isin_bool
+        !> pf_in over a string array and a string set.
+        module subroutine isin_chr(values, set, mask, is_valid, is_valid_set, threads)
+        character(len=*), intent(in) :: values(:)
+        character(len=*), intent(in) :: set(:)
+            logical, allocatable, intent(out) :: mask(:)
+            !! one per element of `values`: .true. when `set` holds an equal element.
+            logical, intent(in), optional :: is_valid(:)
+            !! `values`' validity; absent means it has no nulls.
+            logical, intent(in), optional :: is_valid_set(:)
+            !! `set`'s validity; absent means it has no nulls.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine isin_chr
+        !> pf_in over a date array and a date set.
+        module subroutine isin_date(values, set, mask, threads)
+        type(parquet_date), intent(in) :: values(:)
+        type(parquet_date), intent(in) :: set(:)
+            logical, allocatable, intent(out) :: mask(:)
+            !! one per element of `values`: .true. when `set` holds an equal element.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine isin_date
+        !> pf_in over a time array and a time set.
+        module subroutine isin_time(values, set, mask, threads)
+        type(parquet_time), intent(in) :: values(:)
+        type(parquet_time), intent(in) :: set(:)
+            logical, allocatable, intent(out) :: mask(:)
+            !! one per element of `values`: .true. when `set` holds an equal element.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine isin_time
+        !> pf_in over a timestamp array and a timestamp set.
+        module subroutine isin_ts(values, set, mask, threads)
+        type(parquet_timestamp), intent(in) :: values(:)
+        type(parquet_timestamp), intent(in) :: set(:)
+            logical, allocatable, intent(out) :: mask(:)
+            !! one per element of `values`: .true. when `set` holds an equal element.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine isin_ts
+        !> pf_in over a packed string column array and a packed string column set.
+        module subroutine isin_strcol(values, set, mask, threads)
+        type(parquet_string_column), intent(in) :: values
+        type(parquet_string_column), intent(in) :: set
+            logical, allocatable, intent(out) :: mask(:)
+            !! one per element of `values`: .true. when `set` holds an equal element.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine isin_strcol
+        !> pf_in over a type-erased column array and a type-erased column set.
+        module subroutine isin_col(values, set, mask, threads)
+        type(parquet_column), intent(in) :: values
+        type(parquet_column), intent(in) :: set
+            logical, allocatable, intent(out) :: mask(:)
+            !! one per element of `values`: .true. when `set` holds an equal element.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine isin_col
     end interface
     !
     ! ---- Test-only comparator hooks that take a pf_sort_keys (parquet_sorting_keys) ----

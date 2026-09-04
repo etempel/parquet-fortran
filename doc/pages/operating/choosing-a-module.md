@@ -3,7 +3,7 @@ title: Choosing a module: what each entry module costs to import
 ---
 
 `use parquet` brings the whole library into scope and is the right answer for most programs. It is
-also the largest: a project that imports it compiles **101** of this library's Fortran files.
+also the largest: a project that imports it compiles **102** of this library's Fortran files.
 
 Every layer underneath is importable on its own, and several of them cost a great deal less. This
 page says what each entry module gives you, what it costs, and — the part that is easy to get wrong
@@ -56,12 +56,12 @@ in every one of them.
 | `parquet_logging` | 1 | no | `pf_logger` and the `pf_log_*` procedures: leveled logging to several destinations at once, with a layout you choose and correct behaviour inside an OpenMP parallel region |
 | `parquet_toml` | 2 | no | `pf_toml`: reading and writing TOML configuration files on top of `toml-f`, with checked types, a report for every key nobody read, and diagnostics that point at the offending line |
 | `parquet_utils` | 1 | no | `pf_to_lower`, `pf_to_str`, `pf_join_path` and the path splitters: ASCII case folding, value-to-text, and POSIX path handling |
-| `parquet_sorting` | 21 | no | the whole sorting API, every element type, including `pf_sort_keys` |
-| `parquet_stats` | 27 | no | the `pf_*` array-statistics family: reductions over plain Fortran arrays |
+| `parquet_sorting` | 22 | no | the whole sorting API, every element type, including `pf_sort_keys` |
+| `parquet_stats` | 28 | no | the `pf_*` array-statistics family: reductions over plain Fortran arrays |
 | `parquet_settings` | 3 | **yes** | the process-global knobs, and `parquet_get_arrow_version` |
-| `parquet_io` | 53 | **yes** | reading and writing Parquet files, and nothing else |
-| `parquet_tables` | 72 | **yes** | the `parquet_table` container |
-| `parquet` | 101 | **yes** | everything above, through one `use` |
+| `parquet_io` | 54 | **yes** | reading and writing Parquet files, and nothing else |
+| `parquet_tables` | 73 | **yes** | the `parquet_table` container |
+| `parquet` | 102 | **yes** | everything above, through one `use` |
 
 Four rows deserve a note.
 
@@ -103,7 +103,7 @@ the knobs they read instead.
 
 fpm prunes at **module** granularity, and a submodule is never pruned separately from the module it
 belongs to. So each row above is a union of *whole modules*, not of the procedures you actually
-call. `parquet_sorting` costs 21 files whether you use one specific or all of them, because its
+call. `parquet_sorting` costs 22 files whether you use one specific or all of them, because its
 seven submodules come as a set.
 
 That is also why the argsort tier exists at all. `parquet_sampling` needs exactly one sorting

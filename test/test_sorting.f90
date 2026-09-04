@@ -267,7 +267,19 @@ contains
             new_unittest("the threaded real32 and logical extractions agree with the serial ones", &
                 test_tail_extraction_real32_logical), &
             new_unittest("the threaded date and time extractions agree with the serial ones", &
-                test_tail_extraction_date_time) &
+                test_tail_extraction_date_time), &
+            new_unittest("pf_match/pf_match_all/pf_in agree with a brute-force oracle", &
+                test_match_basic), &
+            new_unittest("a null matches nothing, on either side, including another null", &
+                test_match_nulls), &
+            new_unittest("a NaN matches a NaN, and -0.0 matches +0.0", &
+                test_match_nan_and_zero), &
+            new_unittest("pf_match answers the same shape for every element type", &
+                test_match_all_types), &
+            new_unittest("pf_match and pf_match_all handle every empty-input combination", &
+                test_match_empty), &
+            new_unittest("two character arrays of different widths match on their content", &
+                test_match_string_widths) &
             ]
     end subroutine collect_tests_parquet_sorting
     !
@@ -7496,4 +7508,377 @@ contains
         end if
     end subroutine engine_only_introsort
 
+    !
+    !> `pf_match`, `pf_match_all` and `pf_in` against a BRUTE-FORCE oracle over one fixture.
+    !>
+    !> The oracle is the point of this test. It is O(nl*nr), shares nothing with the engine, and
+    !> so cannot hide a defect in the run walk the way comparing two engine paths against each
+    !> other would. It also pins the two presentation choices the walk makes: `pf_match` reports
+    !> the SMALLEST matching index, and `pf_match_all` reports every index ascending.
+    subroutine test_match_basic(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), parameter :: L(8) = [30, 10, 99, 20, 10, 40, 20, 77]
+        integer(int32), parameter :: R(7) = [20, 10, 40, 20, 10, 10, 55]
+        integer(int64), allocatable :: m(:), off(:), mt(:)
+        logical, allocatable :: inmask(:)
+        integer(int64) :: nm, want, cnt, pos
+        integer :: i, j
+        logical :: ok
+
+        call pf_match(L, R, m, n_matched=nm)
+        call check(error, size(m) == 8, "pf_match must answer once per element of `left`")
+        if (allocated(error)) return
+        ok = .true.
+        do i = 1, 8
+            want = 0_int64
+            do j = 1, 7
+                if (R(j) == L(i)) then
+                    want = int(j, int64)
+                    exit
+                end if
+            end do
+            if (m(i) /= want) ok = .false.
+        end do
+        call check(error, ok, "pf_match must name the FIRST equal element of `right`, or 0")
+        if (allocated(error)) return
+        call check(error, nm == count(m /= 0_int64, kind=int64), &
+            "n_matched must count the left elements that found something")
+        if (allocated(error)) return
+        call check(error, nm == 5_int64, "five of these eight left elements have a counterpart")
+        if (allocated(error)) return
+
+        call pf_match_all(L, R, off, mt)
+        call check(error, size(off) == 9, "pf_match_all's offsets must be size(left)+1 long")
+        if (allocated(error)) return
+        call check(error, off(1) == 1_int64, "pf_match_all's offsets must start at 1")
+        if (allocated(error)) return
+        call check(error, size(mt) == 11, "these two arrays hold eleven matching pairs")
+        if (allocated(error)) return
+        ok = .true.
+        do i = 1, 8
+            cnt = 0_int64
+            do j = 1, 7
+                if (R(j) == L(i)) cnt = cnt + 1_int64
+            end do
+            if (off(i + 1) - off(i) /= cnt) ok = .false.
+        end do
+        call check(error, ok, "each left element's CSR range must be as long as its match count")
+        if (allocated(error)) return
+        ok = .true.
+        do i = 1, 8
+            do pos = off(i), off(i + 1) - 1_int64
+                if (R(mt(pos)) /= L(i)) ok = .false.
+                if (pos > off(i)) then
+                    if (mt(pos) <= mt(pos - 1_int64)) ok = .false.
+                end if
+            end do
+        end do
+        call check(error, ok, "every CSR entry must be equal to its left element, and ascending")
+        if (allocated(error)) return
+        ! The two forms have to agree, and this is also the canary for the engine's stability:
+        ! pf_match takes a minimum while pf_match_all takes permutation order, so they coincide
+        ! only while equal keys really do emerge in increasing row index.
+        ok = .true.
+        do i = 1, 8
+            if (off(i + 1) > off(i)) then
+                if (m(i) /= mt(off(i))) ok = .false.
+            else
+                if (m(i) /= 0_int64) ok = .false.
+            end if
+        end do
+        call check(error, ok, "pf_match must equal the first entry of pf_match_all's range")
+        if (allocated(error)) return
+
+        call pf_in(L, R, inmask)
+        call check(error, size(inmask) == 8, "pf_in must answer once per element of `values`")
+        if (allocated(error)) return
+        call check(error, all(inmask .eqv. (m /= 0_int64)), &
+            "pf_in must be pf_match reduced to whether there was one")
+        if (allocated(error)) return
+        ! The worked example on doc/pages/utilities/sorting.md, asserted rather than arithmetic
+        ! done by hand -- a guide example nothing runs is a guide example that drifts.
+        block
+            integer(int64) :: gid(5), gref(4), gn
+            integer(int64), allocatable :: gm(:)
+            logical, allocatable :: gkeep(:)
+            gid = [30_int64, 10_int64, 99_int64, 20_int64, 10_int64]
+            gref = [20_int64, 10_int64, 40_int64, 10_int64]
+            call pf_match(gid, gref, gm, n_matched=gn)
+            call check(error, all(gm == [0_int64, 2_int64, 0_int64, 1_int64, 2_int64]), &
+                "the sorting guide's pf_match example must give the answer it prints")
+            if (allocated(error)) return
+            call check(error, gn == 3_int64, "the guide's example must report n_matched = 3")
+            if (allocated(error)) return
+            call pf_in(gid, gref, gkeep)
+            call check(error, all(gkeep .eqv. [.false., .true., .false., .true., .true.]), &
+                "the sorting guide's pf_in example must give the answer it prints")
+        end block
+    end subroutine test_match_basic
+    !
+    !> A null matches NOTHING, on either side -- including another null of the same value.
+    !>
+    !> The five positions cover the whole truth table (valid/valid, null/valid, valid/null,
+    !> null/null, valid/valid), and the last assertion is the negative control: with the masks
+    !> withheld the identical arrays match everywhere, so the four refusals above are about the
+    !> masks rather than about the values.
+    subroutine test_match_nulls(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), parameter :: L(5) = [10, 20, 30, 40, 50]
+        integer(int32), parameter :: R(5) = [10, 20, 30, 40, 50]
+        logical, parameter :: LV(5) = [.true., .false., .true., .false., .true.]
+        logical, parameter :: RV(5) = [.true., .true., .false., .false., .true.]
+        integer(int64), allocatable :: m(:), off(:), mt(:)
+        logical, allocatable :: inmask(:)
+
+        call pf_match(L, R, m, is_valid_left=LV, is_valid_right=RV)
+        call check(error, m(1) == 1_int64, "a valid element must still find its counterpart")
+        if (allocated(error)) return
+        call check(error, m(2) == 0_int64, "a NULL left element must find nothing")
+        if (allocated(error)) return
+        call check(error, m(3) == 0_int64, "a NULL right element must never be found")
+        if (allocated(error)) return
+        call check(error, m(4) == 0_int64, "a null must not match another null -- unknown /= unknown")
+        if (allocated(error)) return
+        call check(error, m(5) == 5_int64, "the fifth pair is valid on both sides and must match")
+        if (allocated(error)) return
+        call pf_match_all(L, R, off, mt, is_valid_left=LV, is_valid_right=RV)
+        call check(error, size(mt) == 2, "only the two all-valid pairs may contribute a pair")
+        if (allocated(error)) return
+        call pf_in(L, R, inmask, is_valid=LV, is_valid_set=RV)
+        call check(error, all(inmask .eqv. [.true., .false., .false., .false., .true.]), &
+            "pf_in must report a null as a member of no set at all")
+        if (allocated(error)) return
+        ! Negative control -- without it every assertion above would also pass against a match
+        ! that simply never matched anything.
+        call pf_match(L, R, m)
+        call check(error, all(m == [1_int64, 2_int64, 3_int64, 4_int64, 5_int64]), &
+            "with the masks withheld the same arrays must match everywhere")
+    end subroutine test_match_nulls
+    !
+    !> A NaN is a VALUE and matches; `-0.0` and `+0.0` are one value.
+    !>
+    !> Both are documented contracts rather than accidents of the comparator, and both are the
+    !> kind of property a future engine change could flip with nothing else noticing. The signed
+    !> zero is built at runtime and its own precondition asserted first, because a fixture whose
+    !> whole discriminating power is one bit is worthless if a compiler folded that bit away.
+    subroutine test_match_nan_and_zero(error)
+        type(error_type), allocatable, intent(out) :: error
+        real(real64) :: lv(4), rv(4), nan, zero, negz
+        integer(int64), allocatable :: m(:), off(:), mt(:)
+
+        nan = ieee_value(1.0_real64, ieee_quiet_nan)
+        zero = 0.0_real64
+        negz = sign(zero, -1.0_real64)
+        call check(error, negz == 0.0_real64 .and. transfer(negz, 0_int64) < 0_int64, &
+            "this fixture needs a real negative zero; the compiler did not produce one")
+        if (allocated(error)) return
+        lv = [1.0_real64, nan, zero, 2.0_real64]
+        rv = [nan, negz, nan, 1.0_real64]
+        call pf_match(lv, rv, m)
+        call check(error, m(1) == 4_int64, "an ordinary value must match its ordinary counterpart")
+        if (allocated(error)) return
+        call check(error, m(2) == 1_int64, &
+            "a NaN must match a NaN -- every NaN is one value to the comparator -- at the lowest index")
+        if (allocated(error)) return
+        call check(error, m(3) == 2_int64, "+0.0 and -0.0 must be one value")
+        if (allocated(error)) return
+        call check(error, m(4) == 0_int64, "2.0 appears on neither side of the right array")
+        if (allocated(error)) return
+        ! The cartesian hazard the doc-comments warn about, in miniature: one NaN on the left
+        ! meets BOTH NaNs on the right, so a pair count is a product rather than a sum.
+        call pf_match_all(lv, rv, off, mt)
+        call check(error, off(3) - off(2) == 2_int64, &
+            "one NaN on the left must match every NaN on the right, not just the first")
+    end subroutine test_match_nan_and_zero
+    !
+    !> Every element type reaches the engine differently, so a match passing for `int32` says
+    !> nothing about the other ten. One shape throughout: `left` is [a, b, c] and `right` is
+    !> [c, a], so the answer is [2, 0, 1] whatever the type.
+    subroutine test_match_all_types(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int64), allocatable :: m(:)
+        integer(int64), parameter :: WANT(3) = [2_int64, 0_int64, 1_int64]
+        integer :: k
+
+        block
+            integer(int32) :: l(3), r(2)
+            l = [11_int32, 22_int32, 33_int32]
+            r = [33_int32, 11_int32]
+            call pf_match(l, r, m)
+            call check(error, all(m == WANT), "int32 pf_match")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int64) :: l(3), r(2)
+            l = [11_int64, 22_int64, 33_int64]
+            r = [33_int64, 11_int64]
+            call pf_match(l, r, m)
+            call check(error, all(m == WANT), "int64 pf_match")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32) :: l(3), r(2)
+            l = [1.5_real32, 2.5_real32, 3.5_real32]
+            r = [3.5_real32, 1.5_real32]
+            call pf_match(l, r, m)
+            call check(error, all(m == WANT), "real32 pf_match")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64) :: l(3), r(2)
+            l = [1.5_real64, 2.5_real64, 3.5_real64]
+            r = [3.5_real64, 1.5_real64]
+            call pf_match(l, r, m)
+            call check(error, all(m == WANT), "real64 pf_match")
+        end block
+        if (allocated(error)) return
+        block
+            ! `logical` has only two values, so the [a, b, c] shape does not fit: this is the
+            ! same question asked with the fixture the type can express.
+            logical :: l(3), r(2)
+            l = [.true., .false., .true.]
+            r = [.false., .true.]
+            call pf_match(l, r, m)
+            call check(error, all(m == [2_int64, 1_int64, 2_int64]), "logical pf_match")
+        end block
+        if (allocated(error)) return
+        block
+            character(len=4) :: l(3), r(2)
+            l = ["aaa ", "bbb ", "ccc "]
+            r = ["ccc ", "aaa "]
+            call pf_match(l, r, m)
+            call check(error, all(m == WANT), "character pf_match")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_date) :: l(3), r(2)
+            call l(1)%set(2020, 1, 1)
+            call l(2)%set(2021, 6, 15)
+            call l(3)%set(2022, 12, 31)
+            call r(1)%set(2022, 12, 31)
+            call r(2)%set(2020, 1, 1)
+            call pf_match(l, r, m)
+            call check(error, all(m == WANT), "parquet_date pf_match")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_time) :: l(3), r(2)
+            call l(1)%set(1, 0, 0)
+            call l(2)%set(2, 0, 0)
+            call l(3)%set(3, 0, 0)
+            call r(1)%set(3, 0, 0)
+            call r(2)%set(1, 0, 0)
+            call pf_match(l, r, m)
+            call check(error, all(m == WANT), "parquet_time pf_match")
+        end block
+        if (allocated(error)) return
+        block
+            ! A timestamp becomes TWO engine keys, so it is the one type whose concatenation
+            ! appends a pair of buffers rather than one.
+            type(parquet_timestamp) :: l(3), r(2)
+            call l(1)%set(2020, 1, 1, 0, 0, 1)
+            call l(2)%set(2020, 1, 1, 0, 0, 2)
+            call l(3)%set(2020, 1, 1, 0, 0, 3)
+            call r(1)%set(2020, 1, 1, 0, 0, 3)
+            call r(2)%set(2020, 1, 1, 0, 0, 1)
+            call pf_match(l, r, m)
+            call check(error, all(m == WANT), "parquet_timestamp pf_match")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_string_column) :: l, r
+            call l%append_string("aaa")
+            call l%append_string("bbb")
+            call l%append_string("ccc")
+            call r%append_string("ccc")
+            call r%append_string("aaa")
+            call pf_match(l, r, m)
+            call check(error, all(m == WANT), "parquet_string_column pf_match")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_column) :: l, r
+            call l%init(PK_INT32, 3_int64)
+            call l%set_all([11_int32, 22_int32, 33_int32])
+            call r%init(PK_INT32, 2_int64)
+            call r%set_all([33_int32, 11_int32])
+            call pf_match(l, r, m)
+            call check(error, all(m == WANT), "parquet_column pf_match")
+        end block
+        if (allocated(error)) return
+        ! And the int32 output kind must agree with the int64 one everywhere, since each is a
+        ! separate specific with its own narrowing step.
+        block
+            integer(int32) :: l(3), r(2)
+            integer(int32), allocatable :: m32(:)
+            l = [11_int32, 22_int32, 33_int32]
+            r = [33_int32, 11_int32]
+            call pf_match(l, r, m32)
+            call pf_match(l, r, m)
+            call check(error, all(int(m32, int64) == m), &
+                "the int32 and int64 pf_match specifics must agree")
+            if (allocated(error)) return
+            call check(error, all([(m32(k) == int(WANT(k), int32), k = 1, 3)]), &
+                "the int32 pf_match must give the same answer as the oracle")
+        end block
+    end subroutine test_match_all_types
+    !
+    !> The degenerate sizes, which are where an off-by-one in the CSR shows up first.
+    subroutine test_match_empty(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: full(3), none(0)
+        integer(int64), allocatable :: m(:), off(:), mt(:)
+        logical, allocatable :: inmask(:)
+
+        full = [7_int32, 8_int32, 9_int32]
+        call pf_match(none, full, m)
+        call check(error, size(m) == 0, "an empty left array must give an empty answer")
+        if (allocated(error)) return
+        call pf_match_all(none, full, off, mt)
+        call check(error, size(off) == 1 .and. off(1) == 1_int64, &
+            "an empty left array's CSR must still carry its one sentinel offset")
+        if (allocated(error)) return
+        call check(error, size(mt) == 0, "an empty left array can produce no pairs")
+        if (allocated(error)) return
+        call pf_match(full, none, m)
+        call check(error, all(m == 0_int64), "nothing can match against an empty right array")
+        if (allocated(error)) return
+        call pf_match_all(full, none, off, mt)
+        call check(error, all(off == 1_int64) .and. size(off) == 4, &
+            "every CSR range must be empty when the right array is")
+        if (allocated(error)) return
+        call pf_in(full, none, inmask)
+        call check(error, .not. any(inmask), "no element is a member of the empty set")
+        if (allocated(error)) return
+        ! Both empty: the one path that never enters the engine at all.
+        call pf_match(none, none, m)
+        call check(error, size(m) == 0, "two empty arrays must answer without entering the engine")
+        if (allocated(error)) return
+        call pf_match_all(none, none, off, mt)
+        call check(error, size(off) == 1 .and. size(mt) == 0, "two empty arrays produce an empty CSR")
+    end subroutine test_match_empty
+    !
+    !> Two `character` arrays of different declared lengths compare at the wider of the two.
+    !>
+    !> `extract_chr` keys on the array's own `len`, so without the widening the two halves of the
+    !> concatenation would be packed at two different widths and nothing would ever match. The
+    !> second half of the test is what makes that a real assertion rather than a coincidence: a
+    !> value present only as a padded short element must still be found.
+    subroutine test_match_string_widths(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=3) :: l(3)
+        character(len=7) :: r(3)
+        integer(int64), allocatable :: m(:)
+
+        l = ["ab ", "cd ", "zz "]
+        r = ["cd     ", "ab     ", "qqqqqqq"]
+        call pf_match(l, r, m)
+        call check(error, all(m == [2_int64, 1_int64, 0_int64]), &
+            "a short array and a wide one must match on their trimmed content")
+        if (allocated(error)) return
+        ! The reverse direction too: the wide array as `left`.
+        call pf_match(r, l, m)
+        call check(error, all(m == [2_int64, 1_int64, 0_int64]), &
+            "the same must hold with the wide array on the left")
+    end subroutine test_match_string_widths
 end module test_sorting

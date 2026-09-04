@@ -245,6 +245,7 @@ something a reader is expected to have.
 | [Risk-177](#risk-177--a-pf_toml-section-handle-must-not-outlive-its-document) | A `pf_toml` section handle must not outlive its document | 3 — not testable |
 | [Risk-178](#risk-178--the-values--1-contract-is-what-makes-an-empty-hash-slot-detectable) | The values-≥-1 contract is what makes an empty hash slot detectable | 4 — covered |
 | [Risk-179](#risk-179--a-dropped-parquet_index-guard-issues-one-index-to-two-owners) | A dropped `parquet_index` guard issues one index to two owners | 2 — proposed |
+| [Risk-180](#risk-180--the-matchs-two-null-skips-are-individually-redundant-and-jointly-load-bearing) | The match's two null skips are individually redundant and jointly load-bearing | 4 — covered |
 
 ---
 
@@ -1134,6 +1135,29 @@ Every entry here has a test behind it. What keeps it in the document is the seco
 whoever edits the area next. Read the entry for the area you are about to touch before you touch
 it — that is what this section is for, and it is why "covered" is not the same as "finished".
 
+
+### Risk-180 — The match's two null skips are individually redundant and jointly load-bearing
+
+`match_walk_first` and `match_walk_csr` (`src/parquet_sorting_match.f90`, generated) each test
+`isnull(p)` **twice per run**: once while scanning the run's right members, and again while writing
+the answer to its left members. Either test alone is enough today, because nulls are their own tier
+in the comparator and so a run of equal keys is either all null or all value. **Remove both and
+nulls match each other** — the one thing `pf_match`/`pf_match_all`/`pf_in` promise they never do.
+
+**Confirmed by mutation, in both directions.** Deleting either test alone leaves the whole suite
+green, so a reviewer trimming what looks like a duplicated condition gets no signal at all; deleting
+the pair fails immediately. That is the same shape as `column_has_nulls_from_footer`'s guard pair
+(CLAUDE.md, "The row-group statistics screen") and it fails the same way — quietly, in a valid-looking
+answer of the right size.
+
+**Rule:** do not delete either half on the strength of a coverage report or a surviving mutation.
+The redundancy is deliberate insurance against the comparator's null tier changing, and both sites
+carry a comment saying so — in `tools/generate_parquet_sorting.py`'s `MATCH_WALKS`, not in the
+generated file, which is where an edit would be silently reverted.
+
+**Test:** `test_match_nulls` (`test/test_sorting.f90`) walks the whole valid/null truth table on both
+sides and carries its own negative control — the same arrays with the masks withheld must match
+everywhere, so a guard that refused everything could not pass it.
 
 ### Risk-178 — The values-≥-1 contract is what makes an empty hash slot detectable
 

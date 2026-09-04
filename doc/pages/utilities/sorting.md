@@ -43,13 +43,17 @@ declares.
 | `pf_minmax(values, vmin, vmax, [ok])` | the smallest and largest value |
 | `pf_argminmax(values, imin, imax)` | where those two are |
 | `pf_merge(a, b, merged)` | merges two already-sorted arrays in linear time |
+| `pf_match(left, right, match, [n_matched])` | for each element of `left`, one equal element of `right` |
+| `pf_match_all(left, right, offsets, matches)` | every match, as a CSR pair |
+| `pf_in(values, set, mask)` | elementwise membership |
 
 The first four are covered immediately below; the rest have their own sections —
 [Selecting without sorting](#selecting-without-sorting),
 [Searching a sorted array](#searching-a-sorted-array),
 [Distinct values and ranks](#distinct-values-and-ranks),
-[Extremes](#extremes) and
-[Merging two sorted arrays](#merging-two-sorted-arrays).
+[Extremes](#extremes),
+[Merging two sorted arrays](#merging-two-sorted-arrays) and
+[Matching two arrays](#matching-two-arrays).
 
 Optional arguments are shown in square brackets — in the table above, and in prose throughout this
 page. They are optional at the call site, not part of the syntax, so they never appear that way in a
@@ -122,14 +126,18 @@ The remaining operations follow the same two rules — a type is out wherever th
 a compile-time element type it does not have, and stays in wherever the answer is a permutation, a
 boolean or an integer:
 
-| Type | search | `pf_unique_count` | `pf_unique` | `pf_rank` | `pf_minmax` | `pf_argminmax` | `pf_merge` |
-|---|---|---|---|---|---|---|---|
-| `integer(int32/int64)`, `real(real32/real64)` | yes | yes | yes | yes | yes | yes | yes |
-| `logical` | yes | yes | yes | yes | no | no | yes |
-| `character(len=*)` | yes | yes | yes | yes | yes | yes | yes |
-| `parquet_date`, `parquet_time`, `parquet_timestamp` | yes | yes | yes | yes | yes | yes | yes |
-| `parquet_string_column` | yes | yes | yes | yes | yes | yes | no |
-| `parquet_column` | no | yes | no | yes | no | yes | no |
+| Type | search | `pf_unique_count` | `pf_unique` | `pf_rank` | `pf_minmax` | `pf_argminmax` | `pf_merge` | match |
+|---|---|---|---|---|---|---|---|---|
+| `integer(int32/int64)`, `real(real32/real64)` | yes | yes | yes | yes | yes | yes | yes | yes |
+| `logical` | yes | yes | yes | yes | no | no | yes | yes |
+| `character(len=*)` | yes | yes | yes | yes | yes | yes | yes | yes |
+| `parquet_date`, `parquet_time`, `parquet_timestamp` | yes | yes | yes | yes | yes | yes | yes | yes |
+| `parquet_string_column` | yes | yes | yes | yes | yes | yes | no | yes |
+| `parquet_column` | no | yes | no | yes | no | yes | no | yes |
+
+The match column is the one place `parquet_column` is a **yes** where search is a no, and the
+reason is the same rule read the other way: a search needs a target of the element's own compile-time
+type, while a match compares a column against another column, so there is no such type to name.
 
 `logical` is left out of `pf_minmax`/`pf_argminmax` as vacuous — "where is the first `.false.`" is
 not a question worth an API, and letting one of the pair accept it while the other could not would
@@ -698,6 +706,100 @@ ask for it, all `.true.` when neither input mask was supplied.
 Two `character` arrays of different declared lengths merge into the wider one, so `merged` is
 declared `character(len=:), allocatable` rather than at a fixed width — the one output in this
 module whose length comes from two inputs rather than one.
+
+## Matching two arrays
+
+Three operations answer "which elements of one array occur in another", which is the array-level
+half of a join and the building block a cross-match is written from.
+
+```fortran
+call pf_match(left, right, match, [n_matched])   ! one match each: match(i) indexes right, or 0
+call pf_match_all(left, right, offsets, matches) ! every match, as a CSR pair
+call pf_in(values, set, mask)                    ! elementwise membership
+```
+
+**Neither array has to be sorted, and there is nothing to hoist out of a loop** — because there is
+no loop. One call sorts the two arrays concatenated and reads the matches off the runs of equal
+elements, so the whole answer costs one sort. This is the opposite of the searches, where the array
+being searched is a fixed collection you probe repeatedly.
+
+```fortran
+integer(int64) :: id(5) = [30, 10, 99, 20, 10]
+integer(int64) :: ref(4) = [20, 10, 40, 10]
+integer(int64), allocatable :: m(:)
+integer(int64) :: n
+
+call pf_match(id, ref, m, n_matched=n)   ! m = [0, 2, 0, 1, 2], n = 3
+```
+
+`match(i)` is **0 when there is no match** — the same "0 means absent" protocol `pf_index_map%get`
+uses, which is why there is no separate `found` array to carry alongside it. When `right` holds
+several equal elements, `pf_match` names the one with the smallest index.
+
+### Every match, not just one
+
+`pf_match_all` returns the same CSR pair
+[`pf_spatial_index`](spatial.html#every-points-neighbours-at-once) uses: `offsets` has one more entry
+than `left`, and element `i`'s matches are `matches(offsets(i) : offsets(i+1)-1)`.
+
+```fortran
+integer(int64), allocatable :: offsets(:), matches(:)
+integer(int64) :: i, k
+
+call pf_match_all(id, ref, offsets, matches)
+do i = 1, size(id, kind=int64)
+    do k = offsets(i), offsets(i + 1) - 1
+        print *, "id ", id(i), " matches ref element ", matches(k)
+    end do
+end do
+```
+
+Within one element's range the right-hand indices are **ascending**.
+
+**`size(matches)` counts pairs, and a pair count is a product rather than a sum.** A value appearing
+1000 times on each side contributes a million pairs on its own. `offsets(size(left)+1) - 1` is the
+total; read it before allocating or looping over anything proportional to it.
+
+### Membership
+
+`pf_in` is `pf_match` with the answer reduced to "was there one", at the same cost — pandas'
+`Series.isin`.
+
+```fortran
+logical, allocatable :: keep(:)
+
+call pf_in(id, ref, keep)          ! keep = [.false., .true., .false., .true., .true.]
+```
+
+### A null matches nothing; a NaN matches
+
+These two pull in opposite directions and both are deliberate.
+
+**A null is UNKNOWN, so it matches nothing on either side** — including another null of the same
+value. That is SQL's rule and the one this library's row filters already apply. Pass
+`is_valid_left=`/`is_valid_right=` (and `is_valid=`/`is_valid_set=` for `pf_in`) whenever either
+side has nulls: a null's stored value is indistinguishable from a real one without the mask, so an
+unsupplied mask silently lets nulls match each other.
+
+```fortran
+call pf_match(id, ref, m, is_valid_left=have_id, is_valid_right=have_ref)
+```
+
+**A NaN is a value and does match**, because the comparator treats every NaN as one value. So does
+`-0.0` against `+0.0`. The NaN rule is the one to watch: NaNs on both sides match *wholesale*, so a
+float column with a thousand NaNs on each side produces a million pairs from that one value. Screen
+them out first if that is not what you want.
+
+Equality is the sort comparator's own, so it is exact on reals — `0.1 + 0.2` does not match `0.3`.
+Two `character` arrays of different declared lengths are compared at the wider of the two, so
+trailing blanks never make a shorter element unequal.
+
+### Kinds must match
+
+Two `parquet_column`s of different kinds are **refused**, not promoted: an `int32` column and an
+`int64` column would otherwise match on the raw value. That matters for exactly the identifiers this
+is used on — a 64-bit catalogue identifier above `2**53` does not survive a promotion through
+`float64`, so the join would match the wrong rows and report nothing. Cast one side first.
 
 ## Sorting in parallel
 

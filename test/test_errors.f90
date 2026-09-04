@@ -358,6 +358,8 @@ contains
                 test_sorting_partial_keys_empty_i64_aborts), &
             new_unittest("sorting: a vector column key aborts", &
                 test_sorting_column_vector_aborts), &
+            new_unittest("sorting: matching two columns of different kinds aborts", &
+                test_sorting_match_kind_mismatch_aborts), &
             new_unittest("sorting: searching unsorted input aborts", &
                 test_sorting_search_unsorted_aborts), &
             new_unittest("sorting: an over-long search target aborts", &
@@ -7332,6 +7334,17 @@ contains
             failure_message="a partial argsort of an empty key list was expected to abort", &
             required_stderr="this pf_sort_keys has no key")
     end subroutine test_sorting_partial_keys_empty_i64_aborts
+
+    !> pf_match abort path: see scenario_sorting_match_kind_mismatch in test/error_scenarios.f90
+    !> for the promotion this refusal exists to prevent, and for its negative control.
+    subroutine test_sorting_match_kind_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_match_kind_mismatch", &
+            expect_abort=.true., &
+            failure_message="matching two columns of different kinds was expected to abort", &
+            required_stderr="the two columns hold different kinds")
+    end subroutine test_sorting_match_kind_mismatch_aborts
 
     !> pf_argsort abort path: see scenario_sorting_column_vector in test/error_scenarios.f90
     !> for what it does and why that state is rejected.

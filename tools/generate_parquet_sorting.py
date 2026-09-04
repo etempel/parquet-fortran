@@ -20,6 +20,7 @@ is generated at build time, so the fpm build stays dependency-free):
   src/parquet_sorting_search.f90    pf_lower_bound, pf_upper_bound, pf_equal_range.
   src/parquet_sorting_unique.f90    pf_unique_count, pf_unique, pf_rank.
   src/parquet_sorting_reduce.f90    pf_minmax, pf_argminmax, pf_merge.
+  src/parquet_sorting_match.f90     pf_match, pf_match_all, pf_in.
 
 THE KIND TABLE: the nine scalar rows are imported from tools/generate_parquet_columns.py --
 the single place a supported column kind is declared -- and the three extras this module adds
@@ -628,6 +629,9 @@ module parquet_sorting
     public :: pf_minmax
     public :: pf_argminmax
     public :: pf_merge
+    public :: pf_match
+    public :: pf_match_all
+    public :: pf_in
     !
     ! ---- Re-exported from parquet_argsort, so `use parquet_sorting` is unchanged ----
     !
@@ -1146,13 +1150,15 @@ module parquet_sorting
           "",
           "**`values` is checked for sortedness first, and that check is O(n).** Searching an",
           "unsorted array returns a plausible index with no symptom at all, so the check is on by",
-          "default. Check once with `pf_is_sorted` and pass `assume_sorted=.true.` in a loop:",
+          "default; `assume_sorted=.true.` skips it once the caller knows the answer.",
+          "",
+          "**One call is O(n), not O(log n)**, because the whole array's sort key is extracted on",
+          "entry -- and `assume_sorted=` skips only the sortedness SCAN, never that extraction. A",
+          "loop of single-target calls is therefore quadratic. **Pass the targets as an ARRAY**,",
+          "which extracts once and answers all of them:",
           "",
           "```fortran",
-          "call pf_is_sorted(v, ok)                       ! O(N), once",
-          "do k = 1, m",
-          "    call pf_lower_bound(v, targets(k), pos, assume_sorted=.true.)   ! O(log N) each",
-          "end do",
+          "call pf_lower_bound(v, targets, pos)     ! pos(1:size(targets)); O(n + m log n) in all",
           "```",
           "",
           "`descending`/`nulls_first` must describe the order `values` is ACTUALLY in -- they",
@@ -1171,7 +1177,10 @@ module parquet_sorting
           "target that is absent comes back with `last == first - 1` and `last - first + 1 == 0`.",
           "Do not read `values(first)` without checking that count first.",
           "",
-          "Cheaper than calling the two bounds separately: the values are extracted once."]),
+          "Cheaper than calling the two bounds separately: the values are extracted once.",
+          "",
+          "`target` may also be an ARRAY, giving one `first`/`last` pair per target from a single",
+          "extraction -- the form to use in a lookup loop, for the reason `pf_lower_bound` states."]),
         ("pf_unique_count",
          ["How many DISTINCT non-null values `values` holds. `n_null` optionally reports how many",
           "were null.",
@@ -1309,6 +1318,8 @@ module parquet_sorting
                     w(f"        module procedure merge_{t[0]}")
         w(f"    end interface {gname}")
         w("    !")
+
+    emit_match_generics(w)
 
     # ---- interface bodies ----
     W.both("    ! ---- Key extraction, engine dispatch and the shared helpers ----")
@@ -2157,6 +2168,173 @@ def emit_oracle_plumbing(W):
     W.to_a = False
 
 
+#: The two validity masks every `nulls == "arg"` match specific takes. Both are needed: a null's
+#: stored value is indistinguishable from a real one without the mask, and a match that is not
+#: told which elements are null will happily report two nulls as equal -- the exact opposite of
+#: the contract.
+MATCH_VALID_DOC = [
+    "            logical, intent(in), optional :: is_valid_left(:)",
+    "            !! `left`'s validity; absent means it has no nulls.",
+    "            logical, intent(in), optional :: is_valid_right(:)",
+    "            !! `right`'s validity; absent means it has no nulls.",
+]
+
+IN_VALID_DOC = [
+    "            logical, intent(in), optional :: is_valid(:)",
+    "            !! `values`' validity; absent means it has no nulls.",
+    "            logical, intent(in), optional :: is_valid_set(:)",
+    "            !! `set`'s validity; absent means it has no nulls.",
+]
+
+#: The equality, null and NaN rules, quoted verbatim into all three generics' doc-comments.
+#: One copy, because three subtly different statements of the same contract is how a null rule
+#: comes to differ between two procedures that share an engine.
+MATCH_RULES = [
+    "**A null matches nothing, on either side.** A null is UNKNOWN and `unknown = unknown` is",
+    "not true -- SQL's rule, and the one `eval_filter_clause` already applies on the read path.",
+    "So a null on the left finds nothing, and a null on the right is never found, including by",
+    "another null. **Pass `is_valid_*` whenever either side has nulls**: a null's stored value is",
+    "indistinguishable from a real one without the mask, and an unsupplied mask silently makes",
+    "nulls match each other.",
+    "",
+    "**A NaN is a VALUE and DOES match**, because the comparator treats every NaN as one value.",
+    "That is deliberate and consistent with every other equality question in this library, and it",
+    "is a hazard worth knowing: NaNs on both sides match WHOLESALE, so 1000 of them each is a",
+    "million pairs. `-0.0` and `+0.0` are likewise one value.",
+    "",
+    "Equality is the sort comparator's own, so it is EXACT on reals: `0.1 + 0.2` does not equal",
+    "`0.3`. On `character` the two arrays may have different declared lengths; both are compared",
+    "at the wider of the two, so trailing blanks do not make a shorter element unequal.",
+]
+
+
+def emit_match_generics(w):
+    """The `pf_match`/`pf_match_all`/`pf_in` generic interfaces, with their doc-comments.
+
+    Emitted into the `parquet_sorting` spec only -- the whole family sits above the argsort
+    tier, because it covers `parquet_column` and `parquet_string_column` as well as the six
+    intrinsic types.
+    """
+    blurbs = {
+        "pf_match": [
+            "For each element of `left`, ONE element of `right` equal to it -- the m:1 lookup.",
+            "",
+            "`match(i)` is the index into `right` of the first equal element, or **0 when there is",
+            "none** -- the same \"0 means absent\" protocol `pf_index_map%get` uses, and the reason",
+            "there is no separate `found` array to carry through a loop. `n_matched` optionally",
+            "reports how many elements of `left` found something.",
+            "",
+            "When `right` holds several equal elements, `match` names the one with the SMALLEST",
+            "index. `pf_match_all` is the m:m form that reports all of them.",
+            "",
+            "**Neither side has to be sorted, and there is nothing to hoist.** One call is one sort",
+            "of the two arrays concatenated, so the whole answer costs O((nl+nr) log(nl+nr)) --",
+            "there is no per-call setup a caller could lift out of a loop, because there is no loop:",
+            "pass the whole array.",
+            "",
+        ] + MATCH_RULES,
+        "pf_match_all": [
+            "EVERY match between `left` and `right`, as this library's CSR pair.",
+            "",
+            "`offsets` has length `size(left)+1` and `offsets(1) == 1`; the matches for element `i`",
+            "are `matches(offsets(i) : offsets(i+1)-1)`, an empty range when it has none. Same shape",
+            "`pf_spatial_index%neighbours_within` returns, for the same reason -- a per-element",
+            "variable-length answer with one allocation rather than nl of them.",
+            "",
+            "Within one element's range the right indices are ASCENDING.",
+            "",
+            "**`size(matches)` counts PAIRS, and a pair count is a product rather than a sum.** A",
+            "value appearing 1000 times on each side contributes a million pairs on its own. The",
+            "total is `offsets(size(left)+1) - 1`; read it before doing anything proportional to it.",
+            "",
+        ] + MATCH_RULES,
+        "pf_in": [
+            "Elementwise membership: `mask(i)` is `.true.` when `values(i)` equals at least one",
+            "element of `set`. pandas' `Series.isin`, and the cheapest of the three.",
+            "",
+            "Exactly `pf_match` with the answer reduced to \"was there one\", at the same cost -- one",
+            "sort of the concatenation -- so use this one wherever the index itself is not wanted.",
+            "",
+        ] + MATCH_RULES,
+    }
+    for gname in ("pf_match", "pf_match_all", "pf_in"):
+        for line in blurbs[gname]:
+            w(("    !> " + line).rstrip())
+        w(f"    interface {gname}")
+        for t in TYPES:
+            if gname == "pf_in":
+                w(f"        module procedure isin_{t[0]}")
+            else:
+                base = "match" if gname == "pf_match" else "match_all"
+                for ik, _, _ in IDX_KINDS:
+                    w(f"        module procedure {base}_{t[0]}_{ik}")
+        w(f"    end interface {gname}")
+        w("    !")
+
+
+def emit_match_interfaces(w):
+    """Interface bodies for every pf_match/pf_match_all/pf_in specific."""
+    w("    ! ---- Matching between two arrays (parquet_sorting_match) ----")
+    w("    interface")
+    for t in TYPES:
+        tag, decl, what, family, nulls, _, _ = t
+        masks = ", is_valid_left, is_valid_right" if nulls == "arg" else ""
+        for ik, idecl, iname in IDX_KINDS:
+            w(f"        !> pf_match over two {what} arrays, with {iname} indices.")
+            w(f"        module subroutine match_{tag}_{ik}(left, right, match, n_matched{masks}, threads)")
+            w(val_decl(t, "in", "left"))
+            w(val_decl(t, "in", "right"))
+            w(f"            {idecl}, allocatable, intent(out) :: match(:)")
+            w("            !! one per element of `left`: the index in `right` of the first equal")
+            w("            !! element, or 0 when there is none.")
+            w("            integer(int64), intent(out), optional :: n_matched")
+            w("            !! how many elements of `left` matched. Deliberately int64 whatever kind")
+            w("            !! `match` has, exactly as `pf_unique_count`'s `n_null` is.")
+            if nulls == "arg":
+                for line in MATCH_VALID_DOC:
+                    w(line)
+            for line in THREADS_DOC:
+                w(line)
+            w(f"        end subroutine match_{tag}_{ik}")
+    for t in TYPES:
+        tag, decl, what, family, nulls, _, _ = t
+        masks = ", is_valid_left, is_valid_right" if nulls == "arg" else ""
+        for ik, idecl, iname in IDX_KINDS:
+            w(f"        !> pf_match_all over two {what} arrays, with {iname} indices.")
+            w(f"        module subroutine match_all_{tag}_{ik}(left, right, offsets, matches{masks}, threads)")
+            w(val_decl(t, "in", "left"))
+            w(val_decl(t, "in", "right"))
+            w(f"            {idecl}, allocatable, intent(out) :: offsets(:)")
+            w("            !! length `size(left)+1`, starting at 1: element `i`'s matches are")
+            w("            !! `matches(offsets(i) : offsets(i+1)-1)`.")
+            w(f"            {idecl}, allocatable, intent(out) :: matches(:)")
+            w("            !! every matching index in `right`, grouped by left element and ascending")
+            w("            !! within each group. Its length is the PAIR count.")
+            if nulls == "arg":
+                for line in MATCH_VALID_DOC:
+                    w(line)
+            for line in THREADS_DOC:
+                w(line)
+            w(f"        end subroutine match_all_{tag}_{ik}")
+    for t in TYPES:
+        tag, decl, what, family, nulls, _, _ = t
+        masks = ", is_valid, is_valid_set" if nulls == "arg" else ""
+        w(f"        !> pf_in over a {what} array and a {what} set.")
+        w(f"        module subroutine isin_{tag}(values, set, mask{masks}, threads)")
+        w(val_decl(t, "in"))
+        w(val_decl(t, "in", "set"))
+        w("            logical, allocatable, intent(out) :: mask(:)")
+        w("            !! one per element of `values`: .true. when `set` holds an equal element.")
+        if nulls == "arg":
+            for line in IN_VALID_DOC:
+                w(line)
+        for line in THREADS_DOC:
+            w(line)
+        w(f"        end subroutine isin_{tag}")
+    w("    end interface")
+    w("    !")
+
+
 def emit_m3_interfaces(w):
     """Interface bodies for the M3 families (search, unique/rank, minmax/merge)."""
     w("    ! ---- Searching a sorted array (parquet_sorting_search) ----")
@@ -2315,6 +2493,9 @@ def emit_m3_interfaces(w):
         w(f"        end subroutine merge_{tag}")
     w("    end interface")
     w("    !")
+    # `to_a` is still False here, so the whole match family lands in the parquet_sorting spec
+    # alone -- it covers parquet_column and parquet_string_column, so it sits above the tier.
+    emit_match_interfaces(w)
     w.to_a = True
     emit_engine_interfaces(w)
     w.to_a = False
@@ -5564,6 +5745,362 @@ contains
     return "\n".join(o) + "\n"
 
 
+#: The two walks over a built key, emitted VERBATIM and exactly once.
+#:
+#: Everything type-specific has happened by the time these run: the answer is arithmetic on
+#: `perm`, `tie` and `isnull`, so eleven copies of it would be eleven chances to fix a bug in ten
+#: places. They are ordinary contained procedures of the submodule, reached by host association.
+MATCH_WALKS = r"""    !> One left element's FIRST match -- the walk behind `pf_match` and `pf_in`.
+    !!
+    !! `first(i)` is the SMALLEST index in `right` whose element equals `left(i)`, or 0 when
+    !! there is none. Taken as a minimum over the run's right members rather than as "whichever
+    !! the permutation lists first", so this answer does not depend on the sort being stable.
+    subroutine match_walk_first(perm, tie, isnull, nl, nr, first)
+        integer(int64), intent(in) :: perm(:)   !! the concatenation's permutation.
+        integer(c_int8_t), intent(in) :: tie(:) !! 1 where a row ties the one before it.
+        logical, intent(in) :: isnull(:)        !! .true. where a concatenated row is null.
+        integer(int64), intent(in) :: nl        !! elements in the left half.
+        integer(int64), intent(in) :: nr        !! elements in the right half.
+        integer(int64), allocatable, intent(out) :: first(:) !! per left element: 0, or a right index.
+        integer(int64) :: n, s, e, k, p, best
+        !
+        allocate(first(max(nl, 0_int64)))
+        if (nl < 1_int64) return
+        first = 0_int64
+        n = nl + nr
+        s = 1_int64
+        do while (s <= n)
+            ! The run is [s, e]. The bound test and the tie test are NESTED rather than `.and.`ed:
+            ! Fortran does not short-circuit, and `tie(n+1)` would be out of bounds.
+            e = s
+            do while (e < n)
+                if (tie(e + 1_int64) == 0_c_int8_t) exit
+                e = e + 1_int64
+            end do
+            best = 0_int64
+            do k = s, e
+                p = perm(k)
+                if (p > nl) then
+                    ! THIS TEST AND THE ONE IN THE LOOP BELOW ARE INDIVIDUALLY REDUNDANT AND
+                    ! JOINTLY LOAD-BEARING -- do not delete either on the strength of a coverage
+                    ! report. Nulls are their own tier in the comparator, so a run is either all
+                    ! null or all value and skipping at either end suffices; removing BOTH makes
+                    ! nulls match each other, which is the one thing the contract forbids.
+                    ! Confirmed by mutation: each alone survives the suite, the pair does not.
+                    if (.not. isnull(p)) then
+                        if (best == 0_int64 .or. p - nl < best) best = p - nl
+                    end if
+                end if
+            end do
+            if (best > 0_int64) then
+                do k = s, e
+                    p = perm(k)
+                    if (p <= nl) then
+                        if (.not. isnull(p)) first(p) = best
+                    end if
+                end do
+            end if
+            s = e + 1_int64
+        end do
+    end subroutine match_walk_first
+    !
+    !> EVERY match, as the CSR pair behind `pf_match_all`.
+    !!
+    !! Two passes over the runs: the first counts, so `matches` is allocated exactly once at its
+    !! final size, and the second fills. Counting first is not an optimisation -- the pair count
+    !! is a PRODUCT and can be far larger than either input, so growing the array would copy it
+    !! repeatedly at exactly the sizes where that hurts most.
+    subroutine match_walk_csr(perm, tie, isnull, nl, nr, offsets, matches)
+        integer(int64), intent(in) :: perm(:)   !! the concatenation's permutation.
+        integer(c_int8_t), intent(in) :: tie(:) !! 1 where a row ties the one before it.
+        logical, intent(in) :: isnull(:)        !! .true. where a concatenated row is null.
+        integer(int64), intent(in) :: nl        !! elements in the left half.
+        integer(int64), intent(in) :: nr        !! elements in the right half.
+        integer(int64), allocatable, intent(out) :: offsets(:) !! length nl+1, starting at 1.
+        integer(int64), allocatable, intent(out) :: matches(:) !! the right indices, grouped by left.
+        integer(int64), allocatable :: counts(:), rbuf(:)
+        integer(int64) :: n, s, e, k, j, p, cr, o, total
+        !
+        allocate(offsets(nl + 1_int64))
+        offsets = 1_int64
+        if (nl < 1_int64) then
+            allocate(matches(0))
+            return
+        end if
+        allocate(counts(nl))
+        counts = 0_int64
+        n = nl + nr
+        s = 1_int64
+        do while (s <= n)
+            e = s
+            do while (e < n)
+                if (tie(e + 1_int64) == 0_c_int8_t) exit
+                e = e + 1_int64
+            end do
+            cr = 0_int64
+            do k = s, e
+                p = perm(k)
+                if (p > nl) then
+                    ! Redundant with the test three lines below, and load-bearing together with
+                    ! it -- see match_walk_first, which carries the reasoning and the mutation
+                    ! result. The same pairing appears in the fill pass.
+                    if (.not. isnull(p)) cr = cr + 1_int64
+                end if
+            end do
+            if (cr > 0_int64) then
+                do k = s, e
+                    p = perm(k)
+                    if (p <= nl) then
+                        if (.not. isnull(p)) counts(p) = cr
+                    end if
+                end do
+            end if
+            s = e + 1_int64
+        end do
+        do k = 1_int64, nl
+            offsets(k + 1_int64) = offsets(k) + counts(k)
+        end do
+        total = offsets(nl + 1_int64) - 1_int64
+        allocate(matches(max(total, 0_int64)))
+        if (total < 1_int64) return
+        allocate(rbuf(max(nr, 1_int64)))
+        ! Each left element belongs to exactly one run, so `offsets(p)` is written through once
+        ! and no cursor is needed. `rbuf` takes the run's right members in permutation order,
+        ! which is ascending right index because the engine's sort is stable -- the one place in
+        ! this file that relies on that, and the reason it is a tested output property.
+        s = 1_int64
+        do while (s <= n)
+            e = s
+            do while (e < n)
+                if (tie(e + 1_int64) == 0_c_int8_t) exit
+                e = e + 1_int64
+            end do
+            cr = 0_int64
+            do k = s, e
+                p = perm(k)
+                if (p > nl) then
+                    if (.not. isnull(p)) then
+                        cr = cr + 1_int64
+                        rbuf(cr) = p - nl
+                    end if
+                end if
+            end do
+            if (cr > 0_int64) then
+                do k = s, e
+                    p = perm(k)
+                    if (p <= nl) then
+                        if (.not. isnull(p)) then
+                            o = offsets(p)
+                            do j = 1_int64, cr
+                                matches(o + j - 1_int64) = rbuf(j)
+                            end do
+                        end if
+                    end if
+                end do
+            end if
+            s = e + 1_int64
+        end do
+    end subroutine match_walk_csr
+    !"""
+
+
+# --------------------------------------------------------------------------------------
+# src/parquet_sorting_match.f90 -- pf_match, pf_match_all, pf_in
+# --------------------------------------------------------------------------------------
+def gen_match():
+    o = []
+    w = o.append
+    w(BANNER)
+    w("""!> `pf_match`, `pf_match_all` and `pf_in` -- which elements of one array occur in another.
+!!
+!! **One engine call, over the two arrays CONCATENATED.** Every specific below extracts both
+!! sides into one sort key, appends the right one onto the left one, and hands the `nl+nr` rows
+!! to `engine_build_runs`, which sorts and reports where the runs of EQUAL rows are in the same
+!! pass. A run holding members from both halves is a match: a member at position `p <= nl` is
+!! left element `p`, one at `p > nl` is right element `p - nl`.
+!!
+!! That is astropy's join algorithm, and it is why this family needed no new sorting code. The
+!! comparator, the null tier, the collapsing of every NaN onto one value and of `-0.0` onto
+!! `+0.0`, and the threading are all the engine's -- so "equal" here means exactly what it means
+!! everywhere else in this module, which is the property a second engine would put at risk.
+!!
+!! **The two walks are written ONCE, not per type.** Once `match_keys_*` has run, the answer is
+!! arithmetic on `perm`, `tie` and `isnull` and does not know the element type at all, so
+!! `match_walk_first` and `match_walk_csr` are ordinary contained procedures shared by all
+!! eleven types and only the key assembly is generated per type.
+!!
+!! **Correctness does not rest on the sort being stable.** Each run is split into its left and
+!! right members by a linear scan against `nl`, never by binary-searching for a split point that
+!! only a stable sort guarantees exists, and `pf_match` takes the minimum right index rather than
+!! the first one listed. Stability decides only the ORDER within one element's `pf_match_all`
+!! range, which is a documented output property with its own test.
+!!
+!! **The obvious alternative -- sort the right side, then binary-search each left element -- is
+!! quadratic**, because every `search_impl_*` extracts the whole array on entry. See
+!! `doc/pages/utilities/sorting.md`.
+submodule (parquet_sorting) parquet_sorting_match
+    implicit none
+    !
+contains
+    !""")
+
+    # ---- pf_match ----
+    for t in TYPES:
+        tag, decl, what, family, nulls, _, _ = t
+        masks = ("            is_valid_left=is_valid_left, is_valid_right=is_valid_right, &\n"
+                 if nulls == "arg" else "")
+        for ik, _, _ in IDX_KINDS:
+            w(f"    module procedure match_{tag}_{ik}")
+            w("        integer(int64), allocatable :: perm(:), first(:)")
+            w("        integer(c_int8_t), allocatable :: tie(:)")
+            w("        logical, allocatable :: isnull(:)")
+            w("        integer(int64) :: nl, nr")
+            w("        !")
+            w(f"        call match_keys_{tag}(left, right, \"pf_match\", nl, nr, perm, tie, isnull, &")
+            if masks:
+                w(masks.rstrip("\n"))
+            w("            threads=threads)")
+            w("        call match_walk_first(perm, tie, isnull, nl, nr, first)")
+            w("        if (present(n_matched)) n_matched = count(first /= 0_int64, kind=int64)")
+            if ik == "i32":
+                w("        call narrow_i64_array(first, \"pf_match\", \"match index\", match)")
+            else:
+                w("        call move_alloc(first, match)")
+            w(f"    end procedure match_{tag}_{ik}")
+            w("    !")
+
+    # ---- pf_match_all ----
+    for t in TYPES:
+        tag, decl, what, family, nulls, _, _ = t
+        masks = ("            is_valid_left=is_valid_left, is_valid_right=is_valid_right, &\n"
+                 if nulls == "arg" else "")
+        for ik, _, _ in IDX_KINDS:
+            w(f"    module procedure match_all_{tag}_{ik}")
+            w("        integer(int64), allocatable :: perm(:)")
+            w("        integer(c_int8_t), allocatable :: tie(:)")
+            w("        logical, allocatable :: isnull(:)")
+            w("        integer(int64) :: nl, nr")
+            if ik == "i32":
+                w("        integer(int64), allocatable :: o64(:), m64(:)")
+            w("        !")
+            w(f"        call match_keys_{tag}(left, right, \"pf_match_all\", nl, nr, perm, tie, isnull, &")
+            if masks:
+                w(masks.rstrip("\n"))
+            w("            threads=threads)")
+            if ik == "i32":
+                w("        call match_walk_csr(perm, tie, isnull, nl, nr, o64, m64)")
+                w("        call narrow_i64_array(o64, \"pf_match_all\", \"CSR offset\", offsets)")
+                w("        call narrow_i64_array(m64, \"pf_match_all\", \"match index\", matches)")
+            else:
+                w("        call match_walk_csr(perm, tie, isnull, nl, nr, offsets, matches)")
+            w(f"    end procedure match_all_{tag}_{ik}")
+            w("    !")
+
+    # ---- pf_in ----
+    for t in TYPES:
+        tag, decl, what, family, nulls, _, _ = t
+        w(f"    module procedure isin_{tag}")
+        w("        integer(int64), allocatable :: perm(:), first(:)")
+        w("        integer(c_int8_t), allocatable :: tie(:)")
+        w("        logical, allocatable :: isnull(:)")
+        w("        integer(int64) :: nl, nr")
+        w("        !")
+        w(f"        call match_keys_{tag}(values, set, \"pf_in\", nl, nr, perm, tie, isnull, &")
+        if nulls == "arg":
+            w("            is_valid_left=is_valid, is_valid_right=is_valid_set, &")
+        w("            threads=threads)")
+        w("        call match_walk_first(perm, tie, isnull, nl, nr, first)")
+        w("        allocate(mask(nl))")
+        w("        if (nl > 0_int64) mask = first /= 0_int64")
+        w(f"    end procedure isin_{tag}")
+        w("    !")
+
+    # ---- the per-type key assembly ----
+    for t in TYPES:
+        tag, decl, what, family, nulls, _, _ = t
+        w(f"    !> Shared front half of every pf_match/pf_match_all/pf_in specific over {what}")
+        w("    !! arrays: extracts both sides into one key, appends the right onto the left, and")
+        w("    !! sorts the concatenation with its run boundaries reported. Everything after this")
+        w("    !! point is index arithmetic, which is why the two walks are type-independent.")
+        if nulls == "arg":
+            w(f"    subroutine match_keys_{tag}(left, right, proc, nl, nr, perm, tie, isnull, &")
+            w("            is_valid_left, is_valid_right, threads)")
+        else:
+            w(f"    subroutine match_keys_{tag}(left, right, proc, nl, nr, perm, tie, isnull, threads)")
+        w(val_decl(t, "in", "left") + " !! the left array.")
+        w(val_decl(t, "in", "right") + " !! the right array.")
+        w("        character(len=*), intent(in) :: proc !! calling procedure, for messages.")
+        w("        integer(int64), intent(out) :: nl !! elements in `left`.")
+        w("        integer(int64), intent(out) :: nr !! elements in `right`.")
+        w("        integer(int64), allocatable, intent(out) :: perm(:) !! the concatenation's permutation.")
+        w("        integer(c_int8_t), allocatable, intent(out) :: tie(:) !! 1 where a row ties the previous.")
+        w("        logical, allocatable, intent(out) :: isnull(:) !! .true. where a concatenated row is null.")
+        if nulls == "arg":
+            w("        logical, intent(in), optional :: is_valid_left(:) !! `left`'s validity; absent means none.")
+            w("        logical, intent(in), optional :: is_valid_right(:) !! `right`'s validity; absent means none.")
+        w("        integer, intent(in), optional :: threads !! thread request; absent = auto.")
+        w("        type(sort_key_buf), allocatable :: bufl(:), bufr(:)")
+        w("        integer(int64) :: n")
+        if family == "chr":
+            w("        character(len=max(len(left), len(right))), allocatable :: pl(:), pr(:)")
+            w("        integer(int64) :: k")
+        if family == "col":
+            w("        character(len=:), allocatable :: kl, kr")
+        w("        !")
+        w(f"        nl = {rows_expr(t).replace('values', 'left')}")
+        w(f"        nr = {rows_expr(t).replace('values', 'right')}")
+        if family == "col":
+            w("        ! Checked BEFORE the extraction, and before the empty-input return, so the")
+            w("        ! message names the two kinds rather than buf_append's internal-error one --")
+            w("        ! and so that an int32 column never silently matches an int64 one on the raw")
+            w("        ! value. A 64-bit catalogue identifier above 2**53 is what that would lose.")
+            w("        if (left%kindof() /= right%kindof()) then")
+            w("            call parquet_kind_name(left%kindof(), kl)")
+            w("            call parquet_kind_name(right%kindof(), kr)")
+            w("            error stop EP // proc // \": the two columns hold different kinds (\" // kl // &")
+            w("                \" and \" // kr // \"); matching compares like with like, so cast one of \" // &")
+            w("                \"them to the other's kind first\"")
+            w("        end if")
+        w("        n = nl + nr")
+        w("        if (n < 1_int64) then")
+        w("            ! Both sides empty: there is no key to extract and the engine is never")
+        w("            ! entered. Every caller's answer is an empty array, built from nl and nr.")
+        w("            allocate(perm(0), tie(0), isnull(0))")
+        w("            return")
+        w("        end if")
+        w("        ! `descending` cannot affect which elements are equal, and nulls_first=.false.")
+        w("        ! keeps the nulls contiguous at the end -- where the walks skip them per element")
+        w("        ! rather than relying on that placement.")
+        iv_l = ", is_valid=is_valid_left" if nulls == "arg" else ""
+        iv_r = ", is_valid=is_valid_right" if nulls == "arg" else ""
+        if family == "chr":
+            w("        ! Both halves are widened to one common element length before extraction, or the")
+            w("        ! packed keys would compare strings of two different widths. Element by element,")
+            w("        ! because a whole-array assignment into an allocatable character array is the")
+            w("        ! reallocation hazard CLAUDE.md documents.")
+            w("        allocate(pl(nl), pr(nr))")
+            w("        do k = 1_int64, nl")
+            w("            pl(k) = left(k)")
+            w("        end do")
+            w("        do k = 1_int64, nr")
+            w("            pr(k) = right(k)")
+            w("        end do")
+            w(f"        call extract_chr(pl, bufl, .false., .false., proc{iv_l}, threads=threads)")
+            w(f"        call extract_chr(pr, bufr, .false., .false., proc{iv_r}, threads=threads)")
+        else:
+            w(f"        call extract_{tag}(left, bufl, .false., .false., proc{iv_l}, threads=threads)")
+            w(f"        call extract_{tag}(right, bufr, .false., .false., proc{iv_r}, threads=threads)")
+        w("        call buf_append(bufl, nl, bufr, nr, proc)")
+        w("        call engine_build_runs(bufl, n, proc, perm, tie, threads=threads)")
+        w("        call key_null_mask(bufl, n, isnull)")
+        w(f"    end subroutine match_keys_{tag}")
+        w("    !")
+
+    w(MATCH_WALKS)
+    w("end submodule parquet_sorting_match ! GCOVR_EXCL_LINE")
+    return "\n".join(o) + "\n"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--check", action="store_true",
@@ -5613,6 +6150,7 @@ def main():
         REPO_ROOT / "src" / "parquet_sorting_search.f90": gen_search(),
         REPO_ROOT / "src" / "parquet_sorting_unique.f90": gen_unique(),
         REPO_ROOT / "src" / "parquet_sorting_reduce.f90": gen_reduce(),
+        REPO_ROOT / "src" / "parquet_sorting_match.f90": gen_match(),
     }
 
     if args.check:

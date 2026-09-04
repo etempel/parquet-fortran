@@ -13,7 +13,7 @@
 #     imports parquet_bindings. That half is enforced separately, by
 #     check_parquet_*_stays_arrow_free in tools/check_source_conventions.py.
 #   * A submodule is never pruned separately from the module it belongs to, so every section is a
-#     union of whole modules. That is why parquet_sorting costs 21 Fortran files rather than the
+#     union of whole modules. That is why parquet_sorting costs 22 Fortran files rather than the
 #     handful its callers touch, and why moving one procedure between two modules can move a
 #     dozen files between two sections.
 #
@@ -177,6 +177,7 @@ parquet_settings_base.f90
 parquet_sorting.f90
 parquet_sorting_argsort.f90
 parquet_sorting_keys.f90
+parquet_sorting_match.f90
 parquet_sorting_permute.f90
 parquet_sorting_reduce.f90
 parquet_sorting_search.f90
@@ -201,6 +202,7 @@ parquet_settings_base.f90
 parquet_sorting.f90
 parquet_sorting_argsort.f90
 parquet_sorting_keys.f90
+parquet_sorting_match.f90
 parquet_sorting_permute.f90
 parquet_sorting_reduce.f90
 parquet_sorting_search.f90
@@ -269,6 +271,7 @@ parquet_settings_base.f90
 parquet_sorting.f90
 parquet_sorting_argsort.f90
 parquet_sorting_keys.f90
+parquet_sorting_match.f90
 parquet_sorting_permute.f90
 parquet_sorting_reduce.f90
 parquet_sorting_search.f90
@@ -324,6 +327,7 @@ parquet_settings_base.f90
 parquet_sorting.f90
 parquet_sorting_argsort.f90
 parquet_sorting_keys.f90
+parquet_sorting_match.f90
 parquet_sorting_permute.f90
 parquet_sorting_reduce.f90
 parquet_sorting_search.f90
@@ -414,6 +418,7 @@ parquet_settings_base.f90
 parquet_sorting.f90
 parquet_sorting_argsort.f90
 parquet_sorting_keys.f90
+parquet_sorting_match.f90
 parquet_sorting_permute.f90
 parquet_sorting_reduce.f90
 parquet_sorting_search.f90

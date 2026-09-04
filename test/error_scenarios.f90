@@ -854,6 +854,8 @@ program error_scenarios
         call scenario_stats_bin_edges_size()
     case ("sorting_column_vector")
         call scenario_sorting_column_vector()
+    case ("sorting_match_kind_mismatch")
+        call scenario_sorting_match_kind_mismatch()
     case ("sorting_search_unsorted")
         call scenario_sorting_search_unsorted()
     case ("sorting_search_target_too_long")
@@ -17535,6 +17537,28 @@ contains
 
     !> A vector column has no defined order on a whole row, so it cannot be a sort key -- the
     !! same rule parquet_table%sort_by applies, enforced here for a bare parquet_column.
+    !> `pf_match` over two `parquet_column`s of DIFFERENT kinds is refused rather than compared.
+    !!
+    !! Both kinds reach the engine as plain integers, so an int32 5 and an int64 5 would match on
+    !! the raw value and produce a full-looking, wrong answer -- which is exactly the promotion
+    !! astropy performs and this library refuses, because a 64-bit catalogue identifier above
+    !! 2**53 does not survive it. The matching pair first is the negative control: without it a
+    !! check that refused every `parquet_column` would pass this scenario just as happily.
+    subroutine scenario_sorting_match_kind_mismatch()
+        type(parquet_column) :: a, b, c
+        integer(int64), allocatable :: m(:)
+        call a%init(PK_INT32, 3_int64)
+        call a%set_all([10_int32, 20_int32, 30_int32])
+        call c%init(PK_INT32, 2_int64)
+        call c%set_all([30_int32, 10_int32])
+        call pf_match(a, c, m)
+        print '(a,i0)', "same-kind columns matched ok, first answer=", m(1)
+        call b%init(PK_INT64, 2_int64)
+        call b%set_all([30_int64, 10_int64])
+        call pf_match(a, b, m)   ! -> aborts (an int32 column cannot match an int64 one)
+        print '(a,i0)', "unexpectedly matched two kinds, first answer=", m(1)
+    end subroutine scenario_sorting_match_kind_mismatch
+
     subroutine scenario_sorting_column_vector()
         type(parquet_column) :: col
         integer(int32), allocatable :: perm(:)

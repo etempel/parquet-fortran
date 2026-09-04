@@ -814,6 +814,7 @@ scenarios=(
     "stats_bin_edges_nbins:1"
     "stats_bin_edges_size:1"
     "sorting_column_vector:1"
+    "sorting_match_kind_mismatch:1"
     "sorting_search_unsorted:1"
     "sorting_search_target_too_long:1"
     "sorting_rank_bad_method:1"

@@ -4868,7 +4868,48 @@ def check_join_specifics_forward_every_argument():
     return problems
 
 
+def check_no_leadz():
+    """`LEADZ` must not appear in this project's Fortran at all -- `trailz` is the way.
+
+    nagfor 7.2 MISCOMPILES `LEADZ` on an `integer(int64)` at `-O1` and above, including the bare
+    `-O` and every `--profile release` build: the answer is exactly 2 too small whenever the true
+    answer is 2 or more, so 62 of the 64 single-bit values come back wrong. `leadz` on `int32`,
+    `trailz` and `popcnt` are all correct, and `-O0` is correct, which is why every other nagfor
+    profile here passes and only a release build sees it.
+
+    Both failure modes are bad and one is silent. `pool_do_compact` wrote the natural
+    `j = 63 - leadz(w)` to walk a block's set bits downward; `j` came back 63 instead of 61, so
+    `ibclr` cleared a bit that was already clear, `w` stopped shrinking and the loop never ended --
+    inside the `pf_index_pool_guard` critical region, so every other caller hung behind it. The
+    same file's watermark scan had the same defect with nothing to announce it: a `max_used` up to
+    2 too high, and a `topblk` that can then index past the bitmap.
+
+    So the rule is a blanket one rather than "not on int64": a reader cannot see a variable's kind
+    at the call site, and the wrong answer is silent. Every highest-set-bit question this project
+    has had is answerable by walking `trailz` and keeping the last index reached, which is what
+    `pool_do_compact` now does. If an `int32`-only use is ever genuinely wanted, record the
+    exemption HERE with the reason -- do not delete the check.
+
+    See `feature_risks.md` Risk-186 and `src/parquet_index_pool.f90`'s `pool_do_compact` header.
+    """
+    problems = []
+    for directory in ("src", "test", "app", "bench", "tools"):
+        base = REPO_ROOT / directory
+        if not base.is_dir():
+            continue
+        for path in sorted(base.glob("*.f90")):
+            for n, line in enumerate(path.read_text().split("\n"), 1):
+                if re.search(r"\bleadz\s*\(", strip_comment(line), re.I):
+                    problems.append(
+                        "%s:%d: LEADZ is banned in this project -- nagfor 7.2 miscompiles it on "
+                        "int64 at -O1 and above (silently, by 2). Walk `trailz` and keep the last "
+                        "index reached; see this check's docstring."
+                        % (path.relative_to(REPO_ROOT), n))
+    return problems
+
+
 CHECKS = (
+    ("LEADZ is not used anywhere (nagfor miscompiles it on int64)", check_no_leadz),
     ("threads= is forwarded to every callee that takes it", check_threads_are_forwarded),
     ("generated table types forward every parquet_open_table argument",
      check_open_table_arguments_are_forwarded),

@@ -297,13 +297,25 @@ contains
     !> Lowers the watermark to the highest index actually held, rebuilds the free list so the
     !! smallest free index comes out next, and gives back storage the pool grew.
     !!
-    !! The rebuild walks the bitmap from the TOP DOWN and pushes each free index as it goes, so
-    !! popping (which takes the last entry) yields them smallest first. That is why there is no
-    !! sort call here at all: the walk order and the stack discipline do it between them.
+    !! The rebuild walks the bitmap ASCENDING and fills the free-list stack from its top downward,
+    !! so popping (which takes the last entry) yields the free indexes smallest first. That is why
+    !! there is no sort call here at all: the walk order and the stack discipline do it between
+    !! them.
     !!
     !! Bits above the new watermark read as free in the complement and are filtered by the
     !! `i <= newmax` test rather than by masking the top word, which keeps the loop identical for
     !! every block.
+    !!
+    !! **Both bit walks here use `trailz`, and neither may be rewritten with `leadz`** -- however
+    !! natural `63 - leadz(w)` is for finding a highest set bit. nagfor 7.2 miscompiles `LEADZ` on
+    !! an `integer(int64)` at `-O1` and above: the result is exactly 2 too small whenever the true
+    !! answer is 2 or more (62 of the 64 single-bit values are wrong), while `leadz` on `int32`,
+    !! `trailz` and `popcnt` are all correct. Under `--profile release` that turned the free-list
+    !! walk into an infinite loop -- `j` came back 63 instead of 61, so `ibclr` cleared a bit that
+    !! was already clear and `w` stopped shrinking -- inside the `pf_index_pool_guard` critical
+    !! region, hanging every other caller behind it. The watermark walk above has the same defect
+    !! with a quieter failure: a `max_used` up to 2 too high, and nothing to report it. See
+    !! `feature_risks.md` Risk-186.
     subroutine pool_do_compact(self)
         type(pf_index_pool), intent(inout) :: self !! the pool.
         integer(int64), allocatable :: grown(:)
@@ -320,12 +332,18 @@ contains
         newmax = 0_int64
         do b = nb, 1_int64, -1_int64
             if (self%bits(b) /= 0_int64) then
-                newmax = ishft(b - 1_int64, 6) + int(63 - leadz(self%bits(b)), int64) + 1_int64
+                ! The LAST index this ascending walk reaches is the block's highest set bit.
+                w = self%bits(b)
+                do while (w /= 0_int64)
+                    j = trailz(w)
+                    w = ibclr(w, j)
+                    newmax = ishft(b - 1_int64, 6) + int(j, int64) + 1_int64
+                end do
                 exit
             end if
         end do
         self%max_used = newmax
-        ! Rebuild the free list over 1 .. newmax, descending, so that popping ascends.
+        ! Rebuild the free list over 1 .. newmax, filling the stack top-down, so popping ascends.
         k = 0_int64
         if (newmax > 0_int64) then
             need = newmax - self%n_used
@@ -334,15 +352,19 @@ contains
                 allocate(self%flist(need))
                 self%flist = 0_int64
                 topblk = pool_blk(newmax)
-                do b = topblk, 1_int64, -1_int64
+                ! `need` is exactly the number of clear bits in 1 .. newmax, so this walk fills
+                ! flist(need) down to flist(1) and ends with k == need. Both halves matter: the
+                ! descending SLOT is what makes the ascending walk pop smallest-first, and the
+                ! count is what makes `self%nfree = k` below name the top of a full stack.
+                do b = 1_int64, topblk
                     w = not(self%bits(b))
                     do while (w /= 0_int64)
-                        j = 63 - leadz(w)
+                        j = trailz(w)
                         w = ibclr(w, j)
                         i = ishft(b - 1_int64, 6) + int(j, int64) + 1_int64
                         if (i <= newmax) then
                             k = k + 1_int64
-                            self%flist(k) = i
+                            self%flist(need - k + 1_int64) = i
                         end if
                     end do
                 end do

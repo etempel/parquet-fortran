@@ -3589,6 +3589,42 @@ nagfor needs `FPM_CC`/`FPM_CXX` set explicitly and a shim to get OpenMP onto the
 warning output needs its own triage, and both are covered in
 [NAG's "explicitly imported but not used" warnings](#nags-explicitly-imported-but-not-used-warnings-most-are-false-positives).
 
+- **`LEADZ` on an `integer(int64)` is WRONG BY TWO at `-O1` and above, and this project bans the
+  intrinsic outright.** nagfor 7.2 returns exactly `leadz - 2` whenever the true answer is 2 or
+  more, so 62 of the 64 single-bit values come back wrong. Measured with a 20-line program, at
+  every optimisation setting fpm can produce:
+
+  | build | `leadz(int64)` | `leadz(int32)` | `trailz` | `popcnt` |
+  |---|---|---|---|---|
+  | no flag / `-O0` (the `nag`, `nagdeb`, `nagundef` profiles) | correct | correct | correct | correct |
+  | `-O`, `-O1`, `-O2`, `-O3`, `-O4` (**`--profile release`**) | **62 of 64 wrong** | correct | correct | correct |
+
+  **Both failure modes are reachable and one is silent.** `63 - leadz(w)` is the natural way to
+  walk a word's set bits downward, and with `j` two too large `ibclr(w, j)` clears a bit that is
+  already clear — so `w` stops shrinking and `do while (w /= 0)` **never exits**. That shipped in
+  `pool_do_compact` and hung `fpm test --profile release` inside a `critical` region, taking six
+  further tests down with it; it reproduces at `OMP_NUM_THREADS=1`, so the concurrency only decided
+  how loud it was. The same file's watermark scan had the same defect with **nothing to announce
+  it** — a `max_used` up to 2 too high — and returned the right answer in the build where the hang
+  was found, so the miscompilation is context-dependent as well as silent.
+
+  **Use `trailz` and keep the last index reached**; that is the block's highest set bit, it costs
+  a walk this codebase already performs elsewhere, and it is correct on every compiler at every
+  optimisation level. Where a descending walk was wanted for its *order*, walk ascending and fill
+  the destination from its far end instead. `check_no_leadz`
+  (`tools/check_source_conventions.py`) enforces the ban across `src/`, `test/`, `app/`, `bench/`
+  and `tools/` — **blanket rather than int64-only**, because a reader cannot see a variable's kind
+  at the call site and the wrong answer is silent. See `feature_risks.md` Risk-186.
+
+  **The general lesson is about the profile, not the intrinsic: `--profile release` is the ONLY
+  nagfor configuration this project runs with optimisation on, so it is the only one that can see
+  a codegen defect at all.** `nag`, `nagdeb` and `nagundef` all pass `-O0` by omission, so a green
+  run of any of them says nothing about the compiler's optimiser. Run `fpm test --profile release`
+  under nagfor as its own check, and read a hang there as a possible miscompilation rather than as
+  a concurrency bug — `sample <pid>` names the spinning procedure in seconds, and the test-drive
+  progress line does not (see
+  [Tests run concurrently](#tests-run-concurrently-never-share-a-fixture-file-path-between-two-tests)).
+
 - **A statement may carry at most 255 CONTINUATION LINES, and nagfor is the only compiler that
   enforces it.** F2008 C1003 caps a statement at 255 continuation lines; gfortran, ifx and flang all
   accept more without a word, so a violation compiles clean everywhere else, passes CI, and breaks

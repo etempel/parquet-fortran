@@ -251,6 +251,7 @@ something a reader is expected to have.
 | [Risk-183](#risk-183--a-join-carries-only-the-resident-right-columns-and-a-schema-less-write-then-loses-them) | A join carries only the resident right columns, and a schema-less write then loses them | 2 — proposed |
 | [Risk-184](#risk-184--the-non-detaching-join-is-a-computed-condition-and-both-halves-of-it-are-load-bearing) | The non-detaching join is a computed condition, and BOTH halves of it are load-bearing | 4 — covered |
 | [Risk-185](#risk-185--the-merged-key-of-a-rightouter-join-cannot-be-patched-into-place) | The merged key of a right/outer join cannot be PATCHED into place | 4 — covered |
+| [Risk-186](#risk-186--leadz-on-an-int64-is-two-too-small-under-nagfor-and-the-quiet-half-is-the-watermark) | `LEADZ` on an int64 is TWO too small under nagfor, and the quiet half is the watermark | 4 — covered |
 
 ---
 
@@ -7415,3 +7416,41 @@ for this entry alone**: it repeats every assertion under `order="key"`, which is
 that can tell an index-based rebuild from a contiguous-range patch. Do not delete that arm as a
 duplicate of the first. Mutation-confirmed in both directions — suppressing the rebuild fails three
 tests, and dropping the `nl` offset from the merged index fails two.
+
+### Risk-186 — `LEADZ` on an int64 is TWO too small under nagfor, and the quiet half is the watermark
+
+**What breaks.** nagfor 7.2 miscompiles the `LEADZ` intrinsic applied to an `integer(int64)` at
+`-O1` and above — the bare `-O` and every `--profile release` build included. The result is exactly
+2 too small whenever the true answer is 2 or more, so **62 of the 64 single-bit values come back
+wrong**. `leadz` on an `int32`, `trailz` and `popcnt` are all correct, and `-O0` is correct, which
+is why the `nag` and `nagdeb` profiles — neither of which passes any `-O` — see nothing. gfortran,
+ifx and flang are unaffected, so nothing in CI can see it either.
+
+**Both halves shipped in one procedure, and only one of them announced itself.** `pool_do_compact`
+(`src/parquet_index_pool.f90`) had two highest-set-bit walks written the natural way,
+`63 - leadz(w)`:
+
+* the **free-list rebuild** hung. `j` came back 63 where 61 was right, `ibclr(w, j)` cleared a bit
+  that was already clear, `w` stopped shrinking and `do while (w /= 0_int64)` never exited — inside
+  the `pf_index_pool_guard` critical region, so six further pool tests parked behind it and
+  `fpm test --profile release` stopped dead. It reproduces at `OMP_NUM_THREADS=1`; the concurrency
+  only decided how many callers were taken down with it.
+* the **watermark scan** is the entry's real subject. Same defect, no symptom: `%compact` sets
+  `max_used` up to 2 above the highest index actually held, so the pool hands out indexes it should
+  not, `%get_free_index_count` is wrong, and `topblk = pool_blk(newmax)` can index past the bitmap.
+  In the build where the hang was found this call happened to return the right answer — the
+  miscompilation is context-dependent, which is worse than being consistent, not better.
+
+**What it is instead.** Both walks now use `trailz` and keep the **last** index reached, which is
+the block's highest set bit; the free-list rebuild walks blocks ASCENDING and fills the stack from
+its top downward (`self%flist(need - k + 1_int64)`), so popping still yields the free indexes
+smallest first and the free list is byte-for-byte what the descending walk produced. Same
+complexity, no helper, `self%nfree = k` unchanged.
+
+**Covered by** `check_no_leadz` (`tools/check_source_conventions.py`, run in CI's lint stage),
+which bans `LEADZ` from `src/`, `test/`, `app/`, `bench/` and `tools/` outright rather than trying
+to decide a kind at the call site — a reader cannot see whether a variable is int32 or int64, and
+the wrong answer is silent. The `index` suite under `fpm test run_tester_pf --profile release` with
+nagfor is what fails when the ban is broken on the free-list walk; **nothing at all fails when it
+is broken on the watermark walk**, which is why the check exists rather than a test. An `int32`-only
+use, if one is ever genuinely wanted, is recorded as an exemption in that check with its reason.

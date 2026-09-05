@@ -172,10 +172,16 @@ nagdeb.flags = "-C=all -g"
 
 nagundefined.flags = "-C=undefined -DUNDEFINED_CHECK"
 
+flangopt.flags = "-O3"
+flangdeb.flags = "-g -O0 -Wall"
+
 [profiles]
 nag = ["nagfor"]
 nagdeb = ["nagfor", "nagdeb"]
 nagundef = ["nagfor", "nagdeb", "nagundefined"]
+
+flangopt = ["flangopt"]
+flangdeb = ["flangdeb"]
 
 [preprocess]
 [preprocess.cpp]

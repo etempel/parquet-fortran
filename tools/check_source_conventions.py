@@ -4908,8 +4908,142 @@ def check_no_leadz():
     return problems
 
 
+def _pure_callable_names():
+    """Names a scenario can call that a compiler is entitled to DELETE when the result is unused.
+
+    Three groups, all read out of `src/` so none goes stale: every `pure`/`elemental` FUNCTION
+    declared there; every type-bound binding whose target is one of them; and every NAMED generic
+    interface with such a specific behind it. The last two matter because a call site writes
+    `m%get(...)` or `parquet_slice_range(...)` -- the binding or the interface, never the specific.
+    """
+    pure = set()
+    for path in sorted(SRC.glob("*.f90")):
+        for line in path.read_text().split("\n"):
+            found = re.match(r"^\s*(?:pure|elemental)(?:\s+(?:pure|elemental))?\s+"
+                             r"(?:recursive\s+)?(?:module\s+)?function\s+(\w+)", line)
+            if found:
+                pure.add(found.group(1))
+    bindings = set()
+    for path in sorted(SRC.glob("*.f90")):
+        text = re.sub(r"&\s*\n\s*", "", path.read_text())
+        # A NAMED generic interface: a call site writes the interface's name, never a specific's.
+        for block in re.finditer(r"^\s*interface\s+(\w+)\s*$(.*?)^\s*end interface\b",
+                                 text, re.S | re.M):
+            # `[\w, \t]` rather than `[\w,\s]`: `\s` includes the newline, and with re.M a
+            # greedy match then swallows every following line into one "member".
+            members = re.findall(r"^[ \t]*(?:module[ \t]+)?procedure[ \t]*(?:::)?[ \t]*"
+                                 r"([\w,][\w, \t]*)$", block.group(2), re.M)
+            targets = [t.strip() for group in members for t in group.split(",") if t.strip()]
+            if any(t in pure for t in targets):
+                bindings.add(block.group(1))
+        for line in text.split("\n"):
+            line = strip_comment(line)
+            found = re.match(r"^\s*generic\s*::\s*(\w+)\s*=>\s*(.+)$", line)
+            if found:
+                targets = [t for t in re.split(r"[,\s]+", found.group(2)) if t]
+                if any(t in pure for t in targets):
+                    bindings.add(found.group(1))
+                continue
+            found = re.match(r"^\s*procedure\s*(?:,[^:]*)?::\s*(\w+)\s*=>\s*(\w+)", line)
+            if found:
+                if found.group(2) in pure:
+                    bindings.add(found.group(1))
+                continue
+            found = re.match(r"^\s*procedure\s*(?:,[^:]*)?::\s*([\w,\s]+)$", line)
+            if found:
+                for nm in [t.strip() for t in found.group(1).split(",") if t.strip()]:
+                    if nm in pure:
+                        bindings.add(nm)
+    return pure | bindings
+
+
+def _scenario_statements(path):
+    """Yield (first_lineno, joined_statement) for `path`, with `&` continuations folded together."""
+    out = []
+    buf, first = "", None
+    for n, raw in enumerate(path.read_text().split("\n"), 1):
+        line = strip_comment(raw).rstrip()
+        if first is None:
+            if not line.strip():
+                continue
+            first = n
+        if line.endswith("&"):
+            buf += line[:-1]
+            continue
+        buf += line
+        out.append((first, buf))
+        buf, first = "", None
+    return out
+
+
+def check_scenario_uses_a_pure_result():
+    """A scenario whose abort is inside a `pure` function must USE the result, not just assign it.
+
+    Fortran has no way to call a function and discard the result, so an error scenario always has
+    to put it somewhere -- and putting it in a variable nothing reads is not enough. A compiler may
+    delete a call to a `pure` function whose result is never used, and gfortran does, from `-O1`
+    upward. The abort goes with it: the scenario runs to its "was accepted" print and exits 0,
+    and the test reports the LIBRARY as having failed to refuse something.
+
+    Confirmed on `scenario_index_tuple_width_mismatch` and `scenario_index_scalar_on_composite`,
+    whose `got = m%get(...)` vanished under `--profile release` (`%get` is `pure`) while every
+    unoptimised build passed -- so nothing in CI, in a plain `fpm test` or in any nagfor profile
+    could see it. Printing `got` is the whole fix.
+
+    Only `pure` callees are flagged, because only they are deletable. That makes the check
+    self-maintaining in the direction that matters: the day someone marks an existing procedure
+    `pure` -- `parquet_slice_range` and `%view` are the obvious candidates -- every scenario that
+    discards its result starts failing here rather than silently testing nothing.
+    """
+    path = TEST / "error_scenarios.f90"
+    if not path.exists():
+        return ["%s: not found -- this check needs updating" % path]
+    names = _pure_callable_names()
+    if len(names) < 50:
+        return ["%s: found only %d pure callable name(s) in src/ -- this check has gone blind"
+                % (path.relative_to(REPO_ROOT), len(names))]
+    alternatives = "|".join(sorted(map(re.escape, names), key=len, reverse=True))
+    call = re.compile(r"(?<!\w)(?:" + alternatives + r")\s*\(")
+    problems = []
+    name, body = None, []
+    for n, stmt in _scenario_statements(path):
+        opened = re.match(r"^\s*subroutine\s+(scenario_\w+)\s*\(", stmt)
+        if opened:
+            name, body = opened.group(1), []
+            continue
+        if name and re.match(r"^\s*end subroutine\s+%s\s*$" % name, stmt):
+            assigned = {}
+            for ln, line in body:
+                found = re.match(r"^\s*([A-Za-z]\w*)\s*=\s*(.+)$", line)
+                if found and call.search(found.group(2)):
+                    assigned.setdefault(found.group(1), (ln, found.group(2).strip()))
+            for var, (ln, rhs) in sorted(assigned.items()):
+                read = False
+                for _, line in body:
+                    if re.match(r"^\s*(?:type|class|integer|real|logical|character|procedure)\b"
+                                r".*::", line):
+                        continue           # a declaration is not a read
+                    rest = re.sub(r"^(\s*)%s\s*=" % re.escape(var), r"\1", line)
+                    if re.search(r"\b%s\b" % re.escape(var), rest):
+                        read = True
+                        break
+                if not read:
+                    problems.append(
+                        "%s:%d: %s assigns `%s` from a pure call and never reads it -- the "
+                        "optimiser may delete the call, and the abort with it. Print it. See "
+                        "this check's docstring."
+                        % (path.relative_to(REPO_ROOT), ln, name, var))
+            name = None
+            continue
+        if name:
+            body.append((n, stmt))
+    return problems
+
+
 CHECKS = (
     ("LEADZ is not used anywhere (nagfor miscompiles it on int64)", check_no_leadz),
+    ("every error scenario uses the pure result it computes",
+     check_scenario_uses_a_pure_result),
     ("threads= is forwarded to every callee that takes it", check_threads_are_forwarded),
     ("generated table types forward every parquet_open_table argument",
      check_open_table_arguments_are_forwarded),

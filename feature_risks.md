@@ -252,6 +252,7 @@ something a reader is expected to have.
 | [Risk-184](#risk-184--the-non-detaching-join-is-a-computed-condition-and-both-halves-of-it-are-load-bearing) | The non-detaching join is a computed condition, and BOTH halves of it are load-bearing | 4 — covered |
 | [Risk-185](#risk-185--the-merged-key-of-a-rightouter-join-cannot-be-patched-into-place) | The merged key of a right/outer join cannot be PATCHED into place | 4 — covered |
 | [Risk-186](#risk-186--leadz-on-an-int64-is-two-too-small-under-nagfor-and-the-quiet-half-is-the-watermark) | `LEADZ` on an int64 is TWO too small under nagfor, and the quiet half is the watermark | 4 — covered |
+| [Risk-187](#risk-187--a-rejected-fmt-that-leaves-partial-text-behind-returns-a-plausible-number-instead-of-asterisks) | A rejected `fmt` that leaves PARTIAL TEXT behind returns a plausible number instead of asterisks | 4 — covered |
 
 ---
 
@@ -7454,3 +7455,35 @@ the wrong answer is silent. The `index` suite under `fpm test run_tester_pf --pr
 nagfor is what fails when the ban is broken on the free-list walk; **nothing at all fails when it
 is broken on the watermark walk**, which is why the check exists rather than a test. An `int32`-only
 use, if one is ever genuinely wanted, is recorded as an exemption in that check with its reason.
+
+### Risk-187 — A rejected `fmt` that leaves PARTIAL TEXT behind returns a plausible number instead of asterisks
+
+**What breaks.** `pf_to_str`'s contract is that a `fmt` the I/O runtime rejects yields a run of
+asterisks. `rendered_ok` (`src/parquet_utils.f90`) is what decides that, and it exists only because
+of a second case it must NOT treat as a rejection: a value too wide for its edit descriptor is
+success in the standard — the runtime fills the field with asterisks — while ifx's
+`-check output_conversion`, which `--profile debug` turns on, reports `iostat = 63` for it. Without
+the override a diagnostic build would return `***` where a plain build returns `**`.
+
+**Why the obvious discriminator is wrong.** The first version accepted a nonzero `iostat` whenever
+the buffer was non-empty, reasoning that text in the buffer means the runtime produced a usable
+result. That was measured on ifx 2026.1 and gfortran 15.2, where a rejected format renders *nothing
+at all*, and generalised from those two. **flang 22.1.8 is a third behaviour neither of them has:**
+it reports the rejection through `iostat` (1005) and still leaves partial text behind —
+`pf_to_str(1, s, fmt='(nonsense)')` gave `1`, and the `real64` form gave
+`377600000000000000000`. So a rejected format returned a plausible number, and a caller reading it
+has no way to tell.
+
+**What it is instead.** `rendered_ok` keys on the ASTERISK: a nonzero `iostat` is overridden only
+when the runtime left its overflow marker in the buffer, which is the one case the override exists
+for. Deliberately not "the whole buffer is asterisks" either — a compound format renders `x=**`,
+which that stricter test would reject.
+
+**Covered by** `test_to_str_bad_fmt` (`test/test_utils.f90`), whose `verify(got, "*") == 0`
+assertions are what failed. **Its coverage is compiler-dependent and that is the point of this
+entry**: under gfortran, ifx and nagfor the buffer is empty on a rejection, so those assertions hold
+whichever rule `rendered_ok` uses, and a change back to the non-empty test passes the whole suite
+everywhere except flang. The two `--profile debug` lines further down that suite (`'(i2)'` → `**`,
+`'(f4.2)'` → `****`) are the other half, and guard the opposite direction: they only assert anything
+under ifx `-check all`. So this function has no single build in which both of its rules are live —
+change it and run flang AND an ifx debug build, or it is not tested.

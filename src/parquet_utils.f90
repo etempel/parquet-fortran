@@ -309,7 +309,8 @@ contains
         res = repeat("*", 3)
     end subroutine bad_format_result
 
-    !> Whether a `write` left usable text in `buf`, whatever its `iostat` said.
+    !> Whether a `write` that reported an error nevertheless left the runtime's OVERFLOW MARKER
+    !! in `buf`, in which case that marker is the result to keep.
     !!
     !! **A nonzero `iostat` does not always mean the format was rejected.** A value too wide for
     !! its edit descriptor is not an error in the standard -- the runtime fills the field with
@@ -319,12 +320,23 @@ contains
     !! return a different string from a plain one: `pf_to_str(12345, s, fmt='(i2)')` gives `**`
     !! normally and, without this, `bad_format_result`'s `***` under `-check all`.
     !!
-    !! The discriminator is the buffer, not the code number, because the code numbers are
-    !! per-compiler (ifx 63 for the conversion and 62 for a rejected format, gfortran 5006) and
-    !! nothing portable distinguishes them. Measured on ifx 2026.1 and gfortran 15.2: a rejected
-    !! format renders NOTHING on both, while an overflowing field renders its asterisks on both.
-    !! So text in the buffer means the runtime got far enough to produce a result, and that result
-    !! is what a build without the check would have returned.
+    !! The discriminator cannot be the code number -- they are per-compiler (ifx 63 for the
+    !! conversion and 62 for a rejected format, gfortran 5006, flang 1005, nagfor 125) and nothing
+    !! portable tells them apart. **It is the ASTERISK, and specifically not "the buffer is
+    !! non-empty".** That earlier rule was measured on ifx 2026.1 and gfortran 15.2, where a
+    !! rejected format renders nothing at all, and generalised from those two -- and flang 22.1.8
+    !! is a third behaviour neither of them has: it reports the rejection through `iostat` and
+    !! still leaves PARTIAL TEXT behind, `1` for `pf_to_str(1, s, fmt='(nonsense)')` and
+    !! `377600000000000000000` for the `real64` form. Under the non-empty rule those were returned
+    !! as if they were renderings, so a rejected format silently produced a plausible wrong string
+    !! instead of asterisks.
+    !!
+    !! Keying on the marker is narrower and says what it means: the ONLY nonzero-`iostat` case this
+    !! function exists to accept is the field overflow, and an asterisk is what defines that case.
+    !! It also keeps a compound format working -- `'("x=",i2)'` renders `x=**`, which is text a
+    !! whole-buffer "all asterisks" test would have rejected. Partial text carrying no asterisk is
+    !! a format that got part-way and failed, which is exactly what must fall through to
+    !! `bad_format_result`.
     !!
     !! **Callers must blank `buf` before the write.** It is an uninitialised local otherwise, and
     !! this would read whatever the stack held.
@@ -333,7 +345,7 @@ contains
         character(len=*), intent(in) :: buf !! the buffer it wrote into, blanked beforehand.
 
         ok = ios == 0
-        if (.not. ok) ok = len_trim(buf) > 0
+        if (.not. ok) ok = index(buf, "*") > 0
     end function rendered_ok
 
     !> Applies the optional `min_width`/`pad` tail to already-rendered text.

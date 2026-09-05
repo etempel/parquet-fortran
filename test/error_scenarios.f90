@@ -21682,6 +21682,12 @@ contains
     !
     !> A lookup presenting the wrong number of components is refused. The check is one integer
     !> comparison, which is why it is affordable on the hot path.
+    !!
+    !! **`got` is PRINTED, and that is what makes this scenario test anything.** `%get` is `pure`,
+    !! so a compiler may delete a call whose result is never read -- gfortran does, from `-O1`
+    !! upward, which took the abort away under `--profile release` while every unoptimised build
+    !! still passed. Assigning the result is not enough; it has to be USED. See CLAUDE.md's
+    !! "A scenario whose abort is inside a `pure` function must USE the result".
     subroutine scenario_index_tuple_width_mismatch()
         type(pf_index_map) :: m
         integer(int64) :: pairs(2, 2), got
@@ -21690,10 +21696,13 @@ contains
         pairs(:, 2) = [3_int64, 4_int64]
         call m%build(pairs)
         got = m%get([1_int64, 3_int64, 5_int64])
-        print '(a)', "a three-component lookup on a two-component map was accepted"
+        print '(a,i0)', "a three-component lookup on a two-component map was accepted, got=", got
     end subroutine scenario_index_tuple_width_mismatch
     !
     !> A scalar key on a composite map is refused rather than matching on the first component.
+    !!
+    !! `got` is printed for the same reason as in `scenario_index_tuple_width_mismatch` above: `%get`
+    !! is `pure`, so an unread result lets the optimiser delete the call and the abort with it.
     subroutine scenario_index_scalar_on_composite()
         type(pf_index_map) :: m
         integer(int64) :: pairs(2, 2), got
@@ -21702,7 +21711,7 @@ contains
         pairs(:, 2) = [3_int64, 4_int64]
         call m%build(pairs)
         got = m%get(1_int64)
-        print '(a)', "a scalar lookup on a composite map was accepted"
+        print '(a,i0)', "a scalar lookup on a composite map was accepted, got=", got
     end subroutine scenario_index_scalar_on_composite
     !
     !> A sorted map is frozen once built: keeping an exact-fit sorted array in order through an

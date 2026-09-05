@@ -107,6 +107,7 @@ working rules).
   - [Every `check()` call needs its own message](#every-check-call-needs-its-own-message)
   - [Verifying a change with mutation testing](#verifying-a-change-with-mutation-testing)
   - [A test that asserts a REFUSAL must say what to assert when the refusal lifts](#a-test-that-asserts-a-refusal-must-say-what-to-assert-when-the-refusal-lifts)
+  - [A scenario whose abort is inside a `pure` function must USE the result](#a-scenario-whose-abort-is-inside-a-pure-function-must-use-the-result)
   - [A test that asserts THREADING must skip without OpenMP](#a-test-that-asserts-threading-must-skip-without-openmp)
   - [A test must not assert a compiler's `ERROR STOP` spelling or exit status](#a-test-must-not-assert-a-compilers-error-stop-spelling-or-exit-status)
   - [A static check that enumerates names goes stale silently](#a-static-check-that-enumerates-names-goes-stale-silently)
@@ -3560,6 +3561,24 @@ Compiler-independent rules. Anything specific to one compiler is in its own sect
 flang builds here are **serial only** and `--profile release` does not link — see
 [Building and measuring across machines](#building-and-measuring-across-machines) for both.
 
+- **A REJECTED format is reported through `iostat` AND leaves partial text in the buffer, which no
+  other compiler here does.** `write (buf, fmt, iostat=ios)` with an unusable `fmt` gives
+  `ios = 1005` on flang 22.1.8 *and* a partly-rendered `buf` — `1` for an `integer(int32)` value of
+  1, `377600000000000000000` for `1.0_real64`. gfortran (5006), ifx (62) and nagfor (125) all report
+  the same rejection and leave the buffer **empty**, so any code deciding "was this rendered?" from
+  the buffer's emptiness works on three compilers out of four and returns plausible garbage on the
+  fourth. `rendered_ok` (`src/parquet_utils.f90`) shipped in exactly that state; it now keys on the
+  runtime's overflow marker (an asterisk) instead, which is the only nonzero-`iostat` case it exists
+  to accept. See `feature_risks.md` Risk-187.
+
+  **Two general points, and the second is the reason this is worth a bullet.** A literal bad format
+  is a *compile* error under flang (`error: Unexpected 'N' in format expression`) where the others
+  accept it and fail at run time — so a reproducer for this must take the format through a
+  `character(len=*)` variable, or flang will not build it. And the rule that broke here was written
+  from a two-compiler measurement and generalised: "measured on ifx and gfortran" is evidence about
+  ifx and gfortran, and an I/O runtime is exactly the area where the third compiler is a third
+  behaviour rather than a tie-break.
+
 - **A CHARACTER TEMPORARY built inside a loop may never be reclaimed until the procedure returns, so
   a long loop dies of stack exhaustion far from its cause.** Every `call sub("%" // what // ": ...")`
   in a loop gets its own stack slot, about 90 bytes a call, and the frame grows monotonically.
@@ -5292,6 +5311,40 @@ n = n + mut                  ! n >= 1 here, so bit-for-bit a no-op -- but not re
   defensive** — say so in a comment and `GCOVR_EXCL` it rather than deleting it or inventing an
   unbuildable fixture. `list_uniform_width`'s `IsNull` check is the worked example: Arrow's own
   `ListBuilder::AppendNull` already leaves `value_length == 0`, so no Arrow-built array reaches it.
+
+### A scenario whose abort is inside a `pure` function must USE the result
+
+Fortran has no way to call a function and discard the result, so an error scenario always has to put
+it somewhere — and the note under
+[NAG's warnings](#nags-explicitly-imported-but-not-used-warnings-most-are-false-positives) says as
+much. **Putting it in a variable nothing reads is not enough.** A compiler may delete a call to a
+`pure` function whose result is never used, and **gfortran does, from `-O1` upward**: the `error
+stop` goes with the call, the scenario runs on to its "was accepted" print and exits 0, and the
+test reports the LIBRARY as having failed to refuse something it refuses perfectly well.
+
+Measured on `scenario_index_tuple_width_mismatch` and `scenario_index_scalar_on_composite`, whose
+`got = m%get(...)` vanished under `--profile release` (`pf_index_map%get` is `pure`). `-O0` aborts;
+`-O1`, `-O2` and `-O3` do not; assigning the result and then *printing* it aborts at every level.
+So a plain `fpm test`, CI, and every nagfor profile — all `-O0` for this purpose — pass, and only a
+gfortran release build sees it.
+
+- **Consume the value**, usually by widening the scenario's own trailing message:
+  `print '(a,i0)', "... was accepted, got=", got`. One word of work, and it also makes the
+  diagnostic better when the guard really has gone.
+- **Do NOT consume it with another call that could itself abort.** A follow-up `%is_valid()` on an
+  out-of-range handle would make the scenario abort for the wrong reason, which is a *false pass* —
+  worse than the failure it was papering over.
+- **This is about `pure` specifically.** An impure call cannot be deleted, so the eight other
+  scenarios here that discard a result are safe today. They are one `pure` keyword away from not
+  being, which is what the check is for rather than a reason to rewrite them now.
+
+`check_scenario_uses_a_pure_result` (`tools/check_source_conventions.py`) enforces it, resolving
+what "pure" means at a call site from `src/` in three ways — the `pure`/`elemental` functions
+themselves, the type-bound bindings that reach them (`m%get`), and the named generic interfaces
+that reach them (`parquet_slice_range`). That last group is what makes the check forward-looking:
+mark an existing specific `pure` and the scenario discarding its result fails the lint stage
+immediately. Both directions were controlled — reintroducing the original defect fails the check,
+and marking `slice_range_i32` `pure` surfaces `scenario_table_slice_zero_step`.
 
 ### A test that asserts a REFUSAL must say what to assert when the refusal lifts
 

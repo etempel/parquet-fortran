@@ -421,6 +421,14 @@ contains
     !! a type-mismatched edit descriptor through `iostat` and this module's fallback fires, while
     !! others write asterisks themselves and report success. "Every character is an asterisk" is
     !! the whole contract.
+    !!
+    !! **The three `verify` assertions below bite only under flang**, and are not decoration
+    !! elsewhere for that reason: gfortran, ifx and nagfor leave the buffer EMPTY when they reject a
+    !! format, so they satisfy the contract whatever rule `rendered_ok` (`src/parquet_utils.f90`)
+    !! uses, while flang reports the rejection and still leaves partial text -- `1`, and
+    !! `377600000000000000000` for the `real64` form -- which was returned as if it were a
+    !! rendering. See `feature_risks.md` Risk-187 for why this function has no single build in
+    !! which both of its rules are live.
     subroutine test_to_str_bad_fmt(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
         character(len=:), allocatable :: got

@@ -21338,7 +21338,12 @@ contains
         print '(a)', "scenario_toml_section_not_array: counting a plain table should have aborted"
     end subroutine scenario_toml_section_not_array
 
-    !> An entry index outside `1 .. count` must abort rather than return a closed handle.
+    !> An entry index outside `1 .. count` must abort when the call is a BARE one.
+    !>
+    !> `required = .false.` deliberately does the opposite and returns a closed handle, which
+    !> `test_optional_entry_out_of_range` (test/test_toml.f90) pins. The two halves are the
+    !> same rule the named form already followed: absence honours `required =`, and only a
+    !> name of the wrong shape is fatal whatever it says.
     subroutine scenario_toml_entry_out_of_range()
         type(pf_toml) :: conf, ent
         character(len=:), allocatable :: text

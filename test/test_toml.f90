@@ -50,6 +50,8 @@ contains
             new_unittest("root-level keys are read from the document handle", test_root_keys), &
             new_unittest("sections nest and their paths compose", test_nested_sections), &
             new_unittest("an optional section that is absent stays closed", test_optional_section), &
+            new_unittest("an optional entry index outside the range stays closed", &
+                test_optional_entry_out_of_range), &
             new_unittest("section_count counts entries and answers 0 for an absent name", test_section_count), &
             new_unittest("an array of tables is read entry by entry", test_array_of_tables), &
             new_unittest("caller-sized arrays round-trip for every type", test_array_round_trip), &
@@ -290,6 +292,53 @@ contains
         call check(error, pf_toml_is_open(conf), "the document handle must still be open")
         call pf_toml_close(conf)
     end subroutine test_optional_section
+
+    !> `required = .false.` governs an out-of-range `[[name]]` index exactly as it governs an
+    !> absent name: the handle comes back closed rather than the run stopping.
+    !!
+    !! The bare call still aborts, which `scenario_toml_entry_out_of_range` covers out of process --
+    !! an abort cannot be asserted from in here. What this test pins is the half that was widened,
+    !! and its **negative control is the in-range read**: without it the test would pass just as
+    !! happily against an implementation that had stopped opening entries altogether, since a
+    !! closed handle is exactly what that would produce too.
+    subroutine test_optional_entry_out_of_range(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive's error slot.
+        type(pf_toml) :: conf, ent
+        character(len=:), allocatable :: text
+        logical :: found
+        integer :: n
+
+        call sample(text)
+        call pf_toml_loads(conf, text)
+        n = pf_toml_section_count(conf, "region")
+        call check(error, n >= 1, "the fixture must carry at least one [[region]] entry")
+        if (allocated(error)) return
+
+        ! Negative control first: an index that IS in range must open.
+        call pf_toml_section(conf, "region", 1, ent, required = .false., found = found)
+        call check(error, found, "found must be .true. for an entry the file does have")
+        if (allocated(error)) return
+        call check(error, pf_toml_is_open(ent), "an in-range entry must open")
+        if (allocated(error)) return
+
+        ! Past the end.
+        call pf_toml_section(conf, "region", n + 1, ent, required = .false., found = found)
+        call check(error, .not. found, "found must be .false. for an entry past the last one")
+        if (allocated(error)) return
+        call check(error, .not. pf_toml_is_open(ent), &
+            "an out-of-range optional entry must leave the handle closed, not stop the run")
+        if (allocated(error)) return
+
+        ! And below the start, which is the other side of the same guard.
+        call pf_toml_section(conf, "region", 0, ent, required = .false., found = found)
+        call check(error, .not. found, "found must be .false. for index 0")
+        if (allocated(error)) return
+        call check(error, .not. pf_toml_is_open(ent), "index 0 must leave the handle closed")
+        if (allocated(error)) return
+
+        call check(error, pf_toml_is_open(conf), "the document handle must still be open")
+        call pf_toml_close(conf)
+    end subroutine test_optional_entry_out_of_range
 
     !> `[[name]]` entries are counted, and an absent name counts 0 rather than aborting.
     subroutine test_section_count(error)

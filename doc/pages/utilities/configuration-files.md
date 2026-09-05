@@ -106,6 +106,13 @@ do i = 1, pf_toml_section_count(conf, "region")
 end do
 ```
 
+**`required` governs an entry index exactly as it governs a name.** A bare call with an index
+outside `1 .. count` is fatal; `required = .false.` leaves the handle closed and sets `found` to
+`.false.`, so "is there an entry 7?" is a question you may ask rather than one you must already
+know the answer to. A `name` that is present but is not an array of tables is fatal either way —
+absence is a configuration choice, a name of the wrong shape is a programming error, and
+`pf_toml_section_count` draws the same line.
+
 **A key is looked up literally and never split on a dot.** `pf_toml_get(conf, "general.nproc", n)`
 asks the root table for a single key spelled `general.nproc` and stops with absent-key; open
 `[general]` first. TOML allows a dot inside a quoted key, so `"a.b" = 1` at the root is legal and
@@ -128,8 +135,6 @@ call pf_toml_get_opt(sect, key, values)
 call pf_toml_get_alloc_opt(sect, key, values)
 call pf_toml_get_strings_opt(sect, key, strings, [count])
 ```
-
-Square brackets mark an optional argument throughout this page.
 
 `value` is an `integer(int32)`, `integer(int64)`, `real(real32)`, `real(real64)`, `logical` or
 `character(len=:), allocatable` scalar. `values` is a rank-1 array of any of those six, with
@@ -195,9 +200,10 @@ end do
 n = files%length(2)                 ! element 2's length, without fetching it
 ```
 
-A freshly declared `files` that the file does not set still answers `%count() == 0`, so the loop
-above is the whole idiom for an optional list. The object copies its strings out of the document, so
-it survives `pf_toml_close`.
+An index outside `1 .. %count()` is fatal and names both numbers, so the `%count()`-bounded loop
+above is not merely tidy. A freshly declared `files` that the file does not set still answers
+`%count() == 0`, so that loop is also the whole idiom for an optional list. The object copies
+its strings out of the document, so it survives `pf_toml_close`.
 
 `count =` demands an exact number of entries and is fatal in **both** directions. That is what a
 list whose length must match some other setting needs — three column names for three sky conditions
@@ -269,6 +275,29 @@ sub-table below the section is not then reported as a section nobody read; the c
 misspelt *nested* section name inside a marked section is silenced too. Marking is not reading, so
 `pf_toml_save` does not write a marked section's keys — which is right, because the program did not
 use them.
+
+## A section whose keys you do not know in advance
+
+Everything above assumes your program knows the key names. For a table whose keys are the user's
+own — an `[aliases]` block, a `[thresholds]` block keyed by band name — ask for them:
+
+```fortran
+character(len=PF_TOML_MAX_KEY), allocatable :: names(:)
+character(len=:), allocatable :: value
+integer :: i
+
+call pf_toml_keys(sect, names)                  ! every key in this section, in file order
+do i = 1, size(names)
+    call pf_toml_get(sect, trim(names(i)), value)
+end do
+```
+
+The names come back blank-padded to `PF_TOML_MAX_KEY`, which is what lets you enumerate a section
+without importing a toml-f type — `trim` each one on the way into a getter. A closed handle yields
+a zero-length result rather than stopping, so the loop is safe after an optional section.
+
+Reading each key through `pf_toml_get` marks it, so the sweeps stay accurate with nothing extra to
+do. Reaching into the raw table instead is what needs `pf_toml_mark` — see below.
 
 ## Escape hatches
 
@@ -352,7 +381,8 @@ where `pf_toml_save` differs — so loading a file, editing one key and writing 
 are dropped and the key order and formatting are toml-f's. For a file people hand-edit and keep
 comments in, copy the file.
 
-Both take the document handle rather than a section, and both overwrite.
+Both take the document handle rather than a section — passing a section handle is fatal rather
+than writing that subtree — and both overwrite.
 
 ## Thread safety
 
@@ -397,18 +427,23 @@ Every failure is fatal by default, through `pf_log_fatal`, which writes the mess
 `status`, `pf_toml_section`'s `required = .false.`, a getter's `default =` or its `_opt` form,
 `pf_toml_has`, and a check's `severity = PF_TOML_WARN`.
 
-A message looks like this, and the middle block is toml-f's own rendered report:
+A message looks like this, with `nproc = 2.5` in the file and no logging configured, so every line
+carries the default console sink's timestamp and level. The middle block is toml-f's own rendered
+report:
 
 ```
-[general] nproc is not a whole number: config.toml
-  error: [general] nproc is not a whole number
-    |
-  4 | nproc = 2.5
-    |         ^^^
-    |
-... configuration file: config.toml
-ERROR STOP: pf_logger%fatal: ERR: config value has the wrong type: nproc
+19:09:11.435 [ERROR   ] [general] nproc is not a whole number: config.toml
+19:09:11.437 [ERROR   ]   error: [general] nproc is not a whole number
+19:09:11.437 [ERROR   ]    --> config.toml:2:9-11
+19:09:11.437 [ERROR   ]     |
+19:09:11.437 [ERROR   ]   2 | nproc = 2.5
+19:09:11.437 [ERROR   ]     |         ^^^
+19:09:11.437 [ERROR   ]     |
+19:09:11.437 [ERROR   ] ... configuration file: config.toml
 ```
+
+After that the run stops, and the last line is the Fortran runtime's own — its exact wording and the
+process's exit status differ by compiler, so match on the message above rather than on it.
 
 ## Constants
 

@@ -236,8 +236,16 @@ module parquet_toml
     !! before it is opened. `pf_toml_require` still stops: its keys are required and they are not
     !! there, which is a real failure at any level.
     !!
-    !! `idx` is 1-based and must be in range; `pf_toml_section_count` is how you find out how many
-    !! entries there are, and `do i = 1, pf_toml_section_count(...)` is the whole idiom.
+    !! `idx` is 1-based, and `required` governs it exactly as it governs an absent name: the
+    !! default `.true.` makes an index outside `1 .. count` fatal, while `required = .false.`
+    !! leaves `sect` closed and `found` `.false.`, so "is there an entry `idx`?" is a question a
+    !! caller may ask rather than one they must already know the answer to.
+    !! `pf_toml_section_count` is the other way to find out, and
+    !! `do i = 1, pf_toml_section_count(...)` remains the idiom for walking every entry.
+    !!
+    !! A `name` that is present but is **not** an array of tables is fatal whatever `required`
+    !! says, on the same reasoning as `pf_toml_section_count`: absence is a configuration choice,
+    !! a name of the wrong shape is a programming error.
     !!
     !! Opening a section marks it as read, so neither `pf_toml_check` on the parent nor
     !! `pf_toml_check_all` reports it. For `[[name]]`, both the array name and the entry's own
@@ -544,10 +552,12 @@ contains
     subroutine pf_toml_section_indexed(parent, name, idx, sect, required, found)
         type(pf_toml), intent(in) :: parent            !! Document or section to look in.
         character(len=*), intent(in) :: name           !! Array-of-tables name, looked up literally.
-        integer, intent(in) :: idx                     !! 1-based entry index; must be in range.
+        integer, intent(in) :: idx                     !! 1-based entry index.
         type(pf_toml), intent(out) :: sect             !! Receives the section handle.
-        logical, intent(in), optional :: required      !! Fatal when `[[name]]` is absent. Default `.true.`.
-        logical, intent(out), optional :: found        !! Whether `[[name]]` was there.
+        logical, intent(in), optional :: required
+        !! Fatal when `[[name]]` is absent OR `idx` is outside `1 .. count`. Default `.true.`;
+        !! with `.false.` either absence leaves `sect` closed instead.
+        logical, intent(out), optional :: found        !! Whether that entry was there.
 
         !$omp critical (parquet_toml_guard)
         call section_impl(parent, name, idx, .true., sect, required, found)
@@ -2375,8 +2385,13 @@ contains
                 call fail_not_entries(parent, name)
                 return
             end if
+            ! Gated on `need` exactly as the absent-name case above is, so that the indexed form
+            ! and the named form answer `required = .false.` the same way: absence -- of the name,
+            ! or of the entry -- leaves the handle CLOSED, while a name of the wrong shape stays
+            ! fatal either way. "Is there a seventh entry?" is a question a caller may legitimately
+            ! ask; "how many entries does this plain table have?" is a programming error.
             if (idx < 1 .or. idx > toml_len(arr)) then
-                call fail_entry_range(parent, name, idx, toml_len(arr))
+                if (need) call fail_entry_range(parent, name, idx, toml_len(arr))
                 return
             end if
             call get_value(arr, idx, tptr)

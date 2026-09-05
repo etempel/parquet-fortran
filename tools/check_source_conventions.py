@@ -4506,6 +4506,158 @@ def check_open_table_arguments_are_forwarded():
     return problems
 
 
+def check_generated_init_signature_is_documented():
+    """`generated-tables.md`'s `%init` row must list exactly the dummies the generator emits.
+
+    The sibling check above proves the generated wrapper FORWARDS every `parquet_open_table`
+    argument. Nothing proved the guide SAYS SO, and the same two arguments went missing in both
+    places from one cause: `list_columns=` and `bounded=` were absent from the wrapper (which
+    `check_open_table_arguments_are_forwarded` was then written for), and absent from the page's
+    `%init` row -- where they stayed after the code was fixed, because nothing reads the page.
+
+    What makes that damaging rather than merely incomplete is the sentence directly beneath the
+    table: *"Every one of `%init`'s is forwarded to `parquet_open_table` unchanged, except
+    `exact`"*. It is CORRECT as a rule, and it tells a reader the list above it is exhaustive -- so
+    an argument missing from the row reads as an argument the generated type does not offer.
+
+    **Three things are compared, all from one parse of each side:**
+
+      * the argument NAMES, in both directions -- a dummy the row omits, and a row token no dummy
+        matches (the second catches a rename that only half landed);
+      * their ORDER, because the row is written as a call and Fortran's optional arguments are
+        positional until a caller starts using keywords;
+      * their BRACKETS -- `[x]` must mean `optional` and a bare token must mean required. This is
+        the page's own stated convention, so a bracket that disagrees with the declaration is
+        wrong in the way a reader would actually act on.
+
+    **Matched by shape on both sides; neither the generated type's name nor the page's wording is
+    hard-coded.** The emitted side is reached through `procedure :: init => <name>` in the type
+    body rather than by naming `parquet_table_test_init`, because that name is derived from the
+    Role-A MAML (`table_types/maml_example4.maml` -> `parquet_table_test`) and a downstream project's
+    is different. The page side is anchored on a table row opening with the call in backticks, which
+    is the one form the bracket convention is written in, and EVERY matching row is checked rather
+    than the first -- a second one added later would otherwise drift unchecked, the check narrowing
+    silently with nothing to report it.
+
+    Reading the generator's committed OUTPUT rather than the emitting Python is the same choice
+    `check_open_table_arguments_are_forwarded` makes and for the same reason -- the declaration is
+    assembled there from adjacent string literals, and a regex over that is a second thing to get
+    wrong. `generate_user_table_code.py --check` (lint stage) already proves the output is current.
+
+    **`%init_slice` is deliberately NOT checked.** Its row ends in `...`, an intentional
+    abbreviation that says "and the rest of `%init`'s"; making it match would mean expanding a row
+    the page shortened on purpose. `%init_empty([nrows])` is likewise out of scope: its optionality
+    comes from three separate specifics under one generic, not from an `optional` dummy, so there is
+    no dummy list to compare against.
+
+    Every failure path returns a problem rather than passing quietly -- if the binding, the
+    subroutine or the table row stops being found, this check has gone blind and says so. That is
+    the failure mode a first version of the sibling page-check shipped with.
+    """
+    emitted = SRC / "parquet_table_example.f90"
+    page = REPO_ROOT / "doc" / "pages" / "utilities" / "generated-tables.md"
+    missing = [p for p in (emitted, page) if not p.is_file()]
+    if missing:
+        return ["tools/check_source_conventions.py: %s not found -- this check has gone stale and "
+                "is silently testing nothing" % ", ".join(m.name for m in missing)]
+
+    emitted_text = emitted.read_text(encoding="utf-8", errors="replace")
+
+    # `procedure :: init => <name>` in the generated type body. The type's name comes from the
+    # Role-A MAML, so the binding is the anchor, never the procedure's own name.
+    m = re.search(r"^\s*procedure\s*::\s*init\s*=>\s*(\w+)", emitted_text, re.M)
+    if not m:
+        return ["src/parquet_table_example.f90: no `procedure :: init => ...` binding found -- the "
+                "generator's type body has been restructured and this check is testing nothing"]
+    impl = m.group(1)
+
+    decl = re.search(r"^\s*subroutine %s\(" % re.escape(impl), emitted_text, re.M)
+    if not decl:
+        return ["src/parquet_table_example.f90: `%s` is bound as %%init but never defined -- this "
+                "check is testing nothing" % impl]
+
+    # The dummy list, and then each dummy's own declaration, for the `optional` attribute.
+    depth, buf = 1, []
+    for ch in emitted_text[decl.end():]:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                break
+        buf.append(ch)
+    dummies = [a.strip() for a in "".join(buf).replace("&", " ").replace("\n", " ").split(",")
+               if a.strip()]
+    if len(dummies) < 2:
+        return ["src/parquet_table_example.f90: %s takes %d dummy argument(s) -- expected a passed "
+                "object and at least a filename, so this check is testing nothing"
+                % (impl, len(dummies))]
+    dummies = dummies[1:]                      # drop the passed-object dummy
+
+    body = emitted_text[decl.end():emitted_text.index("end subroutine %s" % impl, decl.end())]
+    optional = set()
+    for line in body.split("\n"):
+        if "::" not in line or "!" == line.strip()[:1]:
+            continue
+        attrs, _, names = line.partition("::")
+        if not re.search(r"\boptional\b", attrs, re.I):
+            continue
+        names = names.split("!")[0]
+        optional.update(n.strip() for n in names.split(",") if n.strip())
+
+    # Every `%init` row on the page, not merely the first -- a second one added later would
+    # otherwise drift unchecked. `%init_slice`'s rows do not match (the literal `(` after `init`
+    # separates them), and a row abbreviated with a trailing `...` is skipped for the same reason
+    # that one is: it says "and the rest of %init's", which is not a claim to check.
+    rows = [m.group(1) for m in re.finditer(
+        r"^\|\s*`%init\((.*?)\)`", page.read_text(encoding="utf-8", errors="replace"), re.M)]
+    rows = [r for r in rows if "..." not in r]
+    if not rows:
+        return ["doc/pages/utilities/generated-tables.md: no unabbreviated `| `%init(...)`` table "
+                "row found -- the page has been restructured and this check is testing nothing"]
+
+    problems = []
+    for tokens in [[t.strip() for t in r.split(",") if t.strip()] for r in rows]:
+        problems += _init_row_problems(tokens, dummies, optional)
+    return problems
+
+
+def _init_row_problems(tokens, dummies, optional):
+    """Compare one rendered `%init(...)` row against the emitted dummy list. See the caller."""
+    problems, shown = [], []
+    for tok in tokens:
+        bare = tok[1:-1].strip() if tok.startswith("[") and tok.endswith("]") else tok
+        shown.append(bare)
+        if bare not in dummies:
+            problems.append(
+                "doc/pages/utilities/generated-tables.md: %%init's row lists `%s`, which the "
+                "generator does not emit -- the page describes an argument a generated table type "
+                "does not have" % bare)
+            continue
+        want_bracket = bare in optional
+        if tok.startswith("[") != want_bracket:
+            problems.append(
+                "doc/pages/utilities/generated-tables.md: %%init's row shows `%s` as %s, but "
+                "src/parquet_table_example.f90 declares it %s -- the page's own convention is that "
+                "square brackets mean optional"
+                % (bare, "optional" if tok.startswith("[") else "required",
+                   "optional" if want_bracket else "required"))
+
+    for arg in dummies:
+        if arg not in shown:
+            problems.append(
+                "doc/pages/utilities/generated-tables.md: %%init's row omits `%s`, which the "
+                "generator emits and forwards -- the sentence under that table says every one of "
+                "%%init's arguments is forwarded, so a reader takes the row as exhaustive" % arg)
+
+    if not problems and shown != dummies:
+        problems.append(
+            "doc/pages/utilities/generated-tables.md: %%init's row lists the right arguments in the "
+            "wrong order (page: %s; generator: %s) -- the row is written as a call, and a caller "
+            "may pass them positionally" % (", ".join(shown), ", ".join(dummies)))
+    return problems
+
+
 def _handle_returning_bindings():
     """`(type -> {binding, ...})` for every binding that hands back a pointer AT its own dummy.
 
@@ -5151,6 +5303,8 @@ CHECKS = (
     ("threads= is forwarded to every callee that takes it", check_threads_are_forwarded),
     ("generated table types forward every parquet_open_table argument",
      check_open_table_arguments_are_forwarded),
+    ("generated-tables.md's %init row matches the generated signature",
+     check_generated_init_signature_is_documented),
     ("omp_* references are guarded by #ifdef _OPENMP", check_openmp_calls_are_guarded),
     ("benchmark build-tree names carry the compiler", check_build_tree_names_carry_the_compiler),
     ("parquet_table has no allocatable component", check_no_allocatable_component),

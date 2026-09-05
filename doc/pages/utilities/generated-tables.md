@@ -168,7 +168,7 @@ so take the pointer again afterwards. See
 
 | constructor | what it opens |
 |---|---|
-| `%init(filename, [maml], [filter], [sort], [qc], [qc_soft], [use_threads], [sample_fraction], [sample_seed], [exact])` | the whole file |
+| `%init(filename, [maml], [filter], [sort], [qc], [qc_soft], [use_threads], [sample_fraction], [sample_seed], [list_columns], [bounded], [exact])` | the whole file |
 | `%init_slice(filename, row_lo, row_hi, ...)` | one contiguous row range; **no `sort` argument** |
 | `%init_empty([nrows])` | nothing — an in-memory table with the same columns, `nrows` of them all null |
 

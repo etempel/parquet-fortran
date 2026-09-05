@@ -6379,7 +6379,8 @@ contains
     !> report_fatal_error (print + std::abort()), same as the type-mismatch
     !> case below, instead of an uncaught C++ exception reaching
     !> std::terminate() -- still a C++-level abort, not a Fortran error stop
-    !> (see README's Null values section), just a clean, diagnosable one.
+    !> (see doc/pages/operating/error-handling.md's "A C++-level process exit"),
+    !> just a clean, diagnosable one.
     subroutine test_read_column_with_nulls_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
@@ -10510,10 +10511,12 @@ contains
         !$ nthreads = omp_get_max_threads()
         if (nthreads <= 1) return   ! no real concurrency -> skip (pass)
 
-        ! README's Thread safety section explicitly promises a diagnostic on
-        ! stderr for this case, not just a bare abort -- check that promise
+        ! doc/pages/operating/thread-safety.md explicitly promises a diagnostic
+        ! on stderr for this case, not just a bare abort -- check that promise
         ! from the same run as the exit-status check, rather than re-running
-        ! the (race-dependent) scenario a second time.
+        ! the (race-dependent) scenario a second time. (README carried that
+        ! promise in a "Thread safety" SECTION until it became a landing page;
+        ! the guide is its home now, and the README feature bullet points there.)
         call check_scenario_exit_status_and_stderr(error, "concurrent_calls_into_shared_reader", &
             expect_abort=.true., &
             failure_message="concurrent parquet_read_column calls into one shared reader were expected to abort", &
@@ -10905,8 +10908,8 @@ contains
     !> Like check_scenario_exit_status, but also asserts stderr (captured
     !> from the same single run) contains `required_stderr`. Used only where
     !> the diagnostic text itself is an explicit documented guarantee (e.g.
-    !> the concurrency guard's stderr message in the README's Thread safety
-    !> section) -- not applied broadly to every scenario, since most
+    !> the concurrency guard's stderr message, promised in
+    !> doc/pages/operating/thread-safety.md) -- not applied broadly to every scenario, since most
     !> diagnostic wording isn't a documented contract and shouldn't be
     !> locked down by regression tests.
     subroutine check_scenario_exit_status_and_stderr(error, scenario, expect_abort, failure_message, required_stderr)

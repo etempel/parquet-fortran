@@ -61,6 +61,7 @@ contains
             new_unittest("a rank-1 default is applied when the key is absent", test_array_default), &
             new_unittest("get_alloc sizes the result from the file", test_get_alloc), &
             new_unittest("get_alloc_opt leaves the result unallocated when the key is absent", test_get_alloc_absent), &
+            new_unittest("get_alloc_opt keeps a list the caller already held", test_get_alloc_opt_keeps_a_list), &
             new_unittest("a string list keeps each element's own length", test_strings_lengths), &
             new_unittest("a string list survives closing the document", test_strings_outlive_document), &
             new_unittest("an absent optional string list has count 0", test_strings_absent), &
@@ -79,6 +80,7 @@ contains
             new_unittest("loading a file that is not there is soft with status=", test_load_status_open), &
             new_unittest("text that is not TOML is soft with status=", test_load_status_parse), &
             new_unittest("a new document can be built, saved and read back", test_build_and_save), &
+            new_unittest("new_section upserts, on a built and on a loaded document", test_new_section_upserts), &
             new_unittest("update changes a key and set adds one", test_set_and_update), &
             new_unittest("append_section builds an array of tables", test_append_section), &
             new_unittest("save writes the effective configuration", test_save_effective), &
@@ -494,6 +496,61 @@ contains
         call check(error, allocated(ints), "a present list must allocate the result")
         call pf_toml_close(conf)
     end subroutine test_get_alloc_absent
+
+    !> `pf_toml_get_alloc_opt` leaves a result that is ALREADY allocated exactly as it found it.
+    !!
+    !! The SIZE assertion is the one that carries the test. Asserting only `allocated(values)`
+    !! would pass against an implementation that reallocated the variable to some other length and
+    !! refilled it, which is why the fixture carries two integer lists of different lengths and the
+    !! negative control reads the shorter one into the same variable -- without that arm, "the
+    !! variable is unchanged" is indistinguishable from "this procedure never writes at all".
+    subroutine test_get_alloc_opt_keeps_a_list(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive's error slot.
+        type(pf_toml) :: conf, gen
+        character(len=:), allocatable :: text
+        integer(int32), allocatable :: ints(:)
+        real(real64), allocatable :: reals(:)
+        character(len=1) :: nl
+
+        nl = new_line("a")
+        text = '[general]' // nl // &
+               'short = [7]' // nl // &
+               'limits = [1, 2, 3]' // nl // &
+               'weights = [0.5, 1.5]' // nl
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+
+        call pf_toml_get_alloc(gen, "limits", ints)
+        call check(error, size(ints) == 3, "the fixture's list must arrive at length 3")
+        if (allocated(error)) return
+        call pf_toml_get_alloc_opt(gen, "no_such_list", ints)
+        call check(error, allocated(ints), "an absent key must leave an allocated list allocated")
+        if (allocated(error)) return
+        call check(error, size(ints) == 3, &
+            "an absent key must not resize a list the caller already held")
+        if (allocated(error)) return
+        call check(error, all(ints == [1_int32, 2_int32, 3_int32]), &
+            "an absent key must not change the contents of a list the caller already held")
+        if (allocated(error)) return
+
+        ! Negative control: a key that IS there replaces the length and the values alike.
+        call pf_toml_get_alloc_opt(gen, "short", ints)
+        call check(error, size(ints) == 1, "a present key must resize an already-allocated list")
+        if (allocated(error)) return
+        call check(error, ints(1) == 7_int32, "a present key must overwrite the values too")
+        if (allocated(error)) return
+
+        ! The page states this of the generic, not of one specific -- a second of the five.
+        call pf_toml_get_alloc(gen, "weights", reals)
+        call pf_toml_get_alloc_opt(gen, "no_such_list", reals)
+        call check(error, allocated(reals), "the real64 specific must keep an allocated list too")
+        if (allocated(error)) return
+        call check(error, size(reals) == 2, "the real64 specific must keep the list's length")
+        if (allocated(error)) return
+        call check(error, abs(reals(1) - 0.5_real64) < 1.0e-12_real64, &
+            "the real64 specific must keep the list's values")
+        call pf_toml_close(conf)
+    end subroutine test_get_alloc_opt_keeps_a_list
 
     ! ================================================================================
     ! String lists
@@ -1187,6 +1244,72 @@ contains
         call check(error, one == "a much longer", "the longest element must reload in full")
         call pf_toml_close(back)
     end subroutine test_build_and_save
+
+    !> `pf_toml_new_section` UPSERTS: a second call with the same name hands back the section that
+    !! is already there -- on a document built from nothing and on a loaded one alike.
+    !!
+    !! The discriminating assertion is the round trip through TWO handles: a key set through the
+    !! first must be readable through the second, and one set through the second visible through
+    !! the first. Asserting only that the second call succeeds would pass against an implementation
+    !! that quietly started a second, empty table beside the first -- which is exactly the failure
+    !! worth pinning, because nothing else on the write side upserts and there is no sibling
+    !! behaviour to fall back on.
+    !!
+    !! The control showing that upserting is SPECIAL rather than universal is out of process,
+    !! because it aborts: `pf_toml_set` on a key that already exists is error scenario
+    !! `toml_set_existing` (`test/error_scenarios.f90`).
+    subroutine test_new_section_upserts(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive's error slot.
+        type(pf_toml) :: doc, first, second, conf, again, fresh
+        character(len=:), allocatable :: text, path_one, path_two
+        integer(int32) :: n
+
+        ! A document built from nothing: the second call must not start an empty table.
+        call pf_toml_new(doc, "upsert")
+        call pf_toml_new_section(doc, "general", first)
+        call pf_toml_set(first, "nproc", 6_int32)
+        call pf_toml_new_section(doc, "general", second)
+        ! `%has` before `%get`: reading an absent key is fatal, so a second handle onto a fresh
+        ! empty table would abort the runner rather than fail this test.
+        call check(error, pf_toml_has(second, "nproc"), &
+            "a second new_section must return the section already there, not a fresh empty one")
+        if (allocated(error)) return
+        call pf_toml_get(second, "nproc", n)
+        call check(error, n == 6_int32, "and it must carry the value the first handle set")
+        if (allocated(error)) return
+        call pf_toml_path(first, path_one)
+        call pf_toml_path(second, path_two)
+        call check(error, path_one == path_two, "both handles must report the same path")
+        if (allocated(error)) return
+        ! The other direction, which is what makes them one section rather than a copy of one.
+        call pf_toml_set(second, "factor", 0.5_real64)
+        call check(error, pf_toml_has(first, "factor"), &
+            "a key set through the second handle must be visible through the first")
+        if (allocated(error)) return
+        call pf_toml_close(doc)
+
+        ! A LOADED document: a section the file already carries comes back with the file's keys ...
+        call sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_new_section(conf, "general", again)
+        call check(error, pf_toml_has(again, "nproc"), &
+            "new_section on a loaded document must return the file's own section, not an empty one")
+        if (allocated(error)) return
+        call pf_toml_get(again, "nproc", n)
+        call check(error, n == 4_int32, "and it must carry the value the file set")
+        if (allocated(error)) return
+        ! ... and one it does not carry is added rather than refused.
+        call check(error, .not. pf_toml_has_section(conf, "extra"), &
+            "the fixture must not already carry the section this arm adds")
+        if (allocated(error)) return
+        call pf_toml_new_section(conf, "extra", fresh)
+        call check(error, pf_toml_has_section(conf, "extra"), &
+            "new_section must add a section the loaded file did not have")
+        if (allocated(error)) return
+        call pf_toml_set(fresh, "added", 1_int32)
+        call check(error, pf_toml_has(fresh, "added"), "the added section must accept keys")
+        call pf_toml_close(conf)
+    end subroutine test_new_section_upserts
 
     !> `pf_toml_update` changes a key the file set; `pf_toml_set` adds one it did not.
     subroutine test_set_and_update(error)

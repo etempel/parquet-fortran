@@ -11,9 +11,9 @@
 [![fpm](https://img.shields.io/badge/fpm-package-729FCF.svg)](https://fpm.fortran-lang.org/)
 [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/LICENSE)
 
-Read and write parquet files from Fortran, with the table's schema and metadata defined in the [MAML format](https://github.com/asgr/MAML-Format) and converted to VOTable-style metadata in the parquet header. Around that sit the pieces a program reading columnar data usually needs anyway: a whole-file table container, type-erased column storage, sorting and array statistics, reproducible random numbers and sampling, spatial and HEALPix indexing, and logging and path helpers — each importable on its own, and most of them free of any Arrow dependency.
+Read and write parquet files from Fortran, with the table's schema and metadata defined in the [MAML format](https://github.com/asgr/MAML-Format) and converted to VOTable-style metadata in the parquet header. Around that sit the pieces a program reading columnar data usually needs anyway: a whole-file table container, type-erased column storage, sorting and array statistics, reproducible random numbers and sampling, spatial and HEALPix indexing, key-to-index lookup, TOML configuration files, and logging and path helpers — each importable on its own, and most of them free of any Arrow dependency.
 
-**Status: 2.0 — stable.** The `use parquet` API follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) — see [API stability](#important-behavior) for exactly what that covers, and [CHANGELOG.md](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/CHANGELOG.md) for release history, including what changed incompatibly in 2.0. `parquet_get_version` reports the version of the library you actually linked against, and `parquet_get_arrow_version` the Arrow/Parquet C++ version behind it.
+**Status: 2.2.0 — stable.** The `use parquet` API follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) — see [API stability](#api-stability) for exactly what that covers, and [CHANGELOG.md](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/CHANGELOG.md) for release history, including what changed incompatibly in 2.0. `parquet_get_version` reports the version of the library you actually linked against, and `parquet_get_arrow_version` the Arrow/Parquet C++ version behind it.
 
 **Features:**
 
@@ -28,12 +28,12 @@ Read and write parquet files from Fortran, with the table's schema and metadata 
 - Sorted reads (`parquet_sortkey`): return a file's rows ordered by one or more columns, ascending or descending, with per-key null placement and stable ties — see [Reading rows in sorted order](doc/pages/io/filter-sort-sample.md#reading-rows-in-sorted-order-with-parquet_sortkey).
 - Compact string columns (`parquet_string_column`) — append/search/mutate a scalar string column without pre-sizing a fixed-width buffer — see [Reading and writing compact string columns](doc/pages/types/string-columns.md#reading-and-writing-compact-string-columns).
 - Read a file's own stored table metadata back (`parquet_get_metadata`), and prefetch specific columns before reading (`parquet_prefetch_columns`).
-- Whole tables in memory (`parquet_table`): a file's columns as one named object, read on first use, reached by name as ordinary Fortran arrays or as zero-copy typed pointers — or built in memory column by column and written out. Filter, sort, take a top-N, delete or append rows, join another table's columns onto it by matching key columns, slice a file into row ranges, or read a filtered file larger than memory one row group at a time. Generated table types give a MAML schema named per-column accessors. See [Whole tables in memory](doc/pages/tables/index.md).
+- Whole tables in memory (`parquet_table`): a file's columns as one named object, read on first use, reached by name as ordinary Fortran arrays or as zero-copy typed pointers — or built in memory column by column and written out. Filter, sort, take a top-N, delete or append rows, join another table's columns onto it by matching key columns (`%join`), slice a file into row ranges, or read a filtered file larger than memory one row group at a time (`bounded=`). Generated table types give a MAML schema named per-column accessors. See [Whole tables in memory](doc/pages/tables/index.md).
 - Array statistics over plain Fortran arrays (`pf_mean`, `pf_variance`, `pf_median`, `pf_quantile`, `pf_corr`, `pf_histogram` and the rest of the family, plus the `pf_stats` accumulator for many statistics in one pass): moments, order statistics, robust estimators, relationships, cumulative folds and binning — null-, NaN- and weight-aware, with one fixed exclusion policy shared by every procedure, and no Arrow. See [Array statistics](doc/pages/utilities/statistics.md).
 - Sorting for plain Fortran arrays and for column types (`pf_sort`, `pf_argsort`, and the partial/selection/search/unique family): stable, null- and NaN-aware, multi-key, threaded, over the six intrinsic element types plus `parquet_column`, `parquet_string_column` and the three temporal types. Nothing about it is parquet-specific, and it imports no Arrow. See [Sorting, ranking and selection](doc/pages/utilities/sorting.md).
 - Reproducible random numbers and sampling (`pf_random_at` and friends): counter-based, so element *k* of a stream is a pure function of `(seed, index)` — no state, no locks, identical values in any order and at any thread count. Uniforms, integers, bits, four distributions, permutations, subsets, resampling and weighted draws without replacement. See [Random numbers and sampling](doc/pages/utilities/random.md).
 - Spatial neighbour search (`pf_spatial_index`) over plain coordinate arrays: ball, annulus, k-nearest, segment/cylinder/cone and on-the-sky queries, the self-join as CSR or as an edge list, connected components for a Friends-of-Friends group finder, optional periodic boundaries, and a cell size the library measures for itself rather than asking you to pick. Two backends on the sky — a uniform grid and a HEALPix pixelisation. No Arrow. See [Spatial neighbour search](doc/pages/utilities/spatial.md).
-- HEALPix sphere pixelisation (`parquet_healpix`): equal-area pixels on rings of constant latitude, both numbering schemes, disc queries, angular separations and grid arithmetic, with a bulk form of every conversion. No floating-point exception is ever raised, so a program running under `-ffpe-trap` needs no guard around a disc query. See [Sphere pixelisation](doc/pages/utilities/healpix.md).
+- HEALPix sphere pixelisation (`parquet_healpix`): equal-area pixels on rings of constant latitude, both numbering schemes, disc queries, angular separations and grid arithmetic, with a bulk form of every conversion. No floating-point exception is raised for any finite argument, so a program running under `-ffpe-trap` needs no guard around a disc query. See [Sphere pixelisation](doc/pages/utilities/healpix.md).
 - Fast key-to-index lookup (`pf_index_map`) over plain integer arrays: which row holds this key, in a few nanoseconds, for a single integer key or a tuple of them when no one column is unique. Three storage backends behind one API — an array indexed by the key, an open-addressing hash table, and sorted keys plus a binary search — the first two chosen automatically from the keys themselves, the third opt-in. Plus `pf_index_pool`, which hands out and recycles unique index values so a program managing slots in its own arrays need not track which are free. Mutations are safe from several threads at once and a map's lookups are lock-free. No Arrow. See [Key-to-index lookup](doc/pages/utilities/index-maps.md).
 - Leveled logging for your own program (`pf_logger`): several destinations at once, each with its own threshold and layout, ISO timestamps, colour, a cheap `%enabled` check before an expensive message, per-thread context tags, and a buffered mode that keeps one thread's narrative together inside an OpenMP region. One Fortran file, no Arrow. See [Logging](doc/pages/utilities/logging.md).
 - TOML configuration files (`parquet_toml`): a convenience layer over [toml-f](https://github.com/toml-f/toml-f) — a wrong-typed value aborts with the offending source line quoted instead of leaving your variable undefined, a default is applied without writing it into the parsed document, string lists read back at each element's own length, and one call at the end reports every key and every section your program never read (which is the only way to catch a misspelt *optional* key). Writes the effective configuration back out, defaults made explicit. Safe from inside an OpenMP parallel region. See [Configuration files](doc/pages/utilities/configuration-files.md).
@@ -49,6 +49,7 @@ Read and write parquet files from Fortran, with the table's schema and metadata 
 - [Quick example](#quick-example)
 - [Minimal setup to depend on this library](#minimal-setup-to-depend-on-this-library)
 - [Important behavior](#important-behavior)
+  - [API stability](#api-stability)
 - [Prerequisites](#prerequisites)
   - [Environment variables](#environment-variables)
 - [Which module do I import?](#which-module-do-i-import)
@@ -95,7 +96,8 @@ Quickstart outline — see [Prerequisites](#prerequisites) and [Environment vari
 
 ```toml
 [dependencies]
-# Depend on a released version (recommended) -- pin to a tag:
+# Depend on a released version (recommended) -- pin to a tag. v2.0.0 is the newest tag;
+# CHANGELOG.md lists what has landed since it.
 parquet-fortran = { git = "https://github.com/etempel/parquet-fortran.git", tag = "v2.0.0" }
 
 # Or, for local development against a working copy on disk instead of a released version:
@@ -116,9 +118,32 @@ link = ["arrow", "parquet"]
 - Reading and writing a *scalar* column (`col_size = 1`) with more than 2,147,483,647 (2^31-1, Fortran's default-integer `huge(1)`) rows is fully supported for every data type — including addressing an individual row past that count via `parquet_read_array_row_mode`. A *vector* column (`col_size > 1`) is capped at that same limit for its own per-row width (`col_size`); its total element count (`nrows * col_size`) has no such cap — row-group sizing handles Parquet's per-row-group element-count ceiling automatically; see [Limitations](#limitations).
 - **`float32`/`float64` columns are always written with BYTE_STREAM_SPLIT encoding and dictionary encoding disabled**, automatically, regardless of the chosen `compression` codec — see [Writer options](doc/pages/io/writing.md#writer-options).
 - **`qc:` (`min:`/`max:`/`miss:`) enforcement defaults to *on*, on both `parquet_open_writer` and `parquet_open_reader`, whenever a `schema=` is given** (pass `qc=.false.` to opt out; a no-op without a schema). A violation never aborts on write, and only aborts on read if you haven't passed `qc_soft=.true.`; see [Quality control](doc/pages/schema/quality-control.md) for both sides.
-- **API stability:** this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The stability promise covers the whole `use parquet` surface — every public type/procedure/constant reachable that way, including a public type's own type-bound procedures and operators (e.g. `schema%add_field`, `col%append_string`, `operator(-)` on the temporal types) — a breaking change to any of those requires a major version bump. Anything not reachable via `use parquet` (private module internals, `src/parquet_wrapper.cpp`'s C++ surface, file/module layout) can change in a minor or patch release. The promise also covers each advertised entry module *in its own right* — `parquet_io`, `parquet_tables`, `parquet_columns`, `parquet_list`, `parquet_struct`, `parquet_map`, `parquet_strings`, `parquet_temporal`, `parquet_sorting`, `parquet_argsort`, `parquet_stats`, `parquet_sampling`, `parquet_spatial`, `parquet_healpix`, `parquet_random`, `parquet_index`, `parquet_logging`, `parquet_toml`, `parquet_utils`, `parquet_settings`, `parquet_version` and `parquet_maml_base`, listed under [Which module do I import?](#which-module-do-i-import) — since a module offered as an entry point has to stay usable through that import alone. That is wider than it sounds: a change to `parquet_column`'s type-bound procedures is a breaking change even if nothing reachable through `use parquet` moves. In particular, `parquet_core` — the internal module `parquet_io` and the `parquet` facade re-export the reader/writer/schema API from — is *not* part of the promise: `use parquet` or `use parquet_io` is the supported spelling, and `parquet_core` may be renamed or restructured at any time. Neither are `parquet_bindings`, `parquet_settings_base`, `parquet_expkey`, `parquet_ziggurat`, `parquet_sorting_oracle`, or any `*_engine`/`*_kernel` submodule: they are accessible because Fortran has no package scope, not because they are meant to be imported.
 
 See [Error handling](doc/pages/operating/error-handling.md) and [Limitations](#limitations) for full details.
+
+### API stability
+
+This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+**Covered:** the whole `use parquet` surface — every public type, procedure and constant reachable
+that way, including type-bound procedures and operators (`schema%add_field`, `operator(-)` on the
+temporal types). Breaking one requires a major version bump.
+
+The promise also covers each advertised entry module in its own right — `parquet_io`,
+`parquet_tables`, `parquet_columns`, `parquet_list`, `parquet_struct`, `parquet_map`,
+`parquet_strings`, `parquet_temporal`, `parquet_sorting`, `parquet_argsort`, `parquet_stats`,
+`parquet_sampling`, `parquet_spatial`, `parquet_healpix`, `parquet_random`, `parquet_index`,
+`parquet_logging`, `parquet_toml`, `parquet_utils`, `parquet_settings`, `parquet_version` and
+`parquet_maml_base` — since a module offered as an entry point has to stay usable through that
+import alone. So a change to `parquet_column`'s bindings is breaking even if nothing reachable
+through `use parquet` moves.
+
+**Not covered**, and free to change in a minor or patch release: private module internals,
+`src/parquet_wrapper.cpp`'s C++ surface, and file/module layout. That includes `parquet_core` —
+`use parquet` or `use parquet_io` is the supported spelling of the reader/writer/schema API — and
+`parquet_bindings`, `parquet_settings_base`, `parquet_expkey`, `parquet_ziggurat`,
+`parquet_sorting_oracle` and any `*_engine`/`*_kernel` submodule, which are accessible because
+Fortran has no package scope, not because they are meant to be imported.
 
 ## Prerequisites
 
@@ -131,10 +156,14 @@ The code compiles successfully with the following compilers and libraries. It mi
       [Troubleshooting](doc/pages/operating/troubleshooting.md) if you hit a spurious
       "column not found" abort.
     - **Intel Fortran (ifx)** v2026.1.0 and v2026.1.1.
-    - **NAG Fortran (nagfor)** v7.2. Set `FPM_CC`/`FPM_CXX` yourself (see
-      [Environment variables](#environment-variables)), since the NAG family implies no C++
-      compiler. fpm's OpenMP probe does not fit NAG's flag spelling, so the OpenMP flag reaches
-      only the link line — add `-openmp` to `FPM_FFLAGS` to compile the threaded paths in.
+    - **NAG Fortran (nagfor)** v7.2, which needs two things. Set `FPM_CC`/`FPM_CXX` yourself
+      (see [Environment variables](#environment-variables)), since the NAG family implies no C++
+      compiler. And put this repository's `tools/nagfor_fpm_shim` first on `PATH`: fpm 0.13 builds
+      a NAG command line this library cannot be compiled or linked from, and the shim corrects it.
+      Without the shim the build fails with `clang: error: no such file or directory: 'arrow'` or
+      `Option error: -openmp option specified twice` — neither of which is about your Arrow
+      install. See
+      [Troubleshooting](doc/pages/operating/troubleshooting.md#build-and-compile-errors).
     - **LLVM flang** v22.1.8.
 - FPM ([Fortran Package Manager](https://fpm.fortran-lang.org/)) — **minimum 0.13.0.**
   This project's `fpm.toml` uses the `[features]` table and the feature-list form of
@@ -213,7 +242,7 @@ Hitting a build or link error? See [Troubleshooting](doc/pages/operating/trouble
 
 ## Which module do I import?
 
-**`use parquet`, unless you have a reason not to.** It brings the whole library into scope and is what the stability promise under [Important behavior](#important-behavior) is written around.
+**`use parquet`, unless you have a reason not to.** It brings the whole library into scope and is what the stability promise under [API stability](#api-stability) is written around.
 
 Every layer underneath is importable on its own, and several cost a great deal less to compile against. Sizes are this library's Fortran source files, measured by `tools/check_module_footprints.sh`:
 

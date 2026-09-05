@@ -272,7 +272,9 @@ The repository's own scripts live in **two directories, split by contract**:
 it, what its environment variables mean, and how to read its output. Read that before running or
 changing one; the tables below exist only so you know what is there. Everything in both directories
 is maintainer-only unless marked **Consumer-facing** — everything in `bench/` without exception,
-and everything in `tools/` but the four generators and converters a downstream project runs itself.
+and everything in `tools/` but the generators, converters and build shims a downstream project
+runs itself. The tables below carry the marking; do not count them out here, where the number
+goes stale the next time one is added.
 
 The one to know before your first push is **`tools/run_lint_check.sh`**: it runs the same checks as
 `.gitlab-ci.yml`'s `lint` stage, needs nothing but `python3` and `bash`, and takes about ten seconds.
@@ -330,7 +332,7 @@ Output is committed; re-run the generator and its `--check` after editing one.
 |---|---|
 | `machine_report.sh` | Identifies a machine and its toolchain. Run it at the start of every benchmarking run. |
 | `fpm_lto.sh` | **Sourced, not executed** — an LTO-aware `fpm` wrapper. See [above](#building-with-link-time-optimisation). |
-| `nagfor_fpm_shim/nagfor` | Makes `fpm build` and `fpm install` work with NAG despite fpm 0.13's NAG link-line defects. |
+| `nagfor_fpm_shim/nagfor` | Makes `fpm build` and `fpm install` work with NAG despite fpm 0.13's NAG link-line defects. **Consumer-facing** — a project that merely *depends* on this library cannot build it under NAG without the shim on `PATH`. |
 | `build_ci_test_image.sh` | Bakes the CI environment into a local Docker image. **Maintainer-only** — see below. |
 | `run_ci_test_image.sh` | Runs this working tree against that image. |
 | `prep_github_mirroring.sh` | Rewrites GitLab-specific links and badges for the GitHub mirror. |

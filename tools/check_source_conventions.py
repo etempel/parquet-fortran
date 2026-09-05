@@ -3091,6 +3091,51 @@ def check_landing_page_names_every_entry_module():
     return problems
 
 
+def check_readme_states_the_current_version():
+    """README.md's status line must name the version in VERSION.txt.
+
+    README opens with "**Status: <version> -- stable.**", which is the first fact a reader takes
+    from the page. It said 2.0 while VERSION.txt, src/parquet_version.f90 and CHANGELOG.md's
+    newest published section all said 2.2.0 -- because the release commit that bumped those three
+    files did not touch README, and nothing compared them. The drift is invisible: every test
+    passes, every other check passes, and the page reads perfectly well.
+
+    VERSION.txt is the source of truth because fpm.toml points `version` at it, so it is the one
+    file a release must change.
+
+    **The status line ONLY.** README also carries a `tag = "vX.Y.Z"` pin in its recommended
+    fpm.toml snippet, and that pin deliberately does NOT track VERSION.txt: it names the newest
+    git TAG, and a release can bump the version without pushing a tag (v2.2.0 shipped that way --
+    `git tag --list` returns v1.0.0 and v2.0.0). Checking the pin against VERSION.txt would demand
+    a tag that does not exist and send a reader to a resolution failure, which is worse than an
+    old pin. If tagging ever becomes part of the release procedure, widening this check to the pin
+    is the obvious second clause -- until then it is out of scope by design, not by omission.
+    """
+    ver_file = REPO_ROOT / "VERSION.txt"
+    doc = REPO_ROOT / "README.md"
+    if not ver_file.is_file():
+        return ["VERSION.txt: missing -- this check needs updating"]
+    if not doc.is_file():
+        return ["README.md: missing -- this check needs updating"]
+    version = ver_file.read_text().strip()
+    if not version:
+        return ["VERSION.txt: parsed empty -- this check needs updating"]
+    # The version is the first whitespace-delimited token after "**Status:". Anchoring on the
+    # dash that follows it instead is what a first attempt did, and `.+?` then ran past the em
+    # dash to the hyphen inside a later `#api-stability` link -- so the token, not the separator.
+    m = re.search(r"^\*\*Status:\s*(\S+)\s", doc.read_text(), re.M)
+    if m is None:
+        return ["README.md: no line starting \"**Status:\" was found -- this check locates the "
+                "version claim by that opening and cannot find it; re-anchor it deliberately"]
+    stated = m.group(1).strip()
+    if stated != version:
+        return ["README.md: the status line says %r but VERSION.txt says %r -- the front page's "
+                "first fact is the version a reader believes they are getting, and a release that "
+                "bumps VERSION.txt without touching README leaves it stale silently" %
+                (stated, version)]
+    return []
+
+
 def check_readme_promise_names_every_entry_module():
     """README.md's API-stability promise must name every advertised entry module.
 
@@ -5443,6 +5488,7 @@ CHECKS = (
     ("every intent(inout) temporal setter assigns all components", check_temporal_setters_assign_all),
     ("doc/pages index files agree with the page tree", check_doc_page_index_consistency),
     ("the landing page names every entry module", check_landing_page_names_every_entry_module),
+    ("README states the current version", check_readme_states_the_current_version),
     ("README's stability promise names every entry module", check_readme_promise_names_every_entry_module),
     ("page titles match their list entries", check_page_titles_match_their_list_entries),
     ("the entry-module tables match the measured footprints",

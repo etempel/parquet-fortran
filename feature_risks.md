@@ -3745,7 +3745,7 @@ defects hide.
 ### Risk-65 — A guard claimed after the state it protects is a guard that loses the race
 
 `ConcurrencyGuard` (`src/parquet_wrapper.cpp`) is the library's only defence against a caller sharing
-one `parquet_reader`/`parquet_writer` across threads, and README's Thread safety section promises a
+one `parquet_reader`/`parquet_writer` across threads, and `doc/pages/operating/thread-safety.md` promises a
 clean diagnostic abort when that happens. **The promise depends entirely on WHERE the claim is
 taken**, and for a long time the writer took it in the wrong place.
 

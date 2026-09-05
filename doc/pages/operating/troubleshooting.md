@@ -21,6 +21,19 @@ own **run-time** variables are a separate family, `PARQUET_FORTRAN_*`, listed un
   **this library's**, not yours — which is why nothing in it mentions `parquet-fortran`. Install
   fpm 0.13.0 or newer from
   [fpm's own releases page](https://github.com/fortran-lang/fpm/releases).
+- **Building with NAG (`FPM_FC=nagfor`) fails with `clang: error: no such file or directory:
+  'arrow'`, or with `Option error: -openmp option specified twice`** — neither is about your Arrow
+  install or your own flags. fpm 0.13 builds a NAG command line this library cannot be compiled or
+  linked from: it emits `link = [...]` entries as `-Wl,arrow` rather than `-larrow`, so nagfor
+  forwards the bare word to the host C compiler as an input filename, and it appends the OpenMP
+  metapackage's flag twice, which NAG rejects outright where other compilers tolerate it. Both go
+  away if you put this repository's `tools/nagfor_fpm_shim` directory first on `PATH`, alongside
+  the `FPM_CC=gcc` and `FPM_CXX=g++` the NAG family does not imply. The shim is named `nagfor` so
+  that fpm's compiler identification is unaffected; it repairs the command line and execs the real
+  `nagfor` further along `PATH`, and it supplies the compile-side `-openmp` that fpm's own probe
+  cannot — so do **not** add `-openmp` to `FPM_FFLAGS` yourself, which reintroduces the doubling.
+  `NAGFOR_OMP=0` opts out for a deliberately serial build. Remove the `PATH` entry once fpm's NAG
+  support is fixed upstream.
 - **fpm fails while resolving dependencies, naming `toml-f` or a git URL it cannot reach** —
   this library has one Fortran package dependency, [toml-f](https://github.com/toml-f/toml-f), and
   `fpm.toml` pins a fork of it. fpm resolves a package's dependency tree **before** it prunes

@@ -3603,8 +3603,21 @@ contains
     module procedure sort_build_runs_permutation
         integer(int64) :: k !! output position.
         !
-        call sort_build_permutation(keys, n, perm)
+        ! **Threaded, on the same count and the same floor as every ungrouped sort.** `nthreads` is
+        ! already resolved -- `resolve_thread_count` has applied the caller's `threads=`, the
+        ! automatic policy, `parquet_set_sort_threads`, the nested-region rule and the processor
+        ! clamp -- so this hands it straight on and `sort_build_permutation_threaded` applies the
+        ! two clauses that need the DATA: the row floor, and one thread meaning the serial path.
+        ! Calling the serial `sort_build_permutation` here is what made `threads=` a no-op on the
+        ! whole grouped family; feature_risks.md Risk-189 records the shape.
+        call sort_build_permutation_threaded(keys, n, nthreads, perm)
         if (n < 1_int64) return
+        ! **The tie pass stays SERIAL, deliberately.** `parquet_sort_builder_build_runs`
+        ! (src/parquet_wrapper.cpp) is the same operation on the C++ side and walks these flags
+        ! serially after a threaded build, so the two engines are structurally identical here --
+        ! which is the property the engine A/B in test/test_sorting_cpp.f90 rests on. This loop is
+        ! embarrassingly parallel and threading it may well pay, but it would be a divergence from
+        ! that reference and needs a measurement of its own rather than being tidied in.
         tie(1) = 0_c_int8_t
         do k = 2_int64, n
             ! `int()` because `sort_keys_compare` takes a default-kind `nkeys` and the drivers carry

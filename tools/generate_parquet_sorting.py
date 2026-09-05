@@ -2680,10 +2680,18 @@ def emit_engine_interfaces(w):
     w("        !!")
     w("        !! `group_keys` is how many LEADING keys decide a tie; the sort itself always uses every")
     w("        !! key. That asymmetry is what produces \"grouped by field, ordered within group\".")
-    w("        module subroutine sort_build_runs_permutation(keys, n, group_keys, perm, tie)")
+    w("        !!")
+    w("        !! **The SORT half is threaded and the tie half is not**, which is deliberate and matches")
+    w("        !! `parquet_sort_builder_build_runs` (`src/parquet_wrapper.cpp`) statement for statement --")
+    w("        !! the C++ engine has always built its permutation with the threaded builder and then")
+    w("        !! walked the flags serially. Keeping the two structurally identical is what lets the")
+    w("        !! engine A/B in `test/test_sorting_cpp.f90` mean anything. Threading the tie pass would")
+    w("        !! be a divergence from that reference and needs its own measurement, not a tidy-up.")
+    w("        module subroutine sort_build_runs_permutation(keys, n, group_keys, nthreads, perm, tie)")
     w("            type(sort_key_buf), intent(in) :: keys(:)  !! the keys, in precedence order.")
     w("            integer(int64), intent(in) :: n            !! rows.")
     w("            integer(int64), intent(in) :: group_keys   !! leading keys that decide a tie.")
+    w("            integer(int64), intent(in) :: nthreads     !! resolved thread count; 1 sorts serially.")
     w("            integer(int64), intent(inout) :: perm(:)   !! receives `n` 1-based row indices.")
     w("            integer(c_int8_t), intent(inout) :: tie(:) !! 1 where a row ties with its predecessor.")
     w("        end subroutine sort_build_runs_permutation")
@@ -4455,7 +4463,15 @@ contains
         gek = int(size(keys), int64)
         if (present(group_ekeys)) gek = int(group_ekeys, int64)
         if (dbg_fortran_engine) then
-            call sort_build_runs_permutation(keys, nrows, gek, perm, tie)
+            ! **`nthreads` is passed, and that is the whole of what makes `threads=` reach this
+            ! path.** It was dropped here for as long as the grouped path existed: the count was
+            ! resolved above, handed to the oracle below, and discarded on the branch that actually
+            ! ships -- so every `pf_argsort(..., group_offsets=)`, `pf_match`, `pf_unique`,
+            ! `pf_rank` and `parquet_table%join` sorted serially whatever the caller asked for,
+            ! while the C++ engine on the other branch had been threading all along. Nothing failed:
+            ! the permutation is identical at every team size, so only
+            ! `parquet_debug_sort_threads_used` could see it. See feature_risks.md Risk-189.
+            call sort_build_runs_permutation(keys, nrows, gek, nthreads, perm, tie)
             return
         end if
         ! **The C++ engine, reached through the pointer parquet_sorting_oracle bound.**

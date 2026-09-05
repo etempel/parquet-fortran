@@ -2015,23 +2015,25 @@ contains
     !! bite (arm 2 against arm 1), and `threads=` must NOT bite on the same observable (arm 3) --
     !! without arm 3 an implementation in which `threads=` drove the column work too would pass.
     !!
-    !! **The sort half is deliberately NOT asserted here, and that is a finding rather than an
-    !! omission.** `%join` asks `pf_argsort` for `group_offsets=`, and on that path
-    !! `engine_build_runs` (`src/parquet_argsort_kernel.f90`) resolves the thread count and then
-    !! calls the SERIAL `sort_build_runs_permutation`, so `threads=` currently changes nothing --
-    !! measured here at 1 for `threads=4` with the engine floor lowered, while the ungrouped path's
-    !! own test (`a selection's ordering route really opens a team`, `test/test_sorting.f90`) opens
-    !! 4 on the same machine. See `feature_doc_table_join.md`'s C5. **When that is fixed, add a
-    !! fourth arm**: `parquet_debug_sort_threads_used()` must report the `threads=` value and must
-    !! stay put when `parquet_set_table_threads` moves.
+    !! **The fourth arm is the sort half, and it is what closes the split in both directions.**
+    !! `%join` asks `pf_argsort` for `group_offsets=`, and on that path `engine_build_runs`
+    !! (`src/parquet_argsort_kernel.f90`) used to resolve the thread count and then call the SERIAL
+    !! builder, so `threads=` changed nothing at all -- measured here at 1 for `threads=4` with the
+    !! engine floor lowered, while the ungrouped path's own test (`a selection's ordering route
+    !! really opens a team`, `test/test_sorting.f90`) opened 4 on the same machine. The builder now
+    !! receives that count (`feature_risks.md` Risk-189), so arm 4 asserts the sort team really is
+    !! what `threads=` asked for, AND that `parquet_set_table_threads` does not move it -- the
+    !! mirror of arm 3, which asserts `threads=` does not move the column team. Together the four
+    !! arms pin each knob to its own half and to nothing else.
     !!
     !! The join is made to DETACH so the column work is a real gather over all five columns rather
     !! than a no-op, which is what clears `colwork_threads`' floor (the Risk-49 trap).
     subroutine test_join_thread_split(error)
         type(error_type), allocatable, intent(out) :: error
-        type(parquet_table) :: a, b, c, d
+        type(parquet_table) :: a, b, c, d, e
         integer(int32) :: k(NROW), rk(NROW + 1)
         integer :: nt, tab_free, tab_capped, tab_threads1
+        integer(int64) :: sort_asked, sort_under_cap !! the SORT teams arm 4 observes.
         !
 #ifndef _OPENMP
         call skip_test(error, "needs OpenMP: table_colwork opens its team inside #ifdef _OPENMP, " // &
@@ -2042,6 +2044,19 @@ contains
         if (nt < 2) then
             call skip_test(error, "needs at least two processors: colwork_threads clamps to " // &
                 "omp_get_num_procs(), so every arm would resolve to 1")
+            return
+        end if
+        ! **The processor count is not enough on its own.** The column team resolves from
+        ! `omp_get_max_threads()`, which `OMP_NUM_THREADS=1` sets to 1 on a machine with any number
+        ! of processors -- and `fpm test --profile nagdeb` is run exactly that way, because a
+        ! multi-threaded abort under a checking build reports from several threads at once. Arm 1's
+        ! precondition then fails on a correctly-working library. The sort half is unaffected
+        ! (`resolve_thread_count` honours an explicit `threads=` and clamps it to the PROCESSOR
+        ! count, not to the ICV), but the arms are one test and skip together.
+        if (omp_get_max_threads() < 2) then
+            call skip_test(error, "needs OMP_NUM_THREADS >= 2: the column team resolves from " // &
+                "omp_get_max_threads(), so arms 1-3 would compare 1 against 1 and hold for the " // &
+                "wrong reason")
             return
         end if
         !
@@ -2084,6 +2099,29 @@ contains
         call check(error, tab_threads1 > 1, &
             "threads=1 must NOT cap the column rewrite -- it sizes the pair-list sort, and the " // &
             "two knobs are separate")
+        if (allocated(error)) return
+        !
+        ! ---- Arm 4: the sort half, the mirror of arm 3. The engine floor is lowered around both
+        ! calls and restored before the assertions, because every `check` can return early and a
+        ! leaked floor would rethread every later test in this suite.
+        call build_fixture(e)
+        call parquet_debug_set_sort_engine_min_rows(1_int64)
+        call e%join(b, "k", how="left", threads=4)
+        sort_asked = parquet_debug_sort_threads_used()
+        call e%clone(c)
+        call parquet_set_table_threads(1)
+        call c%join(b, "k", how="left", threads=4)
+        sort_under_cap = parquet_debug_sort_threads_used()
+        call parquet_reset_settings()
+        call parquet_debug_set_sort_engine_min_rows(-1_int64)
+        !
+        call check(error, sort_asked == 4_int64, &
+            "threads= must reach the pair-list sort: the join asks pf_argsort for group_offsets=, " // &
+            "and that path has to be handed the resolved thread count, not merely resolve one")
+        if (allocated(error)) return
+        call check(error, sort_under_cap == 4_int64, &
+            "parquet_set_table_threads must NOT move the sort team -- it caps the column work, " // &
+            "and this is the mirror of arm 3")
 #endif
     end subroutine test_join_thread_split
     !

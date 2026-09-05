@@ -49,12 +49,17 @@ array of names — the two forms behave identically, and `other_on` takes whiche
 | `other_pairs` | out: the same for `other`'s rows |
 | `threads` | the team size for the sort that builds the match, and for nothing else; see below |
 
-That last row is narrow, and at present it is empty. The column work a join does — this table's
-own columns rewritten, `other`'s copied in beside them — belongs to the table layer and is capped by
+That last row is narrow on purpose, and a join has **two** thread controls that are not
+interchangeable. `threads=` sizes the sort that builds the match, and nothing else. The column work
+a join does — this table's own columns rewritten, `other`'s copied in beside them — belongs to the
+table layer and is capped by
 [`parquet_set_table_threads(n)`](../operating/settings.html#threads-for-mutating-a-table), as every
-other row-structural mutation is. `threads=` reaches only the sort that builds the match, and that
-sort runs serially whatever you pass — so the argument is accepted and currently does nothing. Set
-`parquet_set_table_threads` if you want a large join to use fewer threads.
+other row-structural mutation is.
+
+So a join that is slow because the *match* is large is one to pass `threads=` to, and a join that is
+slow because the *columns* are many or wide answers to `parquet_set_table_threads`. Neither argument
+changes the result: both are performance controls, and the rows that come out, and their order, are
+the same at every team size.
 
 **`%join` changes this table in place**, and detaches it unless every one of its rows survives
 exactly once and in place — see [When the join detaches](#when-the-join-detaches-and-when-it-does-not).

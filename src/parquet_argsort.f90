@@ -1090,10 +1090,18 @@ module parquet_argsort
         !!
         !! `group_keys` is how many LEADING keys decide a tie; the sort itself always uses every
         !! key. That asymmetry is what produces "grouped by field, ordered within group".
-        module subroutine sort_build_runs_permutation(keys, n, group_keys, perm, tie)
+        !!
+        !! **The SORT half is threaded and the tie half is not**, which is deliberate and matches
+        !! `parquet_sort_builder_build_runs` (`src/parquet_wrapper.cpp`) statement for statement --
+        !! the C++ engine has always built its permutation with the threaded builder and then
+        !! walked the flags serially. Keeping the two structurally identical is what lets the
+        !! engine A/B in `test/test_sorting_cpp.f90` mean anything. Threading the tie pass would
+        !! be a divergence from that reference and needs its own measurement, not a tidy-up.
+        module subroutine sort_build_runs_permutation(keys, n, group_keys, nthreads, perm, tie)
             type(sort_key_buf), intent(in) :: keys(:)  !! the keys, in precedence order.
             integer(int64), intent(in) :: n            !! rows.
             integer(int64), intent(in) :: group_keys   !! leading keys that decide a tie.
+            integer(int64), intent(in) :: nthreads     !! resolved thread count; 1 sorts serially.
             integer(int64), intent(inout) :: perm(:)   !! receives `n` 1-based row indices.
             integer(c_int8_t), intent(inout) :: tie(:) !! 1 where a row ties with its predecessor.
         end subroutine sort_build_runs_permutation

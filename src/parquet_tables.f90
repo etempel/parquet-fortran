@@ -6680,8 +6680,10 @@ module parquet_tables
             !! `pairs`'s counterpart, and the same length.
             integer(int64), allocatable, intent(out), optional :: other_pairs(:)
             !> team size for the sort that builds the pair list, and for nothing else -- the
-            !! column work that follows answers to `parquet_set_table_threads`. **That sort is
-            !! serial at present**, so this argument is accepted and currently has no effect.
+            !! column work that follows answers to `parquet_set_table_threads`, as every other
+            !! row-structural mutation does. Absent means the automatic rule (`omp_get_max_threads()`
+            !! capped by `parquet_set_sort_threads` and by the processors available); `threads=1`
+            !! forces that sort serial. It never changes which rows come out, or their order.
             integer, intent(in), optional :: threads
         end subroutine table_join
         !> %join with an `integer(int32)` `max_rows=`; see `table_join` for everything else.
@@ -6709,8 +6711,10 @@ module parquet_tables
             !> per output row: `other`'s row, or 0; see `table_join`.
             integer(int64), allocatable, intent(out), optional :: other_pairs(:)
             !> team size for the sort that builds the pair list, and for nothing else -- the
-            !! column work that follows answers to `parquet_set_table_threads`. **That sort is
-            !! serial at present**, so this argument is accepted and currently has no effect.
+            !! column work that follows answers to `parquet_set_table_threads`, as every other
+            !! row-structural mutation does. Absent means the automatic rule (`omp_get_max_threads()`
+            !! capped by `parquet_set_sort_threads` and by the processors available); `threads=1`
+            !! forces that sort serial. It never changes which rows come out, or their order.
             integer, intent(in), optional :: threads
         end subroutine table_join_max_i32
         !> %join with an `integer(int64)` `max_rows=`; see `table_join` for everything else.
@@ -6738,8 +6742,10 @@ module parquet_tables
             !> per output row: `other`'s row, or 0; see `table_join`.
             integer(int64), allocatable, intent(out), optional :: other_pairs(:)
             !> team size for the sort that builds the pair list, and for nothing else -- the
-            !! column work that follows answers to `parquet_set_table_threads`. **That sort is
-            !! serial at present**, so this argument is accepted and currently has no effect.
+            !! column work that follows answers to `parquet_set_table_threads`, as every other
+            !! row-structural mutation does. Absent means the automatic rule (`omp_get_max_threads()`
+            !! capped by `parquet_set_sort_threads` and by the processors available); `threads=1`
+            !! forces that sort serial. It never changes which rows come out, or their order.
             integer, intent(in), optional :: threads
         end subroutine table_join_max_i64
         !> %join over a separated key string ("id" or "ra,dec"); see `table_join` for everything
@@ -6760,8 +6766,10 @@ module parquet_tables
             !> per output row: `other`'s row, or 0; see `table_join`.
             integer(int64), allocatable, intent(out), optional :: other_pairs(:)
             !> team size for the sort that builds the pair list, and for nothing else -- the
-            !! column work that follows answers to `parquet_set_table_threads`. **That sort is
-            !! serial at present**, so this argument is accepted and currently has no effect.
+            !! column work that follows answers to `parquet_set_table_threads`, as every other
+            !! row-structural mutation does. Absent means the automatic rule (`omp_get_max_threads()`
+            !! capped by `parquet_set_sort_threads` and by the processors available); `threads=1`
+            !! forces that sort serial. It never changes which rows come out, or their order.
             integer, intent(in), optional :: threads
         end subroutine table_join_string
         !> %join over a separated key string with an `integer(int32)` `max_rows=`; see
@@ -6786,8 +6794,10 @@ module parquet_tables
             !> per output row: `other`'s row, or 0; see `table_join`.
             integer(int64), allocatable, intent(out), optional :: other_pairs(:)
             !> team size for the sort that builds the pair list, and for nothing else -- the
-            !! column work that follows answers to `parquet_set_table_threads`. **That sort is
-            !! serial at present**, so this argument is accepted and currently has no effect.
+            !! column work that follows answers to `parquet_set_table_threads`, as every other
+            !! row-structural mutation does. Absent means the automatic rule (`omp_get_max_threads()`
+            !! capped by `parquet_set_sort_threads` and by the processors available); `threads=1`
+            !! forces that sort serial. It never changes which rows come out, or their order.
             integer, intent(in), optional :: threads
         end subroutine table_join_string_max_i32
         !> %join over a separated key string with an `integer(int64)` `max_rows=`; see
@@ -6812,8 +6822,10 @@ module parquet_tables
             !> per output row: `other`'s row, or 0; see `table_join`.
             integer(int64), allocatable, intent(out), optional :: other_pairs(:)
             !> team size for the sort that builds the pair list, and for nothing else -- the
-            !! column work that follows answers to `parquet_set_table_threads`. **That sort is
-            !! serial at present**, so this argument is accepted and currently has no effect.
+            !! column work that follows answers to `parquet_set_table_threads`, as every other
+            !! row-structural mutation does. Absent means the automatic rule (`omp_get_max_threads()`
+            !! capped by `parquet_set_sort_threads` and by the processors available); `threads=1`
+            !! forces that sort serial. It never changes which rows come out, or their order.
             integer, intent(in), optional :: threads
         end subroutine table_join_string_max_i64
         !> Builds the join's PAIR LIST: which left row meets which right row, and how many rows

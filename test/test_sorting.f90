@@ -234,6 +234,10 @@ contains
             new_unittest("a threaded sort equals the serial one", test_threads_identical), &
             new_unittest("no team is opened one level down, on either arm", test_nested_team_guard), &
             new_unittest("unique and rank take threads too", test_threads_on_derived), &
+            new_unittest("the grouped path really opens the team threads= asked for", &
+                test_group_offsets_threads), &
+            new_unittest("a threaded grouped sort equals the serial one", &
+                test_group_offsets_threads_identical), &
             new_unittest("every size from 2 to 400 threads identically", test_split_size_sweep), &
             new_unittest("a threaded sort is still a permutation at every size", test_split_sweep_is_permutation), &
             new_unittest("the threaded split survives its extreme inputs", test_split_boundary_extremes), &
@@ -5807,16 +5811,19 @@ contains
         real(real64), allocatable :: d1(:), d2(:)
         integer, allocatable :: r1(:), r2(:)
         integer :: c1, c2
+        integer(int64) :: seen_ser, seen_par !! teams the two arms actually opened.
 
         call ties_fixture(v)
         call force_fortran_parallel_threshold(1000000000_int64)
         call pf_unique_count(v, c1)
         call pf_unique(v, d1)
         call pf_rank(v, r1)
+        seen_ser = parquet_debug_sort_threads_used()
         call force_fortran_parallel_threshold(4_int64)
         call pf_unique_count(v, c2, threads=8)
         call pf_unique(v, d2, threads=8)
         call pf_rank(v, r2, threads=8)
+        seen_par = parquet_debug_sort_threads_used()
         call force_fortran_parallel_threshold(0_int64)
         call check(error, c1 == c2 .and. c1 == 97, "a threaded pf_unique_count must count the same")
         if (allocated(error)) return
@@ -5824,7 +5831,155 @@ contains
             "a threaded pf_unique must return the same distinct values")
         if (allocated(error)) return
         call check(error, all(r1 == r2), "a threaded pf_rank must produce the same ranks")
+        if (allocated(error)) return
+        ! **The team assertions are what make the three above mean anything.** Every assertion in
+        ! this test compares an answer, and a grouped sort's answer does not depend on the team
+        ! size -- so for as long as `engine_build_runs` dropped its resolved count, the `threads=8`
+        ! arm ran the identical serial code as the default arm and all three held for the wrong
+        ! reason. `seen_par > 1` is the one line that could tell those apart, and `seen_ser == 1`
+        ! is its negative control: without it, an implementation that ignored `threads=` and always
+        ! opened a full team would pass the first. See feature_risks.md Risk-189.
+#ifdef _OPENMP
+        if (omp_get_num_procs() >= 2) then
+            call check(error, seen_par > 1, &
+                "pf_rank(threads=8) must really open a team: the grouped builder has to be " // &
+                "handed the resolved thread count, not just have one resolved for it")
+            if (allocated(error)) return
+            call check(error, seen_ser == 1, &
+                "the control: the default arm here has the engine floor raised out of reach, " // &
+                "so it must sort serially -- if this reports a team the arms are not an A/B")
+        end if
+#endif
     end subroutine test_threads_on_derived
+    !
+    !> The grouped path must open the team `threads=` asked for, exactly as the ungrouped path does.
+    !!
+    !! **This is the assertion that failed before `engine_build_runs` passed its resolved count on.**
+    !! It resolved `nthreads`, handed it to the C++ oracle, and dropped it on the branch that ships
+    !! -- so `pf_argsort(..., group_offsets=)`, and with it `pf_match`, `pf_unique`, `pf_rank` and
+    !! `parquet_table%join`, sorted serially whatever the caller passed. Nothing else could see it:
+    !! the permutation is identical at every team size, so no correctness test can distinguish the
+    !! two and `parquet_debug_sort_threads_used` is the only observable. feature_risks.md Risk-189.
+    !!
+    !! **Three arms.** The grouped path opens what was asked for; `threads=1` still means serial
+    !! (without which a policy that ignored `threads=` entirely would pass the first); and the
+    !! ungrouped path resolves to the same number on the same data, which is the property the whole
+    !! fix is about -- the two drivers must not have separate thread policies.
+    subroutine test_group_offsets_threads(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer, parameter :: n = 4096                      !! above the lowered floor, below any cap.
+        real(real64) :: v(n)
+        integer(int64), allocatable :: perm(:), go(:)
+        integer(int64) :: seen_four, seen_one, seen_plain
+        integer :: i
+        !
+        ! Preconditions, declared rather than assumed -- the same pair `test_selection_ordering_threads`
+        ! carries, and for the same reason: with the team preprocessed out, or on a one-processor
+        ! machine where an explicit threads= clamps back to 1, every arm below is the same serial
+        ! code and each assertion passes without testing anything.
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: sort_build_permutation_threaded opens its team " // &
+            "inside #ifdef _OPENMP, so every arm below would resolve to one thread and the " // &
+            "assertions would hold for the wrong reason")
+        return
+#else
+        if (omp_get_num_procs() < 2) then
+            call skip_test(error, "needs at least two processors: resolve_thread_count clamps " // &
+                "an explicit threads= to omp_get_num_procs(), so threads=4 resolves to 1 here")
+            return
+        end if
+#endif
+        do i = 1, n
+            v(i) = real(mod(i * 7919, 5003), real64) * 0.25_real64
+        end do
+        !
+        ! Lowered and restored around all three calls, BEFORE the first assertion: every `check`
+        ! can return early, and a leaked floor would silently rethread every later test here.
+        call force_fortran_parallel_threshold(1_int64)
+        call pf_argsort(v, perm, group_offsets=go, threads=4)
+        seen_four = parquet_debug_sort_threads_used()
+        call pf_argsort(v, perm, group_offsets=go, threads=1)
+        seen_one = parquet_debug_sort_threads_used()
+        call pf_argsort(v, perm, threads=4)
+        seen_plain = parquet_debug_sort_threads_used()
+        call force_fortran_parallel_threshold(0_int64)
+        !
+        call check(error, seen_four == 4_int64, &
+            "the grouped path must open the team threads= asked for, as the ungrouped one does")
+        if (allocated(error)) return
+        ! The control: without it a policy that ignored threads= and always opened
+        ! omp_get_max_threads() would pass the line above.
+        call check(error, seen_one == 1_int64, &
+            "threads=1 must still sort the grouped path serially")
+        if (allocated(error)) return
+        call check(error, seen_plain == seen_four, &
+            "grouped and ungrouped must resolve the same team on the same data: one policy, " // &
+            "one resolve_thread_count, two drivers")
+    end subroutine test_group_offsets_threads
+    !
+    !> A threaded grouped sort must return the identical permutation AND the identical group offsets.
+    !!
+    !! The oracle is the one the whole feature rests on: every comparator ends in a row-index
+    !! tiebreaker, so no two distinct rows compare equal, exactly one permutation is correct, and a
+    !! threaded answer that differs from a serial one is WRONG rather than merely different. The
+    !! offsets follow, being a pure function of that permutation.
+    !!
+    !! **The team is asserted on both arms, and that is not decoration.** An A/B that only compares
+    !! answers passes just as happily when both arms ran the same serial code -- which is exactly
+    !! what happened here for as long as the grouped builder discarded its thread count, and is the
+    !! vacuity trap feature_risks.md Risk-49 describes. Ties are dense on purpose: `group_offsets`
+    !! is about where the runs are, so a fixture of distinct values would exercise one group per row.
+    subroutine test_group_offsets_threads_identical(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer, parameter :: n = 4096                      !! enough rows for a team to be worth it.
+        real(real64) :: v(n)
+        integer(int64), allocatable :: p_ser(:), p_par(:), g_ser(:), g_par(:)
+        integer(int64) :: seen_ser, seen_par
+        integer :: i
+        !
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: both arms would run the same serial code, so the " // &
+            "equality below would hold for the wrong reason")
+        return
+#else
+        if (omp_get_num_procs() < 2) then
+            call skip_test(error, "needs at least two processors: an explicit threads= is " // &
+                "clamped to omp_get_num_procs(), so the parallel arm would resolve to 1")
+            return
+        end if
+#endif
+        ! ~40 distinct values over 4096 rows, so every run is long and the offsets are the point.
+        do i = 1, n
+            v(i) = real(mod(i * 7919, 41), real64)
+        end do
+        !
+        call force_fortran_parallel_threshold(1_int64)
+        call pf_argsort(v, p_ser, group_offsets=g_ser, threads=1)
+        seen_ser = parquet_debug_sort_threads_used()
+        call pf_argsort(v, p_par, group_offsets=g_par, threads=8)
+        seen_par = parquet_debug_sort_threads_used()
+        call force_fortran_parallel_threshold(0_int64)
+        !
+        call check(error, seen_ser == 1_int64, &
+            "precondition: the serial arm must really be serial")
+        if (allocated(error)) return
+        call check(error, seen_par > 1_int64, &
+            "precondition: the parallel arm must really open a team, or this compares serial " // &
+            "against serial and asserts nothing")
+        if (allocated(error)) return
+        call check(error, size(p_ser) == size(p_par), &
+            "a threaded grouped sort must return a permutation of the same length")
+        if (allocated(error)) return
+        call check(error, all(p_ser == p_par), &
+            "a threaded grouped sort must return the identical permutation: the comparator is a " // &
+            "total order, so a different answer is a wrong one")
+        if (allocated(error)) return
+        call check(error, size(g_ser) == size(g_par), &
+            "a threaded grouped sort must find the same number of groups")
+        if (allocated(error)) return
+        call check(error, all(g_ser == g_par), &
+            "a threaded grouped sort must report the identical group offsets")
+    end subroutine test_group_offsets_threads_identical
 
 
     !

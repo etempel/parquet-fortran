@@ -90,6 +90,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   permutation and a single sentinel `group_offsets` entry, as the array forms always did. It
   previously reported one row, giving back a one-element permutation naming a row that does not
   exist and claiming one group over no rows. `character` keys were unaffected.
+- `threads=` is now honoured by the grouped sort path, which backs `pf_argsort(..., group_offsets=)`,
+  `pf_unique_count`, `pf_unique` and `pf_rank`. It was previously accepted and ignored there, so
+  those operations always sorted serially; results are unchanged at every thread count.
 - Many other minor fixes and improvements.
 
 ## [v2.2.0] - 2026-09-03

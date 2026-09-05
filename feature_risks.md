@@ -254,6 +254,7 @@ something a reader is expected to have.
 | [Risk-186](#risk-186--leadz-on-an-int64-is-two-too-small-under-nagfor-and-the-quiet-half-is-the-watermark) | `LEADZ` on an int64 is TWO too small under nagfor, and the quiet half is the watermark | 4 — covered |
 | [Risk-187](#risk-187--a-rejected-fmt-that-leaves-partial-text-behind-returns-a-plausible-number-instead-of-asterisks) | A rejected `fmt` that leaves PARTIAL TEXT behind returns a plausible number instead of asterisks | 4 — covered |
 | [Risk-188](#risk-188--a-joins-left-container-column-is-carried-only-because-join-reuses-the-shared-gather) | A join's left container column is carried only because `%join` reuses the shared gather | 4 — covered |
+| [Risk-189](#risk-189--a-driver-that-resolves-a-thread-count-and-then-drops-it-threads-nothing-silently) | A driver that RESOLVES a thread count and then drops it threads nothing, silently | 4 — covered |
 
 ---
 
@@ -7532,3 +7533,58 @@ which is the two arms doing the distinct jobs they were written for.
 `join_left_container_outer` and `join_container_payload` (`test/error_scenarios.f90`). Before this
 entry no test in the suite joined a table holding a container column at all, so only the refusals
 were pinned.
+
+### Risk-189 — A driver that RESOLVES a thread count and then drops it threads nothing, silently
+
+**What breaks.** `engine_build_runs` (`src/parquet_argsort_kernel.f90`, generated) calls
+`resolve_thread_count`, hands the result to the C++ oracle, and — for as long as the grouped path
+existed — **discarded it on the branch that ships**, calling the serial `sort_build_permutation`
+through `sort_build_runs_permutation`. So `threads=` was accepted and ignored by every operation on
+that path: `pf_argsort(..., group_offsets=)`, `pf_match`, `pf_match_all`, `pf_in`,
+`pf_unique_count`, `pf_unique`, `pf_rank` and `parquet_table%join` — 34 call sites across three
+submodules, each with a `threads=` dummy whose own doc-comment promised the behaviour.
+
+**Related but distinct from Risk-174 and Risk-49**, and the difference is where the team is lost.
+Those two are about a team that *opens* and then runs a serial path inside it, because a floor
+declined the decomposition — the count arrives and the data does not justify using it. This one is
+about a count that never arrives at all: the team is not declined, it is never requested, so lowering
+every floor in the library changes nothing. A test written for either of those shapes (lower the
+floor, assert the answer) cannot detect this one.
+
+**Why nothing noticed for so long, and why this is the register's shape rather than a bug report.**
+The permutation is identical at every team size — every comparator ends in a row-index tiebreaker,
+so exactly one permutation is correct — which means **no correctness test can see this defect at
+all**. Every A/B over answers passed; the whole-suite runs passed; the guide, the generated
+reference and `src/parquet_sorting_match.f90`'s own module header all described the threading as
+the engine's. The only observable is `parquet_debug_sort_threads_used()`, and it was asserted on
+the ungrouped path only. The cost was silent, and so was the false promise.
+
+**What it forbids.**
+
+- **A driver that calls `resolve_thread_count` must pass the result to EVERY branch**, or carry a
+  comment at the branch that does not saying why it is deliberately serial. Resolving a count for
+  one arm of a two-arm branch is the exact shape that produced this, and it reads as correct.
+- **A new engine path reached from such a driver needs a team assertion of its own, with a
+  `threads=1` negative control.** An answer A/B cannot distinguish "threaded and correct" from
+  "silently serial"; only the counter can, and only the control tells that from "always opens a
+  full team regardless".
+- **A conformance A/B between the two engines is evidence about threading only if BOTH arms are
+  made to thread.** `test_engine_conformance`'s runs arm sorts 60 elements with no floor override,
+  so both engines refuse a team and it compares serial against serial — a perfectly good
+  correctness test that was being read as more. It now says so at the site, and
+  `test_runs_threaded_conformance` is the arm that carries the threaded claim.
+
+**Covered by** `the grouped path really opens the team threads= asked for` and `a threaded grouped
+sort equals the serial one` (`test/test_sorting.f90`), the fourth arm of `a join's threads= reaches
+the sort and not the column rewrite` (`test/test_table_parallel.f90`), and `engine: the two engines
+agree on the runs path with BOTH threaded` (`test/test_sorting_cpp.f90`). Two design details are
+why this entry is kept rather than deleted:
+
+- **`unique and rank take threads too` (`test/test_sorting.f90`) was the pre-existing test over
+  this exact path, and it passed throughout.** It compares `threads=8` against a serial arm and
+  asserts the answers match — which they did, because both arms were serial. It now also asserts
+  both teams. That is the pattern to copy: when a threading test exists and cannot fail, the fix is
+  to add the counter, not another answer comparison.
+- **The counters are two different counters.** `threads_used()` reads the C++ engine's and
+  `parquet_debug_sort_threads_used()` the Fortran one; a cross-engine test that reads only one of
+  them still passes when the other silently declines.

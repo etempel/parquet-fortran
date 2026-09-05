@@ -148,9 +148,80 @@ contains
             new_unittest("engine: the multi-key chain threads a STRING key's radix", &
                 test_multi_string_threads), &
             new_unittest("engine: the string refine threads, at both of its two levels", &
-                test_refine_threads) &
+                test_refine_threads), &
+            new_unittest("engine: the two engines agree on the runs path with BOTH threaded", &
+                test_runs_threaded_conformance) &
             ]
     end subroutine collect_tests_sorting_cpp
+    !
+    !> The grouped (runs) path must give the same answer on both engines when both really thread.
+    !!
+    !! **This exists because the other runs conformance arm cannot cover it.** The engine A/B in
+    !! `test_engine_conformance` sorts a 60-element fixture with no `threads=` and no floor
+    !! override, and both engines refuse a team far below their own floors (32768 rows in Fortran,
+    !! 8192 in C++) -- so it compares serial against serial. That is a perfectly good correctness
+    !! test and no evidence at all about threading, and it was being cited as evidence about
+    !! threading while `engine_build_runs` discarded its resolved thread count on the Fortran
+    !! branch. See `feature_risks.md` Risk-189.
+    !!
+    !! **What makes it non-vacuous is asserting BOTH counters**, which are two different counters:
+    !! `threads_used()` reads the C++ engine's and `parquet_debug_sort_threads_used()` the
+    !! Fortran one. Without both, a run in which either engine quietly declined would still pass
+    !! the equality below -- the vacuous A/B shape `feature_risks.md` Risk-49 describes.
+    !!
+    !! The oracle is the usual one: every comparator ends in a row-index tiebreaker, so exactly one
+    !! permutation is correct and a disagreement is a defect rather than a variation.
+    subroutine test_runs_threaded_conformance(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        real(real64) :: v(2000)                             !! ties are dense; runs are the point.
+        integer(int64) :: cpp_team, ftn_team                !! each engine's own team counter.
+        real(real64), allocatable :: cd(:), fd(:)           !! per-engine distinct values.
+        integer, allocatable :: cr(:), fr(:)                !! per-engine ranks.
+        integer :: cc, fc                                   !! per-engine distinct counts.
+        !
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: neither engine can open a team, so both arms would " // &
+            "run the same serial code and the equality would hold for the wrong reason")
+        return
+#else
+        if (omp_get_num_procs() < 2) then
+            call skip_test(error, "needs at least two processors: an explicit threads= is " // &
+                "clamped to omp_get_num_procs(), so neither engine would thread")
+            return
+        end if
+#endif
+        call ties_fixture(v)
+        ! Lowered around BOTH arms and restored before the first assertion -- every `check` can
+        ! return early, and a leaked floor would rethread every later test in this suite.
+        call force_parallel_threshold(4_int64)
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call pf_unique_count(v, cc, threads=4)
+        call pf_unique(v, cd, threads=4)
+        call pf_rank(v, cr, threads=4)
+        cpp_team = threads_used()
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        call pf_unique_count(v, fc, threads=4)
+        call pf_unique(v, fd, threads=4)
+        call pf_rank(v, fr, threads=4)
+        ftn_team = parquet_debug_sort_threads_used()
+        call restore_engine_default()
+        call force_parallel_threshold(0_int64)
+        !
+        call check(error, cpp_team == 4_int64, &
+            "precondition: the C++ engine must really thread the runs path, or this compares " // &
+            "serial against serial")
+        if (allocated(error)) return
+        call check(error, ftn_team == 4_int64, &
+            "precondition: the Fortran engine must really thread the runs path -- it resolved a " // &
+            "thread count and dropped it for as long as the grouped path existed")
+        if (allocated(error)) return
+        call check(error, cc == fc, "unique_count: the two threaded engines disagreed")
+        if (allocated(error)) return
+        call check(error, size(cd) == size(fd) .and. all(cd == fd), &
+            "unique: the two threaded engines returned different distinct values")
+        if (allocated(error)) return
+        call check(error, all(cr == fr), "rank: the two threaded engines returned different ranks")
+    end subroutine test_runs_threaded_conformance
 
     !
     !> The multi-key chain must run a STRING key's radix on the team, not serially.
@@ -1812,6 +1883,11 @@ contains
         if (allocated(error)) return
         !
         ! ---- run detection: engine_build_runs -> sort_build_runs_permutation ----
+        ! **SERIAL on both sides, and that is not a gap here -- it is a scope limit worth stating.**
+        ! `v` is 60 elements with no `threads=` and no floor override, so both engines refuse a team
+        ! (32768 rows in Fortran, 8192 in C++) and this arm compares serial against serial. It is a
+        ! correctness test and must not be cited as evidence about threading: that is
+        ! `test_runs_threaded_conformance`, which lowers both floors and asserts both counters.
         call parquet_debug_use_fortran_sort_engine(.false.)
         call pf_unique_count(v, cc)
         call pf_unique(v, cp)

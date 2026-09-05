@@ -1475,8 +1475,10 @@ def join_interface(name, rank, mkind):
         a("            !> per output row: `other`'s row, or 0; see `table_join`.")
         a("            integer(int64), allocatable, intent(out), optional :: other_pairs(:)")
     a("""            !> team size for the sort that builds the pair list, and for nothing else -- the
-            !! column work that follows answers to `parquet_set_table_threads`. **That sort is
-            !! serial at present**, so this argument is accepted and currently has no effect.
+            !! column work that follows answers to `parquet_set_table_threads`, as every other
+            !! row-structural mutation does. Absent means the automatic rule (`omp_get_max_threads()`
+            !! capped by `parquet_set_sort_threads` and by the processors available); `threads=1`
+            !! forces that sort serial. It never changes which rows come out, or their order.
             integer, intent(in), optional :: threads""")
     a("        end subroutine " + name)
     return "\n".join(o)

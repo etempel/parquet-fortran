@@ -569,18 +569,20 @@ needs them, rather than adding speculatively.
   type-based rather than caller-facing: see [Automatic BYTE_STREAM_SPLIT for float
   columns](CLAUDE.md#automatic-byte_stream_split-for-float-columns-in-the-writer). A manual
   per-column override for other types remains unimplemented.
-- **`qc:`/`parquet_filter` support for `date`/`time`/`timestamp`** — neither quality-control
-  range/miss checks nor row filtering is implemented for these three, unlike every other supported
-  type.
+- **`qc: min:`/`max:` bounds for `date`/`time`/`timestamp`** — a field declaring one fails
+  `parquet_validate_maml` rather than being silently ignored; see [Quality
+  control](doc/pages/schema/quality-control.md). `qc: miss:` and row filtering on these three
+  column types *are* implemented — see [Filtering `date`, `time` and `timestamp`
+  columns](doc/pages/io/filter-sort-sample.md#filtering-date-time-and-timestamp-columns).
 
 **Bigger lifts, worth being cautious about:**
 
-- **Predicate pushdown** (statistics-based I/O skipping) — *not to be confused with row filtering,
-  which is already implemented*; see [Row
-  filtering](doc/pages/io/filter-sort-sample.md#row-filtering-with-parquet_filter). The existing
-  filter is post-decode: it narrows the rows your code sees but still reads and decodes every
-  referenced column in full. Skipping non-matching row groups off disk entirely is the unimplemented
-  part, and README's "No predicate pushdown" limitation treats it as an intentional non-goal for now.
+- **Finer-grained predicate pushdown** — page-level pruning and bloom filters. Row-group-level
+  pushdown *is* implemented: a filtered reader consults each row group's footer statistics and never
+  reads a row group that provably cannot match, for the filter's own columns and for every column
+  read afterwards; see [Row groups a filter cannot match are never
+  read](doc/pages/io/filter-sort-sample.md#row-groups-a-filter-cannot-match-are-never-read). Within
+  a surviving row group nothing is skipped, which is what README's Limitations section describes.
 - **Writing a nested container** — a list of structs, a map of structs, or a struct with a list or
   map field all *read* (through `parquet_list`/`parquet_map`/`parquet_struct`, reached one level at
   a time with `%nested`), and writing one is refused with a message naming the column and the

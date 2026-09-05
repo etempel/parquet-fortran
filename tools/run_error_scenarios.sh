@@ -834,6 +834,7 @@ scenarios=(
     "join_key_direction:1"
     "join_key_direction_dash:1"
     "join_container_payload:1"
+    "join_container_key:1"
     "join_columns_unknown:1"
     "join_suffix_clash:1"
     "join_blank_suffix:1"

@@ -400,6 +400,8 @@ contains
                 test_join_key_direction_dash_aborts), &
             new_unittest("join: carrying a container column across aborts", &
                 test_join_container_payload_aborts), &
+            new_unittest("join: a container column as a join key aborts", &
+                test_join_container_key_aborts), &
             new_unittest("join: an unknown columns= name aborts", &
                 test_join_columns_unknown_aborts), &
             new_unittest("join: a suffixed incoming name that still clashes aborts", &
@@ -7576,6 +7578,22 @@ contains
             failure_message="carrying a list column across a join was expected to abort", &
             required_stderr="cannot be carried across a join")
     end subroutine test_join_container_payload_aborts
+
+    !> join abort path: see scenario_join_container_key in test/error_scenarios.f90 for what it
+    !> does, and for the negative control that keeps this assertion honest.
+    !>
+    !> The assertion is on the word "join key". The refusal itself is shared with `%sort_by`
+    !> (`sort_lookup_key`, src/parquet_tables_sort.f90) and `container_sort_key` covers that
+    !> spelling; what is only reachable through `%join` is that the message names the operation
+    !> the caller actually asked for, and that it does not repeat the sort's advice to let the
+    !> container be "carried along", which a join cannot do.
+    subroutine test_join_container_key_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "join_container_key", expect_abort=.true., &
+            failure_message="joining on a container column was expected to abort", &
+            required_stderr="cannot be a join key")
+    end subroutine test_join_container_key_aborts
 
     !> join abort path: see scenario_join_columns_unknown in test/error_scenarios.f90 for what it
     !> does, and for the negative control that keeps this assertion honest.

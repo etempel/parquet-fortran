@@ -306,7 +306,7 @@ contains
     end subroutine sort_collect_keys
     !
     module procedure table_lookup_sort_key
-        call sort_lookup_key(self, name, proc, idx)
+        call sort_lookup_key(self, name, proc, idx, key_kind=key_kind)
     end procedure table_lookup_sort_key
     !
     !> Resolves one key name to its slot, refusing every column that cannot be a sort key.
@@ -322,29 +322,46 @@ contains
     !! thread reallocates every column's storage is meaningless), and the reserved
     !! `parquet_row_index` column materialized on demand -- which is what makes
     !! `%argsort_by([PARQUET_ROW_INDEX], perm)` the way back to file order rather than an abort.
-    subroutine sort_lookup_key(self, name, proc, idx)
+    subroutine sort_lookup_key(self, name, proc, idx, key_kind)
         class(parquet_table), intent(in) :: self !! the table.
         character(len=*), intent(in) :: name     !! the key column's name.
         character(len=*), intent(in) :: proc     !! calling procedure, for messages.
         integer, intent(out) :: idx              !! its slot index.
-        character(len=:), allocatable :: sfx, kname
+        !> `"sort"` (the default) or `"join"`; see `table_lookup_sort_key`'s own interface. It
+        !! decides two words of the refusal below and nothing else -- which column can be a key is
+        !! one rule, deliberately, and must stay one.
+        character(len=*), intent(in), optional :: key_kind
+        character(len=:), allocatable :: sfx, kname, kword, advice
         !
         call table_resolve(self, name, proc, idx)
         if (.not. sort_kind_is_orderable(self%cache%cols(idx)%values%kindof())) then
             call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
             call table_context_suffix(self%cache, name, sfx)
+            ! The RULE is shared and the WORDING is not. A join reaches this guard through
+            ! table_lookup_sort_key for the reason that interface gives -- one answer to "which
+            ! columns can be a key" -- but a caller who wrote %join is not sorting, and the sort's
+            ! advice is actively wrong for them: a container cannot be carried across a join at
+            ! all, so "the container is carried along with it" would send them into a second abort.
+            kword = "sort key"
+            advice = "sort by a scalar column and the container is carried along with it"
+            if (present(key_kind)) then
+                if (key_kind == "join") then
+                    kword = "join key"
+                    advice = "join on a scalar column instead; a container cannot be carried " // &
+                        "across a join either"
+                end if
+            end if
             ! Two reasons, one refusal. A *_VEC row is several values and has no single one to
             ! order by; a CONTAINER row is a list, a map or a struct, for which no total order
             ! exists that this library could have picked -- and the sort must keep reproducing
             ! arrow::compute::SortIndices, which has none for them either. Naming the kind is what
             ! makes the two distinguishable to a reader of the message.
             if (parquet_kind_is_container(self%cache%cols(idx)%values%kindof())) then
-                error stop EP // proc // ": a " // kname // " column cannot be a sort key; there " // &
-                    "is no defined order on a list, a map or a struct -- sort by a scalar column " // &
-                    "and the container is carried along with it" // sfx
+                error stop EP // proc // ": a " // kname // " column cannot be a " // kword // &
+                    "; there is no defined order on a list, a map or a struct -- " // advice // sfx
             end if
-            error stop EP // proc // ": a " // kname // " column cannot be a sort key; there is " // &
-                "no defined order on a whole vector row" // sfx
+            error stop EP // proc // ": a " // kname // " column cannot be a " // kword // &
+                "; there is no defined order on a whole vector row" // sfx
         end if
     end subroutine sort_lookup_key
     !

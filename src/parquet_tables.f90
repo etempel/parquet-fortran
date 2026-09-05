@@ -6546,11 +6546,16 @@ module parquet_tables
         !! column, and the file-naming message suffix with it. Two copies of "which columns can
         !! be a key" is precisely the drift that would let a join accept a column `%sort_by`
         !! rejects.
-        module subroutine table_lookup_sort_key(self, name, proc, idx)
+        module subroutine table_lookup_sort_key(self, name, proc, idx, key_kind)
             class(parquet_table), intent(in) :: self !! the table.
             character(len=*), intent(in) :: name     !! the key column's name.
             character(len=*), intent(in) :: proc     !! calling procedure, for messages.
             integer, intent(out) :: idx              !! its slot index.
+            !> what the message calls the key, and what it advises instead: `"sort"` (the default)
+            !! or `"join"`. A join is an equality test rather than an ordering, so telling its
+            !! caller a column "cannot be a sort key" and to "sort by a scalar column" names an
+            !! operation they did not ask for.
+            character(len=*), intent(in), optional :: key_kind
         end subroutine table_lookup_sort_key
     end interface
     !
@@ -6674,7 +6679,10 @@ module parquet_tables
             !> per output row: the row of `other` that produced it, or 0 when there is none.
             !! `pairs`'s counterpart, and the same length.
             integer(int64), allocatable, intent(out), optional :: other_pairs(:)
-            integer, intent(in), optional :: threads    !! forwarded to the sort; absent = auto.
+            !> team size for the sort that builds the pair list, and for nothing else -- the
+            !! column work that follows answers to `parquet_set_table_threads`. **That sort is
+            !! serial at present**, so this argument is accepted and currently has no effect.
+            integer, intent(in), optional :: threads
         end subroutine table_join
         !> %join with an `integer(int32)` `max_rows=`; see `table_join` for everything else.
         !!
@@ -6700,7 +6708,10 @@ module parquet_tables
             integer(int64), allocatable, intent(out), optional :: pairs(:) !! see `table_join`.
             !> per output row: `other`'s row, or 0; see `table_join`.
             integer(int64), allocatable, intent(out), optional :: other_pairs(:)
-            integer, intent(in), optional :: threads    !! forwarded to the sort; absent = auto.
+            !> team size for the sort that builds the pair list, and for nothing else -- the
+            !! column work that follows answers to `parquet_set_table_threads`. **That sort is
+            !! serial at present**, so this argument is accepted and currently has no effect.
+            integer, intent(in), optional :: threads
         end subroutine table_join_max_i32
         !> %join with an `integer(int64)` `max_rows=`; see `table_join` for everything else.
         !!
@@ -6726,7 +6737,10 @@ module parquet_tables
             integer(int64), allocatable, intent(out), optional :: pairs(:) !! see `table_join`.
             !> per output row: `other`'s row, or 0; see `table_join`.
             integer(int64), allocatable, intent(out), optional :: other_pairs(:)
-            integer, intent(in), optional :: threads    !! forwarded to the sort; absent = auto.
+            !> team size for the sort that builds the pair list, and for nothing else -- the
+            !! column work that follows answers to `parquet_set_table_threads`. **That sort is
+            !! serial at present**, so this argument is accepted and currently has no effect.
+            integer, intent(in), optional :: threads
         end subroutine table_join_max_i64
         !> %join over a separated key string ("id" or "ra,dec"); see `table_join` for everything
         !! else. `other_on` is a separated string here too, with one name per `on` name.
@@ -6745,7 +6759,10 @@ module parquet_tables
             integer(int64), allocatable, intent(out), optional :: pairs(:) !! see `table_join`.
             !> per output row: `other`'s row, or 0; see `table_join`.
             integer(int64), allocatable, intent(out), optional :: other_pairs(:)
-            integer, intent(in), optional :: threads    !! forwarded to the sort; absent = auto.
+            !> team size for the sort that builds the pair list, and for nothing else -- the
+            !! column work that follows answers to `parquet_set_table_threads`. **That sort is
+            !! serial at present**, so this argument is accepted and currently has no effect.
+            integer, intent(in), optional :: threads
         end subroutine table_join_string
         !> %join over a separated key string with an `integer(int32)` `max_rows=`; see
         !! `table_join` for everything else, and `table_join_max_i32` for why the ceiling is a
@@ -6768,7 +6785,10 @@ module parquet_tables
             integer(int64), allocatable, intent(out), optional :: pairs(:) !! see `table_join`.
             !> per output row: `other`'s row, or 0; see `table_join`.
             integer(int64), allocatable, intent(out), optional :: other_pairs(:)
-            integer, intent(in), optional :: threads    !! forwarded to the sort; absent = auto.
+            !> team size for the sort that builds the pair list, and for nothing else -- the
+            !! column work that follows answers to `parquet_set_table_threads`. **That sort is
+            !! serial at present**, so this argument is accepted and currently has no effect.
+            integer, intent(in), optional :: threads
         end subroutine table_join_string_max_i32
         !> %join over a separated key string with an `integer(int64)` `max_rows=`; see
         !! `table_join` for everything else, and `table_join_max_i32` for why the ceiling is a
@@ -6791,7 +6811,10 @@ module parquet_tables
             integer(int64), allocatable, intent(out), optional :: pairs(:) !! see `table_join`.
             !> per output row: `other`'s row, or 0; see `table_join`.
             integer(int64), allocatable, intent(out), optional :: other_pairs(:)
-            integer, intent(in), optional :: threads    !! forwarded to the sort; absent = auto.
+            !> team size for the sort that builds the pair list, and for nothing else -- the
+            !! column work that follows answers to `parquet_set_table_threads`. **That sort is
+            !! serial at present**, so this argument is accepted and currently has no effect.
+            integer, intent(in), optional :: threads
         end subroutine table_join_string_max_i64
         !> Builds the join's PAIR LIST: which left row meets which right row, and how many rows
         !! the joined table will have. Does not touch a single value column.

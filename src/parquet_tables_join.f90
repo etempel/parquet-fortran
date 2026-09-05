@@ -489,6 +489,16 @@ contains
                     error stop EP // "join: columns= names '" // trim(toks(i)) // "', which the " // &
                         "table being joined in has no column of" // ctx
                 end if
+                ! A MERGED key is already in the result -- as this table's own column, which is
+                ! the same column -- so carrying `other`'s copy would put `id_2` beside `id`
+                ! holding identical values. The residency default skips it (`if (merged(i))
+                ! cycle` below) and this branch has to agree: `columns=` names what comes across
+                ! IN ADDITION to the keys, not instead of them, so a caller who lists their key
+                ! among their columns gets one key column and not two. Dropped rather than
+                ! refused -- listing the key you joined on is a reasonable thing to write.
+                ! A key whose names DIFFER is not merged, is already in `sslots` from the loop
+                ! above, and `join_push_slot` is a set, so it needs no clause of its own.
+                if (merged(idx)) cycle
                 call join_push_slot(sslots, np, idx)
             end do
         else
@@ -856,8 +866,8 @@ contains
             else
                 rname = trim(on(j))
             end if
-            call table_lookup_sort_key(self, on(j), "join", li)
-            call table_lookup_sort_key(other, rname, "join", ri)
+            call table_lookup_sort_key(self, on(j), "join", li, key_kind="join")
+            call table_lookup_sort_key(other, rname, "join", ri, key_kind="join")
             call join_check_key_kinds(self, other, on(j), rname, li, ri)
             call self%cache%cols(li)%values%deep_copy(kc(j))
             call kc(j)%append(other%cache%cols(ri)%values)
@@ -1005,9 +1015,14 @@ contains
             if (req_id == REQ_11 .or. req_id == REQ_1M) then
                 ! A null-bearing group has lmatched .false. AND cannot violate anything, so the
                 ! same test excludes both it and a group whose right side is empty. The latter
-                ! genuinely has duplicate left keys, but with nothing to match they cannot
-                ! multiply the output either -- and refusing them would make the assertion
-                ! depend on the OTHER table's contents, which is not what it claims to check.
+                ! genuinely has duplicate left keys -- but with nothing to match, they contribute
+                ! no output row at all, so they cannot produce the wrong-sized result this
+                ! assertion exists to catch. That is the whole reason, and it is worth stating
+                ! plainly: `require=` asserts something about the rows that TOOK PART in the
+                ! match, not about either table's own uniqueness, so its outcome legitimately
+                ! depends on both tables. (An earlier version of this comment argued the reverse
+                ! -- that refusing them would make the assertion depend on the other table --
+                ! which is backwards and invites a reader to "fix" the lmatched test away.)
                 if (lmatched(g) .and. nleft(g) > 1_int64) then
                     call join_refuse_require("1:m", "left", "on=", lg_idx(lg_off(g)), &
                         lg_idx(lg_off(g) + 1_int64), nleft(g))

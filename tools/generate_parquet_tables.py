@@ -1474,7 +1474,10 @@ def join_interface(name, rank, mkind):
         a("            integer(int64), allocatable, intent(out), optional :: pairs(:) !! see `table_join`.")
         a("            !> per output row: `other`'s row, or 0; see `table_join`.")
         a("            integer(int64), allocatable, intent(out), optional :: other_pairs(:)")
-    a("            integer, intent(in), optional :: threads    !! forwarded to the sort; absent = auto.")
+    a("""            !> team size for the sort that builds the pair list, and for nothing else -- the
+            !! column work that follows answers to `parquet_set_table_threads`. **That sort is
+            !! serial at present**, so this argument is accepted and currently has no effect.
+            integer, intent(in), optional :: threads""")
     a("        end subroutine " + name)
     return "\n".join(o)
 
@@ -3937,11 +3940,16 @@ def gen_spec_interfaces():
         !! column, and the file-naming message suffix with it. Two copies of "which columns can
         !! be a key" is precisely the drift that would let a join accept a column `%sort_by`
         !! rejects.
-        module subroutine table_lookup_sort_key(self, name, proc, idx)
+        module subroutine table_lookup_sort_key(self, name, proc, idx, key_kind)
             class(parquet_table), intent(in) :: self !! the table.
             character(len=*), intent(in) :: name     !! the key column's name.
             character(len=*), intent(in) :: proc     !! calling procedure, for messages.
             integer, intent(out) :: idx              !! its slot index.
+            !> what the message calls the key, and what it advises instead: `"sort"` (the default)
+            !! or `"join"`. A join is an equality test rather than an ordering, so telling its
+            !! caller a column "cannot be a sort key" and to "sort by a scalar column" names an
+            !! operation they did not ask for.
+            character(len=*), intent(in), optional :: key_kind
         end subroutine table_lookup_sort_key
     end interface""")
     w("    !")

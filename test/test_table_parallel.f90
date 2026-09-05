@@ -43,7 +43,8 @@ module test_table_parallel
     use iso_c_binding, only : c_int64_t
     use testdrive, only : new_unittest, unittest_type, error_type, check, skip_test
 #ifdef _OPENMP
-    use omp_lib, only : omp_get_max_threads, omp_get_num_threads, omp_get_thread_num, omp_get_wtime
+    use omp_lib, only : omp_get_max_threads, omp_get_num_threads, omp_get_thread_num, omp_get_wtime, &
+        omp_get_num_procs
 #endif
     !
     implicit none
@@ -173,6 +174,8 @@ contains
                 test_concurrent_clear_null_shares_block), &
             new_unittest("has_nulls still reports a null a concurrent writer set on a date column", &
                 test_has_nulls_survives_concurrent_null), &
+            new_unittest("a join's threads= reaches the sort and not the column rewrite", &
+                test_join_thread_split), &
             new_unittest("bounded= reads correctly through both parallel paths", &
                 test_bounded_parallel_paths) &
             ]
@@ -1997,6 +2000,101 @@ contains
             "%has_nulls must still report the null a concurrent writer set: a read accessor that " // &
             "refreshes the temporal null cache discards that writer's dirty flag permanently")
     end subroutine test_has_nulls_survives_concurrent_null
+    !
+    !> A join's column rewrite answers to `parquet_set_table_threads`, and `threads=` does not
+    !! reach it.
+    !!
+    !! `%join` has two thread controls and they are not interchangeable: the column work -- this
+    !! table's own columns gathered, `other`'s copied in beside them -- is `table_colwork`'s, capped
+    !! by `parquet_set_table_threads` like every other row-structural mutation, while `threads=`
+    !! belongs to the sort that builds the pair list. Nothing asserted either half: a join's ANSWER
+    !! does not depend on either team size, so every other test in the join suite passes whatever
+    !! the two knobs do.
+    !!
+    !! **Three arms, and the third is what makes this a split rather than one fact.** The cap must
+    !! bite (arm 2 against arm 1), and `threads=` must NOT bite on the same observable (arm 3) --
+    !! without arm 3 an implementation in which `threads=` drove the column work too would pass.
+    !!
+    !! **The sort half is deliberately NOT asserted here, and that is a finding rather than an
+    !! omission.** `%join` asks `pf_argsort` for `group_offsets=`, and on that path
+    !! `engine_build_runs` (`src/parquet_argsort_kernel.f90`) resolves the thread count and then
+    !! calls the SERIAL `sort_build_runs_permutation`, so `threads=` currently changes nothing --
+    !! measured here at 1 for `threads=4` with the engine floor lowered, while the ungrouped path's
+    !! own test (`a selection's ordering route really opens a team`, `test/test_sorting.f90`) opens
+    !! 4 on the same machine. See `feature_doc_table_join.md`'s C5. **When that is fixed, add a
+    !! fourth arm**: `parquet_debug_sort_threads_used()` must report the `threads=` value and must
+    !! stay put when `parquet_set_table_threads` moves.
+    !!
+    !! The join is made to DETACH so the column work is a real gather over all five columns rather
+    !! than a no-op, which is what clears `colwork_threads`' floor (the Risk-49 trap).
+    subroutine test_join_thread_split(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b, c, d
+        integer(int32) :: k(NROW), rk(NROW + 1)
+        integer :: nt, tab_free, tab_capped, tab_threads1
+        !
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: table_colwork opens its team inside #ifdef _OPENMP, " // &
+            "so every arm below would report one thread and the split would hold for the wrong reason")
+        return
+#else
+        nt = min(4, omp_get_num_procs())
+        if (nt < 2) then
+            call skip_test(error, "needs at least two processors: colwork_threads clamps to " // &
+                "omp_get_num_procs(), so every arm would resolve to 1")
+            return
+        end if
+        !
+        ! A right key holding every left key ONCE, plus one duplicate -- so every left row survives
+        ! but one of them twice. The join therefore detaches, and this table's five columns are
+        ! really gathered rather than left in place.
+        call fill_key(k)
+        rk(1:NROW) = k
+        rk(NROW + 1) = k(1)
+        call build_key_table(b, rk)
+        !
+        ! ---- Arm 1: the default. The column rewrite must really thread, or arm 2 cannot tell a
+        ! cap from a floor that had already declined.
+        call build_fixture(a)
+        call parquet_debug_set_table_threads_used(0_c_int64_t)
+        call a%join(b, "k", how="left")
+        tab_free = int(parquet_debug_get_table_threads_used())
+        !
+        ! ---- Arm 2: the cap bites.
+        call build_fixture(c)
+        call parquet_set_table_threads(1)
+        call parquet_debug_set_table_threads_used(0_c_int64_t)
+        call c%join(b, "k", how="left")
+        tab_capped = int(parquet_debug_get_table_threads_used())
+        call parquet_reset_settings()
+        !
+        ! ---- Arm 3, the control: threads= is the SORT's argument and must not touch this team.
+        call build_fixture(d)
+        call parquet_debug_set_table_threads_used(0_c_int64_t)
+        call d%join(b, "k", how="left", threads=1)
+        tab_threads1 = int(parquet_debug_get_table_threads_used())
+        !
+        call check(error, tab_free > 1, &
+            "precondition: a detaching join must rewrite its columns in parallel here, or the " // &
+            "cap below cannot be told from a floor that already declined")
+        if (allocated(error)) return
+        call check(error, tab_capped == 1, &
+            "parquet_set_table_threads(1) must cap the join's column rewrite")
+        if (allocated(error)) return
+        call check(error, tab_threads1 > 1, &
+            "threads=1 must NOT cap the column rewrite -- it sizes the pair-list sort, and the " // &
+            "two knobs are separate")
+#endif
+    end subroutine test_join_thread_split
+    !
+    !> A one-column int32 table, for the join thread test's right-hand side.
+    subroutine build_key_table(t, keys)
+        type(parquet_table), intent(out) :: t !! receives the table.
+        integer(int32), intent(in) :: keys(:) !! the `k` column's values.
+        !
+        call parquet_new_table(t)
+        call t%add_column("k", keys)
+    end subroutine build_key_table
     !
     !
 end module test_table_parallel

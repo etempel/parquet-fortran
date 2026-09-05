@@ -42,7 +42,7 @@ reallocating the storage you are reading. Everything else is arranged around not
 | First read of a column, on a table **this** thread opened inside the region | **yes** | — (this is the per-thread slice pattern) |
 | `%prefetch` / `%materialize_all` called from one thread | **yes, internally** — the library reads the columns on several threads for you | — |
 | A single large column's first read (`%get`, `%prefetch` of one name) | **yes, internally** — split across the column's row groups instead | — |
-| `%sort_by` / `%filter_rows` / `%top_n` / `%delete_rows` / `%truncate` called from one thread | **yes, internally** — the library rewrites the columns on several threads for you | — |
+| `%sort_by` / `%filter_rows` / `%top_n` / `%delete_rows` / `%truncate` / `%join` called from one thread | **yes, internally** — the library rewrites the columns on several threads for you | — |
 | `%clone` called from one thread | **yes, internally** — the library copies the columns on several threads for you | — |
 | Write values into **different** resident columns | **yes** | — |
 | Write values into **disjoint row ranges** of one resident fixed-width column | **yes** | — |
@@ -52,7 +52,7 @@ reallocating the storage you are reading. Everything else is arranged around not
 | `%set_null`/`%clear_null` on a **date/time/timestamp** column | **yes** | — (the null lives in the element; nothing is allocated) |
 | `%append` into a shared table | **yes** — serialised by the table's own lock | — |
 | **Reading** a shared table while any thread appends to it | no | hard error (best-effort — see below) |
-| Any other change to a shared table: `%add_column`, `%drop_column`, `%rename_column`, `%copy_column`, `%cast`, `%evict_column`, `%reload`, `%filter_rows`, `%sort_by`, `%top_n`, `%delete_rows`, `%truncate`, `%append_null_rows`, `parquet_write_table` | no | hard error; do it before or after the region |
+| Any other change to a shared table: `%add_column`, `%drop_column`, `%rename_column`, `%copy_column`, `%cast`, `%evict_column`, `%reload`, `%filter_rows`, `%sort_by`, `%top_n`, `%join`, `%delete_rows`, `%truncate`, `%append_null_rows`, `parquet_write_table` | no | hard error; do it before or after the region |
 | The same change on a table **this** thread opened inside the region | **yes** | — |
 
 Three things the library cannot see, which stay your responsibility:

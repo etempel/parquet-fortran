@@ -894,6 +894,8 @@ program error_scenarios
         call scenario_join_key_direction_dash()
     case ("join_container_payload")
         call scenario_join_container_payload()
+    case ("join_container_key")
+        call scenario_join_container_key()
     case ("join_columns_unknown")
         call scenario_join_columns_unknown()
     case ("join_suffix_clash")
@@ -17887,6 +17889,35 @@ contains
         call a%join(b, "id", how="left")   ! -> aborts (a list column cannot be carried)
         print '(a,i0)', "unexpectedly carried a container column across, cols=", a%ncols()
     end subroutine scenario_join_container_payload
+
+    !> A container column cannot be a join KEY either, and the message must say "join key" rather
+    !! than "sort key".
+    !!
+    !! The rule is shared with `%sort_by` -- both resolve a key name through `table_lookup_sort_key`
+    !! precisely so that two copies of "which columns can be a key" cannot drift -- and only the
+    !! WORDING differs. That is why this scenario exists beside `container_sort_key`: the shared
+    !! guard is reached by two callers, and a join that stopped calling it would lose the refusal
+    !! with `container_sort_key` still green. The sort's own advice is also actively wrong here,
+    !! since a container cannot be carried across a join at all, so a caller told to "sort by a
+    !! scalar column and the container is carried along with it" would walk into a second abort.
+    !!
+    !! The scalar join first is the control: without it the abort below would be satisfied by a
+    !! `%join` that refused every key.
+    subroutine scenario_join_container_key()
+        type(parquet_table) :: a, b
+        type(parquet_list_column) :: lc
+        call join_fixture(a, [10_int64, 20_int64])
+        call join_fixture(b, [20_int64])
+        call a%join(b, "id", how="left")
+        print '(a,i0)', "a scalar join key worked, rows=", a%nrows()
+        call lc%init(PK_INT32)
+        call lc%append_row([1_int32, 2_int32])
+        call lc%append_row([3_int32])
+        call join_fixture(a, [10_int64, 20_int64])
+        call a%add_column("tags", lc)
+        call a%join(b, "tags", how="left")   ! -> aborts (a container cannot be a join key)
+        print '(a,i0)', "unexpectedly joined on a container column, rows=", a%nrows()
+    end subroutine scenario_join_container_key
 
     !> `columns=` naming a column the right table does not have is a mistake worth hearing about:
     !! skipping it would leave the caller believing a column had arrived, and a join keeps no link

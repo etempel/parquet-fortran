@@ -12,9 +12,10 @@ call parquet_open_table(cat, "waves_full.parquet")   ! reads nothing yet
 call parquet_open_table(lut, "todd.parquet")
 call lut%materialize_all()                           ! the lookup table is small: bring it in
 
-call cat%join(lut, on = "uberID", how = "left")
+call cat%join(lut, on = "uberID", how = "left", require = "m:1")
 !  cat has read exactly one of its own columns -- the key -- and now carries every column
-!  `lut` held, matched row for row.
+!  `lut` held, matched row for row. require="m:1" is what makes "row for row" true rather
+!  than hoped for: it refuses the join if uberID is repeated in lut.
 ```
 
 Everything on this page is about `parquet_table`. The rules it depends on — laziness, residency,
@@ -37,16 +38,23 @@ array of names — the two forms behave identically, and `other_on` takes whiche
 |---|---|
 | `on` | the key columns of **this** table, primary first |
 | `other_on` | the key columns of `other`, when their names differ. One name per `on` name |
-| `how` | `"inner"` (the default), `"left"`, `"right"`, `"outer"`, `"semi"` or `"anti"`; see [Which rows come out](#which-rows-come-out) |
+| `how` | `"inner"` (the default), `"left"`, `"right"`, `"outer"`, `"semi"` or `"anti"`, case-insensitive like `require=` and `order=`; see [Which rows come out](#which-rows-come-out) |
 | `columns` | which of `other`'s non-key columns to bring over; see [What the join carries](#what-the-join-carries) |
-| `other_suffix` | the suffix an incoming name takes when it clashes. Default `"_2"` |
+| `other_suffix` | the suffix an incoming name takes when it clashes. Default `"_2"`; a blank one is refused |
 | `require` | the cardinality you expect: `"m:m"` (the default), `"1:1"`, `"1:m"` or `"m:1"`; see [Saying what you expect](#saying-what-you-expect) |
 | `order` | `"left"` (the default) or `"key"`; see [Which rows come out](#which-rows-come-out) |
 | `max_rows` | refuse the join rather than build a result larger than this |
 | `matched` | out: one entry per row of **this** table as it was before the join |
 | `pairs` | out: one entry per output row — the row of **this** table it came from, or 0; see [The match itself](#the-match-itself) |
 | `other_pairs` | out: the same for `other`'s rows |
-| `threads` | forwarded to the sort the join runs. Absent resolves automatically |
+| `threads` | the team size for the sort that builds the match, and for nothing else; see below |
+
+That last row is narrow, and at present it is empty. The column work a join does — this table's
+own columns rewritten, `other`'s copied in beside them — belongs to the table layer and is capped by
+[`parquet_set_table_threads(n)`](../operating/settings.html#threads-for-mutating-a-table), as every
+other row-structural mutation is. `threads=` reaches only the sort that builds the match, and that
+sort runs serially whatever you pass — so the argument is accepted and currently does nothing. Set
+`parquet_set_table_threads` if you want a large join to use fewer threads.
 
 **`%join` changes this table in place**, and detaches it unless every one of its rows survives
 exactly once and in place — see [When the join detaches](#when-the-join-detaches-and-when-it-does-not).
@@ -87,171 +95,14 @@ both sides produce one row each.
 
 **Rows come out in this table's original order**, and within each of them, that row's matches in
 `other`'s original order. So an array you computed against this table before the join still lines
-up row for row whenever the join was one-to-at-most-one.
+up row for row whenever the join was one-to-at-most-one. A row this table contributed nothing to
+has no place in a walk over its rows, so under `"right"` and `"outer"` those rows follow at the end,
+in `other`'s own order.
 
 `order="key"` asks for the engine's own order instead: the rows grouped by key value, which is what
 astropy's join produces. The same pairs come out either way and only the sequence differs, so the
 default is the one to keep unless the grouping itself is what you want — an array computed against
 this table before the join no longer lines up under `"key"`.
-
-## When a row has no counterpart here
-
-`"right"` and `"outer"` are the two that can emit a row this table contributed nothing to, and two
-things follow that the other four never have to deal with.
-
-**This table's own columns are null at such a row**, exactly as the incoming ones are under
-`"left"`. So every column here has to be *fillable with nulls* — which a container column (list,
-map, struct) is not, and one is refused under those two `how` values with a message saying so. The
-refusal is by kind and by side rather than by whether this particular join happens to have an
-unmatched row, so that a join does not start failing the day its input gains one.
-
-**The merged key takes `other`'s value there.** Where `on` and `other_on` name the same column the
-result holds one key column, and at a row with no counterpart here it is `other`'s key that fills
-it — this table has none to give. So the key column of a `"right"` or `"outer"` join is never null
-on account of the join itself, and remains the column you can group or match on afterwards. When
-the two key names *differ* nothing is merged, both columns are kept, and this table's own key is
-null at such a row like the rest of its row.
-
-```fortran
-call a%join(b, "id", how = "outer")
-!  a row only `b` had: `a`'s own columns are null, and `id` holds `b`'s value
-```
-
-## Saying what you expect
-
-A join's worst failure is not an error. It is a result of the wrong size that nothing complains
-about — a duplicated row in a lookup table, and every matching row of a 100-million-row catalogue
-silently doubled. Three arguments exist for that, and all three are settled from the counting pass,
-before a single value column is touched, so a join that will not do what you meant is refused rather
-than half-built.
-
-**`require=` is the assertion, and it reads left-side-first.**
-
-| token | asserts | fails when |
-|---|---|---|
-| `"m:1"` | many rows here may share a key, and each finds at most one row in `other` | `other` repeats a key |
-| `"1:m"` | each key appears at most once in **this** table | this table repeats a key |
-| `"1:m"` and `"m:1"` together, as `"1:1"` | neither side repeats a key | either side does |
-| `"m:m"` | nothing. The default | never |
-
-`require="m:1"` is the annotation for every lookup-table join, and it is worth writing by reflex —
-it is what turns a duplicated row in the lookup table into a named error instead of a result many
-times the size you expected.
-
-```fortran
-call cat%join(lut, "uberID", how = "left", require = "m:1")
-!  a repeated uberID in lut is now an error at this call, naming the two rows that share it
-```
-
-The message names the two offending rows and how many share their key, on the side that broke the
-assertion — a row index is something you can look up, where a key may be several columns of several
-types. Rows whose key is **null** are not counted: a null key matches nothing, so several of them
-are several rows whose key is *unknown* rather than several copies of one key, and counting them
-would refuse a join that was about to be correct.
-
-**`max_rows=` is the weaker form**, for when you know the scale but not the cardinality. It refuses
-the join when the counted output would be larger, and the message names the count, both row counts
-and the largest single key group — because "the join wanted four billion rows" is not actionable
-without "one key value contributes 64 000 of them". There is no default limit, and none is planned:
-a limit that fires on a legitimate join is worse than no limit at all.
-
-```fortran
-call a%join(b, "id", max_rows = 10000000)          ! a plain integer, or 10000000_int64
-```
-
-**`matched=` is the diagnostic**, and it is one entry per row of this table **as it was on entry** —
-the only coordinate system in which "did my object find a counterpart?" still has an answer once the
-join has changed the rows. `count(matched)` is the line a cross-match script prints.
-
-```fortran
-logical, allocatable :: matched(:)
-
-call a%join(b, "object_id", how = "inner", matched = matched)
-write (*, "(a,i0,a,i0)") "matched ", count(matched), " of ", size(matched)
-```
-
-None of the three changes what the join produces when it is satisfied: `require=` and `max_rows=`
-either abort or do nothing at all, and `matched=` is read-only.
-
-## The match itself
-
-`pairs=` and `other_pairs=` hand back what the join worked from: one entry each per row of the
-result, naming the row of this table and the row of `other` that produced it, with **0 for "no
-counterpart on that side"**. Both are `integer(int64), allocatable`, both are the length of the
-joined table, and either can be asked for without the other.
-
-Both number the rows **as they were on entry**, like `matched=`. That is the point of them: by the
-time you read them the join has already rewritten this table, so an index into the rows it has *now*
-would answer a question nobody asked.
-
-This is what applies the same match to something the table does not hold — an array of a derived
-type, a second table keyed the same way, a file you are about to write beside this one:
-
-```fortran
-real(real64), allocatable :: exptime(:), joined(:)   ! parallel to `a`'s rows, but not columns of it
-integer(int64), allocatable :: il(:)
-integer(int64) :: k
-
-call a%join(b, "object_id", how = "left", pairs = il)
-allocate(joined(a%nrows()))
-joined = -1.0_real64
-do k = 1, a%nrows()
-    if (il(k) /= 0) joined(k) = exptime(il(k))        ! il(k) numbers the rows `a` had on entry
-end do
-```
-
-Under `how="inner"` and `how="left"` every output row has a left row, so `pairs` is never 0 there
-and the guard above is pure defence; it earns its place under `"right"` and `"outer"`, which can
-emit a row this table contributed nothing to. `other_pairs` is never 0 under `"inner"` and
-`"right"`, and is 0 on every row of a `"semi"` or `"anti"` join, which carry nothing from `other`
-at all.
-
-The same two arrays are what [`pf_spatial_index%pairs_within`](../utilities/spatial.html) returns
-for the positional case, so a positional cross-match and an exact-key one hand back the same shape,
-and code that consumes one consumes the other. Asking for neither costs nothing; asking for either
-costs nothing either, since the join hands its own arrays over rather than copying them.
-
-## When the join detaches, and when it does not
-
-A join that leaves every one of this table's rows exactly once, in its original position, has not
-changed which rows the table has — it has only added columns. On that path the table keeps its file:
-nothing is rewritten, no column that has not been read becomes unreadable, a slice still covers the
-rows it covered, and an outstanding `%col` pointer can survive the whole operation. Anything else is
-a change to the row set, and the table detaches from its file exactly as `%sort_by` and
-`%filter_rows` do.
-
-**Which one you get is a property of the data, not of `how`.** A left join keeps every left row —
-but keeps it *once* only when each key it matches appears once in `other`. Duplicate that key and
-the row is duplicated too, and the join detaches:
-
-```fortran
-call cat%join(lut, "uberID", how = "left")
-!  uberID unique in lut  ->  cat keeps its file, and every column it never read
-!  uberID repeated in lut ->  those rows are duplicated, so cat detaches
-```
-
-The same rule covers the other four with no clause of its own. A `"semi"` join whose key matches
-every row here is a filter that removes nothing, so it keeps its file; one that removes a row
-detaches, as `%filter_rows` does. A `"right"` or `"outer"` join detaches as soon as a row of
-`other` has no counterpart here, because that row is one this table did not have.
-
-So the rule to plan against is the one on this page's [What the join
-carries](#what-the-join-carries): read the columns you want to keep *before* a join, unless you know
-the key is unique on the other side. `%is_detached()` answers afterwards.
-
-**`%generation()` moves only if the incoming columns had to grow the slot array.** Reserve room
-first and it does not move at all, which is what lets a pointer taken before the join still be
-valid after it:
-
-```fortran
-call cat%reserve_columns(cat%ncols() + 4)   ! four columns coming from lut
-call cat%col("ra", ra)                      ! a live pointer into cat's own storage
-call cat%join(lut, "uberID", how = "left")  ! m:1, so no row moves
-!  cat%generation() is unchanged, and `ra` still points at cat's ra column
-```
-
-Check `%generation()` rather than assuming: a join that did move rows will have bumped it, and that
-is the signal to fetch the pointer again.
 
 ## What counts as a match
 
@@ -266,7 +117,7 @@ match every such row against every other one, which for a few thousand of them i
 output rows.
 
 **Key kinds must match exactly.** An `int32` key and an `int64` key are refused rather than
-promoted, and so are two keys of different widths. Nothing is silently widened, because a 64-bit
+promoted. Nothing is silently widened, because a 64-bit
 catalogue identifier above 2⁵³ does not survive being promoted to a real — cast one side with
 `%cast` first if you really do mean to compare them.
 
@@ -330,6 +181,181 @@ unmatched row has to be filled with nulls, and a container's own row gather has 
 behaviour for that, so the refusal is by kind rather than by whether this particular join happens
 to have an unmatched row. Name the columns you do want with `columns=`.
 
+**That refusal is reached by `%materialize_all()` on the right table as well as by naming the
+column**, since it selects everything resident and a container column is resident like any other.
+So a lookup table holding one list column cannot be brought over wholesale, however little the
+join wanted it — `columns=` is the way to say which of its columns you meant.
+
+## When a row has no counterpart here
+
+`"right"` and `"outer"` are the two that can emit a row this table contributed nothing to, and two
+things follow that the other four never have to deal with.
+
+**This table's own columns are null at such a row**, exactly as the incoming ones are under
+`"left"`. So every column here has to be *fillable with nulls* — which a container column (list,
+map, struct) is not, and one is refused under those two `how` values with a message saying so. The
+refusal is by kind and by side rather than by whether this particular join happens to have an
+unmatched row, so that a join does not start failing the day its input gains one.
+
+**The merged key takes `other`'s value there.** Where `on` and `other_on` name the same column the
+result holds one key column, and at a row with no counterpart here it is `other`'s key that fills
+it — this table has none to give. So the key column of a `"right"` or `"outer"` join is never null
+on account of the join itself, and remains the column you can group or match on afterwards. When
+the two key names *differ* nothing is merged, both columns are kept, and this table's own key is
+null at such a row like the rest of its row.
+
+```fortran
+call a%join(b, "id", how = "outer")
+!  a row only `b` had: `a`'s own columns are null, and `id` holds `b`'s value
+```
+
+## Saying what you expect
+
+A join's worst failure is not an error. It is a result of the wrong size that nothing complains
+about — a duplicated row in a lookup table, and every matching row of a 100-million-row catalogue
+silently doubled. Three arguments exist for that, and all three are settled from the counting pass,
+before a single value column is touched, so a join that will not do what you meant is refused rather
+than half-built.
+
+**`require=` is the assertion, and it reads left-side-first.**
+
+| token | asserts | fails when |
+|---|---|---|
+| `"m:1"` | many rows here may share a key, and each finds at most one row in `other` | `other` repeats a key this table also has |
+| `"1:m"` | each key that matches appears at most once in **this** table | this table repeats a key `other` also has |
+| `"1:m"` and `"m:1"` together, as `"1:1"` | neither side repeats a key the other has | either side does |
+| `"m:m"` | nothing. The default | never |
+
+`require="m:1"` is the annotation for every lookup-table join, and it is worth writing by reflex —
+it is what turns a duplicated row in the lookup table into a named error instead of a result many
+times the size you expected.
+
+```fortran
+call cat%join(lut, "uberID", how = "left", require = "m:1")
+!  a repeated uberID in lut is now an error at this call, naming the two rows that share it
+```
+
+The message names the two offending rows and how many share their key, on the side that broke the
+assertion — a row index is something you can look up, where a key may be several columns of several
+types. Rows whose key is **null** are not counted: a null key matches nothing, so several of them
+are several rows whose key is *unknown* rather than several copies of one key, and counting them
+would refuse a join that was about to be correct. A repeat whose key finds **no counterpart on the
+other side** is not counted either: it contributes no output row, so it cannot multiply the
+result — and a result of the wrong size is what these assertions exist to catch. So `require=` is
+an assertion about the rows that took part in the match, not a uniqueness check on either table by
+itself.
+
+**`max_rows=` is the weaker form**, for when you know the scale but not the cardinality. It refuses
+the join when the counted output would be larger, and the message names the count, both row counts
+and the largest single key group — because "the join wanted four billion rows" is not actionable
+without "one key value contributes 64 000 of them". There is no default limit, and none is planned:
+a limit that fires on a legitimate join is worse than no limit at all.
+
+```fortran
+call a%join(b, "id", max_rows = 10000000)          ! a plain integer, or 10000000_int64
+```
+
+**`matched=` is the diagnostic**, and it is one entry per row of this table **as it was on entry** —
+the only coordinate system in which "did my object find a counterpart?" still has an answer once the
+join has changed the rows. `count(matched)` is the line a cross-match script prints.
+
+```fortran
+logical, allocatable :: matched(:)
+
+call a%join(b, "object_id", how = "inner", matched = matched)
+write (*, "(a,i0,a,i0)") "matched ", count(matched), " of ", size(matched)
+```
+
+None of the three changes what the join produces when it is satisfied: `require=` and `max_rows=`
+either abort or do nothing at all, and `matched=` is read-only.
+
+## The match itself
+
+`pairs=` and `other_pairs=` hand back what the join worked from: one entry each per row of the
+result, naming the row of this table and the row of `other` that produced it, with **0 for "no
+counterpart on that side"**. Both are `integer(int64), allocatable`, both are the length of the
+joined table, and either can be asked for without the other.
+
+Both number the rows **as they were on entry**, like `matched=`. That is the point of them: by the
+time you read them the join has already rewritten this table, so an index into the rows it has *now*
+would answer a question nobody asked.
+
+This is what applies the same match to something the table does not hold — an array of a derived
+type, a second table keyed the same way, a file you are about to write beside this one:
+
+```fortran
+real(real64), allocatable :: exptime(:), joined(:)   ! parallel to `a`'s rows, but not columns of it
+integer(int64), allocatable :: il(:)
+integer(int64) :: k
+
+call a%join(b, "object_id", how = "left", pairs = il)
+allocate(joined(a%nrows()))
+joined = -1.0_real64
+do k = 1, a%nrows()
+    if (il(k) /= 0) joined(k) = exptime(il(k))        ! il(k) numbers the rows `a` had on entry
+end do
+```
+
+Under `how="inner"` and `how="left"` every output row has a left row, so `pairs` is never 0 there
+and the guard above is pure defence; it earns its place under `"right"` and `"outer"`, which can
+emit a row this table contributed nothing to. `other_pairs` is never 0 under `"inner"` and
+`"right"`, and is 0 on every row of a `"semi"` or `"anti"` join, which carry nothing from `other`
+at all.
+
+If what you have is two arrays rather than two tables, the same question is answered one layer
+down by [`pf_match`, `pf_match_all` and `pf_in`](../utilities/sorting.html#matching-two-arrays),
+which use the same convention: an index into the other array, or 0.
+
+The same two arrays are the shape [`pf_spatial_index%pairs_within`](../utilities/spatial.html)
+hands a positional match back in, so a pair list reads the same way whichever produced it. It is a
+shape rather than an interface: `%pairs_within` matches one dataset against itself and reports each
+pair once as `i < j`, never 0, where these two index two different tables and use 0 for a row one of
+them did not contribute to. Asking for neither costs nothing; asking for either costs nothing
+either, since the join hands its own arrays over rather than copying them.
+
+## When the join detaches, and when it does not
+
+A join that leaves every one of this table's rows exactly once, in its original position, has not
+changed which rows the table has — it has only added columns. On that path the table keeps its file:
+nothing is rewritten, no column that has not been read becomes unreadable, a slice still covers the
+rows it covered, and an outstanding `%col` pointer can survive the whole operation. Anything else is
+a change to the row set, and the table detaches from its file exactly as `%sort_by` and
+`%filter_rows` do.
+
+**Which one you get is a property of the data, not of `how`.** A left join keeps every left row —
+but keeps it *once* only when each key it matches appears once in `other`. Duplicate that key and
+the row is duplicated too, and the join detaches:
+
+```fortran
+call cat%join(lut, "uberID", how = "left")
+!  uberID unique in lut  ->  cat keeps its file, and every column it never read
+!  uberID repeated in lut ->  those rows are duplicated, so cat detaches
+```
+
+The same rule covers the other four with no clause of its own. A `"semi"` join whose key matches
+every row here is a filter that removes nothing, so it keeps its file; one that removes a row
+detaches, as `%filter_rows` does. A `"right"` or `"outer"` join detaches as soon as a row of
+`other` has no counterpart here, because that row is one this table did not have — and a `"right"`
+join detaches on the reverse too, since it drops a row of this table that found nothing.
+
+So the rule to plan against is the one on this page's [What the join
+carries](#what-the-join-carries): read the columns you want to keep *before* a join, unless you know
+the key is unique on the other side. `%is_detached()` answers afterwards.
+
+**`%generation()` moves only if the incoming columns had to grow the slot array.** Reserve room
+first and it does not move at all, which is what lets a pointer taken before the join still be
+valid after it:
+
+```fortran
+call cat%reserve_columns(cat%ncols() + 4)   ! four columns coming from lut
+call cat%col("ra", ra)                      ! a live pointer into cat's own storage
+call cat%join(lut, "uberID", how = "left")  ! m:1, so no row moves
+!  cat%generation() is unchanged, and `ra` still points at cat's ra column
+```
+
+Check `%generation()` rather than assuming: a join that did move rows will have bumped it, and that
+is the signal to fetch the pointer again.
+
 ## What the result is called
 
 **The key column appears once**, taken from this table, when `on` and `other_on` name the same
@@ -338,6 +364,11 @@ thing. When they differ both are kept, because the right-hand key really is a di
 ```fortran
 call a%join(b, on = "id", other_on = "object_id")   ! `a` gains `object_id` as well
 ```
+
+**`columns=` does not govern either case.** A right-hand key whose name differs comes across
+whichever columns you named, because it is the only place its values appear in the result at all;
+and naming the merged key in `columns=` adds nothing, since that column is already here. `columns=`
+lists what arrives *in addition to* the keys.
 
 Any other incoming column whose name clashes takes `other_suffix` (default `"_2"`), and **only the
 incoming column is renamed** — your own `mag_r` stays `mag_r` and the arriving one becomes

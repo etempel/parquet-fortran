@@ -31,7 +31,8 @@
 !! concurrently, so a shared one would be truncated out from under the other.
 module test_table_join
     use parquet
-    use iso_fortran_env, only : int32, int64
+    use iso_fortran_env, only : int32, int64, real64
+    use ieee_arithmetic, only : ieee_value, ieee_quiet_nan
     use testdrive, only : new_unittest, unittest_type, error_type, check
     !
     implicit none
@@ -131,6 +132,12 @@ contains
                 test_join_pairs_output), &
             new_unittest("pairs= can be asked for on its own, and costs the join nothing", &
                 test_join_pairs_alone), &
+            new_unittest("a NaN key matches every other NaN, where a null matches none", &
+                test_join_nan_key), &
+            new_unittest("the right table's file metadata is not merged into this one", &
+                test_join_keeps_own_metadata), &
+            new_unittest("columns= naming the merged key carries no second copy of it", &
+                test_join_columns_names_the_key), &
             new_unittest("a container column on this side is carried across a join", &
                 test_join_carries_left_container) &
             ]
@@ -1832,5 +1839,192 @@ contains
         call check(error, all(got_null .eqv. [.false., .false., .false., .false., .true.]), &
             "including which of them are null")
     end subroutine test_join_carries_left_container
+    !
+    !> A NaN key is an ordinary VALUE and matches every other NaN; a null key matches nothing.
+    !!
+    !! The two halves are one test on purpose, because each is the other's negative control. The
+    !! fixture is the same in both arms -- same shape, same row count, same 2.0 pair -- and the
+    !! only difference is whether the four exceptional entries are NaNs or nulls. So an engine
+    !! that matched everything, or one that matched nothing, fails one arm or the other; an
+    !! assertion on either arm alone would pass against both.
+    !!
+    !! Neither is obvious from reading the code and both are silent when broken: the join would go
+    !! on returning uniform-looking pairs of the wrong count, which is why
+    !! `doc/pages/tables/table-join.md` warns about the NaN case by name ("a column where the
+    !! missing values were written as NaN rather than as nulls will match every such row against
+    !! every other one"). The engine is `pf_argsort`'s comparator, whose own NaN and null tiers
+    !! are tested in `test/test_sorting.f90` -- what is untested there is that a JOIN inherits
+    !! them, which is what this asserts.
+    !!
+    !! The NaN comes from `ieee_value`, never a `transfer` of a bit pattern: nagfor constant-folds
+    !! such a transfer and then refuses its own result (CLAUDE.md, "-C=undefined").
+    subroutine test_join_nan_key(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b
+        integer(int64), allocatable :: il(:), ir(:)
+        integer(int64) :: n_out
+        real(real64) :: nan, lk(4), rk(2)
+        !
+        nan = ieee_value(1.0_real64, ieee_quiet_nan)
+        lk = [1.0_real64, nan, 2.0_real64, nan]
+        rk = [nan, 2.0_real64]
+        !
+        ! ---- Arm 1: NaNs. Every NaN matches every other one, so left rows 2 and 4 both pair
+        ! with right row 1, and 2.0 pairs with 2.0. Row 1 (1.0) has no counterpart and is dropped.
+        call build_real(a, "k", lk)
+        call build_real(b, "k", rk)
+        call pairs_of(a, b, ["k"], il, ir, n_out, how="inner")
+        call check(error, n_out == 3_int64, &
+            "a NaN key must match every other NaN, giving three inner pairs, not one")
+        if (allocated(error)) return
+        call check(error, seq_is(il, ir, reshape([2_int64, 1_int64, 3_int64, 2_int64, &
+            4_int64, 1_int64], [2, 3])), &
+            "and the pairs must be (2,1), (3,2), (4,1) in left order")
+        if (allocated(error)) return
+        !
+        ! ---- Arm 2, the control: the SAME four entries as nulls instead. A null matches nothing,
+        ! including another null, so only the 2.0 pair survives. Without this arm every assertion
+        ! above would also pass against an engine that matched any two exceptional values.
+        call build_real(a, "k", lk)
+        call build_real(b, "k", rk)
+        call a%set_null("k", 2_int64)
+        call a%set_null("k", 4_int64)
+        call b%set_null("k", 1_int64)
+        call pairs_of(a, b, ["k"], il, ir, n_out, how="inner")
+        call check(error, n_out == 1_int64, &
+            "a null key must match nothing, so only the 2.0 pair survives")
+        if (allocated(error)) return
+        call check(error, seq_is(il, ir, reshape([3_int64, 2_int64], [2, 1])), &
+            "and that pair must be (3,2)")
+    end subroutine test_join_nan_key
+    !
+    !> `other`'s file metadata is not merged: the joined table still answers about its OWN file.
+    !!
+    !! A **claimed absence**, which is the class no ordinary test asserts -- nothing fails when a
+    !! future change starts merging the two, and the page states it outright ("`other`'s metadata
+    !! is not merged, because there is no defensible rule for what to do with a key both files
+    !! define"). The negative control is the same query on `other` itself, which must find the
+    !! key: without it the test would pass just as happily against a fixture whose right file
+    !! never carried any metadata at all.
+    !!
+    !! The join is an m:1 left join, so the table keeps its file -- which also pins the easier
+    !! half, that a join does not lose its own metadata.
+    subroutine test_join_keeps_own_metadata(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b
+        character(len=:), allocatable :: val
+        logical :: ok
+        character(len=*), parameter :: fa = "test_run/join_meta_left.parquet"
+        character(len=*), parameter :: fb = "test_run/join_meta_right.parquet"
+        !
+        call write_meta_fixture(fa, "left_key", "L", LKEY)
+        call write_meta_fixture(fb, "right_key", "R", UKEY)
+        call parquet_open_table(a, fa)
+        call parquet_open_table(b, fb)
+        call b%materialize_all()
+        !
+        ! The control first, so a later miss cannot be blamed on a fixture that never had the key.
+        call b%get_file_metadata("right_key", val, found=ok)
+        call check(error, ok .and. val == "R", &
+            "precondition: the right file must carry the metadata key this test looks for")
+        if (allocated(error)) return
+        !
+        call a%join(b, "id", how="left", require="m:1")
+        call check(error, .not. a%is_detached(), &
+            "precondition: an m:1 left join must keep its file, or the metadata question changes")
+        if (allocated(error)) return
+        call a%get_file_metadata("left_key", val, found=ok)
+        call check(error, ok .and. val == "L", &
+            "a joined table must still answer for its own source file's metadata")
+        if (allocated(error)) return
+        call a%get_file_metadata("right_key", val, found=ok)
+        call check(error, .not. ok, &
+            "and must NOT have merged the right file's metadata into it")
+    end subroutine test_join_keeps_own_metadata
+    !
+    !> `columns=` names what comes across IN ADDITION to the keys, so naming a key is not a way to
+    !! get a second copy of it.
+    !!
+    !! Two rules in one test, because they are the same rule seen from both ends. A key whose name
+    !! is the SAME on both sides is merged into one column, and naming it in `columns=` must not
+    !! produce `id_2` beside `id` holding identical values (`join_plan_payload` skips it, exactly
+    !! as the residency default already did). A key whose name DIFFERS really is another column,
+    !! and comes across whatever `columns=` says -- so `columns="payload"` still yields `rid`.
+    !!
+    !! The negative control is the same join with the key left out of `columns=`: it must give
+    !! the identical column set, which is what makes "naming the key changed nothing" a claim
+    !! about the code rather than about this fixture.
+    subroutine test_join_columns_names_the_key(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b, c
+        integer(int64), allocatable :: got(:)
+        !
+        ! ---- Naming the merged key must add nothing. ----
+        call build(a, "id", LKEY)
+        call build(b, "id", UKEY)
+        call b%materialize_all()
+        call a%join(b, "id", how="left", columns="id,payload")
+        call check(error, .not. a%has_column("id_2"), &
+            "naming the merged key in columns= must not carry a second copy of it")
+        if (allocated(error)) return
+        call check(error, a%ncols() == 3, &
+            "the result must hold id, payload and payload_2 and nothing else")
+        if (allocated(error)) return
+        call a%get("id", got)
+        call check(error, all(got == LKEY), "and the key column must still hold this table's keys")
+        if (allocated(error)) return
+        !
+        ! The control: the same join without the key in columns= must give the same columns, so
+        ! the assertions above are about the rule and not about this fixture.
+        call build(c, "id", LKEY)
+        call c%join(b, "id", how="left", columns="payload")
+        call check(error, c%ncols() == a%ncols() .and. .not. c%has_column("id_2"), &
+            "leaving the key out of columns= must give the identical column set")
+        if (allocated(error)) return
+        !
+        ! ---- A key whose name DIFFERS is a genuine second column, and columns= cannot suppress
+        ! it: it is the only place the right-hand key value appears in the result at all.
+        call build(a, "id", LKEY)
+        call build(b, "rid", UKEY)
+        call b%materialize_all()
+        call a%join(b, on="id", other_on="rid", how="left", columns="payload")
+        call check(error, a%has_column("rid"), &
+            "a right key whose name differs must come across even when columns= omits it")
+    end subroutine test_join_columns_names_the_key
+    !
+    !> A two-column table with a `real64` key, for the NaN test. `build`'s int64 key cannot hold
+    !! one, and a NaN is the whole point of that fixture.
+    subroutine build_real(t, name, keys)
+        type(parquet_table), intent(out) :: t !! the table.
+        character(len=*), intent(in) :: name  !! the key column's name.
+        real(real64), intent(in) :: keys(:)   !! the key values.
+        integer(int64), allocatable :: payload(:)
+        integer(int64) :: k
+        !
+        allocate(payload(size(keys)))
+        do k = 1_int64, size(keys, kind=int64)
+            payload(k) = k
+        end do
+        call parquet_new_table(t)
+        call t%add_column(name, keys)
+        call t%add_column("payload", payload)
+    end subroutine build_real
+    !
+    !> Writes a one-column file carrying one metadata key, for the metadata test.
+    subroutine write_meta_fixture(fname, key, val, keys)
+        character(len=*), intent(in) :: fname !! the file to write.
+        character(len=*), intent(in) :: key   !! the metadata key to put in it.
+        character(len=*), intent(in) :: val   !! its value.
+        integer(int64), intent(in) :: keys(:) !! the `id` column's values.
+        type(parquet_writer) :: w
+        type(parquet_schema) :: s
+        !
+        call s%init("jointable", survey="TESTSURVEY")
+        call s%add_field("id", "int64")
+        call s%add_metadata(key, val)
+        call parquet_open_writer(w, fname, s)
+        call parquet_write_column(w, "id", keys)
+        call parquet_close_writer(w)
+    end subroutine write_meta_fixture
     !
 end module test_table_join

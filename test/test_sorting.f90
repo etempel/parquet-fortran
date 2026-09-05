@@ -5871,6 +5871,9 @@ contains
         real(real64) :: v(n)
         integer(int64), allocatable :: perm(:), go(:)
         integer(int64) :: seen_four, seen_one, seen_plain
+        integer(int64) :: mleft(n), mright(n)      !! the match arm's two sides.
+        integer(int64), allocatable :: mm(:)       !! its answer; the values are not what is tested.
+        integer(int64) :: seen_match, seen_match1  !! teams the two pf_match calls opened.
         integer :: i
         !
         ! Preconditions, declared rather than assumed -- the same pair `test_selection_ordering_threads`
@@ -5902,6 +5905,18 @@ contains
         seen_one = parquet_debug_sort_threads_used()
         call pf_argsort(v, perm, threads=4)
         seen_plain = parquet_debug_sort_threads_used()
+        ! The match family reaches the same builder, over the two sides CONCATENATED, and is the
+        ! half of the grouped path with no other threading coverage at all -- `pf_argsort`'s own
+        ! arms above would keep passing if every `pf_match` specific stopped forwarding `threads=`.
+        ! Dense duplicates on purpose: matching is about runs of equal elements.
+        do i = 1, n
+            mleft(i) = int(mod(i * 7919, 97), int64)
+            mright(i) = int(mod(i * 104729, 97), int64)
+        end do
+        call pf_match(mleft, mright, mm, threads=4)
+        seen_match = parquet_debug_sort_threads_used()
+        call pf_match(mleft, mright, mm, threads=1)
+        seen_match1 = parquet_debug_sort_threads_used()
         call force_fortran_parallel_threshold(0_int64)
         !
         call check(error, seen_four == 4_int64, &
@@ -5915,6 +5930,15 @@ contains
         call check(error, seen_plain == seen_four, &
             "grouped and ungrouped must resolve the same team on the same data: one policy, " // &
             "one resolve_thread_count, two drivers")
+        if (allocated(error)) return
+        call check(error, seen_match == 4_int64, &
+            "pf_match must open the team threads= asked for: it reaches the same builder, and " // &
+            "the guide says the whole match family uses the machine automatically")
+        if (allocated(error)) return
+        ! The control, and it is the whole reason the line above is not vacuous: a pf_match that
+        ! ignored threads= entirely and always opened omp_get_max_threads() would pass it.
+        call check(error, seen_match1 == 1_int64, &
+            "threads=1 must still run pf_match's sort serially")
     end subroutine test_group_offsets_threads
     !
     !> A threaded grouped sort must return the identical permutation AND the identical group offsets.

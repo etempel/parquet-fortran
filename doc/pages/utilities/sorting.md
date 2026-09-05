@@ -168,7 +168,7 @@ sort engine itself, lives one tier down, in a module of its own:
 use parquet_argsort
 ```
 
-That import compiles **4** of this library's Fortran files, against 21 for `use parquet_sorting`,
+That import compiles **4** of this library's Fortran files, against 22 for `use parquet_sorting`,
 and its Fortran graph never reaches the Parquet C++ bindings. `use parquet_sorting` and
 `use parquet` are unaffected: they re-export the tier and *extend* `pf_argsort` with the five
 element types that need a column, a packed string store or a temporal element, so a single
@@ -723,6 +723,11 @@ no loop. One call sorts the two arrays concatenated and reads the matches off th
 elements, so the whole answer costs one sort. This is the opposite of the searches, where the array
 being searched is a fixed collection you probe repeatedly.
 
+That one sort is the ordinary threaded one, so all three operations use the machine automatically
+and all three take `threads=` to turn that down — see
+[Sorting in parallel](#sorting-in-parallel). Either array may be empty: an empty `left` gives an
+empty answer, an empty `right` matches nothing, and neither is an error.
+
 ```fortran
 integer(int64) :: id(5) = [30, 10, 99, 20, 10]
 integer(int64) :: ref(4) = [20, 10, 40, 10]
@@ -803,14 +808,14 @@ is used on — a 64-bit catalogue identifier above `2**53` does not survive a pr
 
 ## Sorting in parallel
 
-**Sorting is parallel by default.** `pf_argsort`, `pf_sort`, `pf_unique_count`, `pf_unique` and
-`pf_rank` all use the machine automatically, as do the read-time
-`parquet_open_reader(..., sort_by=)` and `parquet_table%sort_by`. There is nothing to switch on.
-`pf_partial_sort`, `pf_partial_argsort`, `pf_nth_element` and `pf_nth_quantile` take `threads=`
-too, but thread less of their work — see
+**Sorting is parallel by default.** `pf_argsort`, `pf_sort`, `pf_unique_count`, `pf_unique`,
+`pf_rank`, `pf_match`, `pf_match_all` and `pf_in` all use the machine automatically, as do the
+read-time `parquet_open_reader(..., sort_by=)` and `parquet_table%sort_by`. There is nothing to
+switch on. `pf_partial_sort`, `pf_partial_argsort`, `pf_nth_element` and `pf_nth_quantile` take
+`threads=` too, but thread less of their work — see
 [What `threads=` reaches in a selection](#what-threads-reaches-in-a-selection) below.
 
-Those nine are the whole list. `pf_permute`, `pf_is_sorted`, the three searches, `pf_minmax`,
+Those twelve are the whole list. `pf_permute`, `pf_is_sorted`, the three searches, `pf_minmax`,
 `pf_argminmax` and `pf_merge` take no `threads=` at all — each is a single linear pass, so there is
 nothing to hand a team — and passing one is a compile error rather than a silently ignored argument.
 

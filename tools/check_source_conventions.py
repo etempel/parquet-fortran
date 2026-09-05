@@ -3350,6 +3350,110 @@ def check_module_tables_match_the_measured_footprints():
     return problems
 
 
+def check_prose_footprint_counts():
+    """A module's file count written in PROSE, on any guide page, must match the measurement.
+
+    `check_module_tables_match_the_measured_footprints` above covers the entry-module TABLES on
+    README.md and choosing-a-module.md, plus that page's one bolded `compiles **N** of this
+    library's Fortran files` sentence. It looks at no other page and at no other phrasing, and that
+    gap let three prose counts drift at once, in three different forms, from one cause -- the
+    addition of `src/parquet_sorting_match.f90`, `parquet_sorting`'s eighth submodule:
+
+      * `utilities/statistics.md`          "-- 27 of this library's Fortran files --"   (28)
+      * `operating/choosing-a-module.md`   "the whole 21-file graph"                    (22)
+      * `utilities/sorting.md`             "against 21 for `use parquet_sorting`"       (22)
+
+    None was caught by anything. The tables on two other pages said 22 throughout, so the guide
+    disagreed with itself in four places while every check stayed green -- and `statistics.md` was
+    not in the campaign that found this at all. It was reached only by cross-checking every figure
+    in the guide at once, which is what this now does on every run.
+
+    **What it matches, and why not more.** A phrasing regex over the three forms above is
+    impossible -- they share no wording -- so the anchor is a number IMMEDIATELY followed by a
+    file-word (`22 files`, `21-file`, `28 of this library's Fortran files`), attributed to any
+    entry module named on the same line, and reported only when it is already within
+    `WINDOW` of that module's true count.
+
+    **Both halves of that are load-bearing, and a looser version was tried first.** Scanning every
+    integer on a line naming a module reported 19 violations on a correct tree -- version strings,
+    years, and the `8` in "took `use parquet_sampling` from 24 files to 8". The window is what
+    separates a stale count from an unrelated number in the same sentence, and it has to stay
+    small: at 5 a wrong `27` beside two modules was attributed to both.
+
+    **Two things it therefore does NOT catch**, stated so nobody reads a pass as proof:
+
+      * a count not adjacent to a file-word -- `utilities/sorting.md`'s "against 22 for
+        `use parquet_sorting`" is checked by nothing, and was one of the three that drifted;
+      * a count whose module is not named in its own SENTENCE. The same page's "That import
+        compiles **4** of this library's Fortran files" is about `parquet_argsort`, which the
+        sentence never names -- verified by breaking it to 5 and watching this check pass;
+      * a count that has drifted by more than `WINDOW`. These figures move by one or two when a
+        file is added, which is how all three above went wrong, so that is the right trade -- and
+        a large drift on a TABLE is still caught exactly by the sibling check.
+
+    All three limits were established by control, not by reading: reintroducing each of the three
+    real defects makes this fire, and the two forms listed above leave it silent.
+    """
+    problems = []
+    measured = _footprint_counts()
+    if not measured:
+        return ["tools/module_footprints.txt: parsed no sections -- this check needs updating"]
+    WINDOW = 3
+    # A number immediately followed by a file-word. The published forms all match.
+    claim = re.compile(r"\b(\d{1,3})(?:-file\b|\s+(?:of\s+this\s+library's\s+)?"
+                       r"(?:Fortran\s+)?files?\b)")
+    pages = sorted((REPO_ROOT / "doc" / "pages").rglob("*.md")) + [REPO_ROOT / "README.md"]
+    seen = 0
+    for path in pages:
+        label = path.relative_to(REPO_ROOT).as_posix()
+        # **Scanned per PARAGRAPH, not per line, and that is not a refinement.** The guide is
+        # hard-wrapped, so a claim routinely straddles a line break -- statistics.md's read
+        # "28 of this library's" / "Fortran files" across two lines, and a per-line version of
+        # this check silently matched nothing there while passing. Table rows are dropped first:
+        # they are the sibling check's business and are exact there.
+        para, first = [], 0
+        blocks = []
+        for lineno, line in enumerate(path.read_text().splitlines(), 1):
+            if line.lstrip().startswith("|") or not line.strip():
+                if para:
+                    blocks.append((first, " ".join(para)))
+                para, first = [], 0
+                continue
+            if not para:
+                first = lineno
+            para.append(line.strip())
+        if para:
+            blocks.append((first, " ".join(para)))
+        for lineno, para_text in blocks:
+            # **Scoped to the SENTENCE, not the paragraph.** A paragraph routinely names several
+            # modules, and choosing-a-module.md has one naming three: "taking it from
+            # `parquet_sorting` cost the whole sorting graph ... took `use parquet_sampling` from
+            # 24 files to 8". At paragraph scope that 24 is within the window of
+            # `parquet_sorting`'s 22 and reports a defect in correct prose.
+            for text in re.split(r"(?<=\.)\s+", para_text):
+                named = [m for m in measured if m in text]
+                if not named:
+                    continue
+                for m in claim.finditer(text):
+                    stated = int(m.group(1))
+                    for mod in named:
+                        truth = measured[mod]
+                        if stated == truth:
+                            seen += 1
+                        elif abs(stated - truth) <= WINDOW:
+                            problems.append(
+                                "%s:%d: `%s` is described as %d file(s); "
+                                "tools/module_footprints.txt measures %d. A `use` line added "
+                                "anywhere in the library moves these counts, and prose carrying "
+                                "one is not covered by the table checks. Correct it, or reword to "
+                                "drop the number if the sentence describes a past state -- %s"
+                                % (label, lineno, mod, stated, truth, text[:80]))
+    if seen == 0:
+        problems.append("no guide prose states a correct module file count -- either the wording "
+                        "changed everywhere or this check needs updating")
+    return problems
+
+
 def check_no_indented_code_fence():
     """A fenced code block in doc/pages/ must start at column 0 or it is not rendered as code.
 
@@ -5110,6 +5214,7 @@ CHECKS = (
     ("page titles match their list entries", check_page_titles_match_their_list_entries),
     ("the entry-module tables match the measured footprints",
      check_module_tables_match_the_measured_footprints),
+    ("prose footprint counts match the measured footprints", check_prose_footprint_counts),
     ("no doc/pages code fence is indented", check_no_indented_code_fence),
     ("no call aliases one variable onto a writable dummy", check_no_aliased_output_argument),
     ("parquet_random takes array lengths as int64", check_fill_size_kind),

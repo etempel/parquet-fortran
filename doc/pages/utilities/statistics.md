@@ -1180,7 +1180,7 @@ with — but it is the one thing to check when moving a call between the two.
 
 ## What it costs to import
 
-`use parquet_stats` compiles this module plus `parquet_sorting`'s files — 27 of this library's
+`use parquet_stats` compiles this module plus `parquet_sorting`'s files — 28 of this library's
 Fortran files — and its Fortran graph never reaches the Parquet C++ bindings. That is narrower than
 "no C++": `link` is a package-level key in `fpm.toml`, so the C++ wrapper is still compiled and
 Arrow still linked whichever module you import. No `use` statement makes the *package* Arrow-free.

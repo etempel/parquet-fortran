@@ -104,11 +104,11 @@ the knobs they read instead.
 fpm prunes at **module** granularity, and a submodule is never pruned separately from the module it
 belongs to. So each row above is a union of *whole modules*, not of the procedures you actually
 call. `parquet_sorting` costs 22 files whether you use one specific or all of them, because its
-seven submodules come as a set.
+eight submodules come as a set.
 
 That is also why the argsort tier exists at all. `parquet_sampling` needs exactly one sorting
 specific — `pf_argsort` over a `real64` array, for `pf_weighted_permutation` — and taking it from
-`parquet_sorting` cost the whole 21-file graph, Arrow included. Splitting the intrinsic-type
+`parquet_sorting` cost the whole sorting graph, Arrow included. Splitting the intrinsic-type
 `pf_argsort` and its engine into `parquet_argsort` took `use parquet_sampling` from 24 files to 8
 and off the C++ boundary entirely.
 

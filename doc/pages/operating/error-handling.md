@@ -3,7 +3,8 @@ title: Error handling
 ---
 
 This library reports failures through two distinct mechanisms, neither of which can be caught or
-recovered from once it fires. The reader, writer and schema surface has no status or `ierr` return
+recovered from once it fires (the first has one variant, described below, for a failure that
+reports through the logger). The reader, writer and schema surface has no status or `ierr` return
 code anywhere, so check inputs (file existence, column names, array bounds) before calling into it
 if you need to avoid aborting. **The `parquet_table` layer is the exception**: every one of its
 type-bound procedures that looks an existing column up by name takes an optional `found=`, and
@@ -60,6 +61,29 @@ This is the class used where the failing check happens on the C++/Arrow side of 
 - the [concurrency guard](thread-safety.html#the-concurrency-guard) firing when a shared
   `reader`/`writer` is called from two threads at once.
 
+### One variant of the first class: a failure routed through the logger
+
+`pf_toml` — and anything else that reports through `parquet_logging` — reaches its fatal path by
+calling `pf_log_fatal` rather than `error stop` directly. That is still the first class above (it
+ends in a Fortran `ERROR STOP`), but three things about it differ from the description there, and
+all three matter when you are reading a log:
+
+- **The message carries an extra prefix.** The abort line reads
+  `pf_logger%fatal: ERR: <message>` after whatever your compiler puts in front, rather than the
+  library's message alone.
+- **The diagnostic itself arrives before the abort, through the logger's own sinks** — every
+  console, file and unit the logger has, in whatever layout it is configured for. This is where the
+  useful part goes: for a wrong-typed value in a TOML file, that record quotes the offending source
+  line, which the abort message does not repeat.
+- **`verbosity` and `message_stream` do not reach any of it.** Those two knobs govern the library's
+  own output; `parquet_logging` carries *your program's* output, and a failure reported through it
+  follows the logger's configuration instead. See
+  [Configuration files](../utilities/configuration-files.html) and
+  [Logging](../utilities/logging.html).
+
+The exit status is the first class's, so the rule below still holds unchanged: it is nonzero and it
+is never 134.
+
 ### Telling them apart
 
 Three things distinguish them, and the first is the one to reach for in a script:
@@ -112,6 +136,12 @@ Once a reader/writer/schema is far enough along to know it (i.e.
 once. This wording isn't a fixed contract (exact phrasing may change between releases); only the
 presence of file/schema context, where available, is intended to be relied on.
 
+**A configuration-file failure carries its context differently**, because it has something better
+to point at: `pf_toml` reports the offending **source line**, quoted, as part of the log record it
+emits before aborting — not appended to the abort message. See
+[the logger-routed variant](#one-variant-of-the-first-class-a-failure-routed-through-the-logger)
+above for where that record goes.
+
 **Some context arrives on a second stream instead, and this catches people out.** Where naming the
 file would make the abort message unreasonably long, the library prints it as its own line *before*
 aborting — and those lines go to **standard output**, while the abort message itself goes to
@@ -128,13 +158,14 @@ stderr:  ERROR STOP parquet_close_writer: missing write for enabled column: col_
 
 **These lines are never suppressed and never redirected**, deliberately: not even
 `verbosity="errors_only"`, the strictest setting, removes them, and `message_stream` does not move
-them, because silencing them would leave an abort that names no file at all. The practical consequence is the one to remember — **a program that
-captures only stderr loses the filename**. Capture both streams when you want a diagnosable failure.
+them, because silencing them would leave an abort that names no file at all. The practical
+consequence is the one to remember — **a program that captures only stderr loses the filename**.
+Capture both streams when you want a diagnosable failure.
 
 ## Calling before open, or after close
 
-Every procedure that takes a `parquet_reader` — all twenty-five of them, from `parquet_read_column`
-and `parquet_prefetch_columns` through the metadata queries to `parquet_reader_set_filter` and
+Every procedure that takes a `parquet_reader` — from `parquet_read_column` and
+`parquet_prefetch_columns` through the metadata queries to `parquet_reader_set_filter` and
 `parquet_release_column` — checks that the reader is open before doing anything else, and every
 procedure taking a `parquet_writer` does the same. Calling one before
 `parquet_open_reader`/`parquet_open_writer` fails with `error stop`, naming both the procedure you

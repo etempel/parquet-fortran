@@ -408,14 +408,14 @@ contains
 
     module procedure parquet_write_struct_column
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column")
         call lk%claim(writer)
         call write_struct_common(writer, name, values, .false.)
     end procedure parquet_write_struct_column
 
     module procedure parquet_write_struct_column_chunk
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column_chunk")
         call lk%claim(writer)
         call write_struct_common(writer, name, values, .true.)
     end procedure parquet_write_struct_column_chunk

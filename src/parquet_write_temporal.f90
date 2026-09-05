@@ -108,7 +108,7 @@ contains
         integer(int64) :: nrows_c
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
 
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column")
         call lk%claim(writer)
         call temporal_write_preamble(writer, name, "date", asize, do_write, outname, idx)
         if (.not. do_write) return
@@ -149,7 +149,7 @@ contains
         integer(int64) :: nrows_c
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
 
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column")
         call lk%claim(writer)
         call temporal_write_preamble(writer, name, "time", asize, do_write, outname, idx)
         if (.not. do_write) return
@@ -194,7 +194,7 @@ contains
         integer(int64) :: nrows_c
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
 
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column")
         call lk%claim(writer)
         call temporal_write_preamble(writer, name, "timestamp", asize, do_write, outname, idx)
         if (.not. do_write) return
@@ -301,7 +301,7 @@ contains
         logical :: masked !! whether a row mask applies to this write.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
 
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column_chunk")
         call lk%claim(writer)
         call temporal_chunk_preamble(writer, name, "date", asize, nrows, do_write, outname, idx, row_mask, masked)
         if (.not. do_write) return
@@ -338,7 +338,7 @@ contains
         logical :: masked !! whether a row mask applies to this write.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
 
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column_chunk")
         call lk%claim(writer)
         call temporal_chunk_preamble(writer, name, "time", asize, nrows, do_write, outname, idx, row_mask, masked)
         if (.not. do_write) return
@@ -378,7 +378,7 @@ contains
         logical :: masked !! whether a row mask applies to this write.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
 
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column_chunk")
         call lk%claim(writer)
         call temporal_chunk_preamble(writer, name, "timestamp", asize, nrows, do_write, outname, idx, row_mask, masked)
         if (.not. do_write) return

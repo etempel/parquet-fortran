@@ -1090,6 +1090,10 @@ program error_scenarios
         call scenario_read_before_open()
     case ("write_before_open")
         call scenario_write_before_open()
+    case ("new_row_group_before_open")
+        call scenario_new_row_group_before_open()
+    case ("get_metadata_before_open")
+        call scenario_get_metadata_before_open()
     case ("get_nrows_before_open")
         call scenario_get_nrows_before_open()
     case ("close_reader_before_open")
@@ -4183,6 +4187,41 @@ contains
         call parquet_write_column(writer, "a", [1, 2, 3])
         print '(a)', "unexpectedly wrote to an unopened writer without error"
     end subroutine scenario_write_before_open
+
+    !> The SAME guard as scenario_write_before_open, reached from a different public entry point,
+    !> and the pair is what the scenario is for.
+    !!
+    !! check_writer_open used to take no context argument and hard-coded "parquet_write_column" into
+    !! its message, so calling parquet_new_row_group on an unopened writer named a procedure the
+    !! caller never wrote. That is invisible to scenario_write_before_open, which calls
+    !! parquet_write_column and therefore reads the right name either way. **Both scenarios are
+    !! needed**: this one asserts the message names parquet_new_row_group, the other that it still
+    !! names parquet_write_column -- and only together do they show the context is threaded through
+    !! rather than hard-coded to something else.
+    subroutine scenario_new_row_group_before_open()
+        type(parquet_writer) :: writer
+
+        call parquet_new_row_group(writer, 100)
+        print '(a)', "unexpectedly started a row group on an unopened writer without error"
+    end subroutine scenario_new_row_group_before_open
+
+    !> parquet_get_metadata was the ONE procedure taking a parquet_reader that did not check the
+    !> reader was open, and its failure was silent rather than loud: reader%metadata is unallocated
+    !> on a reader that was never opened, parquet_metadata_find_index guards that with an
+    !> `allocated` test and answers 0, so with default= present the call returned the default and
+    !> the program carried on. A use-before-open was indistinguishable from a key that is genuinely
+    !> absent.
+    !!
+    !! `default=` is passed deliberately. Without it the call already aborted -- but through
+    !! parquet_metadata_stop_missing, blaming the KEY. This scenario is the one that could not abort
+    !! at all before the guard, so it is the one that proves the guard is there.
+    subroutine scenario_get_metadata_before_open()
+        type(parquet_reader) :: reader
+        integer :: v
+
+        call parquet_get_metadata(reader, "NROWS", v, default=-1)
+        print '(a,i0)', "unexpectedly read metadata from an unopened reader, got=", v
+    end subroutine scenario_get_metadata_before_open
 
     !> parquet_close_reader used to silently no-op on a reader that was never
     !> opened (or already closed) -- matching the automatic finalizer's own

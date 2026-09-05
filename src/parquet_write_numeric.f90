@@ -1532,7 +1532,7 @@ contains
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column")
         call lk%claim(writer)
 
         if (writer%is_schema_enforced) then
@@ -1562,7 +1562,7 @@ contains
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column")
         call lk%claim(writer)
 
         asize = size(values, 1, kind=int64)
@@ -1589,7 +1589,7 @@ contains
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column")
         call lk%claim(writer)
 
         if (writer%is_schema_enforced) then
@@ -1619,7 +1619,7 @@ contains
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column")
         call lk%claim(writer)
 
         asize = size(values, 1, kind=int64)
@@ -1646,7 +1646,7 @@ contains
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column")
         call lk%claim(writer)
 
         if (writer%is_schema_enforced) then
@@ -1676,7 +1676,7 @@ contains
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column")
         call lk%claim(writer)
 
         asize = size(values, 1, kind=int64)
@@ -1703,7 +1703,7 @@ contains
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column")
         call lk%claim(writer)
 
         if (writer%is_schema_enforced) then
@@ -1733,7 +1733,7 @@ contains
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column")
         call lk%claim(writer)
 
         asize = size(values, 1, kind=int64)
@@ -1760,7 +1760,7 @@ contains
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column")
         call lk%claim(writer)
 
         if (writer%is_schema_enforced) then
@@ -1790,7 +1790,7 @@ contains
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column")
         call lk%claim(writer)
 
         asize = size(values, 1, kind=int64)
@@ -1817,7 +1817,7 @@ contains
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column_chunk")
         call lk%claim(writer)
 
         if (writer%is_schema_enforced) then
@@ -1847,7 +1847,7 @@ contains
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column_chunk")
         call lk%claim(writer)
 
         asize = size(values, 1, kind=int64)
@@ -1874,7 +1874,7 @@ contains
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column_chunk")
         call lk%claim(writer)
 
         if (writer%is_schema_enforced) then
@@ -1904,7 +1904,7 @@ contains
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column_chunk")
         call lk%claim(writer)
 
         asize = size(values, 1, kind=int64)
@@ -1931,7 +1931,7 @@ contains
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column_chunk")
         call lk%claim(writer)
 
         if (writer%is_schema_enforced) then
@@ -1961,7 +1961,7 @@ contains
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column_chunk")
         call lk%claim(writer)
 
         asize = size(values, 1, kind=int64)
@@ -1988,7 +1988,7 @@ contains
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column_chunk")
         call lk%claim(writer)
 
         if (writer%is_schema_enforced) then
@@ -2018,7 +2018,7 @@ contains
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column_chunk")
         call lk%claim(writer)
 
         asize = size(values, 1, kind=int64)
@@ -2045,7 +2045,7 @@ contains
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column_chunk")
         call lk%claim(writer)
 
         if (writer%is_schema_enforced) then
@@ -2075,7 +2075,7 @@ contains
         integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column_chunk")
         call lk%claim(writer)
 
         asize = size(values, 1, kind=int64)

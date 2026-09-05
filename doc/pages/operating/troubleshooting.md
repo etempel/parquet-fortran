@@ -21,6 +21,14 @@ own **run-time** variables are a separate family, `PARQUET_FORTRAN_*`, listed un
   **this library's**, not yours — which is why nothing in it mentions `parquet-fortran`. Install
   fpm 0.13.0 or newer from
   [fpm's own releases page](https://github.com/fortran-lang/fpm/releases).
+- **fpm fails while resolving dependencies, naming `toml-f` or a git URL it cannot reach** —
+  this library has one Fortran package dependency, [toml-f](https://github.com/toml-f/toml-f), and
+  `fpm.toml` pins a fork of it. fpm resolves a package's dependency tree **before** it prunes
+  modules, so it is fetched for **every** consumer whether or not you import `parquet_toml` — a
+  program whose only `use` is `parquet_temporal` still needs that remote reachable on its first
+  build. This is a first-build problem only: once fetched, it is cached under `build/dependencies`
+  and later builds do not need the network. Behind a proxy or on an air-gapped machine, clone the
+  dependency yourself and point `fpm.toml` at a local path.
 - **`fatal error: arrow/api.h: No such file or directory`** (GCC's wording) or
   **`fatal error: 'arrow/api.h' file not found`** (Clang's), and likewise for
   `parquet/arrow/reader.h` — `FPM_CXXFLAGS` is not pointing `-I` at Arrow's `include` directory.

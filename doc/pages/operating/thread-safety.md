@@ -17,9 +17,9 @@ Concurrent use (e.g. from an OpenMP parallel region) is supported.
   [Reading a table from several threads](#reading-a-table-from-several-threads).
 - A `pf_logger` may be **emitted through** from many threads at once; **configuring** one may not.
   See [Logging from several threads](#logging-from-several-threads) below.
-- The Arrow-free tiers — sorting, statistics, strings, spatial, HEALPix — have their own short
-  rules, and one of them matters: a **bulk** `pf_spatial_index` query may rebuild the index, so it
-  must not run on a shared index from two threads. See
+- The Arrow-free tiers — sorting, statistics, strings, spatial, HEALPix, index maps, TOML — have
+  their own short rules, and one of them matters: a **bulk** `pf_spatial_index` query may rebuild
+  the index, so it must not run on a shared index from two threads. See
   [The Arrow-free tiers](#the-arrow-free-tiers) below.
 
 ## What a `parquet_table` allows concurrently
@@ -312,9 +312,15 @@ interaction with other threads, and it is handled internally.
 ## The Arrow-free tiers
 
 Everything above is about the reader, the writer and `parquet_table`. The tiers that never touch a
-Parquet file — sorting, statistics, strings, spatial indexing and HEALPix — have their own rules,
-and they are short. **One of them has teeth**; the rest are here so that "what may I do
-concurrently" has one answer rather than five.
+Parquet file and have a rule of their own — sorting, statistics, strings, spatial indexing,
+HEALPix, index maps and TOML configuration — are below, and they are short. **One of them has
+teeth**; the rest are here so that "what may I do concurrently" has one answer rather than seven.
+
+**A tier not listed here needs no rule**, which is why the list is shorter than the set of
+Arrow-free modules. `parquet_temporal`, `parquet_columns`, `parquet_list`, `parquet_map`,
+`parquet_struct` and `parquet_utils` share no state between calls and hold nothing a second thread
+can see: one object per thread, or one shared object nobody writes, is safe without anything being
+said about it.
 
 - **`pf_spatial_index`: a BULK query is not read-only.** Single queries (`%within`, `%count_within`,
   `%nearest`) take the index as read-only, so any number of threads may share one. A bulk form
@@ -338,6 +344,16 @@ concurrently" has one answer rather than five.
   payload, so a write can move the whole thing — the same rule the table above states for a string
   column, and it applies to a bare `parquet_string_column` too. Reading a column nobody is writing
   is unrestricted, and its bulk rebuilds thread internally.
+- **`pf_index_map`/`pf_index_pool`: mutations serialise, lookups do not.** Any number of threads
+  may `%get`, `%contains` or `%get_many` one map at once, taking no lock. Building one, and every
+  `%insert`/`%remove`/`%get_or_add`, is serialised by the library on a single lock per type — so
+  several threads streaming keys through one map's `%get_or_add` is a supported pattern, and each
+  thread's returned index is unique and stable. See
+  [Threading](../utilities/index-maps.html#threading).
+- **`pf_toml`: every public procedure is safe inside a parallel region**, because each takes one
+  module-wide lock on entry. What that does not cover is a document's lifetime: closing one while
+  another thread still holds a handle taken from it is yours to prevent. See
+  [Thread safety](../utilities/configuration-files.html#thread-safety).
 - **`parquet_random` needs no rules at all** — see
   [Random numbers need no rules at all](#random-numbers-need-no-rules-at-all) above, which is the
   one part of this library with nothing to say in this page's terms.

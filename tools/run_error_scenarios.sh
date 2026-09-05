@@ -935,6 +935,8 @@ scenarios=(
     "read_row_count_mismatch:1"
     "read_before_open:1"
     "write_before_open:1"
+    "new_row_group_before_open:1"
+    "get_metadata_before_open:1"
     "get_nrows_before_open:1"
     "close_reader_before_open:1"
     "close_writer_before_open:1"

@@ -736,6 +736,10 @@ contains
                 test_read_before_open_aborts), &
             new_unittest("writing to an unopened writer aborts", &
                 test_write_before_open_aborts), &
+            new_unittest("parquet_new_row_group before open names ITS OWN procedure", &
+                test_new_row_group_before_open_aborts), &
+            new_unittest("parquet_get_metadata before open aborts rather than using default=", &
+                test_get_metadata_before_open_aborts), &
             new_unittest("calling parquet_get_nrows on an unopened reader aborts", &
                 test_get_nrows_before_open_aborts), &
             new_unittest("closing a never-opened reader aborts", &
@@ -9558,6 +9562,32 @@ contains
             failure_message="writing to an unopened writer was expected to abort", &
             required_stderr="parquet_write_column: writer has not been opened (call parquet_open_writer first)")
     end subroutine test_write_before_open_aborts
+
+    !> The message must name the procedure the CALLER wrote, not the one the guard happens to sit
+    !> behind. `check_writer_open` hard-coded "parquet_write_column" until 2026-09-05, so every one
+    !> of the nine public procedures taking a writer reported that name; only
+    !> `parquet_write_column` itself was right. Its sibling above is the negative control -- it must
+    !> keep naming `parquet_write_column`, or this pair would pass against a guard that had simply
+    !> been re-hard-coded to `parquet_new_row_group`.
+    subroutine test_new_row_group_before_open_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "new_row_group_before_open", expect_abort=.true., &
+            failure_message="starting a row group on an unopened writer was expected to abort", &
+            required_stderr="parquet_new_row_group: writer has not been opened (call parquet_open_writer first)")
+    end subroutine test_new_row_group_before_open_aborts
+
+    !> The guard added to parquet_get_metadata on 2026-09-05, and the reason it needed one: with
+    !> `default=` present the call used to SUCCEED on a reader that was never opened, returning the
+    !> default, so a use-before-open looked exactly like an absent key. The scenario passes
+    !> `default=` for that reason -- it is the path that could not abort before.
+    subroutine test_get_metadata_before_open_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "get_metadata_before_open", expect_abort=.true., &
+            failure_message="reading metadata from an unopened reader was expected to abort", &
+            required_stderr="parquet_get_metadata: reader has not been opened (call parquet_open_reader first)")
+    end subroutine test_get_metadata_before_open_aborts
 
     !> Representative of the same guard now applied to every other
     !> reader-taking procedure (parquet_prefetch_columns, parquet_get_col_size,

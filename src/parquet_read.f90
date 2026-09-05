@@ -181,13 +181,11 @@ contains
     !> parquet_wrapper.cpp) with no null check of its own -- calling in with an
     !> unopened reader previously crashed with an unhelpful SIGSEGV instead of
     !> a clean, diagnosable error.
-    subroutine check_reader_open(reader, context)
-        type(parquet_reader), intent(in) :: reader !! reader to check.
-        character(len=*), intent(in) :: context !! calling procedure's name, used in the error-stop message.
+    module procedure check_reader_open
         if (.not. c_associated(reader%handle)) then
             error stop trim(context) // ": reader has not been opened (call parquet_open_reader first)"
         end if
-    end subroutine check_reader_open
+    end procedure check_reader_open
     !> "" if reader%filename was never set; otherwise " (file: X)". Every
     !> caller of this is reached only once the reader is open, at which
     !> point parquet_open_reader has already set %filename, so this is

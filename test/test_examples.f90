@@ -61,6 +61,8 @@ contains
                 test_narrow_import_example), &
             new_unittest("doc/pages/operating/performance.md three_ways example", &
                 test_three_ways_example), &
+            new_unittest("doc/pages/operating/error-handling.md found_or_abort example", &
+                test_found_or_abort_example), &
             new_unittest("use parquet alone reaches every layer of the library", test_facade_covers_every_layer) &
             ]
     end subroutine collect_tests_parquet_examples
@@ -401,6 +403,32 @@ contains
             nnear = idx%within([0.1_real64, 0.0_real64, 0.0_real64], 0.5_real64, near)
             call check(error, nnear == 1_int64, &
                 "pf_spatial_index must be reachable from use parquet alone and answer a query")
+            if (allocated(error)) return
+        end block
+
+        ! parquet_index: the key-to-index lookup and the recycling index allocator. Both types are
+        ! reached ONLY through the facade's bare `use parquet_index` -- no other module in this
+        ! file's import graph exports them -- so dropping that one line stops this block compiling,
+        ! which is the point. Before this block existed the facade could have lost parquet_index
+        ! entirely with nothing failing: test_module_surface_index covers the NARROW `use
+        ! parquet_index` import, and tools/check_module_footprints.sh likewise builds a per-module
+        ! consumer, so neither one exercises the facade.
+        block
+            type(pf_index_map) :: m
+            type(pf_index_pool) :: pool
+            integer(int32) :: ids(4)
+            integer(int64) :: slot
+            ids = [70_int32, 12_int32, 41_int32, 5_int32]
+            call m%build(ids)
+            call check(error, m%get(41_int32) == 3_int64, &
+                "pf_index_map must be reachable from use parquet alone and find a key's row")
+            if (allocated(error)) return
+            call check(error, m%get(99_int32) == 0_int64, &
+                "pf_index_map reached through the facade must answer 0 for an absent key")
+            if (allocated(error)) return
+            slot = pool%get_index()
+            call check(error, slot == 1_int64, &
+                "pf_index_pool must be reachable from use parquet alone and hand out an index")
             if (allocated(error)) return
         end block
 
@@ -1612,5 +1640,45 @@ contains
             "table-mutate.md: the maskless call should rank the null rows as ordinary values, " // &
             "which is precisely the defect the example's is_valid= exists to avoid")
     end subroutine test_rank_by_flux_example
+    !
+    !> `doc/pages/operating/error-handling.md`'s `found_or_abort` program: the one affirmative claim
+    !> that page makes, which is that `found=` turns an abort into a reported miss.
+    !>
+    !> **The negative control is the second call, not the absence of one.** A test that only checks
+    !> the missing name reports `.false.` passes just as happily against a `found=` that is ignored
+    !> and left `.false.` on every path -- so the present column must be shown to set it `.true.`,
+    !> on the same table, through the same accessor. The two together are what pin the argument.
+    !>
+    !> The abort half of the page's claim -- that omitting `found=` on that first call terminates
+    !> the process -- cannot be asserted here, because it would take the runner down with it; it is
+    !> covered out of process by the `table_unknown_column` scenario in test/error_scenarios.f90,
+    !> whose body is this example's first call with `found=` left off.
+    subroutine test_found_or_abort_example(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        real(real64) :: mass(3)
+        real(real64), allocatable :: got(:)
+        logical :: ok
+
+        mass = [1.5_real64, 2.5_real64, 3.5_real64]
+        call parquet_new_table(t)
+        call t%add_column("mass", mass)
+        !
+        call t%get("flux", got, found=ok)          ! there is no "flux" column
+        call check(error, .not. ok, &
+            "error-handling.md: %get of an absent column with found= should report .false., " // &
+            "which is the whole of what the found_or_abort example demonstrates")
+        if (allocated(error)) return
+        !
+        ! ---- negative control: the same accessor on a column that IS there ----
+        call t%get("mass", got, found=ok)
+        call check(error, ok, &
+            "error-handling.md: %get of a present column with found= should report .true. -- " // &
+            "without this the test above passes against a found= that is never set")
+        if (allocated(error)) return
+        call check(error, size(got) == 3, &
+            "error-handling.md: the found_or_abort example prints size(got), which the page " // &
+            "shows as 3 for its three-row mass column")
+    end subroutine test_found_or_abort_example
     !
 end module test_examples

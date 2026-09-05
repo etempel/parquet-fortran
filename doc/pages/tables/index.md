@@ -11,7 +11,8 @@ The high-level layer: one `parquet_open_table` call presents a whole parquet fil
 `parquet_table`, hands its columns back as ordinary Fortran arrays or zero-copy pointers, and
 reads each column only when something first touches it. A table need not come from a file at all —
 it can equally be built from scratch in memory and written back out through an ordinary
-`parquet_schema`.
+`parquet_schema`. Once it exists, a table can be changed in place — values, nulls, columns and
+rows — and joined against another table on one or more key columns.
 
 - [Whole tables in memory: the basics](table.html) — opening a table and reaching a column with
   `%get` or `%col`, nulls, laziness and what it costs, what a table can tell you about itself, the
@@ -24,9 +25,9 @@ it can equally be built from scratch in memory and written back out through an o
 - [Building a table and writing it out](table-write.html) — `parquet_new_table` and `%add_column`,
   then `parquet_write_table` with a schema or without one, its writer options, and carrying the
   source file's metadata into the output.
-- [Changing a table](table-mutate.html) — replacing values, editing nulls, adding and dropping
-  columns, filtering/sorting/ranking/appending rows and the detach rule they share, plus searching
-  and ranking a column through a `%col` pointer.
+- [Changing a table](table-mutate.html) — replacing values, editing nulls, adding, dropping and
+  renaming columns, filtering/sorting/ranking/appending rows and the detach rule they share, plus
+  searching and ranking a column through a `%col` pointer.
 - [Joining two tables](table-join.html) — matching another table's rows against this one's on one
   or more key columns and bringing its columns over: which rows come out, what counts as a match,
   what the join carries and what the result is called.

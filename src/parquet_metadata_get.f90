@@ -173,6 +173,7 @@ contains
         integer(int64) :: parsed
         logical :: warn_value
 
+        call check_reader_open(reader, "parquet_get_metadata")
         warn_value = .true.
         if (present(warn)) warn_value = warn
 
@@ -205,6 +206,7 @@ contains
         integer(int64) :: parsed
         logical :: warn_value
 
+        call check_reader_open(reader, "parquet_get_metadata")
         warn_value = .true.
         if (present(warn)) warn_value = warn
 
@@ -235,6 +237,7 @@ contains
         real(real64) :: parsed
         logical :: warn_value
 
+        call check_reader_open(reader, "parquet_get_metadata")
         warn_value = .true.
         if (present(warn)) warn_value = warn
 
@@ -265,6 +268,7 @@ contains
         real(real64) :: parsed
         logical :: warn_value
 
+        call check_reader_open(reader, "parquet_get_metadata")
         warn_value = .true.
         if (present(warn)) warn_value = warn
 
@@ -294,6 +298,7 @@ contains
         integer :: idx
         logical :: parsed, warn_value
 
+        call check_reader_open(reader, "parquet_get_metadata")
         warn_value = .true.
         if (present(warn)) warn_value = warn
 
@@ -323,6 +328,7 @@ contains
         integer :: idx
         logical :: warn_value
 
+        call check_reader_open(reader, "parquet_get_metadata")
         warn_value = .true.
         if (present(warn)) warn_value = warn
 
@@ -346,6 +352,7 @@ contains
         integer(int64) :: parsed
         logical :: warn_value, ok
 
+        call check_reader_open(reader, "parquet_get_metadata")
         warn_value = .true.
         if (present(warn)) warn_value = warn
 
@@ -385,6 +392,7 @@ contains
         integer(int64) :: parsed
         logical :: warn_value, ok
 
+        call check_reader_open(reader, "parquet_get_metadata")
         warn_value = .true.
         if (present(warn)) warn_value = warn
 
@@ -423,6 +431,7 @@ contains
         real(real64) :: parsed
         logical :: warn_value, ok
 
+        call check_reader_open(reader, "parquet_get_metadata")
         warn_value = .true.
         if (present(warn)) warn_value = warn
 
@@ -461,6 +470,7 @@ contains
         real(real64) :: parsed
         logical :: warn_value, ok
 
+        call check_reader_open(reader, "parquet_get_metadata")
         warn_value = .true.
         if (present(warn)) warn_value = warn
 
@@ -498,6 +508,7 @@ contains
         character(len=:), allocatable :: tokens(:)
         logical :: parsed, warn_value, ok
 
+        call check_reader_open(reader, "parquet_get_metadata")
         warn_value = .true.
         if (present(warn)) warn_value = warn
 
@@ -534,6 +545,7 @@ contains
         character(len=:), allocatable :: tokens(:)
         logical :: warn_value
 
+        call check_reader_open(reader, "parquet_get_metadata")
         warn_value = .true.
         if (present(warn)) warn_value = warn
 

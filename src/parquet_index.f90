@@ -1346,7 +1346,7 @@ module parquet_index
     end interface
 
     interface
-        !> Test-only: threads the last `%build` resolved for its own work; 1 means serial.
+        !> Test-only. Threads the last `%build` resolved for its own work; 1 means serial.
         !!
         !! A build answers identically at every thread count, so nothing about the resulting map
         !! can distinguish an honoured `threads=` from an ignored one. This is the only observable

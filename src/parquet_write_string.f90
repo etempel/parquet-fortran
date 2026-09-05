@@ -453,7 +453,7 @@ contains
         logical :: masked
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
         character(len=:), allocatable :: values_c(:) !! row-masked copy; unused on the fast path.
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column")
         call lk%claim(writer)
 
         if (writer%is_schema_enforced) then
@@ -515,7 +515,7 @@ contains
         logical :: masked
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
         character(len=:), allocatable :: values_c(:,:) !! row-masked copy; unused on the fast path.
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column")
         call lk%claim(writer)
 
         asize = size(values, 1, kind=int64)
@@ -566,7 +566,7 @@ contains
         logical :: masked
         type(parquet_string_column) :: values_c !! row-masked rebuild; unused on the fast path.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column")
         call lk%claim(writer)
 
         if (writer%is_schema_enforced) then
@@ -617,7 +617,7 @@ contains
         logical :: masked
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
         character(len=:), allocatable :: values_c(:) !! row-masked copy; unused on the fast path.
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column_chunk")
         call lk%claim(writer)
 
         if (writer%is_schema_enforced) then
@@ -672,7 +672,7 @@ contains
         logical :: masked
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
         character(len=:), allocatable :: values_c(:,:) !! row-masked copy; unused on the fast path.
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column_chunk")
         call lk%claim(writer)
 
         asize = size(values, 1, kind=int64)
@@ -721,7 +721,7 @@ contains
         logical :: masked
         type(parquet_string_column) :: values_c !! row-masked rebuild; unused on the fast path.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
-        call check_writer_open(writer)
+        call check_writer_open(writer, "parquet_write_column_chunk")
         call lk%claim(writer)
 
         if (writer%is_schema_enforced) then

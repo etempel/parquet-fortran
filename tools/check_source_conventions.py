@@ -5296,6 +5296,85 @@ def check_scenario_uses_a_pure_result():
     return problems
 
 
+def check_no_doc_block_opens_with_a_ford_metadata_key():
+    """A MULTI-line doc-comment must not open with a bare `word:` -- FORD eats the line.
+
+    FORD parses the first lines of every entity's doc block as `key: value` metadata
+    (`ford/utils.py`'s `META_RE = ^[ ]{0,3}(?P<key>[A-Za-z0-9_-]+):\\s*(?P<value>.*)`, applied by
+    `meta_preprocessor` from `ford/sourceform.py`). A key is a SINGLE token -- letters, digits,
+    underscore, hyphen, no spaces. An unrecognised one is warned about and then `settings.pop`ped
+    (`ford/settings.py`), which removes the line from the documentation entirely.
+
+    Confirmed damage rather than a theoretical one: `parquet_debug_index_threads_used` opened
+    `!> Test-only: threads the last %build resolved ...`, and the rendered
+    `interface/parquet_debug_index_threads_used.html` began at the SECOND sentence -- a public
+    procedure whose page never said what it was for. Fixed by writing `Test-only.` instead.
+
+    **Only a multi-line block is at risk, and that is FORD's own rule, not a simplification.**
+    `sourceform.py` guards the single-line case explicitly: when a doc block is one line
+    containing a colon and the text before it is not a real settings field, FORD inserts a blank
+    line in front, so `meta_preprocessor` stops before consuming anything. That is why
+    `src/parquet_tables_access.f90`'s fourteen `!> PK_INT32: smallest and largest value ...`
+    headlines are safe and must NOT be reported -- they are one line each. Flagging them would be
+    a false positive against a deliberate FORD behaviour, and would also send someone editing a
+    GENERATED file. `tools/generate_parquet_tables.py` states the same rule at the template that
+    emits them, and states it correctly.
+
+    The hazard is therefore invisible twice over: the rendered page merely lacks a sentence, and
+    FORD only warns for an entity it documents -- so the same defect on a private helper is
+    silent. CI does not run `ford docs.md` at all, which is why this belongs in the lint stage.
+    """
+    # FORD's own regex, transcribed from ford/utils.py. It is transcribed rather than imported
+    # because FORD is not a dependency of the lint stage; re-check it against a new FORD release.
+    meta_re = re.compile(r"^[ ]{0,3}(?P<key>[A-Za-z0-9_-]+):")
+    doc_re = re.compile(r"^\s*!([!>])(.*)$")
+    trailing_doc_re = re.compile(r"^\s*[^!\s].*!([!>])")
+
+    problems, blocks_seen = [], 0
+    for path in sorted((REPO_ROOT / "src").glob("*.f90")):
+        block, prev_was_doc = [], False
+        lines = path.read_text(encoding="utf-8").split("\n")
+
+        def close(block, start_line, path=path):
+            """A finished block: flag it when it is multi-line and opens with a metadata key."""
+            if not block:
+                return
+            first = block[0]
+            if len(block) >= 2 and meta_re.match(first):
+                problems.append(
+                    "%s:%d: this doc-comment opens with %r, which FORD parses as a metadata key "
+                    "and DELETES from the rendered page -- the single-line exemption does not "
+                    "apply because the block runs to %d lines. Reword so the first line has no "
+                    "bare `word:` (\"Test-only.\" rather than \"Test-only:\")"
+                    % (path.relative_to(REPO_ROOT), start_line,
+                       meta_re.match(first).group("key"), len(block)))
+
+        start = 0
+        for n, raw in enumerate(lines, 1):
+            m = doc_re.match(raw)
+            if m:
+                marker, body = m.group(1), m.group(2)
+                # `!>` always opens a new block; `!!` continues one, and only opens a block when
+                # nothing documentable precedes it -- including a trailing `!!` on a code line,
+                # which is what makes `src/parquet_core.f90`'s wrapped argument docs mid-block.
+                if marker == ">" or not prev_was_doc:
+                    close(block, start)
+                    blocks_seen += 1
+                    block, start = [], n
+                block.append(body[1:] if body.startswith(" ") else body)
+                prev_was_doc = True
+                continue
+            close(block, start)
+            block = []
+            prev_was_doc = bool(trailing_doc_re.match(raw))
+        close(block, start)
+
+    if blocks_seen == 0:
+        return ["src/: parsed no doc-comment blocks at all -- the comment format moved and this "
+                "check has gone blind; re-anchor it deliberately rather than deleting it"]
+    return problems
+
+
 CHECKS = (
     ("LEADZ is not used anywhere (nagfor miscompiles it on int64)", check_no_leadz),
     ("every error scenario uses the pure result it computes",
@@ -5370,6 +5449,8 @@ CHECKS = (
      check_module_tables_match_the_measured_footprints),
     ("prose footprint counts match the measured footprints", check_prose_footprint_counts),
     ("no doc/pages code fence is indented", check_no_indented_code_fence),
+    ("no multi-line doc block opens with a FORD metadata key",
+     check_no_doc_block_opens_with_a_ford_metadata_key),
     ("no call aliases one variable onto a writable dummy", check_no_aliased_output_argument),
     ("parquet_random takes array lengths as int64", check_fill_size_kind),
     ("allocate extents from size() use int64", check_allocate_extent_kind),

@@ -506,7 +506,7 @@ module parquet_core
     !>
     !> ```fortran
     !> type(writer_lock) :: lk   ! among the other local declarations
-    !> call check_writer_open(writer)
+    !> call check_writer_open(writer, "parquet_write_column")   ! the PUBLIC generic's name
     !> call lk%claim(writer)     ! released automatically, however this procedure exits
     !> ```
     !>
@@ -4366,6 +4366,20 @@ module parquet_core
             character(len=*), intent(in), optional :: default(:) !! fallback if key is missing.
             logical, intent(in), optional :: warn !! print a WARNING on the missing-key/default-used path.
         end subroutine parquet_get_metadata_string_array
+    end interface
+
+    ! ---- Cross-subtree reader-state guard ----
+    interface
+        !> Aborts unless `reader` has been opened. Declared here rather than left contained in
+        !> `parquet_read` because two subtrees now need it: the read path, and
+        !> `parquet_get_metadata` under `parquet_metadata`. `context` is the PUBLIC generic's
+        !> name, so the message names the procedure the caller actually wrote -- one guard and
+        !> one message text, rather than a second copy that can drift from what the guide
+        !> documents (`doc/pages/operating/error-handling.md`, "Calling before open").
+        module subroutine check_reader_open(reader, context)
+            type(parquet_reader), intent(in) :: reader !! reader to check.
+            character(len=*), intent(in) :: context !! calling procedure's name, used in the message.
+        end subroutine check_reader_open
     end interface
 
     ! ---- Cross-subtree shared string/MAML helpers ----

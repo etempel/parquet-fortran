@@ -16,20 +16,19 @@ type/function/subroutine under `use parquet`), see the [modules](../lists/module
 **One `use parquet` brings in the whole library** — readers and writers, schemas and MAML, the
 `parquet_table` container, the `parquet_column` foundation and its `PK_*` kind constants, compact
 string columns, the list/struct/map container columns, the date/time/timestamp types, sorting,
-array statistics, random numbers and sampling, spatial neighbour search, sphere pixelisation,
-logging for your own program, text and path helpers, and the process-global settings. Every page
-below assumes that single import.
+array statistics, random numbers and sampling, spatial neighbour search, key-to-index lookup,
+sphere pixelisation, logging for your own program, TOML configuration files, text and path
+helpers, and the process-global settings. Every page below assumes that single import.
 
 The individual modules (`parquet_io`, `parquet_tables`, `parquet_columns`, `parquet_list`,
 `parquet_struct`, `parquet_map`, `parquet_strings`, `parquet_temporal`, `parquet_sorting`,
 `parquet_argsort`, `parquet_stats`, `parquet_sampling`, `parquet_spatial`, `parquet_healpix`,
 `parquet_random`, `parquet_index`, `parquet_logging`, `parquet_toml`, `parquet_utils`,
-`parquet_settings`,
-`parquet_version`,
-`parquet_maml_base`) can be named directly when you want a narrower import — see
-[Choosing a module](operating/choosing-a-module.html) for what each one costs to compile against
-and which of them are covered by the library's API stability promise. `parquet_core` is the
-exception in the other direction: it is internal and is covered by no promise.
+`parquet_settings`, `parquet_version`, `parquet_maml_base`) can be named directly when you want a
+narrower import — see [Choosing a module](operating/choosing-a-module.html) for what each one
+costs to compile against and which of them are covered by the library's API stability promise.
+`parquet_core` is the exception in the other direction: it is internal and is covered by no
+promise.
 
 Because `parquet` re-exports rather than defines, the generated
 [procedures](../lists/procedures.html) and [types](../lists/types.html) listings are the reliable
@@ -53,11 +52,12 @@ point in the library.
   rows are kept and in what order they come back. Ends on two worked examples.
 - [Whole tables in memory](tables/index.html) — the high-level `parquet_table` layer: a whole
   file as one object, columns by name as ordinary arrays or zero-copy pointers, read only when
-  touched — or built in memory and written out.
+  touched — or built in memory and written out; then changed in place, and joined against another
+  table on one or more key columns.
 - [Utilities and code generation](utilities/index.html) — sorting for arrays and columns, array
   statistics, reproducible random numbers and the sampling built on them, spatial neighbour search,
-  sphere pixelisation, logging for your own program, text and path helpers, generated table types,
-  and embedding your own MAML schemas.
+  sphere pixelisation, key-to-index lookup, logging for your own program, TOML configuration files,
+  text and path helpers, generated table types, and embedding your own MAML schemas.
 - [Operating the library](operating/index.html) — the cross-cutting concerns you reach for when
   something is wrong or has to be tuned: which module to import, what an abort means, why a build
   or read fails, what may run concurrently, what memory and speed to expect, and the process-global
@@ -106,10 +106,10 @@ All 35 pages, in reading order. (This list, each group's own page list and the
 - [Random numbers and sampling with `pf_random_at`](utilities/random.html)
 - [Spatial neighbour search with `pf_spatial_index`](utilities/spatial.html)
 - [Sphere pixelisation with `parquet_healpix`](utilities/healpix.html)
-- [Key-to-index lookup with parquet_index](utilities/index-maps.html)
-- [Logging with parquet_logging](utilities/logging.html)
-- [Configuration files with parquet_toml](utilities/configuration-files.html)
-- [Text and path helpers with parquet_utils](utilities/utils.html)
+- [Key-to-index lookup with `parquet_index`](utilities/index-maps.html)
+- [Logging with `parquet_logging`](utilities/logging.html)
+- [Configuration files with `parquet_toml`](utilities/configuration-files.html)
+- [Text and path helpers with `parquet_utils`](utilities/utils.html)
 - [Generated table types: named accessors from a MAML schema](utilities/generated-tables.html)
 - [Embedding your own MAML schemas in your own project](utilities/embedding-maml-schemas.html)
 

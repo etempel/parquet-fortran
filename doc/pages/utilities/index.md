@@ -24,9 +24,9 @@ the two generators meant to be copied into your own project.
 - [Sorting, ranking and selection](sorting.html) — `pf_sort` and `pf_argsort` over eleven element
   types, from plain arrays to a `parquet_column`, with multi-key sorts and group boundaries; then
   selecting a few elements without ordering the rest (`pf_partial_sort`, quantiles), searching a
-  sorted array, distinct values and ranks, extremes, merging, and what threading does and does not
-  change.
-  Also `parquet_argsort`, the smaller import for `pf_argsort` over the intrinsic types alone.
+  sorted array, distinct values and ranks, extremes, merging, matching two arrays, and what
+  threading does and does not change. Also `parquet_argsort`, the smaller import for `pf_argsort`
+  over the intrinsic types alone.
 - [Array statistics with the `pf_` reduction family](statistics.html) — reductions over plain
   Fortran arrays: what counts as the population (a null, a NaN and a zero weight all leave it, in
   that order), what aborts and what quietly returns nothing, and the fixed optional-argument
@@ -50,26 +50,25 @@ the two generators meant to be copied into your own project.
   arithmetic, and a `_bulk` form of every conversion that threads internally. Equal-area pixels on
   rings of constant latitude, both integer kinds, and no floating-point exception raised — so a
   program running under `-ffpe-trap` needs no guard around a disc query.
-- [Key-to-index lookup with parquet_index](index-maps.html) — `pf_index_map`: which row holds
+- [Key-to-index lookup with `parquet_index`](index-maps.html) — `pf_index_map`: which row holds
   this key, in a few nanoseconds, over a single integer key or a tuple of them when no one column
   is unique. Three storage backends behind one API — an array indexed by the key, an open-addressing
-  hash table, and sorted keys plus a binary search — the first two chosen from the keys
-  themselves, the third opt-in. Then
-  `pf_index_pool`, which hands out and recycles unique index values so a program managing slots in
-  its own arrays need not track which are free. Both are safe to mutate from several threads at
-  once, and lookups are lock-free.
+  hash table, and sorted keys plus a binary search — the first two chosen from the keys themselves,
+  the third opt-in. Then `pf_index_pool`, which hands out and recycles unique index values so a
+  program managing slots in its own arrays need not track which are free. Both are safe to mutate
+  from several threads at once, and a map's lookups are lock-free.
 - [Logging with `parquet_logging`](logging.html) — leveled logging for your own program:
   several destinations at once each with its own threshold and layout, ISO timestamps, colour,
   a cheap `%enabled` check before an expensive message, per-thread context tags and a buffered
   mode that keeps one thread's narrative together inside an OpenMP region. Not this library's
   own messaging, which the settings page covers.
-- [Configuration files with parquet_toml](configuration-files.html) — reading and writing TOML
+- [Configuration files with `parquet_toml`](configuration-files.html) — reading and writing TOML
   configuration files on top of `toml-f`: checked types so a wrong-typed value never leaves your
   variable undefined, defaults applied without touching the parsed document, whole-array reads
   including string lists, diagnostics that point at the offending line, and a report for every key
   or section your program never read. Safe to call from inside an OpenMP parallel region, and it
   writes the effective configuration back out.
-- [Text and path helpers with parquet_utils](utils.html) — ASCII case folding, turning a value
+- [Text and path helpers with `parquet_utils`](utils.html) — ASCII case folding, turning a value
   into text with a minimum width or a format of your choosing, and joining and taking apart POSIX
   paths by CPython's `posixpath` rules. A leaf module that cannot fail: nothing in it validates,
   aborts or prints, and every result comes back allocated.

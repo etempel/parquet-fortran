@@ -379,8 +379,8 @@ inputs and each thread writes its own disjoint slice of the output, so the seria
 results are bit-identical.
 
 `parquet_get_healpix_threads()` reports the raw setting (`0` when automatic). See
-[Converting a whole array at once](../utilities/healpix.html#converting-a-whole-array-at-once) for what the bulk forms are and what
-omitting `threads=` costs you.
+[Converting a whole array at once](../utilities/healpix.html#converting-a-whole-array-at-once)
+for what the bulk forms are and what omitting `threads=` costs you.
 
 ## Threads for an index build
 

@@ -298,7 +298,9 @@ contains
             else if (.not. materialize_column_parallel(cache, sc, idx)) then
                 ! materialize_column_parallel is asked FIRST and stays enabled under `bounded`:
                 ! it is chunked already, its peak is one row group per thread, and
-                ! parquet_set_table_threads is the cap on that.
+                ! parquet_set_prefetch_threads is the cap on that -- it resolves through
+                ! prefetch_thread_count, NOT through parquet_set_table_threads, which caps the
+                ! row-structural rewrite loop instead.
                 if (cache%bounded_read) then
                     call materialize_slice(cache, sc, idx)
                 else

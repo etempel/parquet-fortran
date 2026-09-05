@@ -54,7 +54,7 @@ parentheses:
 | **Operators** | `>`, `>=`, `<`, `<=`, `==`, `/=`, `is_null`, `is_not_null`, `is_nan`, `is_not_nan`. A clause's operator must be surrounded by spaces (`"v > 3"`, not `"v>3"`); parentheses need no surrounding spaces. `is_nan`/`is_not_nan` are accepted only for a floating-point column (`float32`/`float64`, and a `half_float` column written by some other tool) — any other column type is rejected, since no value of it could ever be a NaN. |
 | **Values** | A bare number for a numeric column (`ra > 180`), `true`/`false` for a boolean column (`flag == true`), a **double-quoted** string for a `string` column (`name == "abell_1"`), or a **double-quoted ISO-8601 literal** for a `date`/`time`/`timestamp` column (see below). `is_null`/`is_not_null`/`is_nan`/`is_not_nan` take no value. A quoted value may contain spaces, parentheses, and the keywords themselves — it is read as one token. An `inf`/`-inf` value is accepted as an ordinary bound (`v < inf`); a bare `nan` is **rejected**, because every comparison against a NaN is false and every `/=` against it is true, so such a clause could only ever match nothing or everything — say `is_nan`/`is_not_nan` instead. |
 | **Column names** | May be a dotted struct-leaf path (`main.inner.age > 35`). A column name cannot contain spaces. |
-| **Several `%add` calls** | **AND-combined**: two calls mean `(expr1) and (expr2)`. This keeps every filter written as one clause per call meaning exactly what it always did; write `or` inside a single rule when you want alternatives. |
+| **Several `%add` calls** | **AND-combined**: two calls mean `(expr1) and (expr2)`. So a filter written as one clause per call means the conjunction of its clauses; write `or` inside a single rule when you want alternatives. |
 | **Limits** | 32 levels of nesting, 1024 expression terms per filter, 8192 characters per rule, and, within one clause, 64 characters per column name and 512 per value — each reported as a clean error rather than a crash. The first three are published constants you can check a rule against beforehand; see [Read-only limits](../operating/settings.html#read-only-limits). |
 
 `in`, `between` and wildcard/`like` matching are deliberately not supported: the first two are
@@ -258,10 +258,14 @@ time and only the mask is kept, which is what makes a filtered read possible on 
 memory. `row_group_lo = 0` selects that bounded-memory engine over the *whole* file. Both integer
 kinds are accepted throughout.
 
+A `parquet_table` reaches the same engine with one argument:
+[`parquet_open_table(..., bounded=.true.)`](../tables/table-open.html#reading-a-file-larger-than-memory-bounded)
+installs its filter this way and assembles every column from per-row-group chunks.
+
 A scoped filter scopes the whole reader, not just a loop over those row groups — rows outside the
 range have no mask bits, so nothing later can return them. See
-[Memory-bounded filtering with a row-group scope](reading.html#streamingchunked-reads) for the full
-treatment, including the row-range form and pairing it with a chunked loop.
+[Memory-bounded filtering with a row-group scope](reading.html#memory-bounded-filtering-with-a-row-group-scope)
+for the full treatment, including the row-range form and pairing it with a chunked loop.
 
 ## Reading rows in sorted order with `parquet_sortkey`
 
@@ -502,7 +506,7 @@ Three properties are worth knowing:
 
 It does `error stop` in three cases: `from` and `to` differing in size, a replacement name longer
 than the 64-character column-name limit, and — filters only — a rule that fitted
-`filter_max_rule_len` in its original names but no longer does once renamed.
+`parquet_max_filter_rule_len` in its original names but no longer does once renamed.
 
 ## Random downsampling with `sample_fraction`
 

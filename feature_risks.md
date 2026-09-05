@@ -253,6 +253,7 @@ something a reader is expected to have.
 | [Risk-185](#risk-185--the-merged-key-of-a-rightouter-join-cannot-be-patched-into-place) | The merged key of a right/outer join cannot be PATCHED into place | 4 — covered |
 | [Risk-186](#risk-186--leadz-on-an-int64-is-two-too-small-under-nagfor-and-the-quiet-half-is-the-watermark) | `LEADZ` on an int64 is TWO too small under nagfor, and the quiet half is the watermark | 4 — covered |
 | [Risk-187](#risk-187--a-rejected-fmt-that-leaves-partial-text-behind-returns-a-plausible-number-instead-of-asterisks) | A rejected `fmt` that leaves PARTIAL TEXT behind returns a plausible number instead of asterisks | 4 — covered |
+| [Risk-188](#risk-188--a-joins-left-container-column-is-carried-only-because-join-reuses-the-shared-gather) | A join's left container column is carried only because `%join` reuses the shared gather | 4 — covered |
 
 ---
 
@@ -7487,3 +7488,47 @@ everywhere except flang. The two `--profile debug` lines further down that suite
 `'(f4.2)'` → `****`) are the other half, and guard the opposite direction: they only assert anything
 under ifx `-check all`. So this function has no single build in which both of its rules are live —
 change it and run flang AND an ifx debug build, or it is not tested.
+
+### Risk-188 — A join's left container column is carried only because `%join` reuses the shared gather
+
+**What breaks.** `%join` rewrites this table's own columns by gathering them at the pair list's left
+indices, and a `parquet_list_column`, `parquet_map_column` or `parquet_struct_column` on this side
+rides along in that one call — `join_rewrite_left` → `table_colwork(self%cache, PCW_GATHER, lslots,
+rows=lidx)` (`src/parquet_tables_join.f90`), the same path `%sort_by` and `%filter_rows` take. Nothing
+in the join is container-aware for the permitted `how` values, and that is exactly why it works.
+Give the join a gather of its own, filter container kinds out of `table_mutable_slots`, or add a
+per-kind branch that forgets one, and the result is a table whose scalar columns hold the joined rows
+and whose container column still holds the pre-join ones: every row count right, no abort, and a
+silently misaligned column.
+
+**The refusal is by KIND and SIDE, never by whether this join has an unmatched row.**
+`join_check_left_containers` refuses a resident container here for `how="right"` and `how="outer"`
+only — the two values that can emit a row with no counterpart in this table — because `%set_validity`
+has no arm for a container kind. It refuses on the *shape of the call*, not on the data, so that a
+program's join does not start failing the day its input gains an unmatched row. Narrowing it to "only
+when an unmatched row actually occurs" would be a silent trap of the opposite kind.
+
+**Covered by** `a container column on this side is carried across a join`
+(`test/test_table_join.f90`). Two design details of that test are the point of keeping this entry,
+because a re-write that dropped either would pass while testing much less:
+
+- **The fingerprint is the row LENGTH, and the fixture is built so it names the source row** — row
+  *k* holds *k* elements and row 5 is null, so the sequence of lengths coming out of the join *is* the
+  sequence of source row indices. A container left unreordered cannot produce it. Values are
+  deliberately not read back: `%view` is the only route to them and would drag the call site into
+  `check_view_call_sites_declare_target`'s `target` rule for nothing the length and the nullness do
+  not already pin.
+- **The `how="left"` arm against `ALLKEY` is a negative control, not a second case.** Every left row
+  matches exactly once and in place, so the table does not detach and the container must come back
+  unchanged — the same observation reporting the other outcome. Without it, an implementation that
+  simply left the container alone would pass the inner arm whenever `il` happened to be the identity,
+  which is why the inner arm also asserts that `il` is *not* the identity.
+
+Mutation-confirmed: filtering container kinds out of the slot list handed to `table_colwork` in
+`join_rewrite_left` fails the test (exit 1) on the length assertion, and passes the control arm —
+which is the two arms doing the distinct jobs they were written for.
+
+**The refusals have their own coverage** and are not what this entry is about:
+`join_left_container_outer` and `join_container_payload` (`test/error_scenarios.f90`). Before this
+entry no test in the suite joined a table holding a container column at all, so only the refusals
+were pinned.

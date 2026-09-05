@@ -130,7 +130,9 @@ contains
             new_unittest("pairs= and other_pairs= name the rows the output was built from", &
                 test_join_pairs_output), &
             new_unittest("pairs= can be asked for on its own, and costs the join nothing", &
-                test_join_pairs_alone) &
+                test_join_pairs_alone), &
+            new_unittest("a container column on this side is carried across a join", &
+                test_join_carries_left_container) &
             ]
     end subroutine collect_tests_table_join
     !
@@ -1727,5 +1729,108 @@ contains
         if (allocated(error)) return
         call same_join(error, c, d, "a join asked for only the other half")
     end subroutine test_join_pairs_alone
+    !
+    !> A container column on THIS side of a join is carried along with every other column.
+    !!
+    !! `join_check_left_containers` (`src/parquet_tables_join.f90`) refuses one only for
+    !! `how="right"` and `how="outer"`, the two values that can emit a row with no counterpart
+    !! here; for every other `how` the column is gathered by the ordinary shared path
+    !! (`join_rewrite_left` -> `table_colwork(..., PCW_GATHER, ...)`), the same one `%sort_by` and
+    !! `%filter_rows` use. Both REFUSALS have error scenarios (`join_left_container_outer`,
+    !! `join_container_payload`); nothing asserted that the permitted case actually works, and
+    !! before this test no test in the suite joined a table holding a container column at all.
+    !!
+    !! **The fingerprint is the row LENGTH, chosen so it names the source row.** Row k holds k
+    !! elements and row 5 is null, so the sequence of lengths coming out of the join IS the
+    !! sequence of source row indices, and a container left unreordered -- or dropped, or rebuilt
+    !! from scratch -- cannot produce it. Values are not read back: `%view` is the only route to
+    !! them and its handle would have to be declared `target` at the call site (see
+    !! `check_view_call_sites_declare_target`), which buys nothing here that the length and the
+    !! nullness do not already pin.
+    !!
+    !! **Two arms, and the second is the negative control.** The inner join reorders and
+    !! DUPLICATES rows, so `il` is far from the identity and the assertion has to see motion. The
+    !! `how="left"` arm against ALLKEY matches every left row exactly once and in place, so the
+    !! table does not detach and the container must come back UNCHANGED -- which is the same
+    !! observation reporting the other outcome. Without it, an implementation that simply left the
+    !! container alone would pass the first arm whenever `il` happened to be the identity.
+    subroutine test_join_carries_left_container(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b, c, d
+        type(parquet_list_column) :: lc
+        type(parquet_list_column), pointer :: lp
+        integer(int64), allocatable :: il(:), ir(:), payload(:)
+        integer(int64) :: n_out, o, src
+        integer(int64) :: want_len(5), got_len(5)
+        logical :: want_null(5), got_null(5)
+        !
+        ! Row k holds k elements; row 5 is null. Length therefore names the source row.
+        call lc%init(PK_INT32)
+        call lc%append_row([11_int32])
+        call lc%append_row([21_int32, 22_int32])
+        call lc%append_row([31_int32, 32_int32, 33_int32])
+        call lc%append_row([41_int32, 42_int32, 43_int32, 44_int32])
+        call lc%append_null_row()
+        !
+        ! ---- Arm 1: an inner join, which reorders and duplicates rows. ----
+        call build(a, "id", LKEY)
+        call a%add_column("lst", lc)
+        call build(b, "id", RKEY)
+        call pairs_of(a, b, ["id"], il, ir, n_out, how="inner")
+        do o = 1_int64, n_out
+            src = il(o)
+            want_len(o) = merge(0_int64, src, src == 5_int64)
+            want_null(o) = (src == 5_int64)
+        end do
+        ! The arm proves nothing unless the join really moves rows: if `il` were the identity, a
+        ! join that left the container untouched would satisfy every assertion below.
+        call check(error, n_out == 5_int64 .and. any(il /= [(o, o = 1_int64, n_out)]), &
+            "the inner fixture must reorder rows, or this arm is satisfied by doing nothing")
+        if (allocated(error)) return
+        !
+        call a%join(b, ["id"], how="inner")
+        call check(error, a%nrows() == n_out, "the joined table must hold the engine's own row count")
+        if (allocated(error)) return
+        call check(error, a%kind("lst") == PK_LIST, "the container column must survive the join as a list")
+        if (allocated(error)) return
+        call a%col("lst", lp)
+        do o = 1_int64, n_out
+            got_len(o) = lp%length(o)
+            got_null(o) = lp%is_null(o)
+        end do
+        call check(error, all(got_len(1:n_out) == want_len(1:n_out)), &
+            "each output row's list must be the source row the pair list named, by its length")
+        if (allocated(error)) return
+        call check(error, all(got_null(1:n_out) .eqv. want_null(1:n_out)), &
+            "and a null source row must arrive null")
+        if (allocated(error)) return
+        ! Ties the container to the scalar gather: both must name the same source row.
+        call a%get("payload", payload)
+        call check(error, all(payload(1:n_out) == il(1:n_out)), &
+            "the scalar column must name the same source rows the container was gathered by")
+        if (allocated(error)) return
+        !
+        ! ---- Arm 2, the negative control: every row matches once, in place. ----
+        call build(c, "id", LKEY)
+        call c%add_column("lst", lc)
+        call build(d, "id", ALLKEY)
+        call c%join(d, ["id"], how="left")
+        call check(error, .not. c%is_detached(), &
+            "a join in which every row survives once and in place must not detach")
+        if (allocated(error)) return
+        call check(error, c%nrows() == size(LKEY, kind=int64), &
+            "and must leave the row count alone")
+        if (allocated(error)) return
+        call c%col("lst", lp)
+        do o = 1_int64, c%nrows()
+            got_len(o) = lp%length(o)
+            got_null(o) = lp%is_null(o)
+        end do
+        call check(error, all(got_len == [1_int64, 2_int64, 3_int64, 4_int64, 0_int64]), &
+            "an in-place join must leave the container's rows exactly as they were")
+        if (allocated(error)) return
+        call check(error, all(got_null .eqv. [.false., .false., .false., .false., .true.]), &
+            "including which of them are null")
+    end subroutine test_join_carries_left_container
     !
 end module test_table_join

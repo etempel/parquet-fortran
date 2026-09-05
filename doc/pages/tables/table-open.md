@@ -244,8 +244,9 @@ answer are worth knowing before you rely on this:
 
 - **Bounded:** the filter install, and each column's assembly — one row group at a time. The
   internally-parallel read gives each thread its own row group, so the peak there is that many at
-  once; `parquet_set_table_threads` caps it (see
-  [Settings](../operating/settings.html)).
+  once;
+  [`parquet_set_prefetch_threads(n)`](../operating/settings.html#threads-for-reading-a-table)
+  caps it.
 - **Not bounded:** the row mask itself. One bit per row of every row group the row-group
   statistics could not rule out, held for as long as the table's reader is open — around a
   hundred megabytes at a billion rows, and roughly eight times that transiently while the filter is
@@ -266,7 +267,7 @@ call t%materialize_all()
 call t%sort_by(["mass"], descending=[.true.])
 ```
 
-**Everything else behaves as it always did.** `sample_fraction=`, `qc=`, `list_columns=`, a
+**Everything else is unaffected.** `sample_fraction=`, `qc=`, `list_columns=`, a
 read-in MAML's remapping, `parquet_row_index`, `%clone` (which stays bounded), `%reload` and the
 row-structural mutations all mean exactly what they mean without it. One difference is worth
 naming: a `qc=` bound declared on a column the filter *names* is checked when that column is

@@ -47,7 +47,7 @@ which module each name lives in, for when you want that.
 
 | you write | its own module |
 |---|---|
-| `parquet_table`, `parquet_open_table`, `parquet_new_table`, `parquet_write_table`, `parquet_table_row`, `parquet_slice`/`parquet_slice_range`/`parquet_slice_list`, `parquet_table_row_group_bounds`, `RES_EMPTY`/`RES_FULL` (and `RES_PARTIAL`, reserved and never returned today) | `parquet_tables` |
+| `parquet_table`, `parquet_open_table`, `parquet_new_table`, `parquet_write_table`, `parquet_table_row`, `parquet_table_col`, `parquet_slice`/`parquet_slice_range`/`parquet_slice_list`, `parquet_table_row_group_bounds`, `PARQUET_ROW_INDEX`, `RES_EMPTY`/`RES_FULL` (and `RES_PARTIAL`, reserved and never returned today) | `parquet_tables` |
 | the `PK_*` kind constants, `parquet_kind_name` | `parquet_columns` |
 | `parquet_schema`, `parquet_parse_maml`, `parquet_filter`, `parquet_sortkey`, `parquet_read_qc` | `parquet_io` (a facade over the internal `parquet_core`) |
 | `parquet_string_column` | `parquet_strings` |
@@ -819,6 +819,9 @@ Four rules follow from a container carrying its own per-row nullness:
   `%truncate`, `%top_n`, `%append` and `%append_null_rows` all carry it with every other column, so
   the rows stay aligned. A container column may not be a **sort key**, though — there is no defined
   order on a list, a map or a struct — so sort by a scalar column and the container follows.
+  [`%join`](table-join.html) carries one too, with one exception: `how="right"` and `how="outer"`
+  can emit a row this table has no counterpart for, and a container has no null-fill, so a resident
+  container column on this side is refused for those two.
 
 `%print_stat` has nothing to report as a minimum or maximum VALUE for such a column, so its `min`
 and `max` columns show the **shortest and longest row** instead, counting only rows that are
@@ -954,3 +957,8 @@ two — and a table whose columns were never touched holds nothing at all.
 `bench/benchmark_table.sh` measures this directly (see CONTRIBUTING.md); note that resident set
 size does **not** show it, because Arrow's memory pool keeps freed pages rather than returning
 them to the operating system.
+
+That is the steady state. The **peak while a column is being read** is a separate question, and on
+a filtered file too large to hold it is the one that decides whether the read is possible at all —
+see [Reading a file larger than memory:
+`bounded=`](table-open.html#reading-a-file-larger-than-memory-bounded).

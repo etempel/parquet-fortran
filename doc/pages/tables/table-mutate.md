@@ -185,7 +185,8 @@ further. What it loses is the file behind it.
 **A call that changes no row does not detach.** Detaching costs you every column you have not read
 yet, permanently, so it is only paid for when the row set actually moved — a row mutation that
 turns out to have nothing to do returns without touching a column, without invalidating a `%col`
-pointer, and with the file still attached. Five of the six are decided by the arguments you passed:
+pointer, and with the file still attached. Five of the seven are decided by the arguments you
+passed:
 
 | call | changes nothing when |
 |---|---|
@@ -195,11 +196,14 @@ pointer, and with the file still attached. Five of the six are decided by the ar
 | `%append(other)` | `other` has no rows (it is still checked for compatibility first) |
 | `%append_null_rows(n)` | `n == 0` |
 | `%sort_by(keys)` | the rows were already in that order |
+| [`%join(other, on)`](table-join.html) | every row of this table matched exactly once, and in place |
 
-The last is the odd one out: whether a sort moves anything depends on the **data**, not on the
-call, so `%sort_by` on an already-ordered column leaves the table attached and the same call after
-an edit may not. Treat "did it detach?" as something to ask (`%is_detached()`) rather than
-predict, and never rely on staying attached across a mutation you expect to be a no-op.
+The last two are the odd ones out: whether a sort moves anything, and whether a join leaves every
+row where it was, depend on the **data** rather than on the call — so `%sort_by` on an
+already-ordered column leaves the table attached and the same call after an edit may not, and a
+join that kept its file yesterday may detach today on a wider `other`. Treat "did it detach?" as
+something to ask (`%is_detached()`) rather than predict, and never rely on staying attached across
+a mutation you expect to be a no-op.
 
 ### Removing rows
 

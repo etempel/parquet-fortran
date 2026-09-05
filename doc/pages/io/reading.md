@@ -835,7 +835,8 @@ not then be aligned with anything read afterwards. A filter passed to `parquet_o
 as an active filter for the first of those, so opening with `filter=` and then calling
 `parquet_reader_set_filter` aborts as surely as calling it twice does. The second condition is easy
 to meet by accident here: a `parquet_read_column_chunk` call before the `set_filter` gets the
-ordering wrong. Set the filter first, then loop. See
+ordering wrong. Set the filter first, then loop. It refuses on a third condition too — a reader
+that **already has a sort** — since a filter must be applied before one. See
 [Applying a filter after the reader is open](filter-sort-sample.html#applying-a-filter-after-the-reader-is-open).
 
 Pair it with a chunked loop over the same row groups to filter a file larger than memory:

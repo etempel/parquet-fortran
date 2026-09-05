@@ -75,6 +75,7 @@ module parquet_index
     public :: pf_index_pool
     public :: pf_index_threads
     public :: pf_index_max_components
+    public :: parquet_debug_index_threads_used
     !
     ! ---- Settings this module's own code reads, re-exported so a narrow import can configure it ----
     !
@@ -161,6 +162,25 @@ module parquet_index
     !! test-sized fixture of a few tens of thousands reaches the threaded scan and scatter without
     !! anything having to force it. Keep that true if the number is ever raised.
     integer(int64), parameter :: IX_MIN_KEYS_PER_THREAD = 4096_int64
+
+    !> Threads the LAST `%build` resolved for its own work; 1 means it ran serial.
+    !!
+    !! **Test-only, and the only observable a threading test of this module has.** A build's answer
+    !! is identical at every thread count -- that is the point of the design -- so no assertion on
+    !! the map itself can tell a `threads=4` that was honoured from one that was silently ignored.
+    !! Without this counter every such test is vacuous, and a policy that never threads is the
+    !! easiest bug here to write and the hardest to see.
+    !!
+    !! Records what `ix_threads_for` RESOLVED, not `omp_get_num_threads()` from inside the region:
+    !! the decision is what is under test, not the runtime's response to it.
+    !!
+    !! **Written only by `ix_threads_for`, which is reached only from the two build workers, which
+    !! run inside `pf_index_map_guard`** -- so the write is serialized and a concurrent build cannot
+    !! interleave with one. `pf_index_threads` deliberately does NOT record: it is a public query a
+    !! user may call at any time, and letting it write here would let an unrelated call clobber what
+    !! a build had just reported. That is why the rule is split into `ix_threads_rule` (decides) and
+    !! `ix_threads_for` (decides and records).
+    integer, save :: dbg_index_threads_used = 1
 
     !> Most components one key may have, and the reason the tuple paths allocate nothing.
     !!
@@ -1323,6 +1343,22 @@ module parquet_index
             integer(int64), intent(in) :: n !! keys the build would process.
             integer :: nt !! threads it would use; 1 means serial.
         end function pf_index_threads_i64
+    end interface
+
+    interface
+        !> Test-only: threads the last `%build` resolved for its own work; 1 means serial.
+        !!
+        !! A build answers identically at every thread count, so nothing about the resulting map
+        !! can distinguish an honoured `threads=` from an ignored one. This is the only observable
+        !! that can, which is what makes a threading test of this module non-vacuous.
+        !!
+        !! Reports the count the rule RESOLVED, not the team the runtime granted. It covers this
+        !! module's own scan and scatter only: a `method="sorted"` build sorts through `pf_argsort`,
+        !! which resolves its own team against the sorting knobs and reports it through
+        !! `parquet_debug_sort_threads_used` instead.
+        module function parquet_debug_index_threads_used() result(n)
+            integer :: n !! threads the last build resolved; 1 means it ran serial.
+        end function parquet_debug_index_threads_used
     end interface
 
     ! ---- Cross-submodule private helpers ----

@@ -589,13 +589,20 @@ contains
     ! The build's thread rule, reported
     ! ============================================================================================
 
+    ! Both take `ix_threads_rule`, never `ix_threads_for`: this is a public query, so recording
+    ! from here would let any caller overwrite what a build had just reported and make every test
+    ! reading `parquet_debug_index_threads_used` depend on nobody having asked in between.
     module procedure pf_index_threads_i32
-        nt = ix_threads_for(int(n, int64))
+        nt = ix_threads_rule(int(n, int64))
     end procedure pf_index_threads_i32
 
     module procedure pf_index_threads_i64
-        nt = ix_threads_for(n)
+        nt = ix_threads_rule(n)
     end procedure pf_index_threads_i64
+
+    module procedure parquet_debug_index_threads_used
+        n = dbg_index_threads_used
+    end procedure parquet_debug_index_threads_used
 
     ! ============================================================================================
     ! Private workers. Everything below takes a `type(pf_index_map)` dummy, and nothing below
@@ -935,7 +942,7 @@ contains
     !! serial-inside-a-parallel-region rule and the affinity clamp live, and is then bounded by the
     !! work available so that a mid-sized build gets the few threads that pay rather than a full
     !! team that does not.
-    function ix_threads_for(n, threads) result(nt)
+    function ix_threads_rule(n, threads) result(nt)
         integer(int64), intent(in) :: n              !! keys the build will process.
         integer, intent(in), optional :: threads     !! the caller's request, or absent.
         integer :: nt                                !! threads to use; 1 means serial.
@@ -953,6 +960,25 @@ contains
             nt_work = n / IX_MIN_KEYS_PER_THREAD
             if (nt_work < int(nt, int64)) nt = int(nt_work)
         end if
+    end function ix_threads_rule
+
+    !> The rule, and a record of what it answered for `parquet_debug_index_threads_used`.
+    !!
+    !! **Every build path must come through here rather than through `ix_threads_rule` directly**,
+    !! or the debug counter goes stale and the threading tests that read it silently assert against
+    !! the previous build. Splitting the two is what makes that structural rather than remembered:
+    !! `pf_index_threads` -- a public query a user may call at any time, and from any thread --
+    !! takes the rule without the record, so it cannot clobber what a build just reported.
+    !!
+    !! Reached only from the two build workers, which run inside `pf_index_map_guard`, so the write
+    !! below is serialized with every other build.
+    function ix_threads_for(n, threads) result(nt)
+        integer(int64), intent(in) :: n              !! keys the build will process.
+        integer, intent(in), optional :: threads     !! the caller's request, or absent.
+        integer :: nt                                !! threads to use; 1 means serial.
+
+        nt = ix_threads_rule(n, threads)
+        dbg_index_threads_used = nt
     end function ix_threads_for
 
     ! ---- Value validation ----

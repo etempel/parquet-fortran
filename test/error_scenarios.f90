@@ -2508,6 +2508,12 @@ program error_scenarios
         call scenario_index_direct_range_too_wide()
     case ("index_remove_absent")
         call scenario_index_remove_absent()
+    case ("index_get_many_int32_overflow")
+        call scenario_index_get_many_int32_overflow()
+    case ("index_build_threads_zero")
+        call scenario_index_build_threads_zero()
+    case ("index_keys_rank1_on_composite")
+        call scenario_index_keys_rank1_on_composite()
     case ("index_control")
         call scenario_index_control()
     case ("pool_double_free")
@@ -21848,6 +21854,66 @@ contains
         call m%remove(77_int64)
         print '(a)', "removing an absent key was accepted"
     end subroutine scenario_index_remove_absent
+    !
+    !> A stored value too large for an `int32` answer aborts rather than truncating silently.
+    !>
+    !> Reachable with a ONE-key map -- it needs a large stored *value*, not two billion keys -- so
+    !> this costs nothing to test and is a real trap for a caller whose values index into something
+    !> larger than an `int32` can address. `%get` is unaffected: every specific returns `int64`.
+    !>
+    !> The line before the abort is the boundary control: exactly `huge(int32)` must be accepted, so
+    !> a guard that fired one value early would abort HERE and fail the stderr match rather than
+    !> passing as if it had caught the right thing.
+    subroutine scenario_index_get_many_int32_overflow()
+        type(pf_index_map) :: m
+        integer(int32) :: out32(1)
+
+        call m%build([1_int64], [int(huge(0_int32), int64)])
+        call m%get_many([1_int64], out32)   ! control: the largest value an int32 answer can hold
+        print '(a,i0)', "int32 answer at the boundary was accepted, got=", out32(1)
+        call m%build([1_int64], [int(huge(0_int32), int64) + 1_int64])
+        call m%get_many([1_int64], out32)   ! -> aborts
+        ! `%get_many` is `pure`, so its result must be USED or the compiler may delete the call
+        ! along with the abort inside it -- see CLAUDE.md, "A scenario whose abort is inside a
+        ! `pure` function must USE the result".
+        print '(a,i0)', "an oversized value narrowed into an int32 answer, got=", out32(1)
+    end subroutine scenario_index_get_many_int32_overflow
+    !
+    !> `threads=0` is refused rather than silently treated as "automatic".
+    !>
+    !> Zero is the value a caller reaches by computing a team size that came out empty, and taking
+    !> it as "use the default" would hide that arithmetic. The sibling bulk paths refuse it the same
+    !> way -- see `scenario_spatial_count_all_threads_zero` and
+    !> `scenario_healpix_ang2pix_bulk_threads_zero`.
+    subroutine scenario_index_build_threads_zero()
+        type(pf_index_map) :: m
+
+        call m%build([1_int64, 2_int64], threads=1)   ! control: the smallest team that is allowed
+        print '(a)', "threads=1 was accepted"
+        call m%build([1_int64, 2_int64], threads=0)   ! -> aborts
+        print '(a)', "threads=0 was accepted"
+    end subroutine scenario_index_build_threads_zero
+    !
+    !> Asking a composite map for a rank-1 key list aborts rather than answering for one component.
+    !>
+    !> The generic dispatches on the RANK of the array the caller supplies, so this is a mistake a
+    !> caller makes by declaring the wrong variable rather than by calling the wrong name -- which
+    !> is why the message says which rank to ask for instead of merely refusing.
+    subroutine scenario_index_keys_rank1_on_composite()
+        type(pf_index_map) :: m
+        integer(int64) :: pairs(2, 2)
+        integer(int64), allocatable :: flat(:), rows(:,:)
+
+        pairs(:, 1) = [1_int64, 2_int64]
+        pairs(:, 2) = [3_int64, 4_int64]
+        call m%build(pairs, method="hash")
+        call m%keys(rows)                   ! control: the rank the map actually has
+        print '(a,i0)', "the rank-2 key list was returned, rows=", size(rows, 1)
+        call m%keys(flat)                   ! -> aborts
+        ! `%keys` is `pure` and reports only through its argument, so the result is used here for
+        ! the same reason as in the int32 scenario above.
+        print '(a,i0)', "a rank-1 key list was returned for a composite map, n=", size(flat)
+    end subroutine scenario_index_keys_rank1_on_composite
     !
     !> The shared negative control for every map scenario above: the same calls, made correctly,
     !> must run to completion. Without it a guard that fired unconditionally would satisfy every

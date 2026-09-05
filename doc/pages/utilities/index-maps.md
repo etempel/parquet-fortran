@@ -59,9 +59,6 @@ call m%init()                           ! then %set or %get_or_add
 call m%init(capacity=100000)            ! pre-sized, so a run of inserts does not rehash
 ```
 
-Signatures on this page follow the guide's bracket convention: `[x]` marks an optional argument,
-with the comma outside the bracket.
-
 ## The three backends
 
 One API, three storage layouts, and the module picks between them from your keys. `%get_method`
@@ -76,6 +73,10 @@ reports the choice.
 | composite keys | yes | yes | no |
 | `%set` / `%get_or_add` | inside the built key range | yes | aborts |
 | `%remove` | yes | yes | aborts |
+
+The hash row is for a single-component key. A composite one stores its components alongside,
+costing `8 * (ncomponents + 1)` bytes per slot — 24 for a pair, 32 for a triple — with the same
+1.7-3.3x table size.
 
 **direct** is an array indexed by the key: the fastest lookup there is, with no hashing and no
 probing at all. It is chosen automatically when your keys are dense enough that the array is no
@@ -114,6 +115,11 @@ call m%get_many(keys, rows)          ! one answer per key, 0 where absent
 rather than once per key, which on some compilers is the difference between paying for a runtime
 type descriptor per lookup and paying for one per array. `rows` may be `int32` or `int64` and must
 have exactly one element per key.
+
+**Take the answer as `int64` if your stored values can exceed `huge(int32)`.** An `int32` answer
+array aborts rather than truncating when a value will not fit, and so does `%get_or_add` with an
+`int32` index. `%get` is never affected — it always answers `int64`. This needs a large stored
+*value*, not a large map: it is reachable with one key and an explicit `values=`.
 
 A map that was never built answers 0 for every key rather than aborting, and costs nothing extra
 for the privilege.
@@ -195,17 +201,19 @@ w = m%ncomponents()                  ! components per key; 0 if never built
 b = m%memory_bytes()                 ! heap held
 call m%get_method(token)             ! "direct", "hash", "sorted", or "" if never built
 call m%keys(list)                    ! every stored key
-call m%probe_stats(max_probe, [mean_probe])
+call m%probe_stats(max_probe)        ! mean_probe is an optional second answer
 ```
 
 `%keys` gives a rank-1 list for a single-component map and a rank-2 `(nkeys, ncomp)` array for a
-composite one. It is allocated zero-length for an empty map, never left unallocated. Order is
-ascending for the direct and sorted backends and unspecified for hash; ask for the matching values
-with `%get_many(list, vals)`.
+composite one — asking a composite map for a rank-1 list aborts and says which rank to ask for,
+since the generic can only dispatch on the array you supply. It is allocated zero-length for an
+empty map, never left unallocated. Order is ascending for the direct and sorted backends and
+unspecified for hash; ask for the matching values with `%get_many(list, vals)`.
 
 `%probe_stats` reports how far lookups have to walk: 1 for the direct backend, the binary search's
-depth for sorted, and the real probe lengths for hash. It scans the whole table, so it is a
-diagnostic rather than something to call in a loop.
+depth for sorted, and the real probe lengths for hash. On the hash backend it scans the whole
+table, so it is a diagnostic rather than something to call in a loop; the other two answer without
+touching the keys. An empty map reports 0.
 
 ## The index pool
 
@@ -306,13 +314,21 @@ one back is a supported pattern, and so is several threads streaming keys throug
 **Lookups on a map are lock-free.** Any number of threads may `%get`, `%contains` or `%get_many` a
 map nobody is mutating, at full speed.
 
+**The pool guards its queries as well as its mutations**, so `%is_used`, `%get_max_index` and the
+counters all take the lock that a map lookup avoids. A pool query in a hot loop is not free the way
+`%get` is; hold the answer rather than asking repeatedly.
+
 **The one unsupported combination is a lookup racing a mutation of the same map.** Guarding `%get`
 would cost it the few nanoseconds it exists for, so it is not guarded. Two patterns avoid it:
 
 - **phase discipline** — mutate, then read, with a barrier or an `!$omp single` between the
   phases;
 - **route everything through `%get_or_add`**, which is guarded and answers a plain lookup
-  correctly for a key that is already present.
+  correctly for a key that is already present. An **absent** key is *added* rather than reported
+  missing, so this suits a workload that would insert the key anyway — it is not a drop-in for
+  `%get` on a read-mostly map, where it would grow the map on every miss and answer with a fresh
+  index where `%get` answers 0. It also needs the hash backend: a sorted map refuses it, and a
+  direct map refuses a key outside its built range.
 
 The serialization is a single lock per type across the whole process, so two unrelated shared maps
 take turns with each other as well. That is a deliberate trade: it is what keeps both types free of
@@ -343,21 +359,40 @@ segfaults on for any type with allocatable components. The per-thread array sati
 
 ## Threads a build uses
 
-A `%build` threads its key scan and, on the direct backend, its scatter. It resolves the team the
-same way every other part of this library does: automatically outside a parallel region, serially
-inside one, bounded by the work available and by what the process's CPU affinity allows.
+A `%build` threads its key scan and, on the direct backend, its scatter.
 
 ```fortran
+call m%build(keys)                   ! automatic
 call m%build(keys, threads=4)        ! an explicit request, honoured
 call m%build(keys, threads=1)        ! forced serial
 nt = pf_index_threads(size(keys, kind=int64))   ! what an automatic build would open
 ```
 
+**The automatic answer and an explicit `threads=` are resolved differently, and only one of them is
+bounded.** The automatic one is `omp_get_max_threads()` outside a parallel region and **1** inside
+one — nested teams are the caller's business — capped by `parquet_set_index_threads`, then
+bounded by the work available. An explicit `threads=` bypasses all three: it is honoured whatever
+the size of the build and wherever it is called from, including inside somebody else's parallel
+region.
+
+| situation | threads used |
+|---|---|
+| automatic, ordinary serial code | `omp_get_max_threads()`, capped by `parquet_set_index_threads` |
+| automatic, inside any `!$omp parallel` region | **1** — serial |
+| automatic, fewer than about 8000 keys | **1** — below the work floor |
+| automatic, above it | about one thread per 4000 keys, up to the cap |
+| explicit `threads=n`, anywhere | `n` |
+| any of the above | clamped to what the process's CPU affinity allows |
+
+The affinity clamp is the one rule with no exception: it applies to an explicit request as well, and
+lowering a request to the processors actually available is a performance decision that never changes
+the answer. `threads=0` is refused rather than read as "automatic".
+
 `parquet_set_index_threads(n)` caps the automatic answer process-wide, and
 `PARQUET_FORTRAN_INDEX_THREADS` does the same from the environment — see
 [Settings](../operating/settings.html). A cap only ever lowers the automatic answer; pass
 `threads=` to ask for more. A `method="sorted"` build sorts through `pf_argsort`, so that phase
-answers to the sorting thread knobs instead.
+answers to the sorting thread knobs instead, while the key scan around it follows the rule above.
 
 Threading a build changes how fast it answers and never what it answers.
 

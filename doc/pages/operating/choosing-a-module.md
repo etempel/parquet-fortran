@@ -48,7 +48,7 @@ in every one of them.
 | `parquet_sampling` | 8 | no | permutations, subsets, resampling and weighted draws |
 | `parquet_spatial` | 15 | no | `pf_spatial_index`: neighbour and k-nearest search on a uniform grid or a HEALPix pixelisation, including on the sky |
 | `parquet_healpix` | 7 | no | `pf_query_disc` and friends: the HEALPix sphere pixelisation |
-| `parquet_index` | 10 | no | `pf_index_map`: which row holds this key, over a single integer key or a tuple of them, with three storage backends chosen from the keys; and `pf_index_pool`, which hands out and recycles unique index values |
+| `parquet_index` | 10 | no | `pf_index_map`: which row holds this key, over a single integer key or a tuple of them, with three storage backends, two chosen from the keys and one opt-in; and `pf_index_pool`, which hands out and recycles unique index values |
 | `parquet_columns` | 10 | no | `parquet_column`: a typed, null-aware column container |
 | `parquet_list` | 11 | no | `parquet_list_column` / `parquet_list_row`: variable-length list storage |
 | `parquet_struct` | 11 | no | `parquet_struct_column` / `parquet_struct_row`: one value per declared field per row |

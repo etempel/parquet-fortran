@@ -2005,6 +2005,12 @@ contains
                 test_index_direct_range_too_wide_aborts), &
             new_unittest("removing an absent key without found= aborts", &
                 test_index_remove_absent_aborts), &
+            new_unittest("a stored value too large for an int32 answer aborts", &
+                test_index_get_many_int32_overflow_aborts), &
+            new_unittest("threads=0 on a build aborts", &
+                test_index_build_threads_zero_aborts), &
+            new_unittest("a rank-1 key list from a composite map aborts", &
+                test_index_keys_rank1_on_composite_aborts), &
             new_unittest("every legal pf_index_map path completes", &
                 test_index_control_completes), &
             new_unittest("a pool double free aborts", &
@@ -2521,6 +2527,35 @@ contains
             failure_message="removing an absent key without found= was expected to abort", &
             required_stderr="not in the map")
     end subroutine test_index_remove_absent_aborts
+    !
+    !> See `scenario_index_get_many_int32_overflow` (test/error_scenarios.f90). The scenario makes
+    !> the boundary call first, so this passing means the guard fired on the value one past it and
+    !> not on the largest legal one.
+    subroutine test_index_get_many_int32_overflow_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_get_many_int32_overflow", &
+            expect_abort=.true., &
+            failure_message="a stored value above huge(int32) was expected to abort an int32 answer", &
+            required_stderr="too large for an int32 result")
+    end subroutine test_index_get_many_int32_overflow_aborts
+    !
+    !> See `scenario_index_build_threads_zero` (test/error_scenarios.f90).
+    subroutine test_index_build_threads_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_build_threads_zero", &
+            expect_abort=.true., &
+            failure_message="threads=0 on %build was expected to abort", &
+            required_stderr="threads= must be at least 1")
+    end subroutine test_index_build_threads_zero_aborts
+    !
+    !> See `scenario_index_keys_rank1_on_composite` (test/error_scenarios.f90).
+    subroutine test_index_keys_rank1_on_composite_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_keys_rank1_on_composite", &
+            expect_abort=.true., &
+            failure_message="a rank-1 key list from a composite map was expected to abort", &
+            required_stderr="this map has composite keys")
+    end subroutine test_index_keys_rank1_on_composite_aborts
     !
     !> The negative control: every legal call must run to completion, or a guard that fired
     !> unconditionally would satisfy every abort scenario above while breaking the library.

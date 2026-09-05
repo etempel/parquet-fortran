@@ -53,7 +53,8 @@ the two generators meant to be copied into your own project.
 - [Key-to-index lookup with parquet_index](index-maps.html) — `pf_index_map`: which row holds
   this key, in a few nanoseconds, over a single integer key or a tuple of them when no one column
   is unique. Three storage backends behind one API — an array indexed by the key, an open-addressing
-  hash table, and sorted keys plus a binary search — chosen from the keys themselves. Then
+  hash table, and sorted keys plus a binary search — the first two chosen from the keys
+  themselves, the third opt-in. Then
   `pf_index_pool`, which hands out and recycles unique index values so a program managing slots in
   its own arrays need not track which are free. Both are safe to mutate from several threads at
   once, and lookups are lock-free.

@@ -26,7 +26,7 @@ module test_index_omp
     use parquet_index
     use iso_fortran_env, only: int32, int64
 #ifdef _OPENMP
-    use omp_lib, only: omp_get_max_threads, omp_get_thread_num
+    use omp_lib, only: omp_get_max_threads, omp_get_thread_num, omp_get_num_procs
 #endif
     implicit none
     private
@@ -392,24 +392,65 @@ contains
         type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
         type(pf_index_map) :: m
         integer(int64) :: keys(20000), i
+        integer :: seen_many, seen_one, want_many, want_three
 
         do i = 1_int64, 20000_int64
             keys(i) = i
         end do
-        ! Both must build a correct map, whatever the machine allows. This one needs no skip
-        ! guard: it asserts the ARGUMENT is accepted and the answers are right, not that a team
-        ! was opened.
-        call m%build(keys, threads=1)
-        call check(error, m%get(12345_int64) == 12345_int64, "threads=1 builds correctly")
-        if (allocated(error)) return
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it no team is ever opened, so the two arms " // &
+            "below would differ only in a resolved number that reaches no parallel region, and " // &
+            "the assertion would hold for the wrong reason")
+        return
+#endif
+#ifdef _OPENMP
+        if (omp_get_num_procs() < 2) then
+            call skip_test(error, "needs 2+ processors: threads= is clamped to " // &
+                "omp_get_num_procs(), so on a one-processor runner the threads=4 arm and the " // &
+                "threads=1 control both resolve to 1 and the comparison is vacuous")
+            return
+        end if
+        ! The clamp is part of the contract, so the expectation carries it rather than the test
+        ! demanding a machine wide enough to avoid it.
+        want_many = min(4, omp_get_num_procs())
+        want_three = min(3, omp_get_num_procs())
+#endif
+        ! Each arm asserts BOTH halves: the map is right, and the team the rule resolved is the one
+        ! that was asked for. The correctness assertions alone pass against a %build that discards
+        ! threads= entirely -- the answer is identical at every thread count by design, which is
+        ! exactly why parquet_debug_index_threads_used has to exist.
         call m%build(keys, threads=4)
+        seen_many = parquet_debug_index_threads_used()
         call check(error, m%get(12345_int64) == 12345_int64, "threads=4 builds correctly")
         if (allocated(error)) return
+        call check(error, seen_many == want_many, &
+            "threads=4 must be honoured, clamped only by this process's CPU affinity")
+        if (allocated(error)) return
+        ! The negative control. Without it the assertion above passes just as happily against a
+        ! build that always opens the full machine and never reads threads= at all.
+        call m%build(keys, threads=1)
+        seen_one = parquet_debug_index_threads_used()
+        call check(error, m%get(12345_int64) == 12345_int64, "threads=1 builds correctly")
+        if (allocated(error)) return
+        call check(error, seen_one == 1, "threads=1 must force serial")
+        if (allocated(error)) return
+        call check(error, seen_many > seen_one, &
+            "the two requests must resolve differently, or neither assertion is discriminating")
+        if (allocated(error)) return
+        ! Both non-default backends reach the same rule for their own scan.
         call m%build(keys, method="hash", threads=3)
         call check(error, m%get(19999_int64) == 19999_int64, "a threaded hash build is correct")
         if (allocated(error)) return
+        call check(error, parquet_debug_index_threads_used() == want_three, &
+            "a hash build honours threads= for its key scan")
+        if (allocated(error)) return
+        ! A sorted build's SORT answers to pf_argsort and the sorting knobs; what this counter
+        ! reports is this module's own scan, which follows the index rule like every other backend.
         call m%build(keys, method="sorted", threads=3)
         call check(error, m%get(19999_int64) == 19999_int64, "a threaded sorted build is correct")
+        if (allocated(error)) return
+        call check(error, parquet_debug_index_threads_used() == want_three, &
+            "a sorted build honours threads= for its own scan, whatever pf_argsort then does")
     end subroutine test_threads_argument
 
     !> `pf_index_threads` reports the rule `%build` actually follows.
@@ -425,6 +466,25 @@ contains
         call check(error, large >= 1, "the rule always answers at least 1")
         if (allocated(error)) return
         call check(error, large >= small, "and never fewer threads for more work")
+        if (allocated(error)) return
+#ifdef _OPENMP
+        ! `large >= small` is vacuous on its own -- `small` is asserted to be 1 just above, so it
+        ! reduces to `large >= 1`, which the line before it already checked. Where the machine can
+        ! actually thread, the work bound must be seen to lift.
+        if (omp_get_num_procs() >= 2 .and. omp_get_max_threads() >= 2) then
+            call check(error, large > small, &
+                "on a machine that can thread, ten million keys must resolve to more than the " // &
+                "one thread ten keys get, or the work bound is not being applied at all")
+            if (allocated(error)) return
+        end if
+#endif
+        ! The test's name promises this and only this line delivers it: that the number the query
+        ! reports is the number a BUILD actually resolves, not a second copy of the rule that has
+        ! drifted. `pf_index_threads` deliberately does not record, so reading the counter after
+        ! the query cannot be what makes this pass.
+        call build_and_compare(error, 20000_int64)
+        if (allocated(error)) return
+        call build_and_compare(error, 100_int64)
         if (allocated(error)) return
         ! The int32 spelling agrees with the int64 one.
         call check(error, pf_index_threads(10_int32) == small, &
@@ -444,6 +504,30 @@ contains
             "would open a nested team")
 #endif
     end subroutine test_index_threads_rule
+
+    !> Builds a map of `n` keys automatically and checks the build resolved what the query reports.
+    !!
+    !! Two sizes are worth passing: one above the work floor and one below it. Below the floor both
+    !! sides are 1, which proves nothing on its own but would catch a query that answered 1 where
+    !! the build threaded; above it, the two agreeing is the real assertion.
+    subroutine build_and_compare(error, n)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        integer(int64), intent(in) :: n                     !! keys to build over.
+        type(pf_index_map) :: m
+        integer(int64), allocatable :: keys(:)
+        integer(int64) :: i
+        character(len=32) :: t
+
+        allocate(keys(n))
+        do i = 1_int64, n
+            keys(i) = i
+        end do
+        call m%build(keys)
+        write (t, '(i0)') n
+        call check(error, parquet_debug_index_threads_used() == pf_index_threads(n), &
+            "over " // trim(t) // " keys the team the build resolved must equal what " // &
+            "pf_index_threads reports, or the query is a second copy of the rule that has drifted")
+    end subroutine build_and_compare
 
     !> A per-thread map and pool, held in a shared array indexed by thread, work inside a region.
     !!

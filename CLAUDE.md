@@ -5231,6 +5231,24 @@ that a first round of tests did not catch.
 
 Three things about doing it *here* specifically:
 
+- **NEVER restore a mutation with `git checkout`.** The tree you are mutating is almost always
+  **uncommitted** — this repository's rule is that finished work is left in the working tree for the
+  maintainer to commit — so `git checkout -- <file>` does not undo the mutation, it discards the
+  feature. Confirmed here at the cost of an afternoon: a harness that mutated three files and
+  restored them with `git checkout` reverted `src/parquet_sorting_unique.f90`,
+  `src/parquet_sorting_match.f90` and `src/parquet_tables_verbs.f90` to HEAD on its **first**
+  round, and the run then reported fourteen "ANCHOR-FAIL"s that looked like a bug in the harness's
+  patterns rather than the destruction of the code they were pointing at.
+
+  **Snapshot the files to a scratch directory first and restore from that copy.** Two further
+  points make this worse than it sounds. A mutation to a **generated** file is applied to the
+  generated output (never the generator, which the run must not disturb), and `git checkout` on
+  such a file also throws away the *current* regeneration — recoverable only because the generator
+  itself was untouched. And a **hand-written** file has no such recovery at all: the only copy is
+  whatever the session transcript holds, which is exactly the position `feature_*.md`'s
+  no-deletion rule exists to avoid. Verify the harness's **restore** against a scratch file before
+  its first real round; verifying the mutation *anchors* first, which is otherwise the right move,
+  is what triggered the damage here.
 - **Detect an abort, not just a failed check.** This library reports almost every error with
   `error stop`, so a mutation frequently makes a test **crash** rather than fail an assertion —
   `grep -c '\[FAILED\]'` then reports 0 and the mutation looks survived. Always check the exit

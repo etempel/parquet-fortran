@@ -2,16 +2,22 @@
 ! Author: Elmo Tempel (elmo.tempel@ut.ee)
 !===========================================
 !
-!> Row-set verbs that compute a MASK or a PERMUTATION and hand it to
-!! `parquet_tables_rowmutate.f90`: `%duplicated`, `%drop_duplicates`, `%sort_by_values` and
-!! `%argsort_by_values`.
+!> Row-set verbs built on ONE grouping pass: `%duplicated`, `%drop_duplicates`,
+!! `%sort_by_values`, `%argsort_by_values` and `%value_counts`.
 !!
-!! **Nothing in this file touches a column.** Each verb works out which rows should survive, or
-!! what order they should be in, and then calls exactly one of the two shared back halves --
-!! `table_apply_keep` or `apply_permutation` -- which is what keeps every detach in one file. So
-!! "does this detach?" is answered by whether the verb ends in one of those two calls, not by
-!! reading each verb's body: `%drop_duplicates` and `%sort_by_values` do, `%duplicated` and
-!! `%argsort_by_values` do not, and the latter two never write anything at all.
+!! **No verb here mutates a column of THIS table.** Each works out which rows should survive, or
+!! what order they should be in, and then calls exactly one of the two shared back halves in
+!! `parquet_tables_rowmutate.f90` -- `table_apply_keep` or `apply_permutation` -- which is what
+!! keeps every detach in one file. So "does this detach?" is answered by whether the verb ends in
+!! one of those two calls, not by reading each verb's body: `%drop_duplicates` and
+!! `%sort_by_values` do, and `%duplicated`, `%argsort_by_values` and `%value_counts` do not.
+!!
+!! `%value_counts` is the one verb that produces a COLUMN rather than a mask or a permutation,
+!! and it does it without knowing an element type: it deep-copies the counted column, gathers the
+!! copy at one row per distinct value, and hands that to `%add_column`, which reads the kind,
+!! width and unit back off it. That is why one binding covers all eighteen column kinds where
+!! `%sort_by_values` needs five specifics -- the caller of `%sort_by_values` supplies values, so
+!! its type is in the signature, while nothing crosses `%value_counts`\' signature but a name.
 !!
 !! **Equality is the SORT COMPARATOR'S, deliberately, and it is not a rule this file owns.**
 !! `%duplicated` groups rows with one `%argsort_by(keys, perm, group_offsets=go)` -- the grouping
@@ -347,5 +353,89 @@ contains
         call pf_argsort(values, perm, descending=descending, nulls_first=nulls_first, &
             is_valid=is_valid, threads=threads)
     end procedure table_argsort_by_values_chr_i64
+    !
+    ! ---- %value_counts: how often each distinct value occurs ----------------------------------
+    !
+    module procedure table_value_counts
+        integer(int64), allocatable :: perm(:), go(:), cnt(:), reps(:), order(:)
+        integer(int64), allocatable :: sel(:), out_counts(:)
+        integer(int64) :: g, ng, k, m, nout, nnull, null_rep, rep
+        integer :: idx
+        logical :: drop, desc, has_null
+        type(parquet_column) :: vals
+        character(len=:), allocatable :: cname
+        !
+        call table_check_open(self, "value_counts")
+        drop = .true.
+        if (present(dropna)) drop = dropna
+        desc = .true.
+        if (present(descending)) desc = descending
+        cname = "count"
+        if (present(count_name)) cname = trim(adjustl(count_name))
+        ! Resolved HERE, exactly as duplicated_apply resolves its keys, so an unknown or
+        ! unorderable column is refused naming THIS verb -- %argsort_by below names itself. The
+        ! same guard, not a second one.
+        call table_lookup_sort_key(self, name, "value_counts", idx)
+        if (self%cache%cols(idx)%name == cname) then
+            error stop EP // "value_counts: the counted column is already called """ // cname // &
+                """, so the result would carry two columns of that name; pass count_name= to " // &
+                "call the count column something else"
+        end if
+        ! The grouping primitive %duplicated uses, for the same reason: equality is the sort
+        ! comparator's, so every NaN is one value and every null is one. Group g is
+        ! perm(go(g) : go(g+1) - 1), and the groups arrive in ASCENDING VALUE order -- which is
+        ! what makes the stable count sort below break ties by value ascending for free.
+        call self%argsort_by([name], perm, group_offsets=go, threads=threads)
+        ng = size(go, kind=int64) - 1_int64
+        allocate(cnt(max(ng, 1_int64)), reps(max(ng, 1_int64)))
+        m = 0_int64
+        nnull = 0_int64
+        null_rep = 0_int64
+        has_null = .false.
+        do g = 1_int64, ng
+            rep = perm(go(g))
+            ! Every null is in ONE group, since nulls compare equal to each other -- so this fires
+            ! at most once and the null count is that group's size rather than a second scan. The
+            ! group is found by asking the column rather than by assuming which end %argsort_by
+            ! puts nulls at, so nulls_first is nobody's business here.
+            if (parquet_column_is_null(self%cache%cols(idx)%values, rep)) then
+                has_null = .true.
+                null_rep = rep
+                nnull = go(g + 1_int64) - go(g)
+                cycle
+            end if
+            m = m + 1_int64
+            cnt(m) = go(g + 1_int64) - go(g)
+            reps(m) = rep
+        end do
+        ! Stable, and that stability IS the documented tie-break: equal counts keep the ascending
+        ! value order they arrived in, in both directions of `descending`.
+        call pf_argsort(cnt(1:m), order, descending=desc)
+        nout = m
+        if (has_null .and. .not. drop) nout = m + 1_int64
+        allocate(sel(max(nout, 1_int64)), out_counts(max(nout, 1_int64)))
+        do k = 1_int64, m
+            sel(k) = reps(order(k))
+            out_counts(k) = cnt(order(k))
+        end do
+        ! The null row is GATHERED like every other, from a row of the source column that really
+        ! is null -- so the result's null state comes from the column itself and nothing here has
+        ! to know how this kind stores one (the temporal kinds and the string kinds do not use the
+        ! bitmap at all). Placed last whatever its count, per this binding's contract.
+        if (nout > m) then
+            sel(nout) = null_rep
+            out_counts(nout) = nnull
+        end if
+        ! A copy, then a gather on the copy: `self` is intent(in) and this is a read, so the
+        ! source column must come out of it unchanged.
+        call self%cache%cols(idx)%values%deep_copy(vals)
+        call vals%gather(sel(1:nout))
+        call parquet_new_table(out)
+        ! %add_column's parquet_column form reads kind, width and unit off the column it is given,
+        ! which is what lets ONE binding answer for all eighteen column kinds -- nothing above
+        ! this line knows the element type either.
+        call out%add_column(self%cache%cols(idx)%name, vals)
+        call out%add_column(cname, out_counts(1:nout))
+    end procedure table_value_counts
     !
 end submodule parquet_tables_verbs

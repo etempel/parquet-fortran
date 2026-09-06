@@ -773,7 +773,21 @@ contains
             new_unittest("sort_by_values on a shared table aborts", &
                 test_sort_by_values_shared_aborts), &
             new_unittest("explode/duplicated/drop_duplicates/sort_by_values: every well-formed call runs", &
-                test_rowverbs_control_succeeds) &
+                test_rowverbs_control_succeeds), &
+            new_unittest("pf_remap with more keys than values aborts", &
+                test_remap_length_mismatch_aborts), &
+            new_unittest("pf_remap with a repeated key aborts naming both positions", &
+                test_remap_duplicate_key_aborts), &
+            new_unittest("pf_remap with neither default= nor found= aborts on an unmapped value", &
+                test_remap_unmapped_no_policy_aborts), &
+            new_unittest("value_counts of a column already called count aborts", &
+                test_value_counts_count_name_collision_aborts), &
+            new_unittest("value_counts naming a column that is not there blames itself", &
+                test_value_counts_unknown_column_aborts), &
+            new_unittest("value_counts of a vector column aborts", &
+                test_value_counts_unorderable_aborts), &
+            new_unittest("pf_value_counts/pf_remap/value_counts: every well-formed call runs", &
+                test_counting_control_succeeds) &
             ]
         p3 = [ &
             new_unittest("an environment value longer than the buffer aborts", &
@@ -9478,6 +9492,64 @@ contains
             failure_message="%sort_by_values on a table another thread may hold was expected to abort", &
             required_stderr="sort_by_values: this table was not opened by this thread")
     end subroutine test_sort_by_values_shared_aborts
+
+    subroutine test_remap_length_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "remap_length_mismatch", expect_abort=.true., &
+            failure_message="a lookup table with more keys than values was expected to abort", &
+            required_stderr="pf_remap: from_keys has 3 keys but to_values has 2 values")
+    end subroutine test_remap_length_mismatch_aborts
+
+    subroutine test_remap_duplicate_key_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "remap_duplicate_key", expect_abort=.true., &
+            failure_message="a lookup table repeating a key was expected to abort", &
+            required_stderr="pf_remap: from_keys repeats a key at positions 1 and 3")
+    end subroutine test_remap_duplicate_key_aborts
+
+    subroutine test_remap_unmapped_no_policy_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "remap_unmapped_no_policy", expect_abort=.true., &
+            failure_message="an unmapped value with no default= and no found= was expected to abort", &
+            required_stderr="pf_remap: the value at position 2 matches no key in from_keys")
+    end subroutine test_remap_unmapped_no_policy_aborts
+
+    subroutine test_value_counts_count_name_collision_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "value_counts_count_name_collision", &
+            expect_abort=.true., &
+            failure_message="counting a column already called count was expected to abort", &
+            required_stderr="value_counts: the counted column is already called ""count""")
+    end subroutine test_value_counts_count_name_collision_aborts
+
+    subroutine test_value_counts_unknown_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "value_counts_unknown_column", &
+            expect_abort=.true., &
+            failure_message="counting a column that does not exist was expected to abort", &
+            required_stderr="value_counts: no column of this name")
+    end subroutine test_value_counts_unknown_column_aborts
+
+    subroutine test_value_counts_unorderable_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "value_counts_unorderable", &
+            expect_abort=.true., &
+            failure_message="counting a vector column was expected to abort", &
+            required_stderr="value_counts: a PK_INT32_VEC column cannot be a sort key")
+    end subroutine test_value_counts_unorderable_aborts
+
+    subroutine test_counting_control_succeeds(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "counting_control", expect_abort=.false., &
+            failure_message="every well-formed counting and mapping call was expected to run cleanly")
+    end subroutine test_counting_control_succeeds
 
     subroutine test_rowverbs_control_succeeds(error)
         type(error_type), allocatable, intent(out) :: error

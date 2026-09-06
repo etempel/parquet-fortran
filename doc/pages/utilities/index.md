@@ -24,7 +24,8 @@ the two generators meant to be copied into your own project.
 - [Sorting, ranking and selection](sorting.html) — `pf_sort` and `pf_argsort` over eleven element
   types, from plain arrays to a `parquet_column`, with multi-key sorts and group boundaries; then
   selecting a few elements without ordering the rest (`pf_partial_sort`, quantiles), searching a
-  sorted array, distinct values and ranks, extremes, merging, matching two arrays, and what
+  sorted array, distinct values and their counts, ranks, extremes, merging, matching two arrays,
+  mapping values through a lookup table, and what
   threading does and does not change. Also `parquet_argsort`, the smaller import for `pf_argsort`
   over the intrinsic types alone.
 - [Array statistics with the `pf_` reduction family](statistics.html) — reductions over plain

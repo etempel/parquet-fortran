@@ -78,6 +78,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   [Dropping duplicate rows](doc/pages/tables/table-mutate.md#dropping-duplicate-rows),
   [Repeating rows](doc/pages/tables/table-mutate.md#repeating-rows-explode) and
   [Ordering by values you computed yourself](doc/pages/tables/table-mutate.md#ordering-by-values-you-computed-yourself).
+- **Counting and mapping: `%value_counts`, `pf_value_counts` and `pf_remap`.**
+  `t%value_counts("band", out)` answers with a new two-column table — the counted column's distinct
+  values, keeping its name, kind and unit, beside an `int64` `count` — ordered by count descending
+  and by value ascending among equal counts, with `dropna=.false.` keeping the null group as a
+  final row. One binding covers every column kind. `pf_value_counts` is the array-level form,
+  `pf_unique` with the run lengths kept from the same pass. `pf_remap(values, from_keys, to_values,
+  out)` applies a lookup table to an array over any of eleven key types crossed with six value
+  types, and has no silent path for a value that matches no key: `default=` substitutes, `found=`
+  reports, and giving neither aborts naming the position. A repeated key aborts naming both
+  positions. See
+  [Counting how often each value occurs](doc/pages/tables/table-mutate.md#counting-how-often-each-value-occurs)
+  and [Mapping values through a lookup table](doc/pages/utilities/sorting.md#mapping-values-through-a-lookup-table).
 
 ### Fixed
 

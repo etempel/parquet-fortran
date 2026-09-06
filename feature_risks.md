@@ -91,6 +91,8 @@ something a reader is expected to have.
 | [Risk-204](#risk-204--a-slot-a-drop-vacated-is-recycled-by-the-next-add_column-with-whatever-it-still-holds) | A slot a drop vacated is recycled by the next %add_column | 4 — covered |
 | [Risk-205](#risk-205--pf_from_str-must-stay-strict-and-only-one-vector-in-seven-can-tell) | pf_from_str must stay strict, and only one vector in seven can tell | 4 — covered |
 | [Risk-206](#risk-206--explode-must-not-check-for-repeats-and-must-keep-the-range-check-it-does-have) | `%explode` must not check for repeats, and must keep the range check it does have | 4 — covered |
+| [Risk-207](#risk-207--pf_remaps-found-reports-what-matched-never-what-was-filled) | `pf_remap`'s `found` reports what MATCHED, never what was FILLED | 4 — covered |
+| [Risk-208](#risk-208--value_counts-must-gather-a-copy-and-must-ask-the-column-which-group-is-the-null-one) | `%value_counts` must gather a COPY, and must ask the column which group is the null one | 4 — covered |
 | [Risk-1](#risk-1--the-release-policy-regresses-silently) | The release policy regresses silently | 4 — covered |
 | [Risk-2](#risk-2--the-schema-less-write-rests-on-three-properties-that-look-incidental) | The schema-less write rests on three properties that look incidental | 4 — covered |
 | [Risk-3](#risk-3--the-screen-and-the-evaluator-can-drift-apart) | The screen and the evaluator can drift apart | 4 — covered |
@@ -8043,3 +8045,51 @@ why this entry is kept rather than deleted:
 - **The counters are two different counters.** `threads_used()` reads the C++ engine's and
   `parquet_debug_sort_threads_used()` the Fortran one; a cross-engine test that reads only one of
   them still passes when the other silently declines.
+
+### Risk-207 — `pf_remap`'s `found` reports what MATCHED, never what was FILLED
+
+`pf_remap` (`src/parquet_sorting_match.f90`, `remap_fill_*`) has three ways to answer for an
+element that matches no key: substitute `default=`, report through `found=`, or abort. The
+documented meaning of `found` is **"a key matched"**, and it keeps that meaning when `default=` is
+given as well — the two arguments are independent, so a caller may take the fallback value *and*
+still be told which elements were fallbacks.
+
+`found` is therefore also the result's validity mask, and that is how a caller will use it: the
+unmapped rows are the rows they must not treat as data.
+
+**Why a test would not notice.** The obvious way to write this wrong is to compute `found` from
+the finished `out` array, or to fill the default first and set `found` afterwards. Every other
+assertion still holds: `out` is correct, its length is correct, the mapped elements are right, and
+`found` is `.true.` everywhere — which for a caller passing no `default=` is *also* correct, since
+without a default nothing is filled. Only a call passing **both** arguments can tell the two apart,
+and that is not the call anyone writes first.
+
+**What a future change must keep.** `found` is computed from the match indices — `found = first /=
+0` — before any substitution, and the substitution loop never touches it.
+`test_remap_unmapped_policies` (`test/test_sorting.f90`) asserts all three shapes, and the
+both-arguments one is the assertion that matters; confirmed by mutation, which the two
+single-argument shapes survive.
+
+### Risk-208 — `%value_counts` must gather a COPY, and must ask the column which group is the null one
+
+`parquet_table%value_counts` (`src/parquet_tables_verbs.f90`) is a **read**: it builds a new table
+and must leave the counted table exactly as it found it. It does that by deep-copying the counted
+column and gathering the *copy* at one row per distinct value. Gathering the source column instead
+produces an identical result table and silently **reorders and shortens the caller's own column**,
+leaving the table's other columns aligned to rows that are no longer there.
+
+Nothing in the result can show this. The counts are right, the values are right, the order is
+right; the damage is in the table the caller still holds, and it surfaces later as a `%get` that
+returns the wrong rows.
+
+**The second half is quieter still.** The null group is found by asking the column
+(`parquet_column_is_null` on the group's representative row), not by assuming which end
+`%argsort_by` places nulls at. Both work today, because the default `nulls_first` is fixed — so an
+assumption-based version passes every test and becomes a wrong answer the day that default moves
+or a `nulls_first=` argument reaches this verb. It would then either count the nulls as an ordinary
+value (a group of "0", or of whatever the storage held) or drop a real group.
+
+**What a future change must keep.** The `%deep_copy` before the `%gather`; the null group
+identified from the column rather than from the group's position; and `test_value_counts_is_a_read`
+(`test/test_table_rowverbs.f90`), which asserts the source table's rows, order and `%generation()`
+are untouched — the generation assertion being the one an in-place gather fails.

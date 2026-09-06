@@ -1079,6 +1079,8 @@ module parquet_tables
         procedure, private :: table_duplicated_string !! %duplicated, separated key string.
         !> The mask %drop_duplicates would apply, without applying it. Never detaches.
         generic :: duplicated => table_duplicated_all, table_duplicated, table_duplicated_string
+        !> How often each distinct value of one column occurs, as a two-column table. A read.
+        procedure :: value_counts => table_value_counts
         procedure, private :: table_argsort_by_values_i32_i32  !! %argsort_by_values, int32 values, int32 perm.
         procedure, private :: table_argsort_by_values_i32_i64  !! %argsort_by_values, int32 values, int64 perm.
         procedure, private :: table_argsort_by_values_i64_i32  !! %argsort_by_values, int64 values, int32 perm.
@@ -8139,6 +8141,46 @@ module parquet_tables
     !
     ! ---- Duplicates, and order from caller-computed values (parquet_tables_verbs) ----
     interface
+        !> How often each distinct value of column `name` occurs, as a NEW two-column table:
+        !! `name` itself, and `count`.
+        !!
+        !! pandas' `value_counts`. The value column keeps the source column's name, kind, width
+        !! and unit -- it is that column gathered at one row per distinct value -- so the result is
+        !! a table like any other and can be sorted, filtered or written straight out. **One
+        !! binding covers every column kind** for exactly that reason: nothing here reads a value,
+        !! so nothing here needs a compile-time element type. `pf_value_counts` is the array-level
+        !! form for a caller holding a plain array.
+        !!
+        !! Rows come back **by count descending, and by value ascending among equal counts** --
+        !! pandas' order, with a deterministic tie-break pandas does not promise. `descending`
+        !! reverses only the count direction; the tie-break stays ascending by value, so the
+        !! result is fully determined either way. This is where count ordering lives: the array
+        !! form deliberately answers in value order and leaves it to the caller.
+        !!
+        !! **Equality is the sort comparator's, so every NaN is one value and every null is one
+        !! value** -- the same grouping `%duplicated` and `%argsort_by(group_offsets=)` use, and
+        !! the reason this cannot disagree with them about which rows are the same.
+        !!
+        !! `dropna` (default `.true.`) drops the null group. With `dropna=.false.` it becomes one
+        !! extra row whose value is Null and whose count is how many nulls the column had, placed
+        !! **last whatever its count** -- so the count ordering describes the real values and a
+        !! caller reading the top row never gets "missing" as the answer by accident.
+        !!
+        !! The count column is called `count` unless `count_name` says otherwise. A table whose
+        !! counted column is itself called `count` is refused rather than given two columns of one
+        !! name -- pass `count_name` there.
+        !!
+        !! A read: it never detaches, never touches a row and never bumps `%generation()`. It does
+        !! materialize `name` if the table has not read it yet, as every accessor does.
+        module subroutine table_value_counts(self, name, out, dropna, descending, count_name, threads)
+            class(parquet_table), intent(in) :: self       !! the table.
+            character(len=*), intent(in) :: name           !! the column to count.
+            type(parquet_table), intent(out) :: out        !! the two-column result.
+            logical, intent(in), optional :: dropna        !! .false. keeps a final Null row; default .true.
+            logical, intent(in), optional :: descending    !! .false. puts the rarest first; default .true.
+            character(len=*), intent(in), optional :: count_name !! the count column's name; default "count".
+            integer, intent(in), optional :: threads       !! sort thread request; absent = automatic.
+        end subroutine table_value_counts
         !> The mask `%drop_duplicates` would apply -- `.true.` on every row it would DROP --
         !! without dropping anything, over every RESIDENT column.
         !!

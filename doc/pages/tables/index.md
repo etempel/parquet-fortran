@@ -26,9 +26,9 @@ rows — and joined against another table on one or more key columns.
   then `parquet_write_table` with a schema or without one, its writer options, and carrying the
   source file's metadata into the output.
 - [Changing a table](table-mutate.html) — replacing values, editing nulls, adding, dropping and
-  renaming columns, filtering/sorting/ranking/appending rows, dropping duplicates and repeating
-  rows, and the detach rule they all share, plus searching and ranking a column through a `%col`
-  pointer.
+  renaming columns, filtering/sorting/ranking/appending rows, dropping duplicates, counting how
+  often each value occurs and repeating rows, and the detach rule they all share, plus searching
+  and ranking a column through a `%col` pointer.
 - [Joining two tables](table-join.html) — matching another table's rows against this one's on one
   or more key columns and bringing its columns over: which rows come out, what counts as a match,
   what the join carries and what the result is called.

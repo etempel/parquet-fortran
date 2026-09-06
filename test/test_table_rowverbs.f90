@@ -77,7 +77,21 @@ contains
                 test_sort_by_values_noop), &
             new_unittest("argsort_by_values hands back the order without applying it", &
                 test_argsort_by_values), &
-            new_unittest("argsort_by_values fills an int32 permutation too", test_argsort_by_values_i32) &
+            new_unittest("argsort_by_values fills an int32 permutation too", test_argsort_by_values_i32), &
+            new_unittest("value_counts orders by count descending, then by value ascending", &
+                test_value_counts_order), &
+            new_unittest("value_counts descending=.false. puts the rarest first", &
+                test_value_counts_ascending), &
+            new_unittest("value_counts drops the null group, and dropna=.false. keeps it last", &
+                test_value_counts_dropna), &
+            new_unittest("value_counts agrees with pf_value_counts over the same values", &
+                test_value_counts_matches_array_form), &
+            new_unittest("value_counts is a read: nothing mutates, nothing detaches", &
+                test_value_counts_is_a_read), &
+            new_unittest("value_counts keeps the counted column's name, kind and unit", &
+                test_value_counts_keeps_name_kind_unit), &
+            new_unittest("value_counts counts a string column, and count_name renames the count", &
+                test_value_counts_strings_and_count_name) &
             ]
     end subroutine collect_tests_table_rowverbs
 
@@ -113,6 +127,22 @@ contains
         call t%add_column("key", key)
         call t%add_column("payload", payload)
     end subroutine build_groups
+
+    !> Six rows over four distinct values, with a deliberate COUNT TIE: `tag` is
+    !! `[5, 1, 5, 1, 9, 2]`, so 1 and 5 occur twice each and 2 and 9 once each.
+    !!
+    !! The tie is the point. Without one, "count descending" alone determines the whole order and
+    !! a tie-break that had been dropped, reversed, or left to whatever the sort happened to do
+    !! would pass every assertion. With it, the two pairs pin the documented "then by value
+    !! ascending" in both directions of `descending`.
+    subroutine build_tied(t)
+        type(parquet_table), intent(out) :: t !! the table.
+        integer(int32) :: tag(6)
+        !
+        tag = [5, 1, 5, 1, 9, 2]
+        call parquet_new_table(t)
+        call t%add_column("tag", tag)
+    end subroutine build_tied
 
     ! ---- %explode --------------------------------------------------------------------------
 
@@ -619,5 +649,217 @@ contains
         call parquet_write_column(w, "id", id)
         call parquet_close_writer(w)
     end subroutine write_dup_file
+
+    ! ---- %value_counts ----------------------------------------------------------------------
+
+    !> The documented order: count descending, and value ascending among equal counts.
+    !!
+    !! Asserted on the values AND the counts together, in order, rather than on the multiset of
+    !! pairs -- the order is the contract here, and a result carrying the right pairs in the wrong
+    !! order is exactly the failure this binding exists to prevent a caller from writing by hand.
+    subroutine test_value_counts_order(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(parquet_table) :: t, vc
+        integer(int32), allocatable :: vals(:)
+        integer(int64), allocatable :: cnts(:)
+        !
+        call build_tied(t)
+        call t%value_counts("tag", vc)
+        call check(error, vc%ncols() == 2, "the result is a two-column table")
+        if (allocated(error)) return
+        call check(error, vc%nrows() == 4_int64, "one row per distinct value")
+        if (allocated(error)) return
+        call vc%get("tag", vals)
+        call vc%get("count", cnts)
+        call check(error, all(cnts == [2_int64, 2_int64, 1_int64, 1_int64]), &
+            "counts must come back descending")
+        if (allocated(error)) return
+        call check(error, all(vals == [1, 5, 2, 9]), &
+            "and equal counts must be broken by value ASCENDING: 1 before 5, 2 before 9")
+    end subroutine test_value_counts_order
+
+    !> `descending=.false.` reverses only the COUNT direction. The tie-break stays ascending by
+    !! value, which is what makes the result fully determined in both directions rather than
+    !! merely reversed.
+    subroutine test_value_counts_ascending(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(parquet_table) :: t, vc
+        integer(int32), allocatable :: vals(:)
+        integer(int64), allocatable :: cnts(:)
+        !
+        call build_tied(t)
+        call t%value_counts("tag", vc, descending=.false.)
+        call vc%get("tag", vals)
+        call vc%get("count", cnts)
+        call check(error, all(cnts == [1_int64, 1_int64, 2_int64, 2_int64]), &
+            "the rarest values must come first")
+        if (allocated(error)) return
+        call check(error, all(vals == [2, 9, 1, 5]), &
+            "and the tie-break must still be value ascending, not reversed with the counts")
+    end subroutine test_value_counts_ascending
+
+    !> The null group is dropped by default and, with `dropna=.false.`, becomes one extra row --
+    !! placed LAST whatever its count.
+    !!
+    !! The fixture is built so the null group is the LARGEST, which is the only shape that can
+    !! tell "placed last" from "sorted with the others": with three nulls against two 4s and one
+    !! 7, a null row sorted by count would come first.
+    subroutine test_value_counts_dropna(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(parquet_table) :: t, vc
+        integer(int32) :: v(6)
+        integer(int32), allocatable :: vals(:)
+        integer(int64), allocatable :: cnts(:)
+        logical, allocatable :: valid(:)
+        integer :: k
+        !
+        ! Rows 2, 4 and 6 are made Null AFTER the column is added: %add_column takes values only,
+        ! and the stored value under a null is deliberately left as it was -- which is also what
+        ! makes this fixture sharper, since those three rows hold 0 and a version that counted
+        ! them as ordinary values would report a fourth group rather than a wrong count.
+        v = [4, 0, 4, 0, 7, 0]
+        call parquet_new_table(t)
+        call t%add_column("v", v)
+        do k = 2, 6, 2
+            call t%set_null("v", k)
+        end do
+        call t%value_counts("v", vc)
+        call vc%get("v", vals)
+        call vc%get("count", cnts)
+        call check(error, vc%nrows() == 2_int64, "by default the null group is not a row at all")
+        if (allocated(error)) return
+        call check(error, all(vals == [4, 7]) .and. all(cnts == [2_int64, 1_int64]), &
+            "and the real values are counted as if the nulls were not there")
+        if (allocated(error)) return
+
+        call t%value_counts("v", vc, dropna=.false.)
+        call vc%get("v", vals, is_valid=valid)
+        call vc%get("count", cnts)
+        call check(error, vc%nrows() == 3_int64, "dropna=.false. adds one row for the null group")
+        if (allocated(error)) return
+        call check(error, all(cnts == [2_int64, 1_int64, 3_int64]), &
+            "the null row carries the null count and is placed LAST despite being the largest")
+        if (allocated(error)) return
+        call check(error, all(valid .eqv. [.true., .true., .false.]), &
+            "and that row's VALUE is Null, gathered from a row of the column that really is null")
+    end subroutine test_value_counts_dropna
+
+    !> The table verb and the array form must agree about which values there are and how often
+    !! each occurs. Two independent code paths -- `%argsort_by(group_offsets=)` against
+    !! `pf_unique`'s run walk -- so this is a genuine cross-check rather than a restatement.
+    !!
+    !! Compared as a SET of pairs, since the two deliberately order their answers differently:
+    !! the array form is in value order and the table form in count order.
+    subroutine test_value_counts_matches_array_form(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(parquet_table) :: t, vc
+        integer(int32) :: v(9)
+        integer(int32), allocatable :: vals(:), dist(:)
+        integer(int64), allocatable :: cnts(:), acnts(:)
+        integer :: i, j
+        logical :: ok
+        !
+        v = [3, 8, 3, 1, 8, 3, 1, 8, 8]
+        call parquet_new_table(t)
+        call t%add_column("v", v)
+        call t%value_counts("v", vc)
+        call vc%get("v", vals)
+        call vc%get("count", cnts)
+        call pf_value_counts(v, dist, acnts)
+        call check(error, size(vals) == size(dist), "both forms must find the same distinct values")
+        if (allocated(error)) return
+        ok = .true.
+        do i = 1, size(dist)
+            do j = 1, size(vals)
+                if (vals(j) == dist(i)) then
+                    if (cnts(j) /= acnts(i)) ok = .false.
+                    exit
+                end if
+                if (j == size(vals)) ok = .false.
+            end do
+        end do
+        call check(error, ok, "and must agree on every value's count")
+    end subroutine test_value_counts_matches_array_form
+
+    !> A read: the source table keeps its rows, its generation counter and its file.
+    !!
+    !! The generation assertion is the sharp one. `%value_counts` gathers a COPY of the counted
+    !! column, and a version that gathered the column in place would answer correctly here and
+    !! silently reorder the caller's table -- which only `%generation()` and the row contents can
+    !! see.
+    subroutine test_value_counts_is_a_read(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(parquet_table) :: t, vc
+        integer(int64) :: gen
+        integer(int32), allocatable :: key(:)
+        !
+        call build_groups(t)
+        gen = t%generation()
+        call t%value_counts("key", vc)
+        call check(error, t%nrows() == 6_int64, "the source table keeps every row")
+        if (allocated(error)) return
+        call check(error, t%generation() == gen, "and its generation counter does not move")
+        if (allocated(error)) return
+        call check(error, .not. t%is_detached(), "a read never detaches")
+        if (allocated(error)) return
+        call t%get("key", key)
+        call check(error, all(key == [7, 3, 7, 3, 9, 7]), &
+            "and the counted column is left in its original order, not gathered in place")
+    end subroutine test_value_counts_is_a_read
+
+    !> The value column IS the counted column, gathered -- so it keeps that column's name, kind
+    !! and unit, and the count column is `int64`.
+    !!
+    !! The unit is the part a hand-written version drops: it lives on the column rather than in
+    !! the table's descriptor, and only `%deep_copy` carries it across.
+    subroutine test_value_counts_keeps_name_kind_unit(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(parquet_table) :: t, vc
+        real(real32) :: flux(5)
+        character(len=:), allocatable :: u, n1, n2
+        !
+        flux = [1.0_real32, 2.0_real32, 1.0_real32, 3.0_real32, 1.0_real32]
+        call parquet_new_table(t)
+        call t%add_column("flux", flux, unit="Jy")
+        call t%value_counts("flux", vc)
+        call check(error, vc%has_column("flux"), "the value column keeps the counted column's name")
+        if (allocated(error)) return
+        call check(error, vc%kind("flux") == PK_FLOAT32, "and its kind")
+        if (allocated(error)) return
+        call vc%unit("flux", u)
+        call check(error, u == "Jy", "and its unit")
+        if (allocated(error)) return
+        call check(error, vc%kind("count") == PK_INT64, "the count column is int64")
+        if (allocated(error)) return
+        call vc%column_name(1, n1)
+        call vc%column_name(2, n2)
+        call check(error, n1 == "flux" .and. n2 == "count", &
+            "the value column comes first and the count second")
+    end subroutine test_value_counts_keeps_name_kind_unit
+
+    !> A string column counts on content like any other -- one binding covers every kind because
+    !! nothing in it reads a value -- and `count_name` renames the second column.
+    subroutine test_value_counts_strings_and_count_name(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(parquet_table) :: t, vc
+        character(len=5) :: band(6)
+        character(len=:), allocatable :: got(:)
+        integer(int64), allocatable :: cnts(:)
+        !
+        band = ["r    ", "g    ", "r    ", "i    ", "r    ", "g    "]
+        call parquet_new_table(t)
+        call t%add_column("band", band)
+        call t%value_counts("band", vc, count_name="n")
+        call check(error, vc%has_column("n") .and. .not. vc%has_column("count"), &
+            "count_name must name the count column")
+        if (allocated(error)) return
+        call vc%get("band", got)
+        call vc%get("n", cnts)
+        call check(error, all(cnts == [3_int64, 2_int64, 1_int64]), &
+            "r three times, g twice, i once")
+        if (allocated(error)) return
+        call check(error, got(1) == "r" .and. got(2) == "g" .and. got(3) == "i", &
+            "and the values follow their counts, with the tie-break unused here")
+    end subroutine test_value_counts_strings_and_count_name
 
 end module test_table_rowverbs

@@ -772,6 +772,1313 @@ contains
         if (nl > 0_int64) mask = first /= 0_int64
     end procedure isin_col
     !
+    module procedure remap_i32_i32
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_i32(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_i32(first, to_values, out, default, found)
+    end procedure remap_i32_i32
+    !
+    module procedure remap_i32_i64
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_i32(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_i64(first, to_values, out, default, found)
+    end procedure remap_i32_i64
+    !
+    module procedure remap_i32_f32
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_i32(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_f32(first, to_values, out, default, found)
+    end procedure remap_i32_f32
+    !
+    module procedure remap_i32_f64
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_i32(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_f64(first, to_values, out, default, found)
+    end procedure remap_i32_f64
+    !
+    module procedure remap_i32_bool
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_i32(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_bool(first, to_values, out, default, found)
+    end procedure remap_i32_bool
+    !
+    module procedure remap_i32_chr
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_i32(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_chr(first, to_values, out, default, found)
+    end procedure remap_i32_chr
+    !
+    module procedure remap_i64_i32
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_i64(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_i32(first, to_values, out, default, found)
+    end procedure remap_i64_i32
+    !
+    module procedure remap_i64_i64
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_i64(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_i64(first, to_values, out, default, found)
+    end procedure remap_i64_i64
+    !
+    module procedure remap_i64_f32
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_i64(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_f32(first, to_values, out, default, found)
+    end procedure remap_i64_f32
+    !
+    module procedure remap_i64_f64
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_i64(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_f64(first, to_values, out, default, found)
+    end procedure remap_i64_f64
+    !
+    module procedure remap_i64_bool
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_i64(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_bool(first, to_values, out, default, found)
+    end procedure remap_i64_bool
+    !
+    module procedure remap_i64_chr
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_i64(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_chr(first, to_values, out, default, found)
+    end procedure remap_i64_chr
+    !
+    module procedure remap_f32_i32
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_f32(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_i32(first, to_values, out, default, found)
+    end procedure remap_f32_i32
+    !
+    module procedure remap_f32_i64
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_f32(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_i64(first, to_values, out, default, found)
+    end procedure remap_f32_i64
+    !
+    module procedure remap_f32_f32
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_f32(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_f32(first, to_values, out, default, found)
+    end procedure remap_f32_f32
+    !
+    module procedure remap_f32_f64
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_f32(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_f64(first, to_values, out, default, found)
+    end procedure remap_f32_f64
+    !
+    module procedure remap_f32_bool
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_f32(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_bool(first, to_values, out, default, found)
+    end procedure remap_f32_bool
+    !
+    module procedure remap_f32_chr
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_f32(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_chr(first, to_values, out, default, found)
+    end procedure remap_f32_chr
+    !
+    module procedure remap_f64_i32
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_f64(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_i32(first, to_values, out, default, found)
+    end procedure remap_f64_i32
+    !
+    module procedure remap_f64_i64
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_f64(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_i64(first, to_values, out, default, found)
+    end procedure remap_f64_i64
+    !
+    module procedure remap_f64_f32
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_f64(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_f32(first, to_values, out, default, found)
+    end procedure remap_f64_f32
+    !
+    module procedure remap_f64_f64
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_f64(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_f64(first, to_values, out, default, found)
+    end procedure remap_f64_f64
+    !
+    module procedure remap_f64_bool
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_f64(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_bool(first, to_values, out, default, found)
+    end procedure remap_f64_bool
+    !
+    module procedure remap_f64_chr
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_f64(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_chr(first, to_values, out, default, found)
+    end procedure remap_f64_chr
+    !
+    module procedure remap_bool_i32
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_bool(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_i32(first, to_values, out, default, found)
+    end procedure remap_bool_i32
+    !
+    module procedure remap_bool_i64
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_bool(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_i64(first, to_values, out, default, found)
+    end procedure remap_bool_i64
+    !
+    module procedure remap_bool_f32
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_bool(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_f32(first, to_values, out, default, found)
+    end procedure remap_bool_f32
+    !
+    module procedure remap_bool_f64
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_bool(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_f64(first, to_values, out, default, found)
+    end procedure remap_bool_f64
+    !
+    module procedure remap_bool_bool
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_bool(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_bool(first, to_values, out, default, found)
+    end procedure remap_bool_bool
+    !
+    module procedure remap_bool_chr
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_bool(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_chr(first, to_values, out, default, found)
+    end procedure remap_bool_chr
+    !
+    module procedure remap_chr_i32
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_chr(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_i32(first, to_values, out, default, found)
+    end procedure remap_chr_i32
+    !
+    module procedure remap_chr_i64
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_chr(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_i64(first, to_values, out, default, found)
+    end procedure remap_chr_i64
+    !
+    module procedure remap_chr_f32
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_chr(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_f32(first, to_values, out, default, found)
+    end procedure remap_chr_f32
+    !
+    module procedure remap_chr_f64
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_chr(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_f64(first, to_values, out, default, found)
+    end procedure remap_chr_f64
+    !
+    module procedure remap_chr_bool
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_chr(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_bool(first, to_values, out, default, found)
+    end procedure remap_chr_bool
+    !
+    module procedure remap_chr_chr
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_chr(values, from_keys, size(to_values, kind=int64), &
+            first, is_valid=is_valid, threads=threads)
+        call remap_fill_chr(first, to_values, out, default, found)
+    end procedure remap_chr_chr
+    !
+    module procedure remap_date_i32
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_date(values, from_keys, size(to_values, kind=int64), &
+            first, threads=threads)
+        call remap_fill_i32(first, to_values, out, default, found)
+    end procedure remap_date_i32
+    !
+    module procedure remap_date_i64
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_date(values, from_keys, size(to_values, kind=int64), &
+            first, threads=threads)
+        call remap_fill_i64(first, to_values, out, default, found)
+    end procedure remap_date_i64
+    !
+    module procedure remap_date_f32
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_date(values, from_keys, size(to_values, kind=int64), &
+            first, threads=threads)
+        call remap_fill_f32(first, to_values, out, default, found)
+    end procedure remap_date_f32
+    !
+    module procedure remap_date_f64
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_date(values, from_keys, size(to_values, kind=int64), &
+            first, threads=threads)
+        call remap_fill_f64(first, to_values, out, default, found)
+    end procedure remap_date_f64
+    !
+    module procedure remap_date_bool
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_date(values, from_keys, size(to_values, kind=int64), &
+            first, threads=threads)
+        call remap_fill_bool(first, to_values, out, default, found)
+    end procedure remap_date_bool
+    !
+    module procedure remap_date_chr
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_date(values, from_keys, size(to_values, kind=int64), &
+            first, threads=threads)
+        call remap_fill_chr(first, to_values, out, default, found)
+    end procedure remap_date_chr
+    !
+    module procedure remap_time_i32
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_time(values, from_keys, size(to_values, kind=int64), &
+            first, threads=threads)
+        call remap_fill_i32(first, to_values, out, default, found)
+    end procedure remap_time_i32
+    !
+    module procedure remap_time_i64
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_time(values, from_keys, size(to_values, kind=int64), &
+            first, threads=threads)
+        call remap_fill_i64(first, to_values, out, default, found)
+    end procedure remap_time_i64
+    !
+    module procedure remap_time_f32
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_time(values, from_keys, size(to_values, kind=int64), &
+            first, threads=threads)
+        call remap_fill_f32(first, to_values, out, default, found)
+    end procedure remap_time_f32
+    !
+    module procedure remap_time_f64
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_time(values, from_keys, size(to_values, kind=int64), &
+            first, threads=threads)
+        call remap_fill_f64(first, to_values, out, default, found)
+    end procedure remap_time_f64
+    !
+    module procedure remap_time_bool
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_time(values, from_keys, size(to_values, kind=int64), &
+            first, threads=threads)
+        call remap_fill_bool(first, to_values, out, default, found)
+    end procedure remap_time_bool
+    !
+    module procedure remap_time_chr
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_time(values, from_keys, size(to_values, kind=int64), &
+            first, threads=threads)
+        call remap_fill_chr(first, to_values, out, default, found)
+    end procedure remap_time_chr
+    !
+    module procedure remap_ts_i32
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_ts(values, from_keys, size(to_values, kind=int64), &
+            first, threads=threads)
+        call remap_fill_i32(first, to_values, out, default, found)
+    end procedure remap_ts_i32
+    !
+    module procedure remap_ts_i64
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_ts(values, from_keys, size(to_values, kind=int64), &
+            first, threads=threads)
+        call remap_fill_i64(first, to_values, out, default, found)
+    end procedure remap_ts_i64
+    !
+    module procedure remap_ts_f32
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_ts(values, from_keys, size(to_values, kind=int64), &
+            first, threads=threads)
+        call remap_fill_f32(first, to_values, out, default, found)
+    end procedure remap_ts_f32
+    !
+    module procedure remap_ts_f64
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_ts(values, from_keys, size(to_values, kind=int64), &
+            first, threads=threads)
+        call remap_fill_f64(first, to_values, out, default, found)
+    end procedure remap_ts_f64
+    !
+    module procedure remap_ts_bool
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_ts(values, from_keys, size(to_values, kind=int64), &
+            first, threads=threads)
+        call remap_fill_bool(first, to_values, out, default, found)
+    end procedure remap_ts_bool
+    !
+    module procedure remap_ts_chr
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_ts(values, from_keys, size(to_values, kind=int64), &
+            first, threads=threads)
+        call remap_fill_chr(first, to_values, out, default, found)
+    end procedure remap_ts_chr
+    !
+    module procedure remap_strcol_i32
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_strcol(values, from_keys, size(to_values, kind=int64), &
+            first, threads=threads)
+        call remap_fill_i32(first, to_values, out, default, found)
+    end procedure remap_strcol_i32
+    !
+    module procedure remap_strcol_i64
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_strcol(values, from_keys, size(to_values, kind=int64), &
+            first, threads=threads)
+        call remap_fill_i64(first, to_values, out, default, found)
+    end procedure remap_strcol_i64
+    !
+    module procedure remap_strcol_f32
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_strcol(values, from_keys, size(to_values, kind=int64), &
+            first, threads=threads)
+        call remap_fill_f32(first, to_values, out, default, found)
+    end procedure remap_strcol_f32
+    !
+    module procedure remap_strcol_f64
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_strcol(values, from_keys, size(to_values, kind=int64), &
+            first, threads=threads)
+        call remap_fill_f64(first, to_values, out, default, found)
+    end procedure remap_strcol_f64
+    !
+    module procedure remap_strcol_bool
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_strcol(values, from_keys, size(to_values, kind=int64), &
+            first, threads=threads)
+        call remap_fill_bool(first, to_values, out, default, found)
+    end procedure remap_strcol_bool
+    !
+    module procedure remap_strcol_chr
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_strcol(values, from_keys, size(to_values, kind=int64), &
+            first, threads=threads)
+        call remap_fill_chr(first, to_values, out, default, found)
+    end procedure remap_strcol_chr
+    !
+    module procedure remap_col_i32
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_col(values, from_keys, size(to_values, kind=int64), &
+            first, threads=threads)
+        call remap_fill_i32(first, to_values, out, default, found)
+    end procedure remap_col_i32
+    !
+    module procedure remap_col_i64
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_col(values, from_keys, size(to_values, kind=int64), &
+            first, threads=threads)
+        call remap_fill_i64(first, to_values, out, default, found)
+    end procedure remap_col_i64
+    !
+    module procedure remap_col_f32
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_col(values, from_keys, size(to_values, kind=int64), &
+            first, threads=threads)
+        call remap_fill_f32(first, to_values, out, default, found)
+    end procedure remap_col_f32
+    !
+    module procedure remap_col_f64
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_col(values, from_keys, size(to_values, kind=int64), &
+            first, threads=threads)
+        call remap_fill_f64(first, to_values, out, default, found)
+    end procedure remap_col_f64
+    !
+    module procedure remap_col_bool
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_col(values, from_keys, size(to_values, kind=int64), &
+            first, threads=threads)
+        call remap_fill_bool(first, to_values, out, default, found)
+    end procedure remap_col_bool
+    !
+    module procedure remap_col_chr
+        integer(int64), allocatable :: first(:)
+        !
+        call remap_match_col(values, from_keys, size(to_values, kind=int64), &
+            first, threads=threads)
+        call remap_fill_chr(first, to_values, out, default, found)
+    end procedure remap_col_chr
+    !
+    !> The KEY half of every pf_remap specific over 32-bit integer keys: refuses a lookup table
+    !! that is the wrong length or that repeats a key, then matches every value against it.
+    !!
+    !! Split from the value half so that eleven key types times six value types costs
+    !! eleven plus six workers rather than sixty-six -- and so that the two guards below
+    !! are written once. Neither depends on what a key maps TO.
+    subroutine remap_match_i32(values, from_keys, n_to, first, is_valid, threads)
+        integer(int32), intent(in) :: values(:) !! the keys to look up.
+        integer(int32), intent(in) :: from_keys(:) !! the lookup table's keys.
+        integer(int64), intent(in) :: n_to !! size(to_values), checked against the key count.
+        integer(int64), allocatable, intent(out) :: first(:) !! per value: key index, or 0.
+        logical, intent(in), optional :: is_valid(:) !! `values`' validity; absent means none.
+        integer, intent(in), optional :: threads !! thread request; absent = auto.
+        integer(int64), allocatable :: perm(:)
+        integer(c_int8_t), allocatable :: tie(:)
+        logical, allocatable :: isnull(:)
+        integer(int64) :: nl, nr, dup_at, dup_first
+        character(len=32) :: a_str, b_str
+        !
+        ! Checked BEFORE the sort: a caller who paired the wrong two arrays should be told
+        ! so at once rather than after O(n log n) of work they cannot use.
+        nr = size(from_keys, kind=int64)
+        if (nr /= n_to) then
+            write (a_str, "(i0)") nr
+            write (b_str, "(i0)") n_to
+            error stop EP // "pf_remap: from_keys has " // trim(a_str) // " keys but " // &
+                "to_values has " // trim(b_str) // " values; a lookup table takes one " // &
+                "value per key"
+        end if
+        call match_keys_i32(values, from_keys, "pf_remap", nl, nr, perm, tie, isnull, &
+            is_valid_left=is_valid, &
+            threads=threads)
+        call remap_check_unique(perm, tie, isnull, nl, nr, dup_at, dup_first)
+        if (dup_at > 0_int64) then
+            write (a_str, "(i0)") dup_first
+            write (b_str, "(i0)") dup_at
+            error stop EP // "pf_remap: from_keys repeats a key at positions " // &
+                trim(a_str) // " and " // trim(b_str) // "; a lookup table must be " // &
+                "distinct, since a repeated key has no defined value"
+        end if
+        call match_walk_first(perm, tie, isnull, nl, nr, first)
+    end subroutine remap_match_i32
+    !
+    !> The KEY half of every pf_remap specific over 64-bit integer keys: refuses a lookup table
+    !! that is the wrong length or that repeats a key, then matches every value against it.
+    !!
+    !! Split from the value half so that eleven key types times six value types costs
+    !! eleven plus six workers rather than sixty-six -- and so that the two guards below
+    !! are written once. Neither depends on what a key maps TO.
+    subroutine remap_match_i64(values, from_keys, n_to, first, is_valid, threads)
+        integer(int64), intent(in) :: values(:) !! the keys to look up.
+        integer(int64), intent(in) :: from_keys(:) !! the lookup table's keys.
+        integer(int64), intent(in) :: n_to !! size(to_values), checked against the key count.
+        integer(int64), allocatable, intent(out) :: first(:) !! per value: key index, or 0.
+        logical, intent(in), optional :: is_valid(:) !! `values`' validity; absent means none.
+        integer, intent(in), optional :: threads !! thread request; absent = auto.
+        integer(int64), allocatable :: perm(:)
+        integer(c_int8_t), allocatable :: tie(:)
+        logical, allocatable :: isnull(:)
+        integer(int64) :: nl, nr, dup_at, dup_first
+        character(len=32) :: a_str, b_str
+        !
+        ! Checked BEFORE the sort: a caller who paired the wrong two arrays should be told
+        ! so at once rather than after O(n log n) of work they cannot use.
+        nr = size(from_keys, kind=int64)
+        if (nr /= n_to) then
+            write (a_str, "(i0)") nr
+            write (b_str, "(i0)") n_to
+            error stop EP // "pf_remap: from_keys has " // trim(a_str) // " keys but " // &
+                "to_values has " // trim(b_str) // " values; a lookup table takes one " // &
+                "value per key"
+        end if
+        call match_keys_i64(values, from_keys, "pf_remap", nl, nr, perm, tie, isnull, &
+            is_valid_left=is_valid, &
+            threads=threads)
+        call remap_check_unique(perm, tie, isnull, nl, nr, dup_at, dup_first)
+        if (dup_at > 0_int64) then
+            write (a_str, "(i0)") dup_first
+            write (b_str, "(i0)") dup_at
+            error stop EP // "pf_remap: from_keys repeats a key at positions " // &
+                trim(a_str) // " and " // trim(b_str) // "; a lookup table must be " // &
+                "distinct, since a repeated key has no defined value"
+        end if
+        call match_walk_first(perm, tie, isnull, nl, nr, first)
+    end subroutine remap_match_i64
+    !
+    !> The KEY half of every pf_remap specific over 32-bit real keys: refuses a lookup table
+    !! that is the wrong length or that repeats a key, then matches every value against it.
+    !!
+    !! Split from the value half so that eleven key types times six value types costs
+    !! eleven plus six workers rather than sixty-six -- and so that the two guards below
+    !! are written once. Neither depends on what a key maps TO.
+    subroutine remap_match_f32(values, from_keys, n_to, first, is_valid, threads)
+        real(real32), intent(in) :: values(:) !! the keys to look up.
+        real(real32), intent(in) :: from_keys(:) !! the lookup table's keys.
+        integer(int64), intent(in) :: n_to !! size(to_values), checked against the key count.
+        integer(int64), allocatable, intent(out) :: first(:) !! per value: key index, or 0.
+        logical, intent(in), optional :: is_valid(:) !! `values`' validity; absent means none.
+        integer, intent(in), optional :: threads !! thread request; absent = auto.
+        integer(int64), allocatable :: perm(:)
+        integer(c_int8_t), allocatable :: tie(:)
+        logical, allocatable :: isnull(:)
+        integer(int64) :: nl, nr, dup_at, dup_first
+        character(len=32) :: a_str, b_str
+        !
+        ! Checked BEFORE the sort: a caller who paired the wrong two arrays should be told
+        ! so at once rather than after O(n log n) of work they cannot use.
+        nr = size(from_keys, kind=int64)
+        if (nr /= n_to) then
+            write (a_str, "(i0)") nr
+            write (b_str, "(i0)") n_to
+            error stop EP // "pf_remap: from_keys has " // trim(a_str) // " keys but " // &
+                "to_values has " // trim(b_str) // " values; a lookup table takes one " // &
+                "value per key"
+        end if
+        call match_keys_f32(values, from_keys, "pf_remap", nl, nr, perm, tie, isnull, &
+            is_valid_left=is_valid, &
+            threads=threads)
+        call remap_check_unique(perm, tie, isnull, nl, nr, dup_at, dup_first)
+        if (dup_at > 0_int64) then
+            write (a_str, "(i0)") dup_first
+            write (b_str, "(i0)") dup_at
+            error stop EP // "pf_remap: from_keys repeats a key at positions " // &
+                trim(a_str) // " and " // trim(b_str) // "; a lookup table must be " // &
+                "distinct, since a repeated key has no defined value"
+        end if
+        call match_walk_first(perm, tie, isnull, nl, nr, first)
+    end subroutine remap_match_f32
+    !
+    !> The KEY half of every pf_remap specific over 64-bit real keys: refuses a lookup table
+    !! that is the wrong length or that repeats a key, then matches every value against it.
+    !!
+    !! Split from the value half so that eleven key types times six value types costs
+    !! eleven plus six workers rather than sixty-six -- and so that the two guards below
+    !! are written once. Neither depends on what a key maps TO.
+    subroutine remap_match_f64(values, from_keys, n_to, first, is_valid, threads)
+        real(real64), intent(in) :: values(:) !! the keys to look up.
+        real(real64), intent(in) :: from_keys(:) !! the lookup table's keys.
+        integer(int64), intent(in) :: n_to !! size(to_values), checked against the key count.
+        integer(int64), allocatable, intent(out) :: first(:) !! per value: key index, or 0.
+        logical, intent(in), optional :: is_valid(:) !! `values`' validity; absent means none.
+        integer, intent(in), optional :: threads !! thread request; absent = auto.
+        integer(int64), allocatable :: perm(:)
+        integer(c_int8_t), allocatable :: tie(:)
+        logical, allocatable :: isnull(:)
+        integer(int64) :: nl, nr, dup_at, dup_first
+        character(len=32) :: a_str, b_str
+        !
+        ! Checked BEFORE the sort: a caller who paired the wrong two arrays should be told
+        ! so at once rather than after O(n log n) of work they cannot use.
+        nr = size(from_keys, kind=int64)
+        if (nr /= n_to) then
+            write (a_str, "(i0)") nr
+            write (b_str, "(i0)") n_to
+            error stop EP // "pf_remap: from_keys has " // trim(a_str) // " keys but " // &
+                "to_values has " // trim(b_str) // " values; a lookup table takes one " // &
+                "value per key"
+        end if
+        call match_keys_f64(values, from_keys, "pf_remap", nl, nr, perm, tie, isnull, &
+            is_valid_left=is_valid, &
+            threads=threads)
+        call remap_check_unique(perm, tie, isnull, nl, nr, dup_at, dup_first)
+        if (dup_at > 0_int64) then
+            write (a_str, "(i0)") dup_first
+            write (b_str, "(i0)") dup_at
+            error stop EP // "pf_remap: from_keys repeats a key at positions " // &
+                trim(a_str) // " and " // trim(b_str) // "; a lookup table must be " // &
+                "distinct, since a repeated key has no defined value"
+        end if
+        call match_walk_first(perm, tie, isnull, nl, nr, first)
+    end subroutine remap_match_f64
+    !
+    !> The KEY half of every pf_remap specific over logical keys: refuses a lookup table
+    !! that is the wrong length or that repeats a key, then matches every value against it.
+    !!
+    !! Split from the value half so that eleven key types times six value types costs
+    !! eleven plus six workers rather than sixty-six -- and so that the two guards below
+    !! are written once. Neither depends on what a key maps TO.
+    subroutine remap_match_bool(values, from_keys, n_to, first, is_valid, threads)
+        logical, intent(in) :: values(:) !! the keys to look up.
+        logical, intent(in) :: from_keys(:) !! the lookup table's keys.
+        integer(int64), intent(in) :: n_to !! size(to_values), checked against the key count.
+        integer(int64), allocatable, intent(out) :: first(:) !! per value: key index, or 0.
+        logical, intent(in), optional :: is_valid(:) !! `values`' validity; absent means none.
+        integer, intent(in), optional :: threads !! thread request; absent = auto.
+        integer(int64), allocatable :: perm(:)
+        integer(c_int8_t), allocatable :: tie(:)
+        logical, allocatable :: isnull(:)
+        integer(int64) :: nl, nr, dup_at, dup_first
+        character(len=32) :: a_str, b_str
+        !
+        ! Checked BEFORE the sort: a caller who paired the wrong two arrays should be told
+        ! so at once rather than after O(n log n) of work they cannot use.
+        nr = size(from_keys, kind=int64)
+        if (nr /= n_to) then
+            write (a_str, "(i0)") nr
+            write (b_str, "(i0)") n_to
+            error stop EP // "pf_remap: from_keys has " // trim(a_str) // " keys but " // &
+                "to_values has " // trim(b_str) // " values; a lookup table takes one " // &
+                "value per key"
+        end if
+        call match_keys_bool(values, from_keys, "pf_remap", nl, nr, perm, tie, isnull, &
+            is_valid_left=is_valid, &
+            threads=threads)
+        call remap_check_unique(perm, tie, isnull, nl, nr, dup_at, dup_first)
+        if (dup_at > 0_int64) then
+            write (a_str, "(i0)") dup_first
+            write (b_str, "(i0)") dup_at
+            error stop EP // "pf_remap: from_keys repeats a key at positions " // &
+                trim(a_str) // " and " // trim(b_str) // "; a lookup table must be " // &
+                "distinct, since a repeated key has no defined value"
+        end if
+        call match_walk_first(perm, tie, isnull, nl, nr, first)
+    end subroutine remap_match_bool
+    !
+    !> The KEY half of every pf_remap specific over string keys: refuses a lookup table
+    !! that is the wrong length or that repeats a key, then matches every value against it.
+    !!
+    !! Split from the value half so that eleven key types times six value types costs
+    !! eleven plus six workers rather than sixty-six -- and so that the two guards below
+    !! are written once. Neither depends on what a key maps TO.
+    subroutine remap_match_chr(values, from_keys, n_to, first, is_valid, threads)
+        character(len=*), intent(in) :: values(:) !! the keys to look up.
+        character(len=*), intent(in) :: from_keys(:) !! the lookup table's keys.
+        integer(int64), intent(in) :: n_to !! size(to_values), checked against the key count.
+        integer(int64), allocatable, intent(out) :: first(:) !! per value: key index, or 0.
+        logical, intent(in), optional :: is_valid(:) !! `values`' validity; absent means none.
+        integer, intent(in), optional :: threads !! thread request; absent = auto.
+        integer(int64), allocatable :: perm(:)
+        integer(c_int8_t), allocatable :: tie(:)
+        logical, allocatable :: isnull(:)
+        integer(int64) :: nl, nr, dup_at, dup_first
+        character(len=32) :: a_str, b_str
+        !
+        ! Checked BEFORE the sort: a caller who paired the wrong two arrays should be told
+        ! so at once rather than after O(n log n) of work they cannot use.
+        nr = size(from_keys, kind=int64)
+        if (nr /= n_to) then
+            write (a_str, "(i0)") nr
+            write (b_str, "(i0)") n_to
+            error stop EP // "pf_remap: from_keys has " // trim(a_str) // " keys but " // &
+                "to_values has " // trim(b_str) // " values; a lookup table takes one " // &
+                "value per key"
+        end if
+        call match_keys_chr(values, from_keys, "pf_remap", nl, nr, perm, tie, isnull, &
+            is_valid_left=is_valid, &
+            threads=threads)
+        call remap_check_unique(perm, tie, isnull, nl, nr, dup_at, dup_first)
+        if (dup_at > 0_int64) then
+            write (a_str, "(i0)") dup_first
+            write (b_str, "(i0)") dup_at
+            error stop EP // "pf_remap: from_keys repeats a key at positions " // &
+                trim(a_str) // " and " // trim(b_str) // "; a lookup table must be " // &
+                "distinct, since a repeated key has no defined value"
+        end if
+        call match_walk_first(perm, tie, isnull, nl, nr, first)
+    end subroutine remap_match_chr
+    !
+    !> The KEY half of every pf_remap specific over date keys: refuses a lookup table
+    !! that is the wrong length or that repeats a key, then matches every value against it.
+    !!
+    !! Split from the value half so that eleven key types times six value types costs
+    !! eleven plus six workers rather than sixty-six -- and so that the two guards below
+    !! are written once. Neither depends on what a key maps TO.
+    subroutine remap_match_date(values, from_keys, n_to, first, threads)
+        type(parquet_date), intent(in) :: values(:) !! the keys to look up.
+        type(parquet_date), intent(in) :: from_keys(:) !! the lookup table's keys.
+        integer(int64), intent(in) :: n_to !! size(to_values), checked against the key count.
+        integer(int64), allocatable, intent(out) :: first(:) !! per value: key index, or 0.
+        integer, intent(in), optional :: threads !! thread request; absent = auto.
+        integer(int64), allocatable :: perm(:)
+        integer(c_int8_t), allocatable :: tie(:)
+        logical, allocatable :: isnull(:)
+        integer(int64) :: nl, nr, dup_at, dup_first
+        character(len=32) :: a_str, b_str
+        !
+        ! Checked BEFORE the sort: a caller who paired the wrong two arrays should be told
+        ! so at once rather than after O(n log n) of work they cannot use.
+        nr = size(from_keys, kind=int64)
+        if (nr /= n_to) then
+            write (a_str, "(i0)") nr
+            write (b_str, "(i0)") n_to
+            error stop EP // "pf_remap: from_keys has " // trim(a_str) // " keys but " // &
+                "to_values has " // trim(b_str) // " values; a lookup table takes one " // &
+                "value per key"
+        end if
+        call match_keys_date(values, from_keys, "pf_remap", nl, nr, perm, tie, isnull, &
+            threads=threads)
+        call remap_check_unique(perm, tie, isnull, nl, nr, dup_at, dup_first)
+        if (dup_at > 0_int64) then
+            write (a_str, "(i0)") dup_first
+            write (b_str, "(i0)") dup_at
+            error stop EP // "pf_remap: from_keys repeats a key at positions " // &
+                trim(a_str) // " and " // trim(b_str) // "; a lookup table must be " // &
+                "distinct, since a repeated key has no defined value"
+        end if
+        call match_walk_first(perm, tie, isnull, nl, nr, first)
+    end subroutine remap_match_date
+    !
+    !> The KEY half of every pf_remap specific over time keys: refuses a lookup table
+    !! that is the wrong length or that repeats a key, then matches every value against it.
+    !!
+    !! Split from the value half so that eleven key types times six value types costs
+    !! eleven plus six workers rather than sixty-six -- and so that the two guards below
+    !! are written once. Neither depends on what a key maps TO.
+    subroutine remap_match_time(values, from_keys, n_to, first, threads)
+        type(parquet_time), intent(in) :: values(:) !! the keys to look up.
+        type(parquet_time), intent(in) :: from_keys(:) !! the lookup table's keys.
+        integer(int64), intent(in) :: n_to !! size(to_values), checked against the key count.
+        integer(int64), allocatable, intent(out) :: first(:) !! per value: key index, or 0.
+        integer, intent(in), optional :: threads !! thread request; absent = auto.
+        integer(int64), allocatable :: perm(:)
+        integer(c_int8_t), allocatable :: tie(:)
+        logical, allocatable :: isnull(:)
+        integer(int64) :: nl, nr, dup_at, dup_first
+        character(len=32) :: a_str, b_str
+        !
+        ! Checked BEFORE the sort: a caller who paired the wrong two arrays should be told
+        ! so at once rather than after O(n log n) of work they cannot use.
+        nr = size(from_keys, kind=int64)
+        if (nr /= n_to) then
+            write (a_str, "(i0)") nr
+            write (b_str, "(i0)") n_to
+            error stop EP // "pf_remap: from_keys has " // trim(a_str) // " keys but " // &
+                "to_values has " // trim(b_str) // " values; a lookup table takes one " // &
+                "value per key"
+        end if
+        call match_keys_time(values, from_keys, "pf_remap", nl, nr, perm, tie, isnull, &
+            threads=threads)
+        call remap_check_unique(perm, tie, isnull, nl, nr, dup_at, dup_first)
+        if (dup_at > 0_int64) then
+            write (a_str, "(i0)") dup_first
+            write (b_str, "(i0)") dup_at
+            error stop EP // "pf_remap: from_keys repeats a key at positions " // &
+                trim(a_str) // " and " // trim(b_str) // "; a lookup table must be " // &
+                "distinct, since a repeated key has no defined value"
+        end if
+        call match_walk_first(perm, tie, isnull, nl, nr, first)
+    end subroutine remap_match_time
+    !
+    !> The KEY half of every pf_remap specific over timestamp keys: refuses a lookup table
+    !! that is the wrong length or that repeats a key, then matches every value against it.
+    !!
+    !! Split from the value half so that eleven key types times six value types costs
+    !! eleven plus six workers rather than sixty-six -- and so that the two guards below
+    !! are written once. Neither depends on what a key maps TO.
+    subroutine remap_match_ts(values, from_keys, n_to, first, threads)
+        type(parquet_timestamp), intent(in) :: values(:) !! the keys to look up.
+        type(parquet_timestamp), intent(in) :: from_keys(:) !! the lookup table's keys.
+        integer(int64), intent(in) :: n_to !! size(to_values), checked against the key count.
+        integer(int64), allocatable, intent(out) :: first(:) !! per value: key index, or 0.
+        integer, intent(in), optional :: threads !! thread request; absent = auto.
+        integer(int64), allocatable :: perm(:)
+        integer(c_int8_t), allocatable :: tie(:)
+        logical, allocatable :: isnull(:)
+        integer(int64) :: nl, nr, dup_at, dup_first
+        character(len=32) :: a_str, b_str
+        !
+        ! Checked BEFORE the sort: a caller who paired the wrong two arrays should be told
+        ! so at once rather than after O(n log n) of work they cannot use.
+        nr = size(from_keys, kind=int64)
+        if (nr /= n_to) then
+            write (a_str, "(i0)") nr
+            write (b_str, "(i0)") n_to
+            error stop EP // "pf_remap: from_keys has " // trim(a_str) // " keys but " // &
+                "to_values has " // trim(b_str) // " values; a lookup table takes one " // &
+                "value per key"
+        end if
+        call match_keys_ts(values, from_keys, "pf_remap", nl, nr, perm, tie, isnull, &
+            threads=threads)
+        call remap_check_unique(perm, tie, isnull, nl, nr, dup_at, dup_first)
+        if (dup_at > 0_int64) then
+            write (a_str, "(i0)") dup_first
+            write (b_str, "(i0)") dup_at
+            error stop EP // "pf_remap: from_keys repeats a key at positions " // &
+                trim(a_str) // " and " // trim(b_str) // "; a lookup table must be " // &
+                "distinct, since a repeated key has no defined value"
+        end if
+        call match_walk_first(perm, tie, isnull, nl, nr, first)
+    end subroutine remap_match_ts
+    !
+    !> The KEY half of every pf_remap specific over packed string column keys: refuses a lookup table
+    !! that is the wrong length or that repeats a key, then matches every value against it.
+    !!
+    !! Split from the value half so that eleven key types times six value types costs
+    !! eleven plus six workers rather than sixty-six -- and so that the two guards below
+    !! are written once. Neither depends on what a key maps TO.
+    subroutine remap_match_strcol(values, from_keys, n_to, first, threads)
+        type(parquet_string_column), intent(in) :: values !! the keys to look up.
+        type(parquet_string_column), intent(in) :: from_keys !! the lookup table's keys.
+        integer(int64), intent(in) :: n_to !! size(to_values), checked against the key count.
+        integer(int64), allocatable, intent(out) :: first(:) !! per value: key index, or 0.
+        integer, intent(in), optional :: threads !! thread request; absent = auto.
+        integer(int64), allocatable :: perm(:)
+        integer(c_int8_t), allocatable :: tie(:)
+        logical, allocatable :: isnull(:)
+        integer(int64) :: nl, nr, dup_at, dup_first
+        character(len=32) :: a_str, b_str
+        !
+        ! Checked BEFORE the sort: a caller who paired the wrong two arrays should be told
+        ! so at once rather than after O(n log n) of work they cannot use.
+        nr = from_keys%size()
+        if (nr /= n_to) then
+            write (a_str, "(i0)") nr
+            write (b_str, "(i0)") n_to
+            error stop EP // "pf_remap: from_keys has " // trim(a_str) // " keys but " // &
+                "to_values has " // trim(b_str) // " values; a lookup table takes one " // &
+                "value per key"
+        end if
+        call match_keys_strcol(values, from_keys, "pf_remap", nl, nr, perm, tie, isnull, &
+            threads=threads)
+        call remap_check_unique(perm, tie, isnull, nl, nr, dup_at, dup_first)
+        if (dup_at > 0_int64) then
+            write (a_str, "(i0)") dup_first
+            write (b_str, "(i0)") dup_at
+            error stop EP // "pf_remap: from_keys repeats a key at positions " // &
+                trim(a_str) // " and " // trim(b_str) // "; a lookup table must be " // &
+                "distinct, since a repeated key has no defined value"
+        end if
+        call match_walk_first(perm, tie, isnull, nl, nr, first)
+    end subroutine remap_match_strcol
+    !
+    !> The KEY half of every pf_remap specific over type-erased column keys: refuses a lookup table
+    !! that is the wrong length or that repeats a key, then matches every value against it.
+    !!
+    !! Split from the value half so that eleven key types times six value types costs
+    !! eleven plus six workers rather than sixty-six -- and so that the two guards below
+    !! are written once. Neither depends on what a key maps TO.
+    subroutine remap_match_col(values, from_keys, n_to, first, threads)
+        type(parquet_column), intent(in) :: values !! the keys to look up.
+        type(parquet_column), intent(in) :: from_keys !! the lookup table's keys.
+        integer(int64), intent(in) :: n_to !! size(to_values), checked against the key count.
+        integer(int64), allocatable, intent(out) :: first(:) !! per value: key index, or 0.
+        integer, intent(in), optional :: threads !! thread request; absent = auto.
+        integer(int64), allocatable :: perm(:)
+        integer(c_int8_t), allocatable :: tie(:)
+        logical, allocatable :: isnull(:)
+        integer(int64) :: nl, nr, dup_at, dup_first
+        character(len=32) :: a_str, b_str
+        !
+        ! Checked BEFORE the sort: a caller who paired the wrong two arrays should be told
+        ! so at once rather than after O(n log n) of work they cannot use.
+        nr = from_keys%length()
+        if (nr /= n_to) then
+            write (a_str, "(i0)") nr
+            write (b_str, "(i0)") n_to
+            error stop EP // "pf_remap: from_keys has " // trim(a_str) // " keys but " // &
+                "to_values has " // trim(b_str) // " values; a lookup table takes one " // &
+                "value per key"
+        end if
+        call match_keys_col(values, from_keys, "pf_remap", nl, nr, perm, tie, isnull, &
+            threads=threads)
+        call remap_check_unique(perm, tie, isnull, nl, nr, dup_at, dup_first)
+        if (dup_at > 0_int64) then
+            write (a_str, "(i0)") dup_first
+            write (b_str, "(i0)") dup_at
+            error stop EP // "pf_remap: from_keys repeats a key at positions " // &
+                trim(a_str) // " and " // trim(b_str) // "; a lookup table must be " // &
+                "distinct, since a repeated key has no defined value"
+        end if
+        call match_walk_first(perm, tie, isnull, nl, nr, first)
+    end subroutine remap_match_col
+    !
+    !> The VALUE half of every pf_remap specific with 32-bit integer values: the gather, and the
+    !! policy for an element that matched no key.
+    subroutine remap_fill_i32(first, to_values, out, default, found)
+        integer(int64), intent(in) :: first(:) !! per value: key index, or 0 when unmapped.
+        integer(int32), intent(in) :: to_values(:) !! the value each key maps to.
+        integer(int32), allocatable, intent(out) :: out(:) !! the mapped values.
+        integer(int32), intent(in), optional :: default !! what an unmapped element becomes.
+        logical, allocatable, intent(out), optional :: found(:) !! .true. where a key matched.
+        integer(int64) :: i, n
+        character(len=32) :: a_str
+        !
+        n = size(first, kind=int64)
+        if (present(found)) then
+            allocate(found(n))
+            if (n > 0_int64) found = first /= 0_int64
+        end if
+        ! The abort is the DEFAULT, and it happens before `out` is allocated: with neither
+        ! `default` nor `found` the caller has no way to learn an element was unmapped, so
+        ! handing them one silently is the one behaviour this family refuses.
+        if (.not. present(default) .and. .not. present(found)) then
+            do i = 1_int64, n
+                if (first(i) == 0_int64) then
+                    write (a_str, "(i0)") i
+                    error stop EP // "pf_remap: the value at position " // trim(a_str) // &
+                        " matches no key in from_keys; pass default= for a fallback " // &
+                        "value, or found= to be told which elements were unmapped"
+                end if
+            end do
+        end if
+        allocate(out(n))
+        do i = 1_int64, n
+            if (first(i) /= 0_int64) then
+                out(i) = to_values(first(i))
+            else if (present(default)) then
+                out(i) = default
+            else
+                out(i) = 0_int32
+            end if
+        end do
+    end subroutine remap_fill_i32
+    !
+    !> The VALUE half of every pf_remap specific with 64-bit integer values: the gather, and the
+    !! policy for an element that matched no key.
+    subroutine remap_fill_i64(first, to_values, out, default, found)
+        integer(int64), intent(in) :: first(:) !! per value: key index, or 0 when unmapped.
+        integer(int64), intent(in) :: to_values(:) !! the value each key maps to.
+        integer(int64), allocatable, intent(out) :: out(:) !! the mapped values.
+        integer(int64), intent(in), optional :: default !! what an unmapped element becomes.
+        logical, allocatable, intent(out), optional :: found(:) !! .true. where a key matched.
+        integer(int64) :: i, n
+        character(len=32) :: a_str
+        !
+        n = size(first, kind=int64)
+        if (present(found)) then
+            allocate(found(n))
+            if (n > 0_int64) found = first /= 0_int64
+        end if
+        ! The abort is the DEFAULT, and it happens before `out` is allocated: with neither
+        ! `default` nor `found` the caller has no way to learn an element was unmapped, so
+        ! handing them one silently is the one behaviour this family refuses.
+        if (.not. present(default) .and. .not. present(found)) then
+            do i = 1_int64, n
+                if (first(i) == 0_int64) then
+                    write (a_str, "(i0)") i
+                    error stop EP // "pf_remap: the value at position " // trim(a_str) // &
+                        " matches no key in from_keys; pass default= for a fallback " // &
+                        "value, or found= to be told which elements were unmapped"
+                end if
+            end do
+        end if
+        allocate(out(n))
+        do i = 1_int64, n
+            if (first(i) /= 0_int64) then
+                out(i) = to_values(first(i))
+            else if (present(default)) then
+                out(i) = default
+            else
+                out(i) = 0_int64
+            end if
+        end do
+    end subroutine remap_fill_i64
+    !
+    !> The VALUE half of every pf_remap specific with 32-bit real values: the gather, and the
+    !! policy for an element that matched no key.
+    subroutine remap_fill_f32(first, to_values, out, default, found)
+        integer(int64), intent(in) :: first(:) !! per value: key index, or 0 when unmapped.
+        real(real32), intent(in) :: to_values(:) !! the value each key maps to.
+        real(real32), allocatable, intent(out) :: out(:) !! the mapped values.
+        real(real32), intent(in), optional :: default !! what an unmapped element becomes.
+        logical, allocatable, intent(out), optional :: found(:) !! .true. where a key matched.
+        integer(int64) :: i, n
+        character(len=32) :: a_str
+        !
+        n = size(first, kind=int64)
+        if (present(found)) then
+            allocate(found(n))
+            if (n > 0_int64) found = first /= 0_int64
+        end if
+        ! The abort is the DEFAULT, and it happens before `out` is allocated: with neither
+        ! `default` nor `found` the caller has no way to learn an element was unmapped, so
+        ! handing them one silently is the one behaviour this family refuses.
+        if (.not. present(default) .and. .not. present(found)) then
+            do i = 1_int64, n
+                if (first(i) == 0_int64) then
+                    write (a_str, "(i0)") i
+                    error stop EP // "pf_remap: the value at position " // trim(a_str) // &
+                        " matches no key in from_keys; pass default= for a fallback " // &
+                        "value, or found= to be told which elements were unmapped"
+                end if
+            end do
+        end if
+        allocate(out(n))
+        do i = 1_int64, n
+            if (first(i) /= 0_int64) then
+                out(i) = to_values(first(i))
+            else if (present(default)) then
+                out(i) = default
+            else
+                out(i) = 0.0_real32
+            end if
+        end do
+    end subroutine remap_fill_f32
+    !
+    !> The VALUE half of every pf_remap specific with 64-bit real values: the gather, and the
+    !! policy for an element that matched no key.
+    subroutine remap_fill_f64(first, to_values, out, default, found)
+        integer(int64), intent(in) :: first(:) !! per value: key index, or 0 when unmapped.
+        real(real64), intent(in) :: to_values(:) !! the value each key maps to.
+        real(real64), allocatable, intent(out) :: out(:) !! the mapped values.
+        real(real64), intent(in), optional :: default !! what an unmapped element becomes.
+        logical, allocatable, intent(out), optional :: found(:) !! .true. where a key matched.
+        integer(int64) :: i, n
+        character(len=32) :: a_str
+        !
+        n = size(first, kind=int64)
+        if (present(found)) then
+            allocate(found(n))
+            if (n > 0_int64) found = first /= 0_int64
+        end if
+        ! The abort is the DEFAULT, and it happens before `out` is allocated: with neither
+        ! `default` nor `found` the caller has no way to learn an element was unmapped, so
+        ! handing them one silently is the one behaviour this family refuses.
+        if (.not. present(default) .and. .not. present(found)) then
+            do i = 1_int64, n
+                if (first(i) == 0_int64) then
+                    write (a_str, "(i0)") i
+                    error stop EP // "pf_remap: the value at position " // trim(a_str) // &
+                        " matches no key in from_keys; pass default= for a fallback " // &
+                        "value, or found= to be told which elements were unmapped"
+                end if
+            end do
+        end if
+        allocate(out(n))
+        do i = 1_int64, n
+            if (first(i) /= 0_int64) then
+                out(i) = to_values(first(i))
+            else if (present(default)) then
+                out(i) = default
+            else
+                out(i) = 0.0_real64
+            end if
+        end do
+    end subroutine remap_fill_f64
+    !
+    !> The VALUE half of every pf_remap specific with logical values: the gather, and the
+    !! policy for an element that matched no key.
+    subroutine remap_fill_bool(first, to_values, out, default, found)
+        integer(int64), intent(in) :: first(:) !! per value: key index, or 0 when unmapped.
+        logical, intent(in) :: to_values(:) !! the value each key maps to.
+        logical, allocatable, intent(out) :: out(:) !! the mapped values.
+        logical, intent(in), optional :: default !! what an unmapped element becomes.
+        logical, allocatable, intent(out), optional :: found(:) !! .true. where a key matched.
+        integer(int64) :: i, n
+        character(len=32) :: a_str
+        !
+        n = size(first, kind=int64)
+        if (present(found)) then
+            allocate(found(n))
+            if (n > 0_int64) found = first /= 0_int64
+        end if
+        ! The abort is the DEFAULT, and it happens before `out` is allocated: with neither
+        ! `default` nor `found` the caller has no way to learn an element was unmapped, so
+        ! handing them one silently is the one behaviour this family refuses.
+        if (.not. present(default) .and. .not. present(found)) then
+            do i = 1_int64, n
+                if (first(i) == 0_int64) then
+                    write (a_str, "(i0)") i
+                    error stop EP // "pf_remap: the value at position " // trim(a_str) // &
+                        " matches no key in from_keys; pass default= for a fallback " // &
+                        "value, or found= to be told which elements were unmapped"
+                end if
+            end do
+        end if
+        allocate(out(n))
+        do i = 1_int64, n
+            if (first(i) /= 0_int64) then
+                out(i) = to_values(first(i))
+            else if (present(default)) then
+                out(i) = default
+            else
+                out(i) = .false.
+            end if
+        end do
+    end subroutine remap_fill_bool
+    !
+    !> The VALUE half of every pf_remap specific with string values: the gather, and the
+    !! policy for an element that matched no key.
+    subroutine remap_fill_chr(first, to_values, out, default, found)
+        integer(int64), intent(in) :: first(:) !! per value: key index, or 0 when unmapped.
+        character(len=*), intent(in) :: to_values(:) !! the value each key maps to.
+        character(len=:), allocatable, intent(out) :: out(:) !! the mapped values.
+        character(len=*), intent(in), optional :: default !! what an unmapped element becomes.
+        logical, allocatable, intent(out), optional :: found(:) !! .true. where a key matched.
+        integer(int64) :: i, n
+        integer :: wid
+        character(len=32) :: a_str
+        !
+        n = size(first, kind=int64)
+        if (present(found)) then
+            allocate(found(n))
+            if (n > 0_int64) found = first /= 0_int64
+        end if
+        ! The abort is the DEFAULT, and it happens before `out` is allocated: with neither
+        ! `default` nor `found` the caller has no way to learn an element was unmapped, so
+        ! handing them one silently is the one behaviour this family refuses.
+        if (.not. present(default) .and. .not. present(found)) then
+            do i = 1_int64, n
+                if (first(i) == 0_int64) then
+                    write (a_str, "(i0)") i
+                    error stop EP // "pf_remap: the value at position " // trim(a_str) // &
+                        " matches no key in from_keys; pass default= for a fallback " // &
+                        "value, or found= to be told which elements were unmapped"
+                end if
+            end do
+        end if
+        ! Deferred-length, and sized from BOTH inputs -- pf_merge's rule, for the same
+        ! reason: a `default` longer than the table's values would otherwise be truncated
+        ! into the result silently.
+        wid = len(to_values)
+        if (present(default)) wid = max(wid, len(default))
+        allocate(character(len=wid) :: out(n))
+        do i = 1_int64, n
+            if (first(i) /= 0_int64) then
+                out(i) = to_values(first(i))
+            else if (present(default)) then
+                out(i) = default
+            else
+                out(i) = ""
+            end if
+        end do
+    end subroutine remap_fill_chr
+    !
+    !> Whether the RIGHT half of the concatenation -- a `pf_remap` lookup table -- repeats a key.
+    !!
+    !! Reads the same sorted runs `match_walk_first` does, so the uniqueness guard costs a linear
+    !! scan rather than a second sort of `from_keys`. `dup_at` comes back 0 when every non-null key
+    !! is distinct; otherwise `dup_first` and `dup_at` are the two LOWEST positions of some group of
+    !! equal keys, and naming both is what lets a caller find the pair in their own array.
+    !!
+    !! **Nulls are skipped, exactly as in `match_walk_first`.** A null key matches nothing, so two
+    !! of them are not two entries competing to answer the same lookup -- they are two entries that
+    !! answer nothing. Refusing them would make a lookup table with an unused null key unusable for
+    !! no gain.
+    !!
+    !! The two lowest positions are taken as MINIMA over the run rather than as the first two the
+    !! permutation lists, so the message does not depend on the sort being stable -- the reason
+    !! `match_walk_first` takes a minimum too. Which GROUP is reported does depend on the sort
+    !! order, but that order is deterministic, and every group it could name is a real duplicate.
+    subroutine remap_check_unique(perm, tie, isnull, nl, nr, dup_at, dup_first)
+        integer(int64), intent(in) :: perm(:)   !! the concatenation's permutation.
+        integer(c_int8_t), intent(in) :: tie(:) !! 1 where a row ties the one before it.
+        logical, intent(in) :: isnull(:)        !! .true. where a concatenated row is null.
+        integer(int64), intent(in) :: nl        !! elements in the left half (the values).
+        integer(int64), intent(in) :: nr        !! elements in the right half (the keys).
+        integer(int64), intent(out) :: dup_at    !! the higher of two equal key positions, or 0.
+        integer(int64), intent(out) :: dup_first !! the lower of them, or 0.
+        integer(int64) :: n, s, e, k, p, q, lo1, lo2
+        !
+        dup_at = 0_int64
+        dup_first = 0_int64
+        if (nr < 2_int64) return
+        n = nl + nr
+        s = 1_int64
+        do while (s <= n)
+            ! The run is [s, e]. Nested rather than `.and.`ed, since Fortran does not short-circuit
+            ! and `tie(n+1)` would be out of bounds -- match_walk_first's own note.
+            e = s
+            do while (e < n)
+                if (tie(e + 1_int64) == 0_c_int8_t) exit
+                e = e + 1_int64
+            end do
+            lo1 = 0_int64
+            lo2 = 0_int64
+            do k = s, e
+                p = perm(k)
+                if (p > nl) then
+                    if (.not. isnull(p)) then
+                        q = p - nl
+                        if (lo1 == 0_int64 .or. q < lo1) then
+                            lo2 = lo1
+                            lo1 = q
+                        else if (lo2 == 0_int64 .or. q < lo2) then
+                            lo2 = q
+                        end if
+                    end if
+                end if
+            end do
+            if (lo2 > 0_int64) then
+                dup_first = lo1
+                dup_at = lo2
+                return
+            end if
+            s = e + 1_int64
+        end do
+    end subroutine remap_check_unique
+    !
     !> Shared front half of every pf_match/pf_match_all/pf_in specific over 32-bit integer
     !! arrays: extracts both sides into one key, appends the right onto the left, and
     !! sorts the concatenation with its run boundaries reported. Everything after this

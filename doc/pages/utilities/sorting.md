@@ -39,6 +39,7 @@ declares.
 | `pf_lower_bound(values, targets(:), pos(:))` | the same three, for MANY targets in one pass |
 | `pf_unique_count(values, count, [n_null])` | how many distinct non-null values there are |
 | `pf_unique(values, distinct, [n_null])` | those values themselves, in order |
+| `pf_value_counts(values, distinct, counts, [n_null])` | those values **and how often each occurs** |
 | `pf_rank(values, ranks, [method])` | the rank of every element, in place order |
 | `pf_minmax(values, vmin, vmax, [ok])` | the smallest and largest value |
 | `pf_argminmax(values, imin, imax)` | where those two are |
@@ -46,14 +47,16 @@ declares.
 | `pf_match(left, right, match, [n_matched])` | for each element of `left`, one equal element of `right` |
 | `pf_match_all(left, right, offsets, matches)` | every match, as a CSR pair |
 | `pf_in(values, set, mask)` | elementwise membership |
+| `pf_remap(values, from_keys, to_values, out, [default], [found])` | replaces each value with what its key maps to |
 
 The first four are covered immediately below; the rest have their own sections —
 [Selecting without sorting](#selecting-without-sorting),
 [Searching a sorted array](#searching-a-sorted-array),
 [Distinct values and ranks](#distinct-values-and-ranks),
 [Extremes](#extremes),
-[Merging two sorted arrays](#merging-two-sorted-arrays) and
-[Matching two arrays](#matching-two-arrays).
+[Merging two sorted arrays](#merging-two-sorted-arrays),
+[Matching two arrays](#matching-two-arrays) and
+[Mapping values through a lookup table](#mapping-values-through-a-lookup-table).
 
 Optional arguments are shown in square brackets — in the table above, and in prose throughout this
 page. They are optional at the call site, not part of the syntax, so they never appear that way in a
@@ -126,7 +129,7 @@ The remaining operations follow the same two rules — a type is out wherever th
 a compile-time element type it does not have, and stays in wherever the answer is a permutation, a
 boolean or an integer:
 
-| Type | search | `pf_unique_count` | `pf_unique` | `pf_rank` | `pf_minmax` | `pf_argminmax` | `pf_merge` | match |
+| Type | search | `pf_unique_count` | `pf_unique`, `pf_value_counts` | `pf_rank` | `pf_minmax` | `pf_argminmax` | `pf_merge` | match |
 |---|---|---|---|---|---|---|---|---|
 | `integer(int32/int64)`, `real(real32/real64)` | yes | yes | yes | yes | yes | yes | yes | yes |
 | `logical` | yes | yes | yes | yes | no | no | yes | yes |
@@ -621,6 +624,30 @@ That is correct and surprising, and it is the same equality every other operatio
 other direction, every NaN counts as **one** value collectively — NaNs compare equal to each other
 under this comparator even though `==` reports every NaN pair as unequal.
 
+### Counting how often each value occurs
+
+`pf_value_counts` is `pf_unique` with the run lengths kept — the same single pass, answering both
+questions at once:
+
+```fortran
+integer(int32) :: v(8) = [30, 10, 20, 10, 30, 30, 40, 20]
+integer(int32), allocatable :: d(:)
+integer(int64), allocatable :: n(:)
+
+call pf_value_counts(v, d, n)       ! d = [10, 20, 30, 40], n = [2, 2, 3, 1]
+```
+
+`d` is exactly what `pf_unique` returns and `n(k)` is how many elements equal `d(k)`, so `sum(n)`
+is the array length minus the null count. Every rule above carries over unchanged: nulls are
+outside the population and reported through `n_null=`, distinctness is exact on reals, and all
+NaNs count as one value.
+
+**The values come back ascending, never in count order**, and there is no `descending=` here: the
+two arrays are parallel, so re-ordering one without the other would make the answer meaningless.
+When you want the count-ordered summary a report needs, use `parquet_table`'s
+[`%value_counts`](../tables/table-mutate.html#counting-how-often-each-value-occurs), which answers
+with a two-column table sorted by count.
+
 ### Tie handling in `pf_rank`
 
 `method=` chooses how ties are ranked, matched case-insensitively:
@@ -806,16 +833,60 @@ Two `parquet_column`s of different kinds are **refused**, not promoted: an `int3
 is used on — a 64-bit catalogue identifier above `2**53` does not survive a promotion through
 `float64`, so the join would match the wrong rows and report nothing. Cast one side first.
 
+## Mapping values through a lookup table
+
+`pf_remap` replaces every element of an array with the value its key maps to — a lookup table
+applied to a column. It is `pf_match` plus a gather plus a policy, and the policy is what it is
+for:
+
+```fortran
+character(len=6) :: src(5) = ["GAMA  ", "SDSS  ", "GAMA  ", "LSST  ", "SDSS  "]
+character(len=6) :: keys(3) = ["GAMA  ", "SDSS  ", "VISTA "]
+real(real64) :: maglim(3) = [19.8_real64, 17.7_real64, 21.2_real64]
+real(real64), allocatable :: lim(:)
+
+call pf_remap(src, keys, maglim, lim, default=-99.0_real64)
+! lim = [19.8, 17.7, 19.8, -99.0, 17.7]
+```
+
+The key side accepts any of the eleven types `pf_match` does; the value side accepts `int32`,
+`int64`, `real32`, `real64`, `logical` and `character`. The two are independent, so a string key
+mapping to a real value — the shape above, and the common one — is a single call.
+
+**There is no silent path for a value that matches no key.** pandas has two functions with two
+different silent answers (`map` gives NaN, `replace` leaves the value alone); here you say which
+you want:
+
+| given | an element matching no key |
+|---|---|
+| `default=` | becomes `default` |
+| `found=` (no `default`) | `found(i)` is `.false.`; `out(i)` is a zero or a blank |
+| both | becomes `default`, and `found(i)` still reports that it did not match |
+| neither | **aborts**, naming the element's position |
+
+So `found` doubles as the result's validity mask, and it always reports what actually matched
+rather than what was filled in.
+
+`from_keys` must hold no two equal keys — a repeat aborts, naming both positions, because a lookup
+table with a repeat has no defined answer. The check is a linear scan of the sort `pf_match`
+already performs, not a second sort.
+
+A null matches nothing on either side, exactly as in `pf_match`, so a null element of `values` is
+unmapped; pass `is_valid=` whenever the array has nulls. A `character` result is deferred-length
+and is sized from the wider of `to_values` and `default`, so a long fallback string arrives whole
+rather than truncated.
+
 ## Sorting in parallel
 
 **Sorting is parallel by default.** `pf_argsort`, `pf_sort`, `pf_unique_count`, `pf_unique`,
-`pf_rank`, `pf_match`, `pf_match_all` and `pf_in` all use the machine automatically, as do the
+`pf_value_counts`, `pf_rank`, `pf_match`, `pf_match_all`, `pf_in` and `pf_remap` all use the
+machine automatically, as do the
 read-time `parquet_open_reader(..., sort_by=)` and `parquet_table%sort_by`. There is nothing to
 switch on. `pf_partial_sort`, `pf_partial_argsort`, `pf_nth_element` and `pf_nth_quantile` take
 `threads=` too, but thread less of their work — see
 [What `threads=` reaches in a selection](#what-threads-reaches-in-a-selection) below.
 
-Those twelve are the whole list. `pf_permute`, `pf_is_sorted`, the three searches, `pf_minmax`,
+Those fourteen are the whole list. `pf_permute`, `pf_is_sorted`, the three searches, `pf_minmax`,
 `pf_argminmax` and `pf_merge` take no `threads=` at all — each is a single linear pass, so there is
 nothing to hand a team — and passing one is a compile error rather than a silently ignored argument.
 

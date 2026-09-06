@@ -181,6 +181,7 @@ individual procedure:
 | **row** — `%filter_rows`, `%sort_by`, `%top_n`, `%delete_rows`, `%truncate`, `%append`, `%append_null_rows`, `%dropna`, `%explode`, `%drop_duplicates`, `%sort_by_values` | changes which rows exist | **yes, when it changes one** |
 | **read** — `%row_mask` | reports which rows a rule selects, changing nothing | no |
 | **read** — `%duplicated`, `%argsort_by_values` | reports which rows repeat, or what order values imply, changing nothing | no |
+| **read** — `%value_counts` | summarises one column as a NEW two-column table, changing nothing | no |
 | **read** — `%get_matrix` | copies several whole columns out as one `(column, row)` array | no |
 | **row** — `%join` | matches another table's rows against this one's and brings its columns over | **yes, unless every row survives once and in place** |
 
@@ -438,6 +439,54 @@ When you name no columns, **pass `keep` by keyword** — `t%drop_duplicates(keep
 
 `%drop_duplicates` detaches when it drops a row, and does nothing at all when there is nothing to
 drop. `%duplicated` never detaches and never changes anything.
+
+### Counting how often each value occurs
+
+`%value_counts` answers the other half of the question `%drop_duplicates` asks. Where that one
+keeps a row per group, this one reports **how big each group is** — as a new table, so the summary
+is an ordinary table that can be sorted, filtered or written straight out:
+
+```fortran
+type(parquet_table) :: counts
+character(len=:), allocatable :: band(:)
+integer(int64), allocatable :: n(:)
+
+call t%value_counts("band", counts)   ! two columns: "band" and "count"
+call counts%get("band", band)         ! ["r", "g", "i"] -- the commonest first
+call counts%get("count", n)           ! [41822, 39104, 12770]
+```
+
+The first column keeps the counted column's **name, kind, width and unit** — it *is* that column,
+gathered at one row per distinct value — and the second is an `int64` count. One binding covers
+every column kind for exactly that reason: nothing in it reads a value, so nothing in it needs to
+know the element type. Its full form is
+
+```fortran
+call t%value_counts(name, out, [dropna], [descending], [count_name], [threads])
+```
+
+Rows come back **by count descending, and by value ascending among equal counts** — pandas' order,
+with a deterministic tie-break pandas does not promise. `descending=.false.` reverses only the
+count direction; the tie-break stays ascending by value, so the answer is fully determined either
+way and two runs over the same data cannot differ.
+
+Equality is the same one `%drop_duplicates` uses — the sort comparator's, so every NaN is one
+value and every null is one value.
+
+`dropna` decides what happens to the nulls, and defaults to `.true.`: the null group is simply not
+a row. With `dropna=.false.` it becomes one extra row whose value is Null and whose count is how
+many nulls the column held, placed **last whatever its count** — so the count ordering describes
+the real values, and a caller reading the top row never gets "missing" as the answer by accident.
+
+The count column is called `count` unless `count_name=` says otherwise. Counting a column that is
+itself called `count` is refused rather than given two columns of one name; pass `count_name=`
+there.
+
+`%value_counts` is a read: it changes no row, bumps no `%generation()` and never detaches. It does
+materialize the counted column if the table has not read it yet, as every accessor does. For a
+plain Fortran array rather than a table column, the array-level form is
+[`pf_value_counts`](../utilities/sorting.html#counting-how-often-each-value-occurs), which answers
+with two parallel arrays in value order.
 
 ### Repeating rows: `%explode`
 

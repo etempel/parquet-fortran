@@ -738,6 +738,20 @@ program error_scenarios
         call scenario_sort_by_values_shared()
     case ("rowverbs_control")
         call scenario_rowverbs_control()
+    case ("remap_length_mismatch")
+        call scenario_remap_length_mismatch()
+    case ("remap_duplicate_key")
+        call scenario_remap_duplicate_key()
+    case ("remap_unmapped_no_policy")
+        call scenario_remap_unmapped_no_policy()
+    case ("value_counts_count_name_collision")
+        call scenario_value_counts_count_name_collision()
+    case ("value_counts_unknown_column")
+        call scenario_value_counts_unknown_column()
+    case ("value_counts_unorderable")
+        call scenario_value_counts_unorderable()
+    case ("counting_control")
+        call scenario_counting_control()
     case ("sortkey_remap_size_mismatch")
         call scenario_sortkey_remap_size_mismatch()
     case ("sortkey_remap_name_too_long")
@@ -8959,6 +8973,82 @@ contains
 
     !> The negative control for every guard above: each permitted spelling on the same fixture,
     !> so a guard that fired unconditionally would be caught here rather than pass every scenario.
+    !> A lookup table with more keys than values cannot answer, and the mismatch is refused
+    !> BEFORE the sort rather than after O(n log n) of work the caller cannot use.
+    subroutine scenario_remap_length_mismatch()
+        integer(int32), allocatable :: got(:)
+
+        call pf_remap([1_int32, 2_int32], [1_int32, 2_int32, 3_int32], [10_int32, 20_int32], got)
+        print '(a,i0)', "unexpectedly remapped through a mismatched lookup table, got(1)=", got(1)
+    end subroutine scenario_remap_length_mismatch
+
+    !> A repeated key has no defined value, so picking one silently is the failure this family
+    !> exists to remove. The message names both positions.
+    subroutine scenario_remap_duplicate_key()
+        integer(int32), allocatable :: got(:)
+
+        call pf_remap([10_int32, 20_int32], [10_int32, 20_int32, 10_int32], &
+            [1_int32, 2_int32, 3_int32], got)
+        print '(a,i0)', "unexpectedly remapped through a repeated key, got(1)=", got(1)
+    end subroutine scenario_remap_duplicate_key
+
+    !> With neither `default=` nor `found=` the caller has no way to learn an element was
+    !> unmapped, so handing them one silently is refused. The message names the position.
+    subroutine scenario_remap_unmapped_no_policy()
+        integer(int32), allocatable :: got(:)
+
+        call pf_remap([10_int32, 99_int32], [10_int32, 20_int32], [1_int32, 2_int32], got)
+        print '(a,i0)', "unexpectedly remapped an element with no key, got(2)=", got(2)
+    end subroutine scenario_remap_unmapped_no_policy
+
+    !> A result carrying two columns of one name is unusable, so counting a column that is
+    !> already called `count` is refused rather than built.
+    subroutine scenario_value_counts_count_name_collision()
+        type(parquet_table) :: t, vc
+
+        call parquet_new_table(t)
+        call t%add_column("count", [1_int32, 2_int32, 1_int32])
+        call t%value_counts("count", vc)
+        print '(a,i0)', "unexpectedly counted a column called count, rows ", vc%nrows()
+    end subroutine scenario_value_counts_count_name_collision
+
+    !> The key is resolved by %value_counts itself, so the message names THIS verb rather than
+    !> the %argsort_by underneath it.
+    subroutine scenario_value_counts_unknown_column()
+        type(parquet_table) :: t, vc
+
+        call build_rowverbs_fixture(t)
+        call t%value_counts("nosuch", vc)
+        print '(a,i0)', "unexpectedly counted a column that does not exist, rows ", vc%nrows()
+    end subroutine scenario_value_counts_unknown_column
+
+    !> A vector column has no ordering, so it cannot be grouped and cannot be counted.
+    subroutine scenario_value_counts_unorderable()
+        type(parquet_table) :: t, vc
+
+        call build_rowverbs_fixture(t)
+        call t%value_counts("vec", vc)
+        print '(a,i0)', "unexpectedly counted a vector column, rows ", vc%nrows()
+    end subroutine scenario_value_counts_unorderable
+
+    !> The negative control for the six above: every counting and mapping call in its well-formed
+    !> shape, so a guard that fired unconditionally would fail HERE rather than pass everywhere.
+    subroutine scenario_counting_control()
+        type(parquet_table) :: t, vc
+        integer(int32), allocatable :: dist(:), got(:)
+        integer(int64), allocatable :: cnts(:)
+        logical, allocatable :: fnd(:)
+
+        call pf_value_counts([3_int32, 1_int32, 3_int32], dist, cnts)
+        call pf_remap([1_int32, 9_int32], [1_int32, 2_int32], [10_int32, 20_int32], got, default=-1_int32)
+        call pf_remap([1_int32, 9_int32], [1_int32, 2_int32], [10_int32, 20_int32], got, found=fnd)
+        call build_rowverbs_fixture(t)
+        call t%value_counts("id", vc)
+        call t%value_counts("id", vc, dropna=.false., descending=.false., count_name="n")
+        print '(a,i0,a,i0,a,i0)', "counting ran: distinct ", size(dist), ", remapped ", got(1), &
+            ", value_counts rows ", vc%nrows()
+    end subroutine scenario_counting_control
+
     subroutine scenario_rowverbs_control()
         type(parquet_table) :: t
         logical, allocatable :: mask(:)

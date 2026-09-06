@@ -104,6 +104,56 @@ TYPES = [
     ("col",    "type(parquet_column)",       "type-erased column", "col",  "own",  False, "reindex"),
 ]
 
+#: The VALUE kinds `pf_remap` maps a key to -- the second axis of that family\'s specifics.
+#:
+#: Six, against TYPES\' eleven keys: `pf_remap` looks a key up with `pf_match`, so the KEY side
+#: supports whatever matching does, while the value side is only ever gathered and copied. That
+#: rules out `parquet_string_column` and `parquet_column` (a gather into either needs the store,
+#: not an array) and the three temporal types, whose lookup tables are not what anyone builds --
+#: a caller wanting one maps to the integer `%raw()` and converts. Sixty-six specifics is already
+#: the largest generated surface in this module; widening the second axis multiplies it.
+REMAP_VALUES = [
+    # tag,   declaration,        what it is called in prose
+    ("i32",  "integer(int32)",   "32-bit integer"),
+    ("i64",  "integer(int64)",   "64-bit integer"),
+    ("f32",  "real(real32)",     "32-bit real"),
+    ("f64",  "real(real64)",     "64-bit real"),
+    ("bool", "logical",          "logical"),
+    ("chr",  "character(len=*)", "string"),
+]
+
+#: What an UNMAPPED element becomes when `found=` was asked for and no `default=` given. Never
+#: read as a value -- `found` is the answer -- but never left undefined either, since an
+#: undefined `real` is a signalling NaN under nagfor\'s `-nan` and a wrong answer under nobody\'s
+#: rules at all. See CLAUDE.md, "-nan poisons every undefined real".
+REMAP_ZERO = {
+    "i32": "0_int32", "i64": "0_int64", "f32": "0.0_real32", "f64": "0.0_real64",
+    "bool": ".false.", "chr": '""',
+}
+
+
+def remap_to_decl(v, name="to_values"):
+    """Declaration of pf_remap\'s value-per-key array."""
+    return f"        {v[1]}, intent(in) :: {name}(:)"
+
+
+def remap_out_decl(v):
+    """Declaration of pf_remap\'s result."""
+    if v[0] == "chr":
+        return "            character(len=:), allocatable, intent(out) :: out(:)"
+    return f"            {v[1]}, allocatable, intent(out) :: out(:)"
+
+
+def rows_of(t, name):
+    """Expression giving the element count of `name`, an array of type `t`."""
+    family = t[3]
+    if family == "strcol":
+        return f"{name}%size()"
+    if family == "col":
+        return f"{name}%length()"
+    return f"size({name}, kind=int64)"
+
+
 #: The tags that live in the ARGSORT TIER (`parquet_argsort`), which must stay Arrow-free.
 #:
 #: These are the six INTRINSIC element types -- everything `pf_argsort` can order without knowing
@@ -625,6 +675,7 @@ module parquet_sorting
     public :: pf_equal_range
     public :: pf_unique_count
     public :: pf_unique
+    public :: pf_value_counts
     public :: pf_rank
     public :: pf_minmax
     public :: pf_argminmax
@@ -632,6 +683,7 @@ module parquet_sorting
     public :: pf_match
     public :: pf_match_all
     public :: pf_in
+    public :: pf_remap
     !
     ! ---- Re-exported from parquet_argsort, so `use parquet_sorting` is unchanged ----
     !
@@ -1202,6 +1254,24 @@ module parquet_sorting
           "Each distinct value is taken from its FIRST occurrence in the sorted order, which for",
           "equal-comparing-but-not-identical values (a `character` array's trailing blanks, a",
           "`parquet_string_column`'s empty strings) is the earliest such element of `values`."]),
+        ("pf_value_counts",
+         ["The distinct non-null values of `values` AND how many times each occurs -- `pf_unique`",
+          "with the run lengths kept.",
+          "",
+          "`distinct` is exactly what `pf_unique` returns and `counts(k)` is how many elements of",
+          "`values` equal `distinct(k)`, so `sum(counts)` is `size(values)` minus the null count.",
+          "One engine pass answers both, which is the reason this exists rather than a `pf_unique`",
+          "followed by a `pf_match_all`.",
+          "",
+          "**The values come back in ASCENDING order, never in count order**, and there is no",
+          "`descending`: this is a distinctness question, and re-ordering `distinct` would leave",
+          "`counts` meaningless unless it were permuted with it. `parquet_table`\'s",
+          "`%value_counts` is the count-ordered form, and it answers with a two-column table",
+          "rather than two arrays for that reason.",
+          "",
+          "Same distinctness rule as `pf_unique_count`: exact on reals, every NaN one value, and",
+          "nulls excluded from the population rather than counted as a value -- `n_null` reports",
+          "them separately."]),
         ("pf_rank",
          ["The rank of every element of `values`, without reordering it. `ranks(i)` is the rank of",
           "`values(i)`, so this is a per-element answer rather than a permutation.",
@@ -1298,6 +1368,12 @@ module parquet_sorting
             for t in TYPES:
                 if has_unique(t):
                     w(f"        module procedure unique_{t[0]}")
+        elif gname == "pf_value_counts":
+            for t in TYPES:
+                if not has_unique(t):
+                    continue
+                for ik, _, _ in IDX_KINDS:
+                    w(f"        module procedure value_counts_{t[0]}_{ik}")
         elif gname == "pf_rank":
             for t in TYPES:
                 for ik, _, _ in IDX_KINDS:
@@ -2216,6 +2292,53 @@ MATCH_RULES = [
 ]
 
 
+#: `pf_remap`'s generic doc-comment. Written out in prose because FORD 7.0.13 renders no
+#: per-argument documentation at all for a member of a named multi-specific generic -- see
+#: CLAUDE.md's "FORD config gotchas" -- and this generic has sixty-six of them.
+REMAP_BLURB = [
+    "Replaces every element of `values` with the value its key maps to: a lookup table applied",
+    "to an array. pandas' `Series.map`/`replace`, polars' `replace`, SQL's `CASE WHEN`.",
+    "",
+    "```fortran",
+    "call pf_remap(values, from_keys, to_values, out, [default], [found], [is_valid], [threads])",
+    "```",
+    "",
+    "`from_keys` and `to_values` are the lookup table, one value per key and the same length.",
+    "`out` is allocated to `size(values)` and holds `to_values(k)` wherever `values(i)` equals",
+    "`from_keys(k)`. The key side may be any of the eleven types `pf_match` accepts and the value",
+    "side any of `int32`, `int64`, `real32`, `real64`, `logical` and `character` -- the two are",
+    "independent, so mapping a string key to a real value is one call.",
+    "",
+    "**There is no silent path for an unmapped element**, which is the whole reason this exists",
+    "rather than a hand-written gather. pandas has two functions with two different silent",
+    "answers (`map` gives NaN, `replace` leaves the value); here the caller says which they want:",
+    "",
+    "| given | an element matching no key |",
+    "|---|---|",
+    "| `default=` | becomes `default` |",
+    "| `found=` (no `default`) | `found(i)` is `.false.`; `out(i)` is a zero or a blank |",
+    "| both | becomes `default`, and `found(i)` is still `.false.` |",
+    "| neither | **aborts**, naming the element's position |",
+    "",
+    "So `found` doubles as `out`'s validity mask, and `out(i)` where `found(i)` is `.false.` and",
+    "no `default` was given is defined (a zero, a `.false.` or a blank) but means nothing.",
+    "",
+    "**`from_keys` must hold no two equal keys**, or the call aborts naming both positions -- a",
+    "lookup table with a repeat has no defined answer, and picking one silently is exactly the",
+    "class of bug this family is meant to remove. The check costs one linear scan of the sort",
+    "`pf_match` already performs, not a second sort.",
+    "",
+    "**A null matches nothing, on either side**, exactly as in `pf_match`: a null element of",
+    "`values` is unmapped (so it takes `default`, or is reported through `found`, or aborts), and",
+    "a null key is never found. Pass `is_valid` whenever `values` has nulls -- without it a null's",
+    "stored value is indistinguishable from a real one. A NaN is a VALUE and does match, and",
+    "`-0.0` and `+0.0` are one key, again as in `pf_match`.",
+    "",
+    "One call is one `pf_match`, so O((n + k) log(n + k)) for `n` values and `k` keys. Pass the",
+    "whole array; there is no per-call setup to hoist out of a loop.",
+]
+
+
 def emit_match_generics(w):
     """The `pf_match`/`pf_match_all`/`pf_in` generic interfaces, with their doc-comments.
 
@@ -2278,6 +2401,14 @@ def emit_match_generics(w):
                     w(f"        module procedure {base}_{t[0]}_{ik}")
         w(f"    end interface {gname}")
         w("    !")
+    for line in REMAP_BLURB:
+        w(("    !> " + line).rstrip())
+    w("    interface pf_remap")
+    for t in TYPES:
+        for v in REMAP_VALUES:
+            w(f"        module procedure remap_{t[0]}_{v[0]}")
+    w("    end interface pf_remap")
+    w("    !")
 
 
 def emit_match_interfaces(w):
@@ -2339,6 +2470,28 @@ def emit_match_interfaces(w):
         for line in THREADS_DOC:
             w(line)
         w(f"        end subroutine isin_{tag}")
+    for t in TYPES:
+        tag, decl, what, family, nulls, _, _ = t
+        for v in REMAP_VALUES:
+            w(f"        !> pf_remap from {what} keys to {v[2]} values.")
+            w(f"        module subroutine remap_{tag}_{v[0]}(values, from_keys, to_values, out, &")
+            w("                default, found" + (", is_valid" if nulls == "arg" else "") + ", threads)")
+            w(val_decl(t, "in") + " !! the keys to look up, one per output element.")
+            w(val_decl(t, "in", "from_keys") + " !! the lookup table\'s keys; must be distinct.")
+            w(remap_to_decl(v) + " !! the value each key maps to; one per key.")
+            w(remap_out_decl(v))
+            w("            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where")
+            w("            !! it equals none of them. Always allocated to `size(values)`.")
+            w(f"            {v[1]}, intent(in), optional :: default")
+            w("            !! what an unmapped element becomes. Absent, and with `found` absent too,")
+            w("            !! an unmapped element ABORTS naming its position.")
+            w("            logical, allocatable, intent(out), optional :: found(:)")
+            w("            !! per element: .true. where a key matched. This is also `out`\'s validity.")
+            if nulls == "arg":
+                w(VALID_DOC)
+            for line in THREADS_DOC:
+                w(line)
+            w(f"        end subroutine remap_{tag}_{v[0]}")
     w("    end interface")
     w("    !")
 
@@ -2430,6 +2583,24 @@ def emit_m3_interfaces(w):
         for line in THREADS_DOC:
             w(line)
         w(f"        end subroutine unique_{tag}")
+    for t in TYPES:
+        tag, decl, what, family, nulls, _, _ = t
+        if not has_unique(t):
+            continue
+        for ik, idecl, iname in IDX_KINDS:
+            w(f"        !> pf_value_counts over a {what} array, with {iname} counts.")
+            w(f"        module subroutine value_counts_{tag}_{ik}(values, distinct, counts" +
+              f"{', is_valid' if nulls == 'arg' else ''}, n_null, threads)")
+            w(val_decl(t, "in"))
+            w(distinct_decl(t))
+            w(f"            {idecl}, allocatable, intent(out) :: counts(:)")
+            w("            !! `counts(k)` is how many elements equal `distinct(k)`; same length.")
+            if nulls == "arg":
+                w(VALID_DOC)
+            w("            integer(int64), intent(out), optional :: n_null !! how many values were null.")
+            for line in THREADS_DOC:
+                w(line)
+            w(f"        end subroutine value_counts_{tag}_{ik}")
     for t in TYPES:
         tag, decl, what, family, nulls, _, _ = t
         for ik, idecl, iname in IDX_KINDS:
@@ -5442,6 +5613,39 @@ contains
 
     for t in TYPES:
         tag, decl, what, family, nulls, _, _ = t
+        if not has_unique(t):
+            continue
+        iv = ", is_valid=is_valid" if nulls == "arg" else ""
+        for ik, idecl, iname in IDX_KINDS:
+            w(f"    module procedure value_counts_{tag}_{ik}")
+            w("        integer(int64), allocatable :: idxs(:), lens(:)")
+            w("        integer(int64) :: k, nd, nn")
+            w("        !")
+            w(f"        call unique_impl_{tag}(values, .false., \"pf_value_counts\", idxs, nd, nn{iv}, &")
+            w("            run_len=lens, threads=threads)")
+            w("        if (present(n_null)) n_null = nn")
+            if family == "chr":
+                w("        allocate(character(len=len(values)) :: distinct(nd))")
+            elif family == "strcol":
+                w("        call distinct%clear()")
+            else:
+                w("        allocate(distinct(nd))")
+            w("        do k = 1_int64, nd")
+            if family == "strcol":
+                w("            call distinct%append_from(values, idxs(k))")
+            else:
+                w("            distinct(k) = values(idxs(k))")
+            w("        end do")
+            if ik == "i32":
+                w("        call narrow_i64_array(lens(1:nd), \"pf_value_counts\", \"value count\", counts)")
+            else:
+                w("        allocate(counts(nd))")
+                w("        if (nd > 0_int64) counts = lens(1:nd)")
+            w(f"    end procedure value_counts_{tag}_{ik}")
+            w("    !")
+
+    for t in TYPES:
+        tag, decl, what, family, nulls, _, _ = t
         iv = ", is_valid=is_valid" if nulls == "arg" else ""
         for ik, idecl, iname in IDX_KINDS:
             w(f"    module procedure rank_{tag}_{ik}")
@@ -5464,7 +5668,8 @@ contains
         iarg = ", is_valid" if nulls == "arg" else ""
         w(f"    !> Shared worker behind pf_unique_count and pf_unique for a {what} array: the")
         w("    !! 1-based index of the FIRST occurrence of each distinct non-null value, in order.")
-        w(f"    subroutine unique_impl_{tag}(values, descending, proc, first_idx, ndist, nnull{iarg}, threads)")
+        w(f"    subroutine unique_impl_{tag}(values, descending, proc, first_idx, ndist, nnull{iarg}, &")
+        w("            run_len, threads)")
         w(val_decl(t, "in"))
         w("        logical, intent(in) :: descending    !! .true. reports the distinct values high to low.")
         w("        character(len=*), intent(in) :: proc !! calling procedure, for messages.")
@@ -5473,12 +5678,17 @@ contains
         w("        integer(int64), intent(out) :: nnull !! how many values were null.")
         if nulls == "arg":
             w("        logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.")
+        w("        integer(int64), allocatable, intent(out), optional :: run_len(:)")
+        w("        !! how many elements each distinct value has -- `pf_value_counts`\' answer, and the")
+        w("        !! only thing that separates it from `pf_unique`. Allocated to the same length as")
+        w("        !! `first_idx`, so read `run_len(1:ndist)`.")
         w("        integer, intent(in), optional :: threads !! thread request; absent = auto.")
         w("        type(sort_key_buf), allocatable :: buf(:)")
         w("        integer(int64), allocatable :: perm(:)")
         w("        integer(c_int8_t), allocatable :: tie(:)")
         w("        logical, allocatable :: isnull(:)")
-        w("        integer(int64) :: k, n")
+        w("        integer(int64) :: k, n, run_begin")
+        w("        logical :: want_len")
         w("        !")
         w(f"        n = {rows_expr(t)}")
         w(f"        call extract_{tag}(values, buf, descending, .false., proc{iv}, threads=threads)")
@@ -5486,8 +5696,14 @@ contains
         w("        call key_null_mask(buf, n, isnull)")
         w("        allocate(first_idx(max(n, 1_int64)))")
         w("        first_idx = 0_int64")
+        w("        want_len = present(run_len)")
+        w("        if (want_len) then")
+        w("            allocate(run_len(max(n, 1_int64)))")
+        w("            run_len = 0_int64")
+        w("        end if")
         w("        ndist = 0_int64")
         w("        nnull = 0_int64")
+        w("        run_begin = 0_int64")
         w("        do k = 1_int64, n")
         w("            ! nulls_first=.false. puts every null in the last tier, so the first one ends")
         w("            ! the walk and the rest of the array is exactly the null count.")
@@ -5496,10 +5712,18 @@ contains
         w("                exit")
         w("            end if")
         w("            if (tie(k) == 0_c_int8_t) then")
+        w("                ! A run ends where the next one starts, so each length is settled one run")
+        w("                ! LATE -- and the last one after the loop, from whichever k ended it.")
+        w("                if (want_len .and. ndist >= 1_int64) run_len(ndist) = k - run_begin")
         w("                ndist = ndist + 1_int64")
         w("                first_idx(ndist) = perm(k)")
+        w("                run_begin = k")
         w("            end if")
         w("        end do")
+        w("        ! `k` is n+1 when the loop ran out and the null position when it exited, which is")
+        w("        ! exactly one past the last non-null row either way. Fortran leaves the DO variable")
+        w("        ! defined after the construct, and n < 1 leaves ndist 0 so the guard skips it.")
+        w("        if (want_len .and. ndist >= 1_int64) run_len(ndist) = k - run_begin")
         w(f"    end subroutine unique_impl_{tag}")
         w("    !")
         w(f"    !> Shared worker behind every pf_rank specific for a {what} array.")
@@ -5767,6 +5991,71 @@ contains
 #: Everything type-specific has happened by the time these run: the answer is arithmetic on
 #: `perm`, `tie` and `isnull`, so eleven copies of it would be eleven chances to fix a bug in ten
 #: places. They are ordinary contained procedures of the submodule, reached by host association.
+REMAP_UNIQUE_WALK = r"""    !> Whether the RIGHT half of the concatenation -- a `pf_remap` lookup table -- repeats a key.
+    !!
+    !! Reads the same sorted runs `match_walk_first` does, so the uniqueness guard costs a linear
+    !! scan rather than a second sort of `from_keys`. `dup_at` comes back 0 when every non-null key
+    !! is distinct; otherwise `dup_first` and `dup_at` are the two LOWEST positions of some group of
+    !! equal keys, and naming both is what lets a caller find the pair in their own array.
+    !!
+    !! **Nulls are skipped, exactly as in `match_walk_first`.** A null key matches nothing, so two
+    !! of them are not two entries competing to answer the same lookup -- they are two entries that
+    !! answer nothing. Refusing them would make a lookup table with an unused null key unusable for
+    !! no gain.
+    !!
+    !! The two lowest positions are taken as MINIMA over the run rather than as the first two the
+    !! permutation lists, so the message does not depend on the sort being stable -- the reason
+    !! `match_walk_first` takes a minimum too. Which GROUP is reported does depend on the sort
+    !! order, but that order is deterministic, and every group it could name is a real duplicate.
+    subroutine remap_check_unique(perm, tie, isnull, nl, nr, dup_at, dup_first)
+        integer(int64), intent(in) :: perm(:)   !! the concatenation's permutation.
+        integer(c_int8_t), intent(in) :: tie(:) !! 1 where a row ties the one before it.
+        logical, intent(in) :: isnull(:)        !! .true. where a concatenated row is null.
+        integer(int64), intent(in) :: nl        !! elements in the left half (the values).
+        integer(int64), intent(in) :: nr        !! elements in the right half (the keys).
+        integer(int64), intent(out) :: dup_at    !! the higher of two equal key positions, or 0.
+        integer(int64), intent(out) :: dup_first !! the lower of them, or 0.
+        integer(int64) :: n, s, e, k, p, q, lo1, lo2
+        !
+        dup_at = 0_int64
+        dup_first = 0_int64
+        if (nr < 2_int64) return
+        n = nl + nr
+        s = 1_int64
+        do while (s <= n)
+            ! The run is [s, e]. Nested rather than `.and.`ed, since Fortran does not short-circuit
+            ! and `tie(n+1)` would be out of bounds -- match_walk_first's own note.
+            e = s
+            do while (e < n)
+                if (tie(e + 1_int64) == 0_c_int8_t) exit
+                e = e + 1_int64
+            end do
+            lo1 = 0_int64
+            lo2 = 0_int64
+            do k = s, e
+                p = perm(k)
+                if (p > nl) then
+                    if (.not. isnull(p)) then
+                        q = p - nl
+                        if (lo1 == 0_int64 .or. q < lo1) then
+                            lo2 = lo1
+                            lo1 = q
+                        else if (lo2 == 0_int64 .or. q < lo2) then
+                            lo2 = q
+                        end if
+                    end if
+                end if
+            end do
+            if (lo2 > 0_int64) then
+                dup_first = lo1
+                dup_at = lo2
+                return
+            end if
+            s = e + 1_int64
+        end do
+    end subroutine remap_check_unique
+    !"""
+
 MATCH_WALKS = r"""    !> One left element's FIRST match -- the walk behind `pf_match` and `pf_in`.
     !!
     !! `first(i)` is the SMALLEST index in `right` whose element equals `left(i)`, or 0 when
@@ -6031,6 +6320,126 @@ contains
         w("        if (nl > 0_int64) mask = first /= 0_int64")
         w(f"    end procedure isin_{tag}")
         w("    !")
+
+    # ---- pf_remap: sixty-six two-line specifics over eleven key and six value workers ----
+    for t in TYPES:
+        tag, decl, what, family, nulls, _, _ = t
+        iv = ", is_valid=is_valid" if nulls == "arg" else ""
+        for v in REMAP_VALUES:
+            w(f"    module procedure remap_{tag}_{v[0]}")
+            w("        integer(int64), allocatable :: first(:)")
+            w("        !")
+            w(f"        call remap_match_{tag}(values, from_keys, size(to_values, kind=int64), &")
+            w(f"            first{iv}, threads=threads)")
+            w(f"        call remap_fill_{v[0]}(first, to_values, out, default, found)")
+            w(f"    end procedure remap_{tag}_{v[0]}")
+            w("    !")
+
+    for t in TYPES:
+        tag, decl, what, family, nulls, _, _ = t
+        w(f"    !> The KEY half of every pf_remap specific over {what} keys: refuses a lookup table")
+        w("    !! that is the wrong length or that repeats a key, then matches every value against it.")
+        w("    !!")
+        w("    !! Split from the value half so that eleven key types times six value types costs")
+        w("    !! eleven plus six workers rather than sixty-six -- and so that the two guards below")
+        w("    !! are written once. Neither depends on what a key maps TO.")
+        if nulls == "arg":
+            w(f"    subroutine remap_match_{tag}(values, from_keys, n_to, first, is_valid, threads)")
+        else:
+            w(f"    subroutine remap_match_{tag}(values, from_keys, n_to, first, threads)")
+        w(val_decl(t, "in") + " !! the keys to look up.")
+        w(val_decl(t, "in", "from_keys") + " !! the lookup table's keys.")
+        w("        integer(int64), intent(in) :: n_to !! size(to_values), checked against the key count.")
+        w("        integer(int64), allocatable, intent(out) :: first(:) !! per value: key index, or 0.")
+        if nulls == "arg":
+            w("        logical, intent(in), optional :: is_valid(:) !! `values`' validity; absent means none.")
+        w("        integer, intent(in), optional :: threads !! thread request; absent = auto.")
+        w("        integer(int64), allocatable :: perm(:)")
+        w("        integer(c_int8_t), allocatable :: tie(:)")
+        w("        logical, allocatable :: isnull(:)")
+        w("        integer(int64) :: nl, nr, dup_at, dup_first")
+        w("        character(len=32) :: a_str, b_str")
+        w("        !")
+        w("        ! Checked BEFORE the sort: a caller who paired the wrong two arrays should be told")
+        w("        ! so at once rather than after O(n log n) of work they cannot use.")
+        w(f"        nr = {rows_of(t, 'from_keys')}")
+        w("        if (nr /= n_to) then")
+        w("            write (a_str, \"(i0)\") nr")
+        w("            write (b_str, \"(i0)\") n_to")
+        w("            error stop EP // \"pf_remap: from_keys has \" // trim(a_str) // \" keys but \" // &")
+        w("                \"to_values has \" // trim(b_str) // \" values; a lookup table takes one \" // &")
+        w("                \"value per key\"")
+        w("        end if")
+        w(f"        call match_keys_{tag}(values, from_keys, \"pf_remap\", nl, nr, perm, tie, isnull, &")
+        if nulls == "arg":
+            w("            is_valid_left=is_valid, &")
+        w("            threads=threads)")
+        w("        call remap_check_unique(perm, tie, isnull, nl, nr, dup_at, dup_first)")
+        w("        if (dup_at > 0_int64) then")
+        w("            write (a_str, \"(i0)\") dup_first")
+        w("            write (b_str, \"(i0)\") dup_at")
+        w("            error stop EP // \"pf_remap: from_keys repeats a key at positions \" // &")
+        w("                trim(a_str) // \" and \" // trim(b_str) // \"; a lookup table must be \" // &")
+        w("                \"distinct, since a repeated key has no defined value\"")
+        w("        end if")
+        w("        call match_walk_first(perm, tie, isnull, nl, nr, first)")
+        w(f"    end subroutine remap_match_{tag}")
+        w("    !")
+
+    for v in REMAP_VALUES:
+        w(f"    !> The VALUE half of every pf_remap specific with {v[2]} values: the gather, and the")
+        w("    !! policy for an element that matched no key.")
+        w(f"    subroutine remap_fill_{v[0]}(first, to_values, out, default, found)")
+        w("        integer(int64), intent(in) :: first(:) !! per value: key index, or 0 when unmapped.")
+        w(remap_to_decl(v) + " !! the value each key maps to.")
+        w(remap_out_decl(v).replace("            ", "        ", 1) + " !! the mapped values.")
+        w(f"        {v[1]}, intent(in), optional :: default !! what an unmapped element becomes.")
+        w("        logical, allocatable, intent(out), optional :: found(:) !! .true. where a key matched.")
+        w("        integer(int64) :: i, n")
+        if v[0] == "chr":
+            w("        integer :: wid")
+        w("        character(len=32) :: a_str")
+        w("        !")
+        w("        n = size(first, kind=int64)")
+        w("        if (present(found)) then")
+        w("            allocate(found(n))")
+        w("            if (n > 0_int64) found = first /= 0_int64")
+        w("        end if")
+        w("        ! The abort is the DEFAULT, and it happens before `out` is allocated: with neither")
+        w("        ! `default` nor `found` the caller has no way to learn an element was unmapped, so")
+        w("        ! handing them one silently is the one behaviour this family refuses.")
+        w("        if (.not. present(default) .and. .not. present(found)) then")
+        w("            do i = 1_int64, n")
+        w("                if (first(i) == 0_int64) then")
+        w("                    write (a_str, \"(i0)\") i")
+        w("                    error stop EP // \"pf_remap: the value at position \" // trim(a_str) // &")
+        w("                        \" matches no key in from_keys; pass default= for a fallback \" // &")
+        w("                        \"value, or found= to be told which elements were unmapped\"")
+        w("                end if")
+        w("            end do")
+        w("        end if")
+        if v[0] == "chr":
+            w("        ! Deferred-length, and sized from BOTH inputs -- pf_merge's rule, for the same")
+            w("        ! reason: a `default` longer than the table's values would otherwise be truncated")
+            w("        ! into the result silently.")
+            w("        wid = len(to_values)")
+            w("        if (present(default)) wid = max(wid, len(default))")
+            w("        allocate(character(len=wid) :: out(n))")
+        else:
+            w("        allocate(out(n))")
+        w("        do i = 1_int64, n")
+        w("            if (first(i) /= 0_int64) then")
+        w("                out(i) = to_values(first(i))")
+        w("            else if (present(default)) then")
+        w("                out(i) = default")
+        w("            else")
+        w(f"                out(i) = {REMAP_ZERO[v[0]]}")
+        w("            end if")
+        w("        end do")
+        w(f"    end subroutine remap_fill_{v[0]}")
+        w("    !")
+
+    w(REMAP_UNIQUE_WALK)
 
     # ---- the per-type key assembly ----
     for t in TYPES:

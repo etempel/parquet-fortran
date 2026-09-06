@@ -397,6 +397,296 @@ contains
         end do
     end procedure unique_strcol
     !
+    module procedure value_counts_i32_i32
+        integer(int64), allocatable :: idxs(:), lens(:)
+        integer(int64) :: k, nd, nn
+        !
+        call unique_impl_i32(values, .false., "pf_value_counts", idxs, nd, nn, is_valid=is_valid, &
+            run_len=lens, threads=threads)
+        if (present(n_null)) n_null = nn
+        allocate(distinct(nd))
+        do k = 1_int64, nd
+            distinct(k) = values(idxs(k))
+        end do
+        call narrow_i64_array(lens(1:nd), "pf_value_counts", "value count", counts)
+    end procedure value_counts_i32_i32
+    !
+    module procedure value_counts_i32_i64
+        integer(int64), allocatable :: idxs(:), lens(:)
+        integer(int64) :: k, nd, nn
+        !
+        call unique_impl_i32(values, .false., "pf_value_counts", idxs, nd, nn, is_valid=is_valid, &
+            run_len=lens, threads=threads)
+        if (present(n_null)) n_null = nn
+        allocate(distinct(nd))
+        do k = 1_int64, nd
+            distinct(k) = values(idxs(k))
+        end do
+        allocate(counts(nd))
+        if (nd > 0_int64) counts = lens(1:nd)
+    end procedure value_counts_i32_i64
+    !
+    module procedure value_counts_i64_i32
+        integer(int64), allocatable :: idxs(:), lens(:)
+        integer(int64) :: k, nd, nn
+        !
+        call unique_impl_i64(values, .false., "pf_value_counts", idxs, nd, nn, is_valid=is_valid, &
+            run_len=lens, threads=threads)
+        if (present(n_null)) n_null = nn
+        allocate(distinct(nd))
+        do k = 1_int64, nd
+            distinct(k) = values(idxs(k))
+        end do
+        call narrow_i64_array(lens(1:nd), "pf_value_counts", "value count", counts)
+    end procedure value_counts_i64_i32
+    !
+    module procedure value_counts_i64_i64
+        integer(int64), allocatable :: idxs(:), lens(:)
+        integer(int64) :: k, nd, nn
+        !
+        call unique_impl_i64(values, .false., "pf_value_counts", idxs, nd, nn, is_valid=is_valid, &
+            run_len=lens, threads=threads)
+        if (present(n_null)) n_null = nn
+        allocate(distinct(nd))
+        do k = 1_int64, nd
+            distinct(k) = values(idxs(k))
+        end do
+        allocate(counts(nd))
+        if (nd > 0_int64) counts = lens(1:nd)
+    end procedure value_counts_i64_i64
+    !
+    module procedure value_counts_f32_i32
+        integer(int64), allocatable :: idxs(:), lens(:)
+        integer(int64) :: k, nd, nn
+        !
+        call unique_impl_f32(values, .false., "pf_value_counts", idxs, nd, nn, is_valid=is_valid, &
+            run_len=lens, threads=threads)
+        if (present(n_null)) n_null = nn
+        allocate(distinct(nd))
+        do k = 1_int64, nd
+            distinct(k) = values(idxs(k))
+        end do
+        call narrow_i64_array(lens(1:nd), "pf_value_counts", "value count", counts)
+    end procedure value_counts_f32_i32
+    !
+    module procedure value_counts_f32_i64
+        integer(int64), allocatable :: idxs(:), lens(:)
+        integer(int64) :: k, nd, nn
+        !
+        call unique_impl_f32(values, .false., "pf_value_counts", idxs, nd, nn, is_valid=is_valid, &
+            run_len=lens, threads=threads)
+        if (present(n_null)) n_null = nn
+        allocate(distinct(nd))
+        do k = 1_int64, nd
+            distinct(k) = values(idxs(k))
+        end do
+        allocate(counts(nd))
+        if (nd > 0_int64) counts = lens(1:nd)
+    end procedure value_counts_f32_i64
+    !
+    module procedure value_counts_f64_i32
+        integer(int64), allocatable :: idxs(:), lens(:)
+        integer(int64) :: k, nd, nn
+        !
+        call unique_impl_f64(values, .false., "pf_value_counts", idxs, nd, nn, is_valid=is_valid, &
+            run_len=lens, threads=threads)
+        if (present(n_null)) n_null = nn
+        allocate(distinct(nd))
+        do k = 1_int64, nd
+            distinct(k) = values(idxs(k))
+        end do
+        call narrow_i64_array(lens(1:nd), "pf_value_counts", "value count", counts)
+    end procedure value_counts_f64_i32
+    !
+    module procedure value_counts_f64_i64
+        integer(int64), allocatable :: idxs(:), lens(:)
+        integer(int64) :: k, nd, nn
+        !
+        call unique_impl_f64(values, .false., "pf_value_counts", idxs, nd, nn, is_valid=is_valid, &
+            run_len=lens, threads=threads)
+        if (present(n_null)) n_null = nn
+        allocate(distinct(nd))
+        do k = 1_int64, nd
+            distinct(k) = values(idxs(k))
+        end do
+        allocate(counts(nd))
+        if (nd > 0_int64) counts = lens(1:nd)
+    end procedure value_counts_f64_i64
+    !
+    module procedure value_counts_bool_i32
+        integer(int64), allocatable :: idxs(:), lens(:)
+        integer(int64) :: k, nd, nn
+        !
+        call unique_impl_bool(values, .false., "pf_value_counts", idxs, nd, nn, is_valid=is_valid, &
+            run_len=lens, threads=threads)
+        if (present(n_null)) n_null = nn
+        allocate(distinct(nd))
+        do k = 1_int64, nd
+            distinct(k) = values(idxs(k))
+        end do
+        call narrow_i64_array(lens(1:nd), "pf_value_counts", "value count", counts)
+    end procedure value_counts_bool_i32
+    !
+    module procedure value_counts_bool_i64
+        integer(int64), allocatable :: idxs(:), lens(:)
+        integer(int64) :: k, nd, nn
+        !
+        call unique_impl_bool(values, .false., "pf_value_counts", idxs, nd, nn, is_valid=is_valid, &
+            run_len=lens, threads=threads)
+        if (present(n_null)) n_null = nn
+        allocate(distinct(nd))
+        do k = 1_int64, nd
+            distinct(k) = values(idxs(k))
+        end do
+        allocate(counts(nd))
+        if (nd > 0_int64) counts = lens(1:nd)
+    end procedure value_counts_bool_i64
+    !
+    module procedure value_counts_chr_i32
+        integer(int64), allocatable :: idxs(:), lens(:)
+        integer(int64) :: k, nd, nn
+        !
+        call unique_impl_chr(values, .false., "pf_value_counts", idxs, nd, nn, is_valid=is_valid, &
+            run_len=lens, threads=threads)
+        if (present(n_null)) n_null = nn
+        allocate(character(len=len(values)) :: distinct(nd))
+        do k = 1_int64, nd
+            distinct(k) = values(idxs(k))
+        end do
+        call narrow_i64_array(lens(1:nd), "pf_value_counts", "value count", counts)
+    end procedure value_counts_chr_i32
+    !
+    module procedure value_counts_chr_i64
+        integer(int64), allocatable :: idxs(:), lens(:)
+        integer(int64) :: k, nd, nn
+        !
+        call unique_impl_chr(values, .false., "pf_value_counts", idxs, nd, nn, is_valid=is_valid, &
+            run_len=lens, threads=threads)
+        if (present(n_null)) n_null = nn
+        allocate(character(len=len(values)) :: distinct(nd))
+        do k = 1_int64, nd
+            distinct(k) = values(idxs(k))
+        end do
+        allocate(counts(nd))
+        if (nd > 0_int64) counts = lens(1:nd)
+    end procedure value_counts_chr_i64
+    !
+    module procedure value_counts_date_i32
+        integer(int64), allocatable :: idxs(:), lens(:)
+        integer(int64) :: k, nd, nn
+        !
+        call unique_impl_date(values, .false., "pf_value_counts", idxs, nd, nn, &
+            run_len=lens, threads=threads)
+        if (present(n_null)) n_null = nn
+        allocate(distinct(nd))
+        do k = 1_int64, nd
+            distinct(k) = values(idxs(k))
+        end do
+        call narrow_i64_array(lens(1:nd), "pf_value_counts", "value count", counts)
+    end procedure value_counts_date_i32
+    !
+    module procedure value_counts_date_i64
+        integer(int64), allocatable :: idxs(:), lens(:)
+        integer(int64) :: k, nd, nn
+        !
+        call unique_impl_date(values, .false., "pf_value_counts", idxs, nd, nn, &
+            run_len=lens, threads=threads)
+        if (present(n_null)) n_null = nn
+        allocate(distinct(nd))
+        do k = 1_int64, nd
+            distinct(k) = values(idxs(k))
+        end do
+        allocate(counts(nd))
+        if (nd > 0_int64) counts = lens(1:nd)
+    end procedure value_counts_date_i64
+    !
+    module procedure value_counts_time_i32
+        integer(int64), allocatable :: idxs(:), lens(:)
+        integer(int64) :: k, nd, nn
+        !
+        call unique_impl_time(values, .false., "pf_value_counts", idxs, nd, nn, &
+            run_len=lens, threads=threads)
+        if (present(n_null)) n_null = nn
+        allocate(distinct(nd))
+        do k = 1_int64, nd
+            distinct(k) = values(idxs(k))
+        end do
+        call narrow_i64_array(lens(1:nd), "pf_value_counts", "value count", counts)
+    end procedure value_counts_time_i32
+    !
+    module procedure value_counts_time_i64
+        integer(int64), allocatable :: idxs(:), lens(:)
+        integer(int64) :: k, nd, nn
+        !
+        call unique_impl_time(values, .false., "pf_value_counts", idxs, nd, nn, &
+            run_len=lens, threads=threads)
+        if (present(n_null)) n_null = nn
+        allocate(distinct(nd))
+        do k = 1_int64, nd
+            distinct(k) = values(idxs(k))
+        end do
+        allocate(counts(nd))
+        if (nd > 0_int64) counts = lens(1:nd)
+    end procedure value_counts_time_i64
+    !
+    module procedure value_counts_ts_i32
+        integer(int64), allocatable :: idxs(:), lens(:)
+        integer(int64) :: k, nd, nn
+        !
+        call unique_impl_ts(values, .false., "pf_value_counts", idxs, nd, nn, &
+            run_len=lens, threads=threads)
+        if (present(n_null)) n_null = nn
+        allocate(distinct(nd))
+        do k = 1_int64, nd
+            distinct(k) = values(idxs(k))
+        end do
+        call narrow_i64_array(lens(1:nd), "pf_value_counts", "value count", counts)
+    end procedure value_counts_ts_i32
+    !
+    module procedure value_counts_ts_i64
+        integer(int64), allocatable :: idxs(:), lens(:)
+        integer(int64) :: k, nd, nn
+        !
+        call unique_impl_ts(values, .false., "pf_value_counts", idxs, nd, nn, &
+            run_len=lens, threads=threads)
+        if (present(n_null)) n_null = nn
+        allocate(distinct(nd))
+        do k = 1_int64, nd
+            distinct(k) = values(idxs(k))
+        end do
+        allocate(counts(nd))
+        if (nd > 0_int64) counts = lens(1:nd)
+    end procedure value_counts_ts_i64
+    !
+    module procedure value_counts_strcol_i32
+        integer(int64), allocatable :: idxs(:), lens(:)
+        integer(int64) :: k, nd, nn
+        !
+        call unique_impl_strcol(values, .false., "pf_value_counts", idxs, nd, nn, &
+            run_len=lens, threads=threads)
+        if (present(n_null)) n_null = nn
+        call distinct%clear()
+        do k = 1_int64, nd
+            call distinct%append_from(values, idxs(k))
+        end do
+        call narrow_i64_array(lens(1:nd), "pf_value_counts", "value count", counts)
+    end procedure value_counts_strcol_i32
+    !
+    module procedure value_counts_strcol_i64
+        integer(int64), allocatable :: idxs(:), lens(:)
+        integer(int64) :: k, nd, nn
+        !
+        call unique_impl_strcol(values, .false., "pf_value_counts", idxs, nd, nn, &
+            run_len=lens, threads=threads)
+        if (present(n_null)) n_null = nn
+        call distinct%clear()
+        do k = 1_int64, nd
+            call distinct%append_from(values, idxs(k))
+        end do
+        allocate(counts(nd))
+        if (nd > 0_int64) counts = lens(1:nd)
+    end procedure value_counts_strcol_i64
+    !
     module procedure rank_i32_i32
         integer(int64), allocatable :: r64(:)
         logical :: desc
@@ -619,7 +909,8 @@ contains
     !
     !> Shared worker behind pf_unique_count and pf_unique for a 32-bit integer array: the
     !! 1-based index of the FIRST occurrence of each distinct non-null value, in order.
-    subroutine unique_impl_i32(values, descending, proc, first_idx, ndist, nnull, is_valid, threads)
+    subroutine unique_impl_i32(values, descending, proc, first_idx, ndist, nnull, is_valid, &
+            run_len, threads)
         integer(int32), intent(in) :: values(:)
         logical, intent(in) :: descending    !! .true. reports the distinct values high to low.
         character(len=*), intent(in) :: proc !! calling procedure, for messages.
@@ -627,12 +918,17 @@ contains
         integer(int64), intent(out) :: ndist !! how many distinct non-null values.
         integer(int64), intent(out) :: nnull !! how many values were null.
         logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        integer(int64), allocatable, intent(out), optional :: run_len(:)
+        !! how many elements each distinct value has -- `pf_value_counts`' answer, and the
+        !! only thing that separates it from `pf_unique`. Allocated to the same length as
+        !! `first_idx`, so read `run_len(1:ndist)`.
         integer, intent(in), optional :: threads !! thread request; absent = auto.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64), allocatable :: perm(:)
         integer(c_int8_t), allocatable :: tie(:)
         logical, allocatable :: isnull(:)
-        integer(int64) :: k, n
+        integer(int64) :: k, n, run_begin
+        logical :: want_len
         !
         n = size(values, kind=int64)
         call extract_i32(values, buf, descending, .false., proc, is_valid=is_valid, threads=threads)
@@ -640,8 +936,14 @@ contains
         call key_null_mask(buf, n, isnull)
         allocate(first_idx(max(n, 1_int64)))
         first_idx = 0_int64
+        want_len = present(run_len)
+        if (want_len) then
+            allocate(run_len(max(n, 1_int64)))
+            run_len = 0_int64
+        end if
         ndist = 0_int64
         nnull = 0_int64
+        run_begin = 0_int64
         do k = 1_int64, n
             ! nulls_first=.false. puts every null in the last tier, so the first one ends
             ! the walk and the rest of the array is exactly the null count.
@@ -650,10 +952,18 @@ contains
                 exit
             end if
             if (tie(k) == 0_c_int8_t) then
+                ! A run ends where the next one starts, so each length is settled one run
+                ! LATE -- and the last one after the loop, from whichever k ended it.
+                if (want_len .and. ndist >= 1_int64) run_len(ndist) = k - run_begin
                 ndist = ndist + 1_int64
                 first_idx(ndist) = perm(k)
+                run_begin = k
             end if
         end do
+        ! `k` is n+1 when the loop ran out and the null position when it exited, which is
+        ! exactly one past the last non-null row either way. Fortran leaves the DO variable
+        ! defined after the construct, and n < 1 leaves ndist 0 so the guard skips it.
+        if (want_len .and. ndist >= 1_int64) run_len(ndist) = k - run_begin
     end subroutine unique_impl_i32
     !
     !> Shared worker behind every pf_rank specific for a 32-bit integer array.
@@ -706,7 +1016,8 @@ contains
     !
     !> Shared worker behind pf_unique_count and pf_unique for a 64-bit integer array: the
     !! 1-based index of the FIRST occurrence of each distinct non-null value, in order.
-    subroutine unique_impl_i64(values, descending, proc, first_idx, ndist, nnull, is_valid, threads)
+    subroutine unique_impl_i64(values, descending, proc, first_idx, ndist, nnull, is_valid, &
+            run_len, threads)
         integer(int64), intent(in) :: values(:)
         logical, intent(in) :: descending    !! .true. reports the distinct values high to low.
         character(len=*), intent(in) :: proc !! calling procedure, for messages.
@@ -714,12 +1025,17 @@ contains
         integer(int64), intent(out) :: ndist !! how many distinct non-null values.
         integer(int64), intent(out) :: nnull !! how many values were null.
         logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        integer(int64), allocatable, intent(out), optional :: run_len(:)
+        !! how many elements each distinct value has -- `pf_value_counts`' answer, and the
+        !! only thing that separates it from `pf_unique`. Allocated to the same length as
+        !! `first_idx`, so read `run_len(1:ndist)`.
         integer, intent(in), optional :: threads !! thread request; absent = auto.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64), allocatable :: perm(:)
         integer(c_int8_t), allocatable :: tie(:)
         logical, allocatable :: isnull(:)
-        integer(int64) :: k, n
+        integer(int64) :: k, n, run_begin
+        logical :: want_len
         !
         n = size(values, kind=int64)
         call extract_i64(values, buf, descending, .false., proc, is_valid=is_valid, threads=threads)
@@ -727,8 +1043,14 @@ contains
         call key_null_mask(buf, n, isnull)
         allocate(first_idx(max(n, 1_int64)))
         first_idx = 0_int64
+        want_len = present(run_len)
+        if (want_len) then
+            allocate(run_len(max(n, 1_int64)))
+            run_len = 0_int64
+        end if
         ndist = 0_int64
         nnull = 0_int64
+        run_begin = 0_int64
         do k = 1_int64, n
             ! nulls_first=.false. puts every null in the last tier, so the first one ends
             ! the walk and the rest of the array is exactly the null count.
@@ -737,10 +1059,18 @@ contains
                 exit
             end if
             if (tie(k) == 0_c_int8_t) then
+                ! A run ends where the next one starts, so each length is settled one run
+                ! LATE -- and the last one after the loop, from whichever k ended it.
+                if (want_len .and. ndist >= 1_int64) run_len(ndist) = k - run_begin
                 ndist = ndist + 1_int64
                 first_idx(ndist) = perm(k)
+                run_begin = k
             end if
         end do
+        ! `k` is n+1 when the loop ran out and the null position when it exited, which is
+        ! exactly one past the last non-null row either way. Fortran leaves the DO variable
+        ! defined after the construct, and n < 1 leaves ndist 0 so the guard skips it.
+        if (want_len .and. ndist >= 1_int64) run_len(ndist) = k - run_begin
     end subroutine unique_impl_i64
     !
     !> Shared worker behind every pf_rank specific for a 64-bit integer array.
@@ -793,7 +1123,8 @@ contains
     !
     !> Shared worker behind pf_unique_count and pf_unique for a 32-bit real array: the
     !! 1-based index of the FIRST occurrence of each distinct non-null value, in order.
-    subroutine unique_impl_f32(values, descending, proc, first_idx, ndist, nnull, is_valid, threads)
+    subroutine unique_impl_f32(values, descending, proc, first_idx, ndist, nnull, is_valid, &
+            run_len, threads)
         real(real32), intent(in) :: values(:)
         logical, intent(in) :: descending    !! .true. reports the distinct values high to low.
         character(len=*), intent(in) :: proc !! calling procedure, for messages.
@@ -801,12 +1132,17 @@ contains
         integer(int64), intent(out) :: ndist !! how many distinct non-null values.
         integer(int64), intent(out) :: nnull !! how many values were null.
         logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        integer(int64), allocatable, intent(out), optional :: run_len(:)
+        !! how many elements each distinct value has -- `pf_value_counts`' answer, and the
+        !! only thing that separates it from `pf_unique`. Allocated to the same length as
+        !! `first_idx`, so read `run_len(1:ndist)`.
         integer, intent(in), optional :: threads !! thread request; absent = auto.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64), allocatable :: perm(:)
         integer(c_int8_t), allocatable :: tie(:)
         logical, allocatable :: isnull(:)
-        integer(int64) :: k, n
+        integer(int64) :: k, n, run_begin
+        logical :: want_len
         !
         n = size(values, kind=int64)
         call extract_f32(values, buf, descending, .false., proc, is_valid=is_valid, threads=threads)
@@ -814,8 +1150,14 @@ contains
         call key_null_mask(buf, n, isnull)
         allocate(first_idx(max(n, 1_int64)))
         first_idx = 0_int64
+        want_len = present(run_len)
+        if (want_len) then
+            allocate(run_len(max(n, 1_int64)))
+            run_len = 0_int64
+        end if
         ndist = 0_int64
         nnull = 0_int64
+        run_begin = 0_int64
         do k = 1_int64, n
             ! nulls_first=.false. puts every null in the last tier, so the first one ends
             ! the walk and the rest of the array is exactly the null count.
@@ -824,10 +1166,18 @@ contains
                 exit
             end if
             if (tie(k) == 0_c_int8_t) then
+                ! A run ends where the next one starts, so each length is settled one run
+                ! LATE -- and the last one after the loop, from whichever k ended it.
+                if (want_len .and. ndist >= 1_int64) run_len(ndist) = k - run_begin
                 ndist = ndist + 1_int64
                 first_idx(ndist) = perm(k)
+                run_begin = k
             end if
         end do
+        ! `k` is n+1 when the loop ran out and the null position when it exited, which is
+        ! exactly one past the last non-null row either way. Fortran leaves the DO variable
+        ! defined after the construct, and n < 1 leaves ndist 0 so the guard skips it.
+        if (want_len .and. ndist >= 1_int64) run_len(ndist) = k - run_begin
     end subroutine unique_impl_f32
     !
     !> Shared worker behind every pf_rank specific for a 32-bit real array.
@@ -880,7 +1230,8 @@ contains
     !
     !> Shared worker behind pf_unique_count and pf_unique for a 64-bit real array: the
     !! 1-based index of the FIRST occurrence of each distinct non-null value, in order.
-    subroutine unique_impl_f64(values, descending, proc, first_idx, ndist, nnull, is_valid, threads)
+    subroutine unique_impl_f64(values, descending, proc, first_idx, ndist, nnull, is_valid, &
+            run_len, threads)
         real(real64), intent(in) :: values(:)
         logical, intent(in) :: descending    !! .true. reports the distinct values high to low.
         character(len=*), intent(in) :: proc !! calling procedure, for messages.
@@ -888,12 +1239,17 @@ contains
         integer(int64), intent(out) :: ndist !! how many distinct non-null values.
         integer(int64), intent(out) :: nnull !! how many values were null.
         logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        integer(int64), allocatable, intent(out), optional :: run_len(:)
+        !! how many elements each distinct value has -- `pf_value_counts`' answer, and the
+        !! only thing that separates it from `pf_unique`. Allocated to the same length as
+        !! `first_idx`, so read `run_len(1:ndist)`.
         integer, intent(in), optional :: threads !! thread request; absent = auto.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64), allocatable :: perm(:)
         integer(c_int8_t), allocatable :: tie(:)
         logical, allocatable :: isnull(:)
-        integer(int64) :: k, n
+        integer(int64) :: k, n, run_begin
+        logical :: want_len
         !
         n = size(values, kind=int64)
         call extract_f64(values, buf, descending, .false., proc, is_valid=is_valid, threads=threads)
@@ -901,8 +1257,14 @@ contains
         call key_null_mask(buf, n, isnull)
         allocate(first_idx(max(n, 1_int64)))
         first_idx = 0_int64
+        want_len = present(run_len)
+        if (want_len) then
+            allocate(run_len(max(n, 1_int64)))
+            run_len = 0_int64
+        end if
         ndist = 0_int64
         nnull = 0_int64
+        run_begin = 0_int64
         do k = 1_int64, n
             ! nulls_first=.false. puts every null in the last tier, so the first one ends
             ! the walk and the rest of the array is exactly the null count.
@@ -911,10 +1273,18 @@ contains
                 exit
             end if
             if (tie(k) == 0_c_int8_t) then
+                ! A run ends where the next one starts, so each length is settled one run
+                ! LATE -- and the last one after the loop, from whichever k ended it.
+                if (want_len .and. ndist >= 1_int64) run_len(ndist) = k - run_begin
                 ndist = ndist + 1_int64
                 first_idx(ndist) = perm(k)
+                run_begin = k
             end if
         end do
+        ! `k` is n+1 when the loop ran out and the null position when it exited, which is
+        ! exactly one past the last non-null row either way. Fortran leaves the DO variable
+        ! defined after the construct, and n < 1 leaves ndist 0 so the guard skips it.
+        if (want_len .and. ndist >= 1_int64) run_len(ndist) = k - run_begin
     end subroutine unique_impl_f64
     !
     !> Shared worker behind every pf_rank specific for a 64-bit real array.
@@ -967,7 +1337,8 @@ contains
     !
     !> Shared worker behind pf_unique_count and pf_unique for a logical array: the
     !! 1-based index of the FIRST occurrence of each distinct non-null value, in order.
-    subroutine unique_impl_bool(values, descending, proc, first_idx, ndist, nnull, is_valid, threads)
+    subroutine unique_impl_bool(values, descending, proc, first_idx, ndist, nnull, is_valid, &
+            run_len, threads)
         logical, intent(in) :: values(:)
         logical, intent(in) :: descending    !! .true. reports the distinct values high to low.
         character(len=*), intent(in) :: proc !! calling procedure, for messages.
@@ -975,12 +1346,17 @@ contains
         integer(int64), intent(out) :: ndist !! how many distinct non-null values.
         integer(int64), intent(out) :: nnull !! how many values were null.
         logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        integer(int64), allocatable, intent(out), optional :: run_len(:)
+        !! how many elements each distinct value has -- `pf_value_counts`' answer, and the
+        !! only thing that separates it from `pf_unique`. Allocated to the same length as
+        !! `first_idx`, so read `run_len(1:ndist)`.
         integer, intent(in), optional :: threads !! thread request; absent = auto.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64), allocatable :: perm(:)
         integer(c_int8_t), allocatable :: tie(:)
         logical, allocatable :: isnull(:)
-        integer(int64) :: k, n
+        integer(int64) :: k, n, run_begin
+        logical :: want_len
         !
         n = size(values, kind=int64)
         call extract_bool(values, buf, descending, .false., proc, is_valid=is_valid, threads=threads)
@@ -988,8 +1364,14 @@ contains
         call key_null_mask(buf, n, isnull)
         allocate(first_idx(max(n, 1_int64)))
         first_idx = 0_int64
+        want_len = present(run_len)
+        if (want_len) then
+            allocate(run_len(max(n, 1_int64)))
+            run_len = 0_int64
+        end if
         ndist = 0_int64
         nnull = 0_int64
+        run_begin = 0_int64
         do k = 1_int64, n
             ! nulls_first=.false. puts every null in the last tier, so the first one ends
             ! the walk and the rest of the array is exactly the null count.
@@ -998,10 +1380,18 @@ contains
                 exit
             end if
             if (tie(k) == 0_c_int8_t) then
+                ! A run ends where the next one starts, so each length is settled one run
+                ! LATE -- and the last one after the loop, from whichever k ended it.
+                if (want_len .and. ndist >= 1_int64) run_len(ndist) = k - run_begin
                 ndist = ndist + 1_int64
                 first_idx(ndist) = perm(k)
+                run_begin = k
             end if
         end do
+        ! `k` is n+1 when the loop ran out and the null position when it exited, which is
+        ! exactly one past the last non-null row either way. Fortran leaves the DO variable
+        ! defined after the construct, and n < 1 leaves ndist 0 so the guard skips it.
+        if (want_len .and. ndist >= 1_int64) run_len(ndist) = k - run_begin
     end subroutine unique_impl_bool
     !
     !> Shared worker behind every pf_rank specific for a logical array.
@@ -1054,7 +1444,8 @@ contains
     !
     !> Shared worker behind pf_unique_count and pf_unique for a string array: the
     !! 1-based index of the FIRST occurrence of each distinct non-null value, in order.
-    subroutine unique_impl_chr(values, descending, proc, first_idx, ndist, nnull, is_valid, threads)
+    subroutine unique_impl_chr(values, descending, proc, first_idx, ndist, nnull, is_valid, &
+            run_len, threads)
         character(len=*), intent(in) :: values(:)
         logical, intent(in) :: descending    !! .true. reports the distinct values high to low.
         character(len=*), intent(in) :: proc !! calling procedure, for messages.
@@ -1062,12 +1453,17 @@ contains
         integer(int64), intent(out) :: ndist !! how many distinct non-null values.
         integer(int64), intent(out) :: nnull !! how many values were null.
         logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        integer(int64), allocatable, intent(out), optional :: run_len(:)
+        !! how many elements each distinct value has -- `pf_value_counts`' answer, and the
+        !! only thing that separates it from `pf_unique`. Allocated to the same length as
+        !! `first_idx`, so read `run_len(1:ndist)`.
         integer, intent(in), optional :: threads !! thread request; absent = auto.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64), allocatable :: perm(:)
         integer(c_int8_t), allocatable :: tie(:)
         logical, allocatable :: isnull(:)
-        integer(int64) :: k, n
+        integer(int64) :: k, n, run_begin
+        logical :: want_len
         !
         n = size(values, kind=int64)
         call extract_chr(values, buf, descending, .false., proc, is_valid=is_valid, threads=threads)
@@ -1075,8 +1471,14 @@ contains
         call key_null_mask(buf, n, isnull)
         allocate(first_idx(max(n, 1_int64)))
         first_idx = 0_int64
+        want_len = present(run_len)
+        if (want_len) then
+            allocate(run_len(max(n, 1_int64)))
+            run_len = 0_int64
+        end if
         ndist = 0_int64
         nnull = 0_int64
+        run_begin = 0_int64
         do k = 1_int64, n
             ! nulls_first=.false. puts every null in the last tier, so the first one ends
             ! the walk and the rest of the array is exactly the null count.
@@ -1085,10 +1487,18 @@ contains
                 exit
             end if
             if (tie(k) == 0_c_int8_t) then
+                ! A run ends where the next one starts, so each length is settled one run
+                ! LATE -- and the last one after the loop, from whichever k ended it.
+                if (want_len .and. ndist >= 1_int64) run_len(ndist) = k - run_begin
                 ndist = ndist + 1_int64
                 first_idx(ndist) = perm(k)
+                run_begin = k
             end if
         end do
+        ! `k` is n+1 when the loop ran out and the null position when it exited, which is
+        ! exactly one past the last non-null row either way. Fortran leaves the DO variable
+        ! defined after the construct, and n < 1 leaves ndist 0 so the guard skips it.
+        if (want_len .and. ndist >= 1_int64) run_len(ndist) = k - run_begin
     end subroutine unique_impl_chr
     !
     !> Shared worker behind every pf_rank specific for a string array.
@@ -1141,19 +1551,25 @@ contains
     !
     !> Shared worker behind pf_unique_count and pf_unique for a date array: the
     !! 1-based index of the FIRST occurrence of each distinct non-null value, in order.
-    subroutine unique_impl_date(values, descending, proc, first_idx, ndist, nnull, threads)
+    subroutine unique_impl_date(values, descending, proc, first_idx, ndist, nnull, &
+            run_len, threads)
         type(parquet_date), intent(in) :: values(:)
         logical, intent(in) :: descending    !! .true. reports the distinct values high to low.
         character(len=*), intent(in) :: proc !! calling procedure, for messages.
         integer(int64), allocatable, intent(out) :: first_idx(:) !! where each distinct value is.
         integer(int64), intent(out) :: ndist !! how many distinct non-null values.
         integer(int64), intent(out) :: nnull !! how many values were null.
+        integer(int64), allocatable, intent(out), optional :: run_len(:)
+        !! how many elements each distinct value has -- `pf_value_counts`' answer, and the
+        !! only thing that separates it from `pf_unique`. Allocated to the same length as
+        !! `first_idx`, so read `run_len(1:ndist)`.
         integer, intent(in), optional :: threads !! thread request; absent = auto.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64), allocatable :: perm(:)
         integer(c_int8_t), allocatable :: tie(:)
         logical, allocatable :: isnull(:)
-        integer(int64) :: k, n
+        integer(int64) :: k, n, run_begin
+        logical :: want_len
         !
         n = size(values, kind=int64)
         call extract_date(values, buf, descending, .false., proc, threads=threads)
@@ -1161,8 +1577,14 @@ contains
         call key_null_mask(buf, n, isnull)
         allocate(first_idx(max(n, 1_int64)))
         first_idx = 0_int64
+        want_len = present(run_len)
+        if (want_len) then
+            allocate(run_len(max(n, 1_int64)))
+            run_len = 0_int64
+        end if
         ndist = 0_int64
         nnull = 0_int64
+        run_begin = 0_int64
         do k = 1_int64, n
             ! nulls_first=.false. puts every null in the last tier, so the first one ends
             ! the walk and the rest of the array is exactly the null count.
@@ -1171,10 +1593,18 @@ contains
                 exit
             end if
             if (tie(k) == 0_c_int8_t) then
+                ! A run ends where the next one starts, so each length is settled one run
+                ! LATE -- and the last one after the loop, from whichever k ended it.
+                if (want_len .and. ndist >= 1_int64) run_len(ndist) = k - run_begin
                 ndist = ndist + 1_int64
                 first_idx(ndist) = perm(k)
+                run_begin = k
             end if
         end do
+        ! `k` is n+1 when the loop ran out and the null position when it exited, which is
+        ! exactly one past the last non-null row either way. Fortran leaves the DO variable
+        ! defined after the construct, and n < 1 leaves ndist 0 so the guard skips it.
+        if (want_len .and. ndist >= 1_int64) run_len(ndist) = k - run_begin
     end subroutine unique_impl_date
     !
     !> Shared worker behind every pf_rank specific for a date array.
@@ -1226,19 +1656,25 @@ contains
     !
     !> Shared worker behind pf_unique_count and pf_unique for a time array: the
     !! 1-based index of the FIRST occurrence of each distinct non-null value, in order.
-    subroutine unique_impl_time(values, descending, proc, first_idx, ndist, nnull, threads)
+    subroutine unique_impl_time(values, descending, proc, first_idx, ndist, nnull, &
+            run_len, threads)
         type(parquet_time), intent(in) :: values(:)
         logical, intent(in) :: descending    !! .true. reports the distinct values high to low.
         character(len=*), intent(in) :: proc !! calling procedure, for messages.
         integer(int64), allocatable, intent(out) :: first_idx(:) !! where each distinct value is.
         integer(int64), intent(out) :: ndist !! how many distinct non-null values.
         integer(int64), intent(out) :: nnull !! how many values were null.
+        integer(int64), allocatable, intent(out), optional :: run_len(:)
+        !! how many elements each distinct value has -- `pf_value_counts`' answer, and the
+        !! only thing that separates it from `pf_unique`. Allocated to the same length as
+        !! `first_idx`, so read `run_len(1:ndist)`.
         integer, intent(in), optional :: threads !! thread request; absent = auto.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64), allocatable :: perm(:)
         integer(c_int8_t), allocatable :: tie(:)
         logical, allocatable :: isnull(:)
-        integer(int64) :: k, n
+        integer(int64) :: k, n, run_begin
+        logical :: want_len
         !
         n = size(values, kind=int64)
         call extract_time(values, buf, descending, .false., proc, threads=threads)
@@ -1246,8 +1682,14 @@ contains
         call key_null_mask(buf, n, isnull)
         allocate(first_idx(max(n, 1_int64)))
         first_idx = 0_int64
+        want_len = present(run_len)
+        if (want_len) then
+            allocate(run_len(max(n, 1_int64)))
+            run_len = 0_int64
+        end if
         ndist = 0_int64
         nnull = 0_int64
+        run_begin = 0_int64
         do k = 1_int64, n
             ! nulls_first=.false. puts every null in the last tier, so the first one ends
             ! the walk and the rest of the array is exactly the null count.
@@ -1256,10 +1698,18 @@ contains
                 exit
             end if
             if (tie(k) == 0_c_int8_t) then
+                ! A run ends where the next one starts, so each length is settled one run
+                ! LATE -- and the last one after the loop, from whichever k ended it.
+                if (want_len .and. ndist >= 1_int64) run_len(ndist) = k - run_begin
                 ndist = ndist + 1_int64
                 first_idx(ndist) = perm(k)
+                run_begin = k
             end if
         end do
+        ! `k` is n+1 when the loop ran out and the null position when it exited, which is
+        ! exactly one past the last non-null row either way. Fortran leaves the DO variable
+        ! defined after the construct, and n < 1 leaves ndist 0 so the guard skips it.
+        if (want_len .and. ndist >= 1_int64) run_len(ndist) = k - run_begin
     end subroutine unique_impl_time
     !
     !> Shared worker behind every pf_rank specific for a time array.
@@ -1311,19 +1761,25 @@ contains
     !
     !> Shared worker behind pf_unique_count and pf_unique for a timestamp array: the
     !! 1-based index of the FIRST occurrence of each distinct non-null value, in order.
-    subroutine unique_impl_ts(values, descending, proc, first_idx, ndist, nnull, threads)
+    subroutine unique_impl_ts(values, descending, proc, first_idx, ndist, nnull, &
+            run_len, threads)
         type(parquet_timestamp), intent(in) :: values(:)
         logical, intent(in) :: descending    !! .true. reports the distinct values high to low.
         character(len=*), intent(in) :: proc !! calling procedure, for messages.
         integer(int64), allocatable, intent(out) :: first_idx(:) !! where each distinct value is.
         integer(int64), intent(out) :: ndist !! how many distinct non-null values.
         integer(int64), intent(out) :: nnull !! how many values were null.
+        integer(int64), allocatable, intent(out), optional :: run_len(:)
+        !! how many elements each distinct value has -- `pf_value_counts`' answer, and the
+        !! only thing that separates it from `pf_unique`. Allocated to the same length as
+        !! `first_idx`, so read `run_len(1:ndist)`.
         integer, intent(in), optional :: threads !! thread request; absent = auto.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64), allocatable :: perm(:)
         integer(c_int8_t), allocatable :: tie(:)
         logical, allocatable :: isnull(:)
-        integer(int64) :: k, n
+        integer(int64) :: k, n, run_begin
+        logical :: want_len
         !
         n = size(values, kind=int64)
         call extract_ts(values, buf, descending, .false., proc, threads=threads)
@@ -1331,8 +1787,14 @@ contains
         call key_null_mask(buf, n, isnull)
         allocate(first_idx(max(n, 1_int64)))
         first_idx = 0_int64
+        want_len = present(run_len)
+        if (want_len) then
+            allocate(run_len(max(n, 1_int64)))
+            run_len = 0_int64
+        end if
         ndist = 0_int64
         nnull = 0_int64
+        run_begin = 0_int64
         do k = 1_int64, n
             ! nulls_first=.false. puts every null in the last tier, so the first one ends
             ! the walk and the rest of the array is exactly the null count.
@@ -1341,10 +1803,18 @@ contains
                 exit
             end if
             if (tie(k) == 0_c_int8_t) then
+                ! A run ends where the next one starts, so each length is settled one run
+                ! LATE -- and the last one after the loop, from whichever k ended it.
+                if (want_len .and. ndist >= 1_int64) run_len(ndist) = k - run_begin
                 ndist = ndist + 1_int64
                 first_idx(ndist) = perm(k)
+                run_begin = k
             end if
         end do
+        ! `k` is n+1 when the loop ran out and the null position when it exited, which is
+        ! exactly one past the last non-null row either way. Fortran leaves the DO variable
+        ! defined after the construct, and n < 1 leaves ndist 0 so the guard skips it.
+        if (want_len .and. ndist >= 1_int64) run_len(ndist) = k - run_begin
     end subroutine unique_impl_ts
     !
     !> Shared worker behind every pf_rank specific for a timestamp array.
@@ -1396,19 +1866,25 @@ contains
     !
     !> Shared worker behind pf_unique_count and pf_unique for a packed string column array: the
     !! 1-based index of the FIRST occurrence of each distinct non-null value, in order.
-    subroutine unique_impl_strcol(values, descending, proc, first_idx, ndist, nnull, threads)
+    subroutine unique_impl_strcol(values, descending, proc, first_idx, ndist, nnull, &
+            run_len, threads)
         type(parquet_string_column), intent(in) :: values
         logical, intent(in) :: descending    !! .true. reports the distinct values high to low.
         character(len=*), intent(in) :: proc !! calling procedure, for messages.
         integer(int64), allocatable, intent(out) :: first_idx(:) !! where each distinct value is.
         integer(int64), intent(out) :: ndist !! how many distinct non-null values.
         integer(int64), intent(out) :: nnull !! how many values were null.
+        integer(int64), allocatable, intent(out), optional :: run_len(:)
+        !! how many elements each distinct value has -- `pf_value_counts`' answer, and the
+        !! only thing that separates it from `pf_unique`. Allocated to the same length as
+        !! `first_idx`, so read `run_len(1:ndist)`.
         integer, intent(in), optional :: threads !! thread request; absent = auto.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64), allocatable :: perm(:)
         integer(c_int8_t), allocatable :: tie(:)
         logical, allocatable :: isnull(:)
-        integer(int64) :: k, n
+        integer(int64) :: k, n, run_begin
+        logical :: want_len
         !
         n = values%size()
         call extract_strcol(values, buf, descending, .false., proc, threads=threads)
@@ -1416,8 +1892,14 @@ contains
         call key_null_mask(buf, n, isnull)
         allocate(first_idx(max(n, 1_int64)))
         first_idx = 0_int64
+        want_len = present(run_len)
+        if (want_len) then
+            allocate(run_len(max(n, 1_int64)))
+            run_len = 0_int64
+        end if
         ndist = 0_int64
         nnull = 0_int64
+        run_begin = 0_int64
         do k = 1_int64, n
             ! nulls_first=.false. puts every null in the last tier, so the first one ends
             ! the walk and the rest of the array is exactly the null count.
@@ -1426,10 +1908,18 @@ contains
                 exit
             end if
             if (tie(k) == 0_c_int8_t) then
+                ! A run ends where the next one starts, so each length is settled one run
+                ! LATE -- and the last one after the loop, from whichever k ended it.
+                if (want_len .and. ndist >= 1_int64) run_len(ndist) = k - run_begin
                 ndist = ndist + 1_int64
                 first_idx(ndist) = perm(k)
+                run_begin = k
             end if
         end do
+        ! `k` is n+1 when the loop ran out and the null position when it exited, which is
+        ! exactly one past the last non-null row either way. Fortran leaves the DO variable
+        ! defined after the construct, and n < 1 leaves ndist 0 so the guard skips it.
+        if (want_len .and. ndist >= 1_int64) run_len(ndist) = k - run_begin
     end subroutine unique_impl_strcol
     !
     !> Shared worker behind every pf_rank specific for a packed string column array.
@@ -1481,19 +1971,25 @@ contains
     !
     !> Shared worker behind pf_unique_count and pf_unique for a type-erased column array: the
     !! 1-based index of the FIRST occurrence of each distinct non-null value, in order.
-    subroutine unique_impl_col(values, descending, proc, first_idx, ndist, nnull, threads)
+    subroutine unique_impl_col(values, descending, proc, first_idx, ndist, nnull, &
+            run_len, threads)
         type(parquet_column), intent(in) :: values
         logical, intent(in) :: descending    !! .true. reports the distinct values high to low.
         character(len=*), intent(in) :: proc !! calling procedure, for messages.
         integer(int64), allocatable, intent(out) :: first_idx(:) !! where each distinct value is.
         integer(int64), intent(out) :: ndist !! how many distinct non-null values.
         integer(int64), intent(out) :: nnull !! how many values were null.
+        integer(int64), allocatable, intent(out), optional :: run_len(:)
+        !! how many elements each distinct value has -- `pf_value_counts`' answer, and the
+        !! only thing that separates it from `pf_unique`. Allocated to the same length as
+        !! `first_idx`, so read `run_len(1:ndist)`.
         integer, intent(in), optional :: threads !! thread request; absent = auto.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64), allocatable :: perm(:)
         integer(c_int8_t), allocatable :: tie(:)
         logical, allocatable :: isnull(:)
-        integer(int64) :: k, n
+        integer(int64) :: k, n, run_begin
+        logical :: want_len
         !
         n = values%length()
         call extract_col(values, buf, descending, .false., proc, threads=threads)
@@ -1501,8 +1997,14 @@ contains
         call key_null_mask(buf, n, isnull)
         allocate(first_idx(max(n, 1_int64)))
         first_idx = 0_int64
+        want_len = present(run_len)
+        if (want_len) then
+            allocate(run_len(max(n, 1_int64)))
+            run_len = 0_int64
+        end if
         ndist = 0_int64
         nnull = 0_int64
+        run_begin = 0_int64
         do k = 1_int64, n
             ! nulls_first=.false. puts every null in the last tier, so the first one ends
             ! the walk and the rest of the array is exactly the null count.
@@ -1511,10 +2013,18 @@ contains
                 exit
             end if
             if (tie(k) == 0_c_int8_t) then
+                ! A run ends where the next one starts, so each length is settled one run
+                ! LATE -- and the last one after the loop, from whichever k ended it.
+                if (want_len .and. ndist >= 1_int64) run_len(ndist) = k - run_begin
                 ndist = ndist + 1_int64
                 first_idx(ndist) = perm(k)
+                run_begin = k
             end if
         end do
+        ! `k` is n+1 when the loop ran out and the null position when it exited, which is
+        ! exactly one past the last non-null row either way. Fortran leaves the DO variable
+        ! defined after the construct, and n < 1 leaves ndist 0 so the guard skips it.
+        if (want_len .and. ndist >= 1_int64) run_len(ndist) = k - run_begin
     end subroutine unique_impl_col
     !
     !> Shared worker behind every pf_rank specific for a type-erased column array.

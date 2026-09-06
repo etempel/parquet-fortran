@@ -285,7 +285,25 @@ contains
             new_unittest("two character arrays of different widths match on their content", &
                 test_match_string_widths), &
             new_unittest("a pf_sort_keys built from an EMPTY array reports zero rows", &
-                test_keys_empty_row_count) &
+                test_keys_empty_row_count), &
+            new_unittest("pf_value_counts agrees with a brute-force count and with pf_unique", &
+                test_value_counts_basic), &
+            new_unittest("pf_value_counts excludes nulls from the population and reports them", &
+                test_value_counts_nulls), &
+            new_unittest("pf_value_counts collapses every NaN onto one value, and counts strings", &
+                test_value_counts_nan_and_strings), &
+            new_unittest("pf_value_counts answers an empty array and both count kinds alike", &
+                test_value_counts_empty_and_kinds), &
+            new_unittest("pf_remap is pf_match plus a gather, and every value kind agrees", &
+                test_remap_basic), &
+            new_unittest("an unmapped element takes default=, or is reported through found=", &
+                test_remap_unmapped_policies), &
+            new_unittest("a null value element is unmapped, and a null key is never found", &
+                test_remap_nulls), &
+            new_unittest("a character result is as wide as the widest of to_values and default", &
+                test_remap_character_width), &
+            new_unittest("two null keys in a lookup table are not a duplicate", &
+                test_remap_null_keys_are_not_duplicates) &
             ]
     end subroutine collect_tests_parquet_sorting
     !
@@ -8122,4 +8140,320 @@ contains
         call check(error, size(perm) == 0 .and. size(go) == 1, &
             "two empty keys must agree about their row count rather than aborting")
     end subroutine test_keys_empty_row_count
+    !> A lookup table may hold several NULL keys without being refused as a duplicate table.
+    !>
+    !> A null key matches nothing, so two of them are not two entries competing to answer one
+    !> lookup -- they are two entries that answer nothing. Refusing them would make a lookup table
+    !> built from a column with gaps unusable for no gain, and the refusal would be a false abort
+    !> on data that is perfectly well formed.
+    !>
+    !> The key side here is a `parquet_column`, which is the only way to get a null INTO a lookup
+    !> table: the six intrinsic key types take an `is_valid` mask for `values` alone, so their keys
+    !> are all valid by construction. That also makes this the suite's coverage of a type-erased
+    !> key, whose element type is resolved at run time rather than by the specific chosen.
+    subroutine test_remap_null_keys_are_not_duplicates(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: vals, keys
+        integer(int32), allocatable :: got(:)
+        logical, allocatable :: fnd(:)
+
+        call vals%init(PK_INT32, 4_int64)
+        call vals%set_all([10_int32, 20_int32, 30_int32, 10_int32])
+        call keys%init(PK_INT32, 4_int64)
+        call keys%set_all([10_int32, 20_int32, 0_int32, 0_int32])
+        call keys%set_null(3_int64)
+        call keys%set_null(4_int64)
+
+        call pf_remap(vals, keys, [1_int32, 2_int32, 3_int32, 4_int32], got, &
+            default=-1_int32, found=fnd)
+        call check(error, all(got == [1, 2, -1, 1]), &
+            "the two null keys must be ignored, not refused, and the real keys must still map")
+        if (allocated(error)) return
+        call check(error, all(fnd .eqv. [.true., .true., .false., .true.]), &
+            "and the value matching no key is the one reported unmapped")
+    end subroutine test_remap_null_keys_are_not_duplicates
+    !
+    !> `pf_value_counts` must be `pf_unique` with the run lengths kept -- so the values it reports
+    !> are exactly `pf_unique`'s, and each count is what a brute-force scan finds.
+    !>
+    !> The two halves matter separately: agreement with `pf_unique` pins the DISTINCTNESS rule
+    !> (which is the sort comparator's and is asserted at length elsewhere), and the brute-force
+    !> count pins the run lengths, which are the only thing this procedure adds. `sum(counts)`
+    !> against the array length is the third, and it is what catches a run boundary dropped or
+    !> double-counted somewhere in the middle -- an error the first two can both miss when the
+    !> mistake moves an element from one group to its neighbour.
+    subroutine test_value_counts_basic(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), parameter :: V(11) = [30, 10, 50, 10, 30, 30, 20, 50, 10, 30, 20]
+        integer(int32), allocatable :: dist(:), uniq(:)
+        integer(int64), allocatable :: cnts(:)
+        integer(int64) :: nn
+        integer :: k
+        logical :: ok
+
+        call pf_value_counts(V, dist, cnts, n_null=nn)
+        call check(error, size(dist) == 4, "these eleven values hold four distinct ones")
+        if (allocated(error)) return
+        call check(error, size(cnts) == size(dist), "one count per distinct value")
+        if (allocated(error)) return
+        call check(error, nn == 0_int64, "an array with no mask has no nulls")
+        if (allocated(error)) return
+
+        call pf_unique(V, uniq)
+        call check(error, size(uniq) == size(dist), "pf_value_counts must report pf_unique's values")
+        if (allocated(error)) return
+        call check(error, all(uniq == dist), "and in pf_unique's ascending order")
+        if (allocated(error)) return
+
+        ok = .true.
+        do k = 1, size(dist)
+            if (cnts(k) /= count(V == dist(k), kind=int64)) ok = .false.
+        end do
+        call check(error, ok, "each count must be how many elements equal that distinct value")
+        if (allocated(error)) return
+        call check(error, sum(cnts) == 11_int64, &
+            "the counts must account for every non-null element exactly once")
+    end subroutine test_value_counts_basic
+    !
+    !> A null is outside the population: it is not a distinct value, it is not counted into any
+    !> group, and `n_null` is where it is reported -- `pf_unique_count`'s rule, inherited.
+    !>
+    !> The negative control is the second call, with the mask withheld: the same array then has
+    !> the masked-out elements as ordinary values, so the four assertions above are about the
+    !> mask rather than about the values.
+    subroutine test_value_counts_nulls(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), parameter :: V(8) = [7, 7, 3, 9, 3, 7, 3, 9]
+        logical, parameter :: OKM(8) = [.true., .true., .true., .true., .false., .true., .false., .true.]
+        integer(int32), allocatable :: dist(:)
+        integer(int64), allocatable :: cnts(:)
+        integer(int64) :: nn
+
+        call pf_value_counts(V, dist, cnts, is_valid=OKM, n_null=nn)
+        call check(error, nn == 2_int64, "two elements were masked out")
+        if (allocated(error)) return
+        call check(error, size(dist) == 3, "the six valid elements hold three distinct values")
+        if (allocated(error)) return
+        call check(error, all(dist == [3, 7, 9]), "the distinct values come back ascending")
+        if (allocated(error)) return
+        call check(error, all(cnts == [1_int64, 3_int64, 2_int64]), &
+            "a masked-out element must not be counted into its value's group")
+        if (allocated(error)) return
+        call check(error, sum(cnts) == 6_int64, "the counts must sum to the VALID element count")
+        if (allocated(error)) return
+
+        call pf_value_counts(V, dist, cnts, n_null=nn)
+        call check(error, nn == 0_int64 .and. sum(cnts) == 8_int64, &
+            "negative control: without the mask the same array has no nulls and eight values")
+    end subroutine test_value_counts_nulls
+    !
+    !> Two rules this family inherits and that a counting caller will meet first: every NaN is ONE
+    !> value (they compare equal here even though `==` says otherwise), and `character` counts on
+    !> content rather than on declared width.
+    subroutine test_value_counts_nan_and_strings(error)
+        type(error_type), allocatable, intent(out) :: error
+        real(real64) :: v(7)
+        real(real64), allocatable :: dist(:)
+        character(len=4), parameter :: S(6) = ["red ", "blue", "red ", "red ", "grey", "blue"]
+        character(len=4), allocatable :: sdist(:)
+        integer(int64), allocatable :: cnts(:)
+        integer :: k
+        logical :: ok
+
+        v = [1.5_real64, ieee_value(0.0_real64, ieee_quiet_nan), 2.5_real64, &
+             ieee_value(0.0_real64, ieee_quiet_nan), 1.5_real64, &
+             ieee_value(0.0_real64, ieee_quiet_nan), 2.5_real64]
+        call pf_value_counts(v, dist, cnts)
+        call check(error, size(dist) == 3, "1.5, 2.5 and NaN are three distinct values, not five")
+        if (allocated(error)) return
+        ok = .false.
+        do k = 1, size(dist)
+            if (ieee_is_nan(dist(k))) then
+                ok = cnts(k) == 3_int64
+            end if
+        end do
+        call check(error, ok, "all three NaNs must land in ONE group of three")
+        if (allocated(error)) return
+        call check(error, sum(cnts) == 7_int64, "every element is still counted once")
+        if (allocated(error)) return
+
+        call pf_value_counts(S, sdist, cnts)
+        call check(error, size(sdist) == 3, "three distinct colours")
+        if (allocated(error)) return
+        call check(error, all(sdist == ["blue", "grey", "red "]), "ascending by content")
+        if (allocated(error)) return
+        call check(error, all(cnts == [2_int64, 1_int64, 3_int64]), &
+            "the counts must follow the distinct values they belong to")
+    end subroutine test_value_counts_nan_and_strings
+    !
+    !> An empty array answers with two empty arrays rather than aborting or leaving anything
+    !> unallocated, and the int32 count kind agrees with the int64 one element for element.
+    !>
+    !> The kind pair is worth its own assertion because the two specifics differ by one call --
+    !> `narrow_i64_array` against a `move_alloc` -- and a narrowing that read the wrong slice
+    !> would still return plausible counts.
+    subroutine test_value_counts_empty_and_kinds(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int64), parameter :: E(0) = [integer(int64) ::]
+        integer(int32), parameter :: V(9) = [4, 4, 1, 1, 1, 8, 4, 8, 1]
+        integer(int64), allocatable :: edist(:), c64(:)
+        integer(int32), allocatable :: dist(:), c32(:)
+        integer(int64) :: nn
+
+        call pf_value_counts(E, edist, c64, n_null=nn)
+        call check(error, allocated(edist) .and. allocated(c64), &
+            "both results must be allocated even for an empty input")
+        if (allocated(error)) return
+        call check(error, size(edist) == 0 .and. size(c64) == 0, "and both empty")
+        if (allocated(error)) return
+        call check(error, nn == 0_int64, "an empty array has no nulls either")
+        if (allocated(error)) return
+
+        call pf_value_counts(V, dist, c32)
+        call pf_value_counts(V, dist, c64)
+        call check(error, size(c32) == size(c64), "both count kinds must answer the same length")
+        if (allocated(error)) return
+        call check(error, all(int(c32, int64) == c64), "and the same counts")
+        if (allocated(error)) return
+        call check(error, all(c64 == [4_int64, 3_int64, 2_int64]), &
+            "1 occurs four times, 4 three times and 8 twice, in ascending value order")
+    end subroutine test_value_counts_empty_and_kinds
+    !
+    !> `pf_remap` must be exactly `pf_match` followed by a gather -- so a hand-written match plus
+    !> gather is the independent oracle, and it is independent because it never touches the remap
+    !> code path at all.
+    !>
+    !> The second half crosses the two axes: the same keys mapped to a `real64` and to a
+    !> `character` value array, and a `real64` key array mapped to an `int64` one. Sixty-six
+    !> specifics are generated from one pair of workers, so a handful of crossings is what
+    !> establishes that the crossing itself is wired up rather than one lucky diagonal.
+    subroutine test_remap_basic(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), parameter :: V(7) = [20, 10, 30, 10, 20, 30, 10]
+        integer(int32), parameter :: K(3) = [10, 20, 30]
+        real(real64), parameter :: TO_F(3) = [1.5_real64, 2.5_real64, 3.5_real64]
+        character(len=6), parameter :: TO_S(3) = ["ten   ", "twenty", "thirty"]
+        integer(int64), parameter :: TO_I(3) = [100_int64, 200_int64, 300_int64]
+        real(real64), parameter :: RK(3) = [0.5_real64, 1.5_real64, 2.5_real64]
+        real(real64), parameter :: RV(5) = [1.5_real64, 0.5_real64, 2.5_real64, 1.5_real64, 0.5_real64]
+        real(real64), allocatable :: got(:)
+        character(len=:), allocatable :: gots(:)
+        integer(int64), allocatable :: idx(:), goti(:)
+        real(real64), allocatable :: want(:)
+        integer :: i
+
+        call pf_remap(V, K, TO_F, got)
+        call check(error, size(got) == 7, "one output element per input value")
+        if (allocated(error)) return
+        ! The oracle: pf_match answers WHICH key, and the gather is written out by hand here.
+        call pf_match(V, K, idx)
+        allocate(want(7))
+        do i = 1, 7
+            want(i) = TO_F(idx(i))
+        end do
+        call check(error, all(got == want), &
+            "pf_remap must equal a pf_match followed by a gather of to_values")
+        if (allocated(error)) return
+
+        call pf_remap(V, K, TO_S, gots)
+        call check(error, len(gots) == 6, "a character result is as wide as to_values")
+        if (allocated(error)) return
+        call check(error, gots(1) == "twenty" .and. gots(2) == "ten" .and. gots(3) == "thirty", &
+            "the same lookup answers with the string values")
+        if (allocated(error)) return
+
+        call pf_remap(RV, RK, TO_I, goti)
+        call check(error, all(goti == [200_int64, 100_int64, 300_int64, 200_int64, 100_int64]), &
+            "a real key array and an int64 value array is one of the sixty-six crossings")
+    end subroutine test_remap_basic
+    !
+    !> The three policies for an element that matches no key, and the fact that they are not the
+    !> same policy: `default=` substitutes a value, `found=` reports which elements were unmapped,
+    !> and giving both leaves `found` still reporting the truth rather than all-`.true.`.
+    !>
+    !> That last assertion is the one worth having. A `found` computed after the default was
+    !> substituted -- the obvious way to write this wrong -- would come back all `.true.` and
+    !> nothing else in the call would notice.
+    subroutine test_remap_unmapped_policies(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), parameter :: V(5) = [10, 99, 20, 77, 10]
+        integer(int32), parameter :: K(2) = [10, 20]
+        integer(int32), parameter :: TO(2) = [1, 2]
+        integer(int32), allocatable :: got(:)
+        logical, allocatable :: fnd(:)
+
+        call pf_remap(V, K, TO, got, default=-1_int32)
+        call check(error, all(got == [1, -1, 2, -1, 1]), "default= must fill every unmapped element")
+        if (allocated(error)) return
+
+        call pf_remap(V, K, TO, got, found=fnd)
+        call check(error, size(fnd) == 5, "found must answer once per input element")
+        if (allocated(error)) return
+        call check(error, all(fnd .eqv. [.true., .false., .true., .false., .true.]), &
+            "found must be .true. exactly where a key matched")
+        if (allocated(error)) return
+        call check(error, all(got == [1, 0, 2, 0, 1]), &
+            "with found= and no default=, an unmapped element is left at the type's zero")
+        if (allocated(error)) return
+
+        call pf_remap(V, K, TO, got, default=-1_int32, found=fnd)
+        call check(error, all(got == [1, -1, 2, -1, 1]), "both given: default still fills")
+        if (allocated(error)) return
+        call check(error, all(fnd .eqv. [.true., .false., .true., .false., .true.]), &
+            "and found still reports what actually matched, not what was filled in")
+    end subroutine test_remap_unmapped_policies
+    !
+    !> `pf_match`'s null rule, inherited: a null element of `values` matches nothing, so it is
+    !> unmapped; and a null KEY is never found, so a null value does not pair with it.
+    !>
+    !> The negative control is the final call with the mask withheld -- the same arrays then map
+    !> the element that the mask made null, which is what shows the refusals above come from the
+    !> mask and not from the values.
+    subroutine test_remap_nulls(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), parameter :: V(4) = [10, 20, 10, 20]
+        logical, parameter :: OKM(4) = [.true., .false., .true., .true.]
+        integer(int32), parameter :: K(2) = [10, 20]
+        integer(int32), parameter :: TO(2) = [1, 2]
+        integer(int32), allocatable :: got(:)
+        logical, allocatable :: fnd(:)
+
+        call pf_remap(V, K, TO, got, found=fnd, is_valid=OKM)
+        call check(error, all(fnd .eqv. [.true., .false., .true., .true.]), &
+            "a null element of `values` must match nothing, however ordinary its stored value")
+        if (allocated(error)) return
+        call check(error, got(1) == 1 .and. got(3) == 1 .and. got(4) == 2, &
+            "the elements that are not null must map exactly as they would have")
+        if (allocated(error)) return
+
+        call pf_remap(V, K, TO, got, found=fnd)
+        call check(error, all(fnd), &
+            "negative control: without the mask every element of this array maps")
+    end subroutine test_remap_nulls
+    !
+    !> A `character` result is deferred-length and sized from BOTH inputs, because a `default`
+    !> longer than the lookup table's own values would otherwise be truncated into the result
+    !> silently -- `pf_merge`'s rule for the same reason.
+    subroutine test_remap_character_width(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), parameter :: V(3) = [1, 9, 2]
+        integer(int32), parameter :: K(2) = [1, 2]
+        character(len=3), parameter :: TO(2) = ["yes", "no "]
+        character(len=:), allocatable :: got(:)
+
+        call pf_remap(V, K, TO, got, default="unknown")
+        call check(error, len(got) == 7, &
+            "the result must be as wide as the longer of to_values and default")
+        if (allocated(error)) return
+        call check(error, got(2) == "unknown", "so the default arrives whole rather than truncated")
+        if (allocated(error)) return
+        call check(error, got(1) == "yes" .and. got(3) == "no", &
+            "and the mapped values are blank-padded into that width")
+        if (allocated(error)) return
+
+        call pf_remap(V, K, TO, got, default="x")
+        call check(error, len(got) == 3, &
+            "a default SHORTER than to_values must not narrow the result")
+    end subroutine test_remap_character_width
+    !
 end module test_sorting

@@ -80,6 +80,7 @@ module parquet_sorting
     public :: pf_equal_range
     public :: pf_unique_count
     public :: pf_unique
+    public :: pf_value_counts
     public :: pf_rank
     public :: pf_minmax
     public :: pf_argminmax
@@ -87,6 +88,7 @@ module parquet_sorting
     public :: pf_match
     public :: pf_match_all
     public :: pf_in
+    public :: pf_remap
     !
     ! ---- Re-exported from parquet_argsort, so `use parquet_sorting` is unchanged ----
     !
@@ -710,6 +712,46 @@ module parquet_sorting
         module procedure unique_strcol
     end interface pf_unique
     !
+    !> The distinct non-null values of `values` AND how many times each occurs -- `pf_unique`
+    !> with the run lengths kept.
+    !>
+    !> `distinct` is exactly what `pf_unique` returns and `counts(k)` is how many elements of
+    !> `values` equal `distinct(k)`, so `sum(counts)` is `size(values)` minus the null count.
+    !> One engine pass answers both, which is the reason this exists rather than a `pf_unique`
+    !> followed by a `pf_match_all`.
+    !>
+    !> **The values come back in ASCENDING order, never in count order**, and there is no
+    !> `descending`: this is a distinctness question, and re-ordering `distinct` would leave
+    !> `counts` meaningless unless it were permuted with it. `parquet_table`'s
+    !> `%value_counts` is the count-ordered form, and it answers with a two-column table
+    !> rather than two arrays for that reason.
+    !>
+    !> Same distinctness rule as `pf_unique_count`: exact on reals, every NaN one value, and
+    !> nulls excluded from the population rather than counted as a value -- `n_null` reports
+    !> them separately.
+    interface pf_value_counts
+        module procedure value_counts_i32_i32
+        module procedure value_counts_i32_i64
+        module procedure value_counts_i64_i32
+        module procedure value_counts_i64_i64
+        module procedure value_counts_f32_i32
+        module procedure value_counts_f32_i64
+        module procedure value_counts_f64_i32
+        module procedure value_counts_f64_i64
+        module procedure value_counts_bool_i32
+        module procedure value_counts_bool_i64
+        module procedure value_counts_chr_i32
+        module procedure value_counts_chr_i64
+        module procedure value_counts_date_i32
+        module procedure value_counts_date_i64
+        module procedure value_counts_time_i32
+        module procedure value_counts_time_i64
+        module procedure value_counts_ts_i32
+        module procedure value_counts_ts_i64
+        module procedure value_counts_strcol_i32
+        module procedure value_counts_strcol_i64
+    end interface pf_value_counts
+    !
     !> The rank of every element of `values`, without reordering it. `ranks(i)` is the rank of
     !> `values(i)`, so this is a per-element answer rather than a permutation.
     !>
@@ -988,6 +1030,115 @@ module parquet_sorting
         module procedure isin_strcol
         module procedure isin_col
     end interface pf_in
+    !
+    !> Replaces every element of `values` with the value its key maps to: a lookup table applied
+    !> to an array. pandas' `Series.map`/`replace`, polars' `replace`, SQL's `CASE WHEN`.
+    !>
+    !> ```fortran
+    !> call pf_remap(values, from_keys, to_values, out, [default], [found], [is_valid], [threads])
+    !> ```
+    !>
+    !> `from_keys` and `to_values` are the lookup table, one value per key and the same length.
+    !> `out` is allocated to `size(values)` and holds `to_values(k)` wherever `values(i)` equals
+    !> `from_keys(k)`. The key side may be any of the eleven types `pf_match` accepts and the value
+    !> side any of `int32`, `int64`, `real32`, `real64`, `logical` and `character` -- the two are
+    !> independent, so mapping a string key to a real value is one call.
+    !>
+    !> **There is no silent path for an unmapped element**, which is the whole reason this exists
+    !> rather than a hand-written gather. pandas has two functions with two different silent
+    !> answers (`map` gives NaN, `replace` leaves the value); here the caller says which they want:
+    !>
+    !> | given | an element matching no key |
+    !> |---|---|
+    !> | `default=` | becomes `default` |
+    !> | `found=` (no `default`) | `found(i)` is `.false.`; `out(i)` is a zero or a blank |
+    !> | both | becomes `default`, and `found(i)` is still `.false.` |
+    !> | neither | **aborts**, naming the element's position |
+    !>
+    !> So `found` doubles as `out`'s validity mask, and `out(i)` where `found(i)` is `.false.` and
+    !> no `default` was given is defined (a zero, a `.false.` or a blank) but means nothing.
+    !>
+    !> **`from_keys` must hold no two equal keys**, or the call aborts naming both positions -- a
+    !> lookup table with a repeat has no defined answer, and picking one silently is exactly the
+    !> class of bug this family is meant to remove. The check costs one linear scan of the sort
+    !> `pf_match` already performs, not a second sort.
+    !>
+    !> **A null matches nothing, on either side**, exactly as in `pf_match`: a null element of
+    !> `values` is unmapped (so it takes `default`, or is reported through `found`, or aborts), and
+    !> a null key is never found. Pass `is_valid` whenever `values` has nulls -- without it a null's
+    !> stored value is indistinguishable from a real one. A NaN is a VALUE and does match, and
+    !> `-0.0` and `+0.0` are one key, again as in `pf_match`.
+    !>
+    !> One call is one `pf_match`, so O((n + k) log(n + k)) for `n` values and `k` keys. Pass the
+    !> whole array; there is no per-call setup to hoist out of a loop.
+    interface pf_remap
+        module procedure remap_i32_i32
+        module procedure remap_i32_i64
+        module procedure remap_i32_f32
+        module procedure remap_i32_f64
+        module procedure remap_i32_bool
+        module procedure remap_i32_chr
+        module procedure remap_i64_i32
+        module procedure remap_i64_i64
+        module procedure remap_i64_f32
+        module procedure remap_i64_f64
+        module procedure remap_i64_bool
+        module procedure remap_i64_chr
+        module procedure remap_f32_i32
+        module procedure remap_f32_i64
+        module procedure remap_f32_f32
+        module procedure remap_f32_f64
+        module procedure remap_f32_bool
+        module procedure remap_f32_chr
+        module procedure remap_f64_i32
+        module procedure remap_f64_i64
+        module procedure remap_f64_f32
+        module procedure remap_f64_f64
+        module procedure remap_f64_bool
+        module procedure remap_f64_chr
+        module procedure remap_bool_i32
+        module procedure remap_bool_i64
+        module procedure remap_bool_f32
+        module procedure remap_bool_f64
+        module procedure remap_bool_bool
+        module procedure remap_bool_chr
+        module procedure remap_chr_i32
+        module procedure remap_chr_i64
+        module procedure remap_chr_f32
+        module procedure remap_chr_f64
+        module procedure remap_chr_bool
+        module procedure remap_chr_chr
+        module procedure remap_date_i32
+        module procedure remap_date_i64
+        module procedure remap_date_f32
+        module procedure remap_date_f64
+        module procedure remap_date_bool
+        module procedure remap_date_chr
+        module procedure remap_time_i32
+        module procedure remap_time_i64
+        module procedure remap_time_f32
+        module procedure remap_time_f64
+        module procedure remap_time_bool
+        module procedure remap_time_chr
+        module procedure remap_ts_i32
+        module procedure remap_ts_i64
+        module procedure remap_ts_f32
+        module procedure remap_ts_f64
+        module procedure remap_ts_bool
+        module procedure remap_ts_chr
+        module procedure remap_strcol_i32
+        module procedure remap_strcol_i64
+        module procedure remap_strcol_f32
+        module procedure remap_strcol_f64
+        module procedure remap_strcol_bool
+        module procedure remap_strcol_chr
+        module procedure remap_col_i32
+        module procedure remap_col_i64
+        module procedure remap_col_f32
+        module procedure remap_col_f64
+        module procedure remap_col_bool
+        module procedure remap_col_chr
+    end interface pf_remap
     !
     ! ---- Key extraction, engine dispatch and the shared helpers ----
     interface
@@ -7207,6 +7358,298 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
         end subroutine unique_strcol
+        !> pf_value_counts over a 32-bit integer array, with int32 counts.
+        module subroutine value_counts_i32_i32(values, distinct, counts, is_valid, n_null, threads)
+        integer(int32), intent(in) :: values(:)
+            integer(int32), allocatable, intent(out) :: distinct(:) !! the distinct values, in order.
+            integer(int32), allocatable, intent(out) :: counts(:)
+            !! `counts(k)` is how many elements equal `distinct(k)`; same length.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine value_counts_i32_i32
+        !> pf_value_counts over a 32-bit integer array, with int64 counts.
+        module subroutine value_counts_i32_i64(values, distinct, counts, is_valid, n_null, threads)
+        integer(int32), intent(in) :: values(:)
+            integer(int32), allocatable, intent(out) :: distinct(:) !! the distinct values, in order.
+            integer(int64), allocatable, intent(out) :: counts(:)
+            !! `counts(k)` is how many elements equal `distinct(k)`; same length.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine value_counts_i32_i64
+        !> pf_value_counts over a 64-bit integer array, with int32 counts.
+        module subroutine value_counts_i64_i32(values, distinct, counts, is_valid, n_null, threads)
+        integer(int64), intent(in) :: values(:)
+            integer(int64), allocatable, intent(out) :: distinct(:) !! the distinct values, in order.
+            integer(int32), allocatable, intent(out) :: counts(:)
+            !! `counts(k)` is how many elements equal `distinct(k)`; same length.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine value_counts_i64_i32
+        !> pf_value_counts over a 64-bit integer array, with int64 counts.
+        module subroutine value_counts_i64_i64(values, distinct, counts, is_valid, n_null, threads)
+        integer(int64), intent(in) :: values(:)
+            integer(int64), allocatable, intent(out) :: distinct(:) !! the distinct values, in order.
+            integer(int64), allocatable, intent(out) :: counts(:)
+            !! `counts(k)` is how many elements equal `distinct(k)`; same length.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine value_counts_i64_i64
+        !> pf_value_counts over a 32-bit real array, with int32 counts.
+        module subroutine value_counts_f32_i32(values, distinct, counts, is_valid, n_null, threads)
+        real(real32), intent(in) :: values(:)
+            real(real32), allocatable, intent(out) :: distinct(:) !! the distinct values, in order.
+            integer(int32), allocatable, intent(out) :: counts(:)
+            !! `counts(k)` is how many elements equal `distinct(k)`; same length.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine value_counts_f32_i32
+        !> pf_value_counts over a 32-bit real array, with int64 counts.
+        module subroutine value_counts_f32_i64(values, distinct, counts, is_valid, n_null, threads)
+        real(real32), intent(in) :: values(:)
+            real(real32), allocatable, intent(out) :: distinct(:) !! the distinct values, in order.
+            integer(int64), allocatable, intent(out) :: counts(:)
+            !! `counts(k)` is how many elements equal `distinct(k)`; same length.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine value_counts_f32_i64
+        !> pf_value_counts over a 64-bit real array, with int32 counts.
+        module subroutine value_counts_f64_i32(values, distinct, counts, is_valid, n_null, threads)
+        real(real64), intent(in) :: values(:)
+            real(real64), allocatable, intent(out) :: distinct(:) !! the distinct values, in order.
+            integer(int32), allocatable, intent(out) :: counts(:)
+            !! `counts(k)` is how many elements equal `distinct(k)`; same length.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine value_counts_f64_i32
+        !> pf_value_counts over a 64-bit real array, with int64 counts.
+        module subroutine value_counts_f64_i64(values, distinct, counts, is_valid, n_null, threads)
+        real(real64), intent(in) :: values(:)
+            real(real64), allocatable, intent(out) :: distinct(:) !! the distinct values, in order.
+            integer(int64), allocatable, intent(out) :: counts(:)
+            !! `counts(k)` is how many elements equal `distinct(k)`; same length.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine value_counts_f64_i64
+        !> pf_value_counts over a logical array, with int32 counts.
+        module subroutine value_counts_bool_i32(values, distinct, counts, is_valid, n_null, threads)
+        logical, intent(in) :: values(:)
+            logical, allocatable, intent(out) :: distinct(:) !! the distinct values, in order.
+            integer(int32), allocatable, intent(out) :: counts(:)
+            !! `counts(k)` is how many elements equal `distinct(k)`; same length.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine value_counts_bool_i32
+        !> pf_value_counts over a logical array, with int64 counts.
+        module subroutine value_counts_bool_i64(values, distinct, counts, is_valid, n_null, threads)
+        logical, intent(in) :: values(:)
+            logical, allocatable, intent(out) :: distinct(:) !! the distinct values, in order.
+            integer(int64), allocatable, intent(out) :: counts(:)
+            !! `counts(k)` is how many elements equal `distinct(k)`; same length.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine value_counts_bool_i64
+        !> pf_value_counts over a string array, with int32 counts.
+        module subroutine value_counts_chr_i32(values, distinct, counts, is_valid, n_null, threads)
+        character(len=*), intent(in) :: values(:)
+            character(len=len(values)), allocatable, intent(out) :: distinct(:) !! the distinct values.
+            integer(int32), allocatable, intent(out) :: counts(:)
+            !! `counts(k)` is how many elements equal `distinct(k)`; same length.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine value_counts_chr_i32
+        !> pf_value_counts over a string array, with int64 counts.
+        module subroutine value_counts_chr_i64(values, distinct, counts, is_valid, n_null, threads)
+        character(len=*), intent(in) :: values(:)
+            character(len=len(values)), allocatable, intent(out) :: distinct(:) !! the distinct values.
+            integer(int64), allocatable, intent(out) :: counts(:)
+            !! `counts(k)` is how many elements equal `distinct(k)`; same length.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine value_counts_chr_i64
+        !> pf_value_counts over a date array, with int32 counts.
+        module subroutine value_counts_date_i32(values, distinct, counts, n_null, threads)
+        type(parquet_date), intent(in) :: values(:)
+            type(parquet_date), allocatable, intent(out) :: distinct(:) !! the distinct values, in order.
+            integer(int32), allocatable, intent(out) :: counts(:)
+            !! `counts(k)` is how many elements equal `distinct(k)`; same length.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine value_counts_date_i32
+        !> pf_value_counts over a date array, with int64 counts.
+        module subroutine value_counts_date_i64(values, distinct, counts, n_null, threads)
+        type(parquet_date), intent(in) :: values(:)
+            type(parquet_date), allocatable, intent(out) :: distinct(:) !! the distinct values, in order.
+            integer(int64), allocatable, intent(out) :: counts(:)
+            !! `counts(k)` is how many elements equal `distinct(k)`; same length.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine value_counts_date_i64
+        !> pf_value_counts over a time array, with int32 counts.
+        module subroutine value_counts_time_i32(values, distinct, counts, n_null, threads)
+        type(parquet_time), intent(in) :: values(:)
+            type(parquet_time), allocatable, intent(out) :: distinct(:) !! the distinct values, in order.
+            integer(int32), allocatable, intent(out) :: counts(:)
+            !! `counts(k)` is how many elements equal `distinct(k)`; same length.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine value_counts_time_i32
+        !> pf_value_counts over a time array, with int64 counts.
+        module subroutine value_counts_time_i64(values, distinct, counts, n_null, threads)
+        type(parquet_time), intent(in) :: values(:)
+            type(parquet_time), allocatable, intent(out) :: distinct(:) !! the distinct values, in order.
+            integer(int64), allocatable, intent(out) :: counts(:)
+            !! `counts(k)` is how many elements equal `distinct(k)`; same length.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine value_counts_time_i64
+        !> pf_value_counts over a timestamp array, with int32 counts.
+        module subroutine value_counts_ts_i32(values, distinct, counts, n_null, threads)
+        type(parquet_timestamp), intent(in) :: values(:)
+            type(parquet_timestamp), allocatable, intent(out) :: distinct(:) !! the distinct values, in order.
+            integer(int32), allocatable, intent(out) :: counts(:)
+            !! `counts(k)` is how many elements equal `distinct(k)`; same length.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine value_counts_ts_i32
+        !> pf_value_counts over a timestamp array, with int64 counts.
+        module subroutine value_counts_ts_i64(values, distinct, counts, n_null, threads)
+        type(parquet_timestamp), intent(in) :: values(:)
+            type(parquet_timestamp), allocatable, intent(out) :: distinct(:) !! the distinct values, in order.
+            integer(int64), allocatable, intent(out) :: counts(:)
+            !! `counts(k)` is how many elements equal `distinct(k)`; same length.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine value_counts_ts_i64
+        !> pf_value_counts over a packed string column array, with int32 counts.
+        module subroutine value_counts_strcol_i32(values, distinct, counts, n_null, threads)
+        type(parquet_string_column), intent(in) :: values
+            type(parquet_string_column), intent(out) :: distinct !! the distinct values.
+            integer(int32), allocatable, intent(out) :: counts(:)
+            !! `counts(k)` is how many elements equal `distinct(k)`; same length.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine value_counts_strcol_i32
+        !> pf_value_counts over a packed string column array, with int64 counts.
+        module subroutine value_counts_strcol_i64(values, distinct, counts, n_null, threads)
+        type(parquet_string_column), intent(in) :: values
+            type(parquet_string_column), intent(out) :: distinct !! the distinct values.
+            integer(int64), allocatable, intent(out) :: counts(:)
+            !! `counts(k)` is how many elements equal `distinct(k)`; same length.
+            integer(int64), intent(out), optional :: n_null !! how many values were null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine value_counts_strcol_i64
         !> pf_rank over a 32-bit integer array, with int32 ranks.
         module subroutine rank_i32_i32(values, ranks, method, descending, is_valid, threads)
         integer(int32), intent(in) :: values(:)
@@ -8912,6 +9355,1428 @@ module parquet_sorting
             !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
             !! governs row counts and indices here does not apply.
         end subroutine isin_col
+        !> pf_remap from 32-bit integer keys to 32-bit integer values.
+        module subroutine remap_i32_i32(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        integer(int32), intent(in) :: values(:) !! the keys to look up, one per output element.
+        integer(int32), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        integer(int32), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            integer(int32), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            integer(int32), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_i32_i32
+        !> pf_remap from 32-bit integer keys to 64-bit integer values.
+        module subroutine remap_i32_i64(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        integer(int32), intent(in) :: values(:) !! the keys to look up, one per output element.
+        integer(int32), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        integer(int64), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            integer(int64), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            integer(int64), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_i32_i64
+        !> pf_remap from 32-bit integer keys to 32-bit real values.
+        module subroutine remap_i32_f32(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        integer(int32), intent(in) :: values(:) !! the keys to look up, one per output element.
+        integer(int32), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        real(real32), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            real(real32), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            real(real32), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_i32_f32
+        !> pf_remap from 32-bit integer keys to 64-bit real values.
+        module subroutine remap_i32_f64(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        integer(int32), intent(in) :: values(:) !! the keys to look up, one per output element.
+        integer(int32), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        real(real64), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            real(real64), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            real(real64), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_i32_f64
+        !> pf_remap from 32-bit integer keys to logical values.
+        module subroutine remap_i32_bool(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        integer(int32), intent(in) :: values(:) !! the keys to look up, one per output element.
+        integer(int32), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        logical, intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            logical, allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            logical, intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_i32_bool
+        !> pf_remap from 32-bit integer keys to string values.
+        module subroutine remap_i32_chr(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        integer(int32), intent(in) :: values(:) !! the keys to look up, one per output element.
+        integer(int32), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        character(len=*), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            character(len=:), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            character(len=*), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_i32_chr
+        !> pf_remap from 64-bit integer keys to 32-bit integer values.
+        module subroutine remap_i64_i32(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        integer(int64), intent(in) :: values(:) !! the keys to look up, one per output element.
+        integer(int64), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        integer(int32), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            integer(int32), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            integer(int32), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_i64_i32
+        !> pf_remap from 64-bit integer keys to 64-bit integer values.
+        module subroutine remap_i64_i64(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        integer(int64), intent(in) :: values(:) !! the keys to look up, one per output element.
+        integer(int64), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        integer(int64), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            integer(int64), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            integer(int64), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_i64_i64
+        !> pf_remap from 64-bit integer keys to 32-bit real values.
+        module subroutine remap_i64_f32(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        integer(int64), intent(in) :: values(:) !! the keys to look up, one per output element.
+        integer(int64), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        real(real32), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            real(real32), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            real(real32), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_i64_f32
+        !> pf_remap from 64-bit integer keys to 64-bit real values.
+        module subroutine remap_i64_f64(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        integer(int64), intent(in) :: values(:) !! the keys to look up, one per output element.
+        integer(int64), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        real(real64), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            real(real64), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            real(real64), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_i64_f64
+        !> pf_remap from 64-bit integer keys to logical values.
+        module subroutine remap_i64_bool(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        integer(int64), intent(in) :: values(:) !! the keys to look up, one per output element.
+        integer(int64), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        logical, intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            logical, allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            logical, intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_i64_bool
+        !> pf_remap from 64-bit integer keys to string values.
+        module subroutine remap_i64_chr(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        integer(int64), intent(in) :: values(:) !! the keys to look up, one per output element.
+        integer(int64), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        character(len=*), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            character(len=:), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            character(len=*), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_i64_chr
+        !> pf_remap from 32-bit real keys to 32-bit integer values.
+        module subroutine remap_f32_i32(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        real(real32), intent(in) :: values(:) !! the keys to look up, one per output element.
+        real(real32), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        integer(int32), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            integer(int32), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            integer(int32), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_f32_i32
+        !> pf_remap from 32-bit real keys to 64-bit integer values.
+        module subroutine remap_f32_i64(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        real(real32), intent(in) :: values(:) !! the keys to look up, one per output element.
+        real(real32), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        integer(int64), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            integer(int64), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            integer(int64), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_f32_i64
+        !> pf_remap from 32-bit real keys to 32-bit real values.
+        module subroutine remap_f32_f32(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        real(real32), intent(in) :: values(:) !! the keys to look up, one per output element.
+        real(real32), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        real(real32), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            real(real32), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            real(real32), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_f32_f32
+        !> pf_remap from 32-bit real keys to 64-bit real values.
+        module subroutine remap_f32_f64(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        real(real32), intent(in) :: values(:) !! the keys to look up, one per output element.
+        real(real32), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        real(real64), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            real(real64), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            real(real64), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_f32_f64
+        !> pf_remap from 32-bit real keys to logical values.
+        module subroutine remap_f32_bool(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        real(real32), intent(in) :: values(:) !! the keys to look up, one per output element.
+        real(real32), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        logical, intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            logical, allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            logical, intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_f32_bool
+        !> pf_remap from 32-bit real keys to string values.
+        module subroutine remap_f32_chr(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        real(real32), intent(in) :: values(:) !! the keys to look up, one per output element.
+        real(real32), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        character(len=*), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            character(len=:), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            character(len=*), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_f32_chr
+        !> pf_remap from 64-bit real keys to 32-bit integer values.
+        module subroutine remap_f64_i32(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        real(real64), intent(in) :: values(:) !! the keys to look up, one per output element.
+        real(real64), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        integer(int32), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            integer(int32), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            integer(int32), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_f64_i32
+        !> pf_remap from 64-bit real keys to 64-bit integer values.
+        module subroutine remap_f64_i64(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        real(real64), intent(in) :: values(:) !! the keys to look up, one per output element.
+        real(real64), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        integer(int64), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            integer(int64), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            integer(int64), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_f64_i64
+        !> pf_remap from 64-bit real keys to 32-bit real values.
+        module subroutine remap_f64_f32(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        real(real64), intent(in) :: values(:) !! the keys to look up, one per output element.
+        real(real64), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        real(real32), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            real(real32), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            real(real32), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_f64_f32
+        !> pf_remap from 64-bit real keys to 64-bit real values.
+        module subroutine remap_f64_f64(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        real(real64), intent(in) :: values(:) !! the keys to look up, one per output element.
+        real(real64), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        real(real64), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            real(real64), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            real(real64), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_f64_f64
+        !> pf_remap from 64-bit real keys to logical values.
+        module subroutine remap_f64_bool(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        real(real64), intent(in) :: values(:) !! the keys to look up, one per output element.
+        real(real64), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        logical, intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            logical, allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            logical, intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_f64_bool
+        !> pf_remap from 64-bit real keys to string values.
+        module subroutine remap_f64_chr(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        real(real64), intent(in) :: values(:) !! the keys to look up, one per output element.
+        real(real64), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        character(len=*), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            character(len=:), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            character(len=*), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_f64_chr
+        !> pf_remap from logical keys to 32-bit integer values.
+        module subroutine remap_bool_i32(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        logical, intent(in) :: values(:) !! the keys to look up, one per output element.
+        logical, intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        integer(int32), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            integer(int32), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            integer(int32), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_bool_i32
+        !> pf_remap from logical keys to 64-bit integer values.
+        module subroutine remap_bool_i64(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        logical, intent(in) :: values(:) !! the keys to look up, one per output element.
+        logical, intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        integer(int64), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            integer(int64), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            integer(int64), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_bool_i64
+        !> pf_remap from logical keys to 32-bit real values.
+        module subroutine remap_bool_f32(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        logical, intent(in) :: values(:) !! the keys to look up, one per output element.
+        logical, intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        real(real32), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            real(real32), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            real(real32), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_bool_f32
+        !> pf_remap from logical keys to 64-bit real values.
+        module subroutine remap_bool_f64(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        logical, intent(in) :: values(:) !! the keys to look up, one per output element.
+        logical, intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        real(real64), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            real(real64), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            real(real64), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_bool_f64
+        !> pf_remap from logical keys to logical values.
+        module subroutine remap_bool_bool(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        logical, intent(in) :: values(:) !! the keys to look up, one per output element.
+        logical, intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        logical, intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            logical, allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            logical, intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_bool_bool
+        !> pf_remap from logical keys to string values.
+        module subroutine remap_bool_chr(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        logical, intent(in) :: values(:) !! the keys to look up, one per output element.
+        logical, intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        character(len=*), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            character(len=:), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            character(len=*), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_bool_chr
+        !> pf_remap from string keys to 32-bit integer values.
+        module subroutine remap_chr_i32(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        character(len=*), intent(in) :: values(:) !! the keys to look up, one per output element.
+        character(len=*), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        integer(int32), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            integer(int32), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            integer(int32), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_chr_i32
+        !> pf_remap from string keys to 64-bit integer values.
+        module subroutine remap_chr_i64(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        character(len=*), intent(in) :: values(:) !! the keys to look up, one per output element.
+        character(len=*), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        integer(int64), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            integer(int64), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            integer(int64), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_chr_i64
+        !> pf_remap from string keys to 32-bit real values.
+        module subroutine remap_chr_f32(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        character(len=*), intent(in) :: values(:) !! the keys to look up, one per output element.
+        character(len=*), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        real(real32), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            real(real32), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            real(real32), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_chr_f32
+        !> pf_remap from string keys to 64-bit real values.
+        module subroutine remap_chr_f64(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        character(len=*), intent(in) :: values(:) !! the keys to look up, one per output element.
+        character(len=*), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        real(real64), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            real(real64), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            real(real64), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_chr_f64
+        !> pf_remap from string keys to logical values.
+        module subroutine remap_chr_bool(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        character(len=*), intent(in) :: values(:) !! the keys to look up, one per output element.
+        character(len=*), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        logical, intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            logical, allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            logical, intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_chr_bool
+        !> pf_remap from string keys to string values.
+        module subroutine remap_chr_chr(values, from_keys, to_values, out, &
+                default, found, is_valid, threads)
+        character(len=*), intent(in) :: values(:) !! the keys to look up, one per output element.
+        character(len=*), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        character(len=*), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            character(len=:), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            character(len=*), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_chr_chr
+        !> pf_remap from date keys to 32-bit integer values.
+        module subroutine remap_date_i32(values, from_keys, to_values, out, &
+                default, found, threads)
+        type(parquet_date), intent(in) :: values(:) !! the keys to look up, one per output element.
+        type(parquet_date), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        integer(int32), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            integer(int32), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            integer(int32), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_date_i32
+        !> pf_remap from date keys to 64-bit integer values.
+        module subroutine remap_date_i64(values, from_keys, to_values, out, &
+                default, found, threads)
+        type(parquet_date), intent(in) :: values(:) !! the keys to look up, one per output element.
+        type(parquet_date), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        integer(int64), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            integer(int64), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            integer(int64), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_date_i64
+        !> pf_remap from date keys to 32-bit real values.
+        module subroutine remap_date_f32(values, from_keys, to_values, out, &
+                default, found, threads)
+        type(parquet_date), intent(in) :: values(:) !! the keys to look up, one per output element.
+        type(parquet_date), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        real(real32), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            real(real32), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            real(real32), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_date_f32
+        !> pf_remap from date keys to 64-bit real values.
+        module subroutine remap_date_f64(values, from_keys, to_values, out, &
+                default, found, threads)
+        type(parquet_date), intent(in) :: values(:) !! the keys to look up, one per output element.
+        type(parquet_date), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        real(real64), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            real(real64), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            real(real64), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_date_f64
+        !> pf_remap from date keys to logical values.
+        module subroutine remap_date_bool(values, from_keys, to_values, out, &
+                default, found, threads)
+        type(parquet_date), intent(in) :: values(:) !! the keys to look up, one per output element.
+        type(parquet_date), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        logical, intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            logical, allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            logical, intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_date_bool
+        !> pf_remap from date keys to string values.
+        module subroutine remap_date_chr(values, from_keys, to_values, out, &
+                default, found, threads)
+        type(parquet_date), intent(in) :: values(:) !! the keys to look up, one per output element.
+        type(parquet_date), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        character(len=*), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            character(len=:), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            character(len=*), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_date_chr
+        !> pf_remap from time keys to 32-bit integer values.
+        module subroutine remap_time_i32(values, from_keys, to_values, out, &
+                default, found, threads)
+        type(parquet_time), intent(in) :: values(:) !! the keys to look up, one per output element.
+        type(parquet_time), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        integer(int32), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            integer(int32), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            integer(int32), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_time_i32
+        !> pf_remap from time keys to 64-bit integer values.
+        module subroutine remap_time_i64(values, from_keys, to_values, out, &
+                default, found, threads)
+        type(parquet_time), intent(in) :: values(:) !! the keys to look up, one per output element.
+        type(parquet_time), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        integer(int64), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            integer(int64), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            integer(int64), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_time_i64
+        !> pf_remap from time keys to 32-bit real values.
+        module subroutine remap_time_f32(values, from_keys, to_values, out, &
+                default, found, threads)
+        type(parquet_time), intent(in) :: values(:) !! the keys to look up, one per output element.
+        type(parquet_time), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        real(real32), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            real(real32), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            real(real32), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_time_f32
+        !> pf_remap from time keys to 64-bit real values.
+        module subroutine remap_time_f64(values, from_keys, to_values, out, &
+                default, found, threads)
+        type(parquet_time), intent(in) :: values(:) !! the keys to look up, one per output element.
+        type(parquet_time), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        real(real64), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            real(real64), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            real(real64), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_time_f64
+        !> pf_remap from time keys to logical values.
+        module subroutine remap_time_bool(values, from_keys, to_values, out, &
+                default, found, threads)
+        type(parquet_time), intent(in) :: values(:) !! the keys to look up, one per output element.
+        type(parquet_time), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        logical, intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            logical, allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            logical, intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_time_bool
+        !> pf_remap from time keys to string values.
+        module subroutine remap_time_chr(values, from_keys, to_values, out, &
+                default, found, threads)
+        type(parquet_time), intent(in) :: values(:) !! the keys to look up, one per output element.
+        type(parquet_time), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        character(len=*), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            character(len=:), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            character(len=*), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_time_chr
+        !> pf_remap from timestamp keys to 32-bit integer values.
+        module subroutine remap_ts_i32(values, from_keys, to_values, out, &
+                default, found, threads)
+        type(parquet_timestamp), intent(in) :: values(:) !! the keys to look up, one per output element.
+        type(parquet_timestamp), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        integer(int32), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            integer(int32), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            integer(int32), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_ts_i32
+        !> pf_remap from timestamp keys to 64-bit integer values.
+        module subroutine remap_ts_i64(values, from_keys, to_values, out, &
+                default, found, threads)
+        type(parquet_timestamp), intent(in) :: values(:) !! the keys to look up, one per output element.
+        type(parquet_timestamp), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        integer(int64), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            integer(int64), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            integer(int64), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_ts_i64
+        !> pf_remap from timestamp keys to 32-bit real values.
+        module subroutine remap_ts_f32(values, from_keys, to_values, out, &
+                default, found, threads)
+        type(parquet_timestamp), intent(in) :: values(:) !! the keys to look up, one per output element.
+        type(parquet_timestamp), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        real(real32), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            real(real32), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            real(real32), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_ts_f32
+        !> pf_remap from timestamp keys to 64-bit real values.
+        module subroutine remap_ts_f64(values, from_keys, to_values, out, &
+                default, found, threads)
+        type(parquet_timestamp), intent(in) :: values(:) !! the keys to look up, one per output element.
+        type(parquet_timestamp), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        real(real64), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            real(real64), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            real(real64), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_ts_f64
+        !> pf_remap from timestamp keys to logical values.
+        module subroutine remap_ts_bool(values, from_keys, to_values, out, &
+                default, found, threads)
+        type(parquet_timestamp), intent(in) :: values(:) !! the keys to look up, one per output element.
+        type(parquet_timestamp), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        logical, intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            logical, allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            logical, intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_ts_bool
+        !> pf_remap from timestamp keys to string values.
+        module subroutine remap_ts_chr(values, from_keys, to_values, out, &
+                default, found, threads)
+        type(parquet_timestamp), intent(in) :: values(:) !! the keys to look up, one per output element.
+        type(parquet_timestamp), intent(in) :: from_keys(:) !! the lookup table's keys; must be distinct.
+        character(len=*), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            character(len=:), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            character(len=*), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_ts_chr
+        !> pf_remap from packed string column keys to 32-bit integer values.
+        module subroutine remap_strcol_i32(values, from_keys, to_values, out, &
+                default, found, threads)
+        type(parquet_string_column), intent(in) :: values !! the keys to look up, one per output element.
+        type(parquet_string_column), intent(in) :: from_keys !! the lookup table's keys; must be distinct.
+        integer(int32), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            integer(int32), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            integer(int32), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_strcol_i32
+        !> pf_remap from packed string column keys to 64-bit integer values.
+        module subroutine remap_strcol_i64(values, from_keys, to_values, out, &
+                default, found, threads)
+        type(parquet_string_column), intent(in) :: values !! the keys to look up, one per output element.
+        type(parquet_string_column), intent(in) :: from_keys !! the lookup table's keys; must be distinct.
+        integer(int64), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            integer(int64), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            integer(int64), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_strcol_i64
+        !> pf_remap from packed string column keys to 32-bit real values.
+        module subroutine remap_strcol_f32(values, from_keys, to_values, out, &
+                default, found, threads)
+        type(parquet_string_column), intent(in) :: values !! the keys to look up, one per output element.
+        type(parquet_string_column), intent(in) :: from_keys !! the lookup table's keys; must be distinct.
+        real(real32), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            real(real32), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            real(real32), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_strcol_f32
+        !> pf_remap from packed string column keys to 64-bit real values.
+        module subroutine remap_strcol_f64(values, from_keys, to_values, out, &
+                default, found, threads)
+        type(parquet_string_column), intent(in) :: values !! the keys to look up, one per output element.
+        type(parquet_string_column), intent(in) :: from_keys !! the lookup table's keys; must be distinct.
+        real(real64), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            real(real64), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            real(real64), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_strcol_f64
+        !> pf_remap from packed string column keys to logical values.
+        module subroutine remap_strcol_bool(values, from_keys, to_values, out, &
+                default, found, threads)
+        type(parquet_string_column), intent(in) :: values !! the keys to look up, one per output element.
+        type(parquet_string_column), intent(in) :: from_keys !! the lookup table's keys; must be distinct.
+        logical, intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            logical, allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            logical, intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_strcol_bool
+        !> pf_remap from packed string column keys to string values.
+        module subroutine remap_strcol_chr(values, from_keys, to_values, out, &
+                default, found, threads)
+        type(parquet_string_column), intent(in) :: values !! the keys to look up, one per output element.
+        type(parquet_string_column), intent(in) :: from_keys !! the lookup table's keys; must be distinct.
+        character(len=*), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            character(len=:), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            character(len=*), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_strcol_chr
+        !> pf_remap from type-erased column keys to 32-bit integer values.
+        module subroutine remap_col_i32(values, from_keys, to_values, out, &
+                default, found, threads)
+        type(parquet_column), intent(in) :: values !! the keys to look up, one per output element.
+        type(parquet_column), intent(in) :: from_keys !! the lookup table's keys; must be distinct.
+        integer(int32), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            integer(int32), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            integer(int32), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_col_i32
+        !> pf_remap from type-erased column keys to 64-bit integer values.
+        module subroutine remap_col_i64(values, from_keys, to_values, out, &
+                default, found, threads)
+        type(parquet_column), intent(in) :: values !! the keys to look up, one per output element.
+        type(parquet_column), intent(in) :: from_keys !! the lookup table's keys; must be distinct.
+        integer(int64), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            integer(int64), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            integer(int64), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_col_i64
+        !> pf_remap from type-erased column keys to 32-bit real values.
+        module subroutine remap_col_f32(values, from_keys, to_values, out, &
+                default, found, threads)
+        type(parquet_column), intent(in) :: values !! the keys to look up, one per output element.
+        type(parquet_column), intent(in) :: from_keys !! the lookup table's keys; must be distinct.
+        real(real32), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            real(real32), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            real(real32), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_col_f32
+        !> pf_remap from type-erased column keys to 64-bit real values.
+        module subroutine remap_col_f64(values, from_keys, to_values, out, &
+                default, found, threads)
+        type(parquet_column), intent(in) :: values !! the keys to look up, one per output element.
+        type(parquet_column), intent(in) :: from_keys !! the lookup table's keys; must be distinct.
+        real(real64), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            real(real64), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            real(real64), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_col_f64
+        !> pf_remap from type-erased column keys to logical values.
+        module subroutine remap_col_bool(values, from_keys, to_values, out, &
+                default, found, threads)
+        type(parquet_column), intent(in) :: values !! the keys to look up, one per output element.
+        type(parquet_column), intent(in) :: from_keys !! the lookup table's keys; must be distinct.
+        logical, intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            logical, allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            logical, intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_col_bool
+        !> pf_remap from type-erased column keys to string values.
+        module subroutine remap_col_chr(values, from_keys, to_values, out, &
+                default, found, threads)
+        type(parquet_column), intent(in) :: values !! the keys to look up, one per output element.
+        type(parquet_column), intent(in) :: from_keys !! the lookup table's keys; must be distinct.
+        character(len=*), intent(in) :: to_values(:) !! the value each key maps to; one per key.
+            character(len=:), allocatable, intent(out) :: out(:)
+            !! `to_values(k)` where `values(i)` equals `from_keys(k)`, `default` where
+            !! it equals none of them. Always allocated to `size(values)`.
+            character(len=*), intent(in), optional :: default
+            !! what an unmapped element becomes. Absent, and with `found` absent too,
+            !! an unmapped element ABORTS naming its position.
+            logical, allocatable, intent(out), optional :: found(:)
+            !! per element: .true. where a key matched. This is also `out`'s validity.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+        end subroutine remap_col_chr
     end interface
     !
     ! ---- Test-only comparator hooks that take a pf_sort_keys (parquet_sorting_keys) ----

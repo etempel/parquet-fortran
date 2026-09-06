@@ -192,6 +192,7 @@ RESERVED = {
     "table_sort_by_values_f32", "table_sort_by_values_f64", "table_sort_by_values_i32",
     "table_sort_by_values_i64", "table_top_n", "table_top_n_string", "table_truncate_i32",
     "table_truncate_i64", "top_n", "truncate", "unit", "unit_at", "unit_name", "validate_qc",
+    "value_counts",
     "width", "width_at", "width_name"
 }
 

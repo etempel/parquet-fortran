@@ -43,9 +43,10 @@
 !! pool may be mutated from several threads at once -- one thread taking an index from a pool while
 !! another gives one back is a supported pattern, and so is several threads streaming keys through
 !! one map's `%get_or_add`. Lookups on a map are lock-free and may run on any number of threads at
-!! full speed. The one combination that is NOT supported is a lookup racing a mutation of the same
-!! map: guarding `%get` would cost it the few nanoseconds it exists for. Separate the phases, or
-!! route every access through `%get_or_add`. See `doc/pages/utilities/index-maps.md`.
+!! full speed, and `%get_many` opens a team of its own over the keys it is given, by the same rule
+!! a build follows. The one combination that is NOT supported is a lookup racing a mutation of the
+!! same map: guarding `%get` would cost it the few nanoseconds it exists for. Separate the phases,
+!! or route every access through `%get_or_add`. See `doc/pages/utilities/index-maps.md`.
 !!
 !! **Arrow-free by construction, and that is the point of its tier.** This module reaches
 !! `iso_fortran_env`, `parquet_settings_base` and -- for the sorted backend's build --
@@ -76,6 +77,7 @@ module parquet_index
     public :: pf_index_threads
     public :: pf_index_max_components
     public :: parquet_debug_index_threads_used
+    public :: parquet_debug_index_get_many_threads_used
     !
     ! ---- Settings this module's own code reads, re-exported so a narrow import can configure it ----
     !
@@ -181,6 +183,20 @@ module parquet_index
     !! a build had just reported. That is why the rule is split into `ix_threads_rule` (decides) and
     !! `ix_threads_for` (decides and records).
     integer, save :: dbg_index_threads_used = 1
+
+    !> Threads the LAST `%get_many` resolved for its own work; 1 means it ran serial.
+    !!
+    !! The lookup counterpart of `dbg_index_threads_used`, and there for the same reason: a bulk
+    !! lookup answers identically at every team size, so nothing about its answers can tell an
+    !! honoured `threads=` from one that was ignored, or a team that was opened from one that
+    !! silently collapsed to a single thread. Kept apart from the build's counter because the two
+    !! are written on different paths -- the build's under `pf_index_map_guard`, this one lock-free
+    !! from whichever thread called `%get_many` -- so one counter for both would let a probe clobber
+    !! what a build had just reported under a test's feet, or the reverse. Written with an atomic
+    !! store, so concurrent bulk lookups cannot tear it; which of them is reported is then simply
+    !! the last to resolve its team, which is all a test may rely on. Written only by
+    !! `ix_lookup_threads_for`, which every `%get_many` specific reaches.
+    integer, save :: dbg_index_get_many_threads_used = 1
 
     !> Most components one key may have, and the reason the tuple paths allocate nothing.
     !!
@@ -321,7 +337,7 @@ module parquet_index
         !> Whether a key is present. Sugar over `%get(...) > 0`.
         generic :: contains => has_k32, has_k64, has_t32, has_t64
         procedure, private :: has_k32, has_k64, has_t32, has_t64
-        !> Look up a whole array of keys at once. The form to prefer in a hot loop.
+        !> Look up a whole array of keys at once, on a team. The form to prefer in a hot loop.
         generic :: get_many => &
             many_r1_k32_i32, many_r1_k32_i64, many_r1_k64_i32, many_r1_k64_i64, &
             many_r2_k32_i32, many_r2_k32_i64, many_r2_k64_i32, many_r2_k64_i64
@@ -342,6 +358,12 @@ module parquet_index
             goa_t32_i32, goa_t32_i64, goa_t64_i32, goa_t64_i64
         procedure, private :: goa_k32_i32, goa_k32_i64, goa_k64_i32, goa_k64_i64
         procedure, private :: goa_t32_i32, goa_t32_i64, goa_t64_i32, goa_t64_i64
+        !> The index of every key in one call, assigning the next unused one to each new key.
+        generic :: get_or_add_many => &
+            goam_r1_k32_i32, goam_r1_k32_i64, goam_r1_k64_i32, goam_r1_k64_i64, &
+            goam_r2_k32_i32, goam_r2_k32_i64, goam_r2_k64_i32, goam_r2_k64_i64
+        procedure, private :: goam_r1_k32_i32, goam_r1_k32_i64, goam_r1_k64_i32, goam_r1_k64_i64
+        procedure, private :: goam_r2_k32_i32, goam_r2_k32_i64, goam_r2_k64_i32, goam_r2_k64_i64
         !> Forget one key.
         generic :: remove => rm_k32, rm_k64, rm_t32, rm_t64
         procedure, private :: rm_k32, rm_k64, rm_t32, rm_t64
@@ -434,26 +456,36 @@ module parquet_index
         !> Builds the map from `keys`, replacing whatever it held.
         !!
         !! Rebuilding is allowed and needs no guard: this releases and reconstructs, so it is
-        !! idempotent by reconstruction. A duplicate key aborts, naming it.
-        module subroutine build_r1_k32_nov(self, keys, method, threads)
+        !! idempotent by reconstruction. A duplicate key aborts, naming it. With `valid=`, a
+        !! masked row is skipped entirely: the stored values stay the ROW NUMBERS of the unmasked
+        !! rows (or their `values=` entries), which is what lets a nullable key column be indexed
+        !! without compacting it first.
+        module subroutine build_r1_k32_nov(self, keys, method, threads, valid)
         class(pf_index_map), intent(inout) :: self !! the map.
-        integer(int32), intent(in) :: keys(:) !! one key per element; every key must be unique.
+        integer(int32), intent(in) :: keys(:) !! one key per element; every unmasked key must be unique.
         character(len=*), intent(in), optional :: method
             !! backend token: "auto" (default), "direct", "hash" or "sorted".
         integer, intent(in), optional :: threads
             !! threads the build may use. ABSENT means automatic: bounded by the work, by
             !! `index_threads`, by this process's CPU affinity, and serial when the caller
             !! is already inside an OpenMP parallel region. `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry skips that row, which is then neither stored
+            !! nor counted, and whose key may repeat one that is stored. Last in the list, so
+            !! that an existing positional call is unaffected.
         end subroutine build_r1_k32_nov
     end interface
     interface
         !> Builds the map from `keys`, replacing whatever it held.
         !!
         !! Rebuilding is allowed and needs no guard: this releases and reconstructs, so it is
-        !! idempotent by reconstruction. A duplicate key aborts, naming it.
-        module subroutine build_r1_k32_v32(self, keys, values, method, threads)
+        !! idempotent by reconstruction. A duplicate key aborts, naming it. With `valid=`, a
+        !! masked row is skipped entirely: the stored values stay the ROW NUMBERS of the unmasked
+        !! rows (or their `values=` entries), which is what lets a nullable key column be indexed
+        !! without compacting it first.
+        module subroutine build_r1_k32_v32(self, keys, values, method, threads, valid)
         class(pf_index_map), intent(inout) :: self !! the map.
-        integer(int32), intent(in) :: keys(:) !! one key per element; every key must be unique.
+        integer(int32), intent(in) :: keys(:) !! one key per element; every unmasked key must be unique.
         integer(int32), intent(in) :: values(:)
             !! index value per key, each >= 1. Defaults to `1 .. n` when absent.
         character(len=*), intent(in), optional :: method
@@ -462,16 +494,23 @@ module parquet_index
             !! threads the build may use. ABSENT means automatic: bounded by the work, by
             !! `index_threads`, by this process's CPU affinity, and serial when the caller
             !! is already inside an OpenMP parallel region. `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry skips that row, which is then neither stored
+            !! nor counted, and whose key may repeat one that is stored. Last in the list, so
+            !! that an existing positional call is unaffected.
         end subroutine build_r1_k32_v32
     end interface
     interface
         !> Builds the map from `keys`, replacing whatever it held.
         !!
         !! Rebuilding is allowed and needs no guard: this releases and reconstructs, so it is
-        !! idempotent by reconstruction. A duplicate key aborts, naming it.
-        module subroutine build_r1_k32_v64(self, keys, values, method, threads)
+        !! idempotent by reconstruction. A duplicate key aborts, naming it. With `valid=`, a
+        !! masked row is skipped entirely: the stored values stay the ROW NUMBERS of the unmasked
+        !! rows (or their `values=` entries), which is what lets a nullable key column be indexed
+        !! without compacting it first.
+        module subroutine build_r1_k32_v64(self, keys, values, method, threads, valid)
         class(pf_index_map), intent(inout) :: self !! the map.
-        integer(int32), intent(in) :: keys(:) !! one key per element; every key must be unique.
+        integer(int32), intent(in) :: keys(:) !! one key per element; every unmasked key must be unique.
         integer(int64), intent(in) :: values(:)
             !! index value per key, each >= 1. Defaults to `1 .. n` when absent.
         character(len=*), intent(in), optional :: method
@@ -480,32 +519,46 @@ module parquet_index
             !! threads the build may use. ABSENT means automatic: bounded by the work, by
             !! `index_threads`, by this process's CPU affinity, and serial when the caller
             !! is already inside an OpenMP parallel region. `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry skips that row, which is then neither stored
+            !! nor counted, and whose key may repeat one that is stored. Last in the list, so
+            !! that an existing positional call is unaffected.
         end subroutine build_r1_k32_v64
     end interface
     interface
         !> Builds the map from `keys`, replacing whatever it held.
         !!
         !! Rebuilding is allowed and needs no guard: this releases and reconstructs, so it is
-        !! idempotent by reconstruction. A duplicate key aborts, naming it.
-        module subroutine build_r1_k64_nov(self, keys, method, threads)
+        !! idempotent by reconstruction. A duplicate key aborts, naming it. With `valid=`, a
+        !! masked row is skipped entirely: the stored values stay the ROW NUMBERS of the unmasked
+        !! rows (or their `values=` entries), which is what lets a nullable key column be indexed
+        !! without compacting it first.
+        module subroutine build_r1_k64_nov(self, keys, method, threads, valid)
         class(pf_index_map), intent(inout) :: self !! the map.
-        integer(int64), intent(in) :: keys(:) !! one key per element; every key must be unique.
+        integer(int64), intent(in) :: keys(:) !! one key per element; every unmasked key must be unique.
         character(len=*), intent(in), optional :: method
             !! backend token: "auto" (default), "direct", "hash" or "sorted".
         integer, intent(in), optional :: threads
             !! threads the build may use. ABSENT means automatic: bounded by the work, by
             !! `index_threads`, by this process's CPU affinity, and serial when the caller
             !! is already inside an OpenMP parallel region. `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry skips that row, which is then neither stored
+            !! nor counted, and whose key may repeat one that is stored. Last in the list, so
+            !! that an existing positional call is unaffected.
         end subroutine build_r1_k64_nov
     end interface
     interface
         !> Builds the map from `keys`, replacing whatever it held.
         !!
         !! Rebuilding is allowed and needs no guard: this releases and reconstructs, so it is
-        !! idempotent by reconstruction. A duplicate key aborts, naming it.
-        module subroutine build_r1_k64_v32(self, keys, values, method, threads)
+        !! idempotent by reconstruction. A duplicate key aborts, naming it. With `valid=`, a
+        !! masked row is skipped entirely: the stored values stay the ROW NUMBERS of the unmasked
+        !! rows (or their `values=` entries), which is what lets a nullable key column be indexed
+        !! without compacting it first.
+        module subroutine build_r1_k64_v32(self, keys, values, method, threads, valid)
         class(pf_index_map), intent(inout) :: self !! the map.
-        integer(int64), intent(in) :: keys(:) !! one key per element; every key must be unique.
+        integer(int64), intent(in) :: keys(:) !! one key per element; every unmasked key must be unique.
         integer(int32), intent(in) :: values(:)
             !! index value per key, each >= 1. Defaults to `1 .. n` when absent.
         character(len=*), intent(in), optional :: method
@@ -514,16 +567,23 @@ module parquet_index
             !! threads the build may use. ABSENT means automatic: bounded by the work, by
             !! `index_threads`, by this process's CPU affinity, and serial when the caller
             !! is already inside an OpenMP parallel region. `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry skips that row, which is then neither stored
+            !! nor counted, and whose key may repeat one that is stored. Last in the list, so
+            !! that an existing positional call is unaffected.
         end subroutine build_r1_k64_v32
     end interface
     interface
         !> Builds the map from `keys`, replacing whatever it held.
         !!
         !! Rebuilding is allowed and needs no guard: this releases and reconstructs, so it is
-        !! idempotent by reconstruction. A duplicate key aborts, naming it.
-        module subroutine build_r1_k64_v64(self, keys, values, method, threads)
+        !! idempotent by reconstruction. A duplicate key aborts, naming it. With `valid=`, a
+        !! masked row is skipped entirely: the stored values stay the ROW NUMBERS of the unmasked
+        !! rows (or their `values=` entries), which is what lets a nullable key column be indexed
+        !! without compacting it first.
+        module subroutine build_r1_k64_v64(self, keys, values, method, threads, valid)
         class(pf_index_map), intent(inout) :: self !! the map.
-        integer(int64), intent(in) :: keys(:) !! one key per element; every key must be unique.
+        integer(int64), intent(in) :: keys(:) !! one key per element; every unmasked key must be unique.
         integer(int64), intent(in) :: values(:)
             !! index value per key, each >= 1. Defaults to `1 .. n` when absent.
         character(len=*), intent(in), optional :: method
@@ -532,36 +592,50 @@ module parquet_index
             !! threads the build may use. ABSENT means automatic: bounded by the work, by
             !! `index_threads`, by this process's CPU affinity, and serial when the caller
             !! is already inside an OpenMP parallel region. `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry skips that row, which is then neither stored
+            !! nor counted, and whose key may repeat one that is stored. Last in the list, so
+            !! that an existing positional call is unaffected.
         end subroutine build_r1_k64_v64
     end interface
     interface
         !> Builds the map from `keys`, replacing whatever it held.
         !!
         !! Rebuilding is allowed and needs no guard: this releases and reconstructs, so it is
-        !! idempotent by reconstruction. A duplicate key aborts, naming it.
-        module subroutine build_r2_k32_nov(self, keys, method, threads)
+        !! idempotent by reconstruction. A duplicate key aborts, naming it. With `valid=`, a
+        !! masked row is skipped entirely: the stored values stay the ROW NUMBERS of the unmasked
+        !! rows (or their `values=` entries), which is what lets a nullable key column be indexed
+        !! without compacting it first.
+        module subroutine build_r2_k32_nov(self, keys, method, threads, valid)
         class(pf_index_map), intent(inout) :: self !! the map.
         integer(int32), intent(in) :: keys(:,:)
-            !! one key per ROW, one component per column, shaped `(n, ncomp)`. Every ROW must be
-            !! unique; the individual columns may repeat freely.
+            !! one key per ROW, one component per column, shaped `(n, ncomp)`. Every unmasked ROW
+            !! must be unique; the individual columns may repeat freely.
         character(len=*), intent(in), optional :: method
             !! backend token: "auto" (default), "direct", "hash" or "sorted".
         integer, intent(in), optional :: threads
             !! threads the build may use. ABSENT means automatic: bounded by the work, by
             !! `index_threads`, by this process's CPU affinity, and serial when the caller
             !! is already inside an OpenMP parallel region. `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry skips that row, which is then neither stored
+            !! nor counted, and whose key may repeat one that is stored. Last in the list, so
+            !! that an existing positional call is unaffected.
         end subroutine build_r2_k32_nov
     end interface
     interface
         !> Builds the map from `keys`, replacing whatever it held.
         !!
         !! Rebuilding is allowed and needs no guard: this releases and reconstructs, so it is
-        !! idempotent by reconstruction. A duplicate key aborts, naming it.
-        module subroutine build_r2_k32_v32(self, keys, values, method, threads)
+        !! idempotent by reconstruction. A duplicate key aborts, naming it. With `valid=`, a
+        !! masked row is skipped entirely: the stored values stay the ROW NUMBERS of the unmasked
+        !! rows (or their `values=` entries), which is what lets a nullable key column be indexed
+        !! without compacting it first.
+        module subroutine build_r2_k32_v32(self, keys, values, method, threads, valid)
         class(pf_index_map), intent(inout) :: self !! the map.
         integer(int32), intent(in) :: keys(:,:)
-            !! one key per ROW, one component per column, shaped `(n, ncomp)`. Every ROW must be
-            !! unique; the individual columns may repeat freely.
+            !! one key per ROW, one component per column, shaped `(n, ncomp)`. Every unmasked ROW
+            !! must be unique; the individual columns may repeat freely.
         integer(int32), intent(in) :: values(:)
             !! index value per key, each >= 1. Defaults to `1 .. n` when absent.
         character(len=*), intent(in), optional :: method
@@ -570,18 +644,25 @@ module parquet_index
             !! threads the build may use. ABSENT means automatic: bounded by the work, by
             !! `index_threads`, by this process's CPU affinity, and serial when the caller
             !! is already inside an OpenMP parallel region. `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry skips that row, which is then neither stored
+            !! nor counted, and whose key may repeat one that is stored. Last in the list, so
+            !! that an existing positional call is unaffected.
         end subroutine build_r2_k32_v32
     end interface
     interface
         !> Builds the map from `keys`, replacing whatever it held.
         !!
         !! Rebuilding is allowed and needs no guard: this releases and reconstructs, so it is
-        !! idempotent by reconstruction. A duplicate key aborts, naming it.
-        module subroutine build_r2_k32_v64(self, keys, values, method, threads)
+        !! idempotent by reconstruction. A duplicate key aborts, naming it. With `valid=`, a
+        !! masked row is skipped entirely: the stored values stay the ROW NUMBERS of the unmasked
+        !! rows (or their `values=` entries), which is what lets a nullable key column be indexed
+        !! without compacting it first.
+        module subroutine build_r2_k32_v64(self, keys, values, method, threads, valid)
         class(pf_index_map), intent(inout) :: self !! the map.
         integer(int32), intent(in) :: keys(:,:)
-            !! one key per ROW, one component per column, shaped `(n, ncomp)`. Every ROW must be
-            !! unique; the individual columns may repeat freely.
+            !! one key per ROW, one component per column, shaped `(n, ncomp)`. Every unmasked ROW
+            !! must be unique; the individual columns may repeat freely.
         integer(int64), intent(in) :: values(:)
             !! index value per key, each >= 1. Defaults to `1 .. n` when absent.
         character(len=*), intent(in), optional :: method
@@ -590,36 +671,50 @@ module parquet_index
             !! threads the build may use. ABSENT means automatic: bounded by the work, by
             !! `index_threads`, by this process's CPU affinity, and serial when the caller
             !! is already inside an OpenMP parallel region. `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry skips that row, which is then neither stored
+            !! nor counted, and whose key may repeat one that is stored. Last in the list, so
+            !! that an existing positional call is unaffected.
         end subroutine build_r2_k32_v64
     end interface
     interface
         !> Builds the map from `keys`, replacing whatever it held.
         !!
         !! Rebuilding is allowed and needs no guard: this releases and reconstructs, so it is
-        !! idempotent by reconstruction. A duplicate key aborts, naming it.
-        module subroutine build_r2_k64_nov(self, keys, method, threads)
+        !! idempotent by reconstruction. A duplicate key aborts, naming it. With `valid=`, a
+        !! masked row is skipped entirely: the stored values stay the ROW NUMBERS of the unmasked
+        !! rows (or their `values=` entries), which is what lets a nullable key column be indexed
+        !! without compacting it first.
+        module subroutine build_r2_k64_nov(self, keys, method, threads, valid)
         class(pf_index_map), intent(inout) :: self !! the map.
         integer(int64), intent(in) :: keys(:,:)
-            !! one key per ROW, one component per column, shaped `(n, ncomp)`. Every ROW must be
-            !! unique; the individual columns may repeat freely.
+            !! one key per ROW, one component per column, shaped `(n, ncomp)`. Every unmasked ROW
+            !! must be unique; the individual columns may repeat freely.
         character(len=*), intent(in), optional :: method
             !! backend token: "auto" (default), "direct", "hash" or "sorted".
         integer, intent(in), optional :: threads
             !! threads the build may use. ABSENT means automatic: bounded by the work, by
             !! `index_threads`, by this process's CPU affinity, and serial when the caller
             !! is already inside an OpenMP parallel region. `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry skips that row, which is then neither stored
+            !! nor counted, and whose key may repeat one that is stored. Last in the list, so
+            !! that an existing positional call is unaffected.
         end subroutine build_r2_k64_nov
     end interface
     interface
         !> Builds the map from `keys`, replacing whatever it held.
         !!
         !! Rebuilding is allowed and needs no guard: this releases and reconstructs, so it is
-        !! idempotent by reconstruction. A duplicate key aborts, naming it.
-        module subroutine build_r2_k64_v32(self, keys, values, method, threads)
+        !! idempotent by reconstruction. A duplicate key aborts, naming it. With `valid=`, a
+        !! masked row is skipped entirely: the stored values stay the ROW NUMBERS of the unmasked
+        !! rows (or their `values=` entries), which is what lets a nullable key column be indexed
+        !! without compacting it first.
+        module subroutine build_r2_k64_v32(self, keys, values, method, threads, valid)
         class(pf_index_map), intent(inout) :: self !! the map.
         integer(int64), intent(in) :: keys(:,:)
-            !! one key per ROW, one component per column, shaped `(n, ncomp)`. Every ROW must be
-            !! unique; the individual columns may repeat freely.
+            !! one key per ROW, one component per column, shaped `(n, ncomp)`. Every unmasked ROW
+            !! must be unique; the individual columns may repeat freely.
         integer(int32), intent(in) :: values(:)
             !! index value per key, each >= 1. Defaults to `1 .. n` when absent.
         character(len=*), intent(in), optional :: method
@@ -628,18 +723,25 @@ module parquet_index
             !! threads the build may use. ABSENT means automatic: bounded by the work, by
             !! `index_threads`, by this process's CPU affinity, and serial when the caller
             !! is already inside an OpenMP parallel region. `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry skips that row, which is then neither stored
+            !! nor counted, and whose key may repeat one that is stored. Last in the list, so
+            !! that an existing positional call is unaffected.
         end subroutine build_r2_k64_v32
     end interface
     interface
         !> Builds the map from `keys`, replacing whatever it held.
         !!
         !! Rebuilding is allowed and needs no guard: this releases and reconstructs, so it is
-        !! idempotent by reconstruction. A duplicate key aborts, naming it.
-        module subroutine build_r2_k64_v64(self, keys, values, method, threads)
+        !! idempotent by reconstruction. A duplicate key aborts, naming it. With `valid=`, a
+        !! masked row is skipped entirely: the stored values stay the ROW NUMBERS of the unmasked
+        !! rows (or their `values=` entries), which is what lets a nullable key column be indexed
+        !! without compacting it first.
+        module subroutine build_r2_k64_v64(self, keys, values, method, threads, valid)
         class(pf_index_map), intent(inout) :: self !! the map.
         integer(int64), intent(in) :: keys(:,:)
-            !! one key per ROW, one component per column, shaped `(n, ncomp)`. Every ROW must be
-            !! unique; the individual columns may repeat freely.
+            !! one key per ROW, one component per column, shaped `(n, ncomp)`. Every unmasked ROW
+            !! must be unique; the individual columns may repeat freely.
         integer(int64), intent(in) :: values(:)
             !! index value per key, each >= 1. Defaults to `1 .. n` when absent.
         character(len=*), intent(in), optional :: method
@@ -648,6 +750,10 @@ module parquet_index
             !! threads the build may use. ABSENT means automatic: bounded by the work, by
             !! `index_threads`, by this process's CPU affinity, and serial when the caller
             !! is already inside an OpenMP parallel region. `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry skips that row, which is then neither stored
+            !! nor counted, and whose key may repeat one that is stored. Last in the list, so
+            !! that an existing positional call is unaffected.
         end subroutine build_r2_k64_v64
     end interface
 
@@ -704,8 +810,9 @@ module parquet_index
         end subroutine map_reset
     end interface
 
-    ! ---- pf_index_map: lookup. `pure`, allocation-free, and never guarded -- see the module's
-    ! own header for the one access pattern that makes that unsafe. ----
+    ! ---- pf_index_map: lookup. Allocation-free and never guarded -- see the module's own
+    ! header for the one access pattern that makes that unsafe. The scalar forms are `pure`;
+    ! the bulk form is not, because it opens an OpenMP team of its own. ----
 
     interface
         !> The index stored for `key`, or **0 when the key is absent**.
@@ -796,12 +903,22 @@ module parquet_index
         !!
         !! **The form to prefer in a hot loop.** It converts the map object once per call
         !! rather than once per key, which under ifx is the difference between paying for a
-        !! runtime class descriptor per lookup and paying for one per array.
-        pure module subroutine many_r1_k32_i32(self, keys, indexes)
+        !! runtime class descriptor per lookup and paying for one per array -- and it threads
+        !! over the keys by the rule a build follows (`pf_index_threads`), so a large probe runs
+        !! on a team while a small one, or one made from inside a parallel region, runs serially.
+        !! Lock-free and allocation-free at every team size. Not `pure`, because an OpenMP
+        !! directive may not appear in a pure procedure; the scalar `%get` and `%contains` are.
+        module subroutine many_r1_k32_i32(self, keys, indexes, valid, threads)
         class(pf_index_map), intent(in) :: self !! the map.
         integer(int32), intent(in) :: keys(:) !! the keys to look up, one per element.
             integer(int32), intent(out) :: indexes(:)
             !! one answer per key, 0 where absent. Must be exactly as long as `keys` has rows.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry answers 0 without the key being looked up.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use. ABSENT means automatic: bounded by the rows, by
+            !! `index_threads`, by this process's CPU affinity, and serial when the caller is
+            !! already inside an OpenMP parallel region. `threads=1` forces serial.
         end subroutine many_r1_k32_i32
     end interface
     interface
@@ -809,12 +926,22 @@ module parquet_index
         !!
         !! **The form to prefer in a hot loop.** It converts the map object once per call
         !! rather than once per key, which under ifx is the difference between paying for a
-        !! runtime class descriptor per lookup and paying for one per array.
-        pure module subroutine many_r1_k32_i64(self, keys, indexes)
+        !! runtime class descriptor per lookup and paying for one per array -- and it threads
+        !! over the keys by the rule a build follows (`pf_index_threads`), so a large probe runs
+        !! on a team while a small one, or one made from inside a parallel region, runs serially.
+        !! Lock-free and allocation-free at every team size. Not `pure`, because an OpenMP
+        !! directive may not appear in a pure procedure; the scalar `%get` and `%contains` are.
+        module subroutine many_r1_k32_i64(self, keys, indexes, valid, threads)
         class(pf_index_map), intent(in) :: self !! the map.
         integer(int32), intent(in) :: keys(:) !! the keys to look up, one per element.
             integer(int64), intent(out) :: indexes(:)
             !! one answer per key, 0 where absent. Must be exactly as long as `keys` has rows.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry answers 0 without the key being looked up.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use. ABSENT means automatic: bounded by the rows, by
+            !! `index_threads`, by this process's CPU affinity, and serial when the caller is
+            !! already inside an OpenMP parallel region. `threads=1` forces serial.
         end subroutine many_r1_k32_i64
     end interface
     interface
@@ -822,12 +949,22 @@ module parquet_index
         !!
         !! **The form to prefer in a hot loop.** It converts the map object once per call
         !! rather than once per key, which under ifx is the difference between paying for a
-        !! runtime class descriptor per lookup and paying for one per array.
-        pure module subroutine many_r1_k64_i32(self, keys, indexes)
+        !! runtime class descriptor per lookup and paying for one per array -- and it threads
+        !! over the keys by the rule a build follows (`pf_index_threads`), so a large probe runs
+        !! on a team while a small one, or one made from inside a parallel region, runs serially.
+        !! Lock-free and allocation-free at every team size. Not `pure`, because an OpenMP
+        !! directive may not appear in a pure procedure; the scalar `%get` and `%contains` are.
+        module subroutine many_r1_k64_i32(self, keys, indexes, valid, threads)
         class(pf_index_map), intent(in) :: self !! the map.
         integer(int64), intent(in) :: keys(:) !! the keys to look up, one per element.
             integer(int32), intent(out) :: indexes(:)
             !! one answer per key, 0 where absent. Must be exactly as long as `keys` has rows.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry answers 0 without the key being looked up.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use. ABSENT means automatic: bounded by the rows, by
+            !! `index_threads`, by this process's CPU affinity, and serial when the caller is
+            !! already inside an OpenMP parallel region. `threads=1` forces serial.
         end subroutine many_r1_k64_i32
     end interface
     interface
@@ -835,12 +972,22 @@ module parquet_index
         !!
         !! **The form to prefer in a hot loop.** It converts the map object once per call
         !! rather than once per key, which under ifx is the difference between paying for a
-        !! runtime class descriptor per lookup and paying for one per array.
-        pure module subroutine many_r1_k64_i64(self, keys, indexes)
+        !! runtime class descriptor per lookup and paying for one per array -- and it threads
+        !! over the keys by the rule a build follows (`pf_index_threads`), so a large probe runs
+        !! on a team while a small one, or one made from inside a parallel region, runs serially.
+        !! Lock-free and allocation-free at every team size. Not `pure`, because an OpenMP
+        !! directive may not appear in a pure procedure; the scalar `%get` and `%contains` are.
+        module subroutine many_r1_k64_i64(self, keys, indexes, valid, threads)
         class(pf_index_map), intent(in) :: self !! the map.
         integer(int64), intent(in) :: keys(:) !! the keys to look up, one per element.
             integer(int64), intent(out) :: indexes(:)
             !! one answer per key, 0 where absent. Must be exactly as long as `keys` has rows.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry answers 0 without the key being looked up.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use. ABSENT means automatic: bounded by the rows, by
+            !! `index_threads`, by this process's CPU affinity, and serial when the caller is
+            !! already inside an OpenMP parallel region. `threads=1` forces serial.
         end subroutine many_r1_k64_i64
     end interface
     interface
@@ -848,13 +995,23 @@ module parquet_index
         !!
         !! **The form to prefer in a hot loop.** It converts the map object once per call
         !! rather than once per key, which under ifx is the difference between paying for a
-        !! runtime class descriptor per lookup and paying for one per array.
-        pure module subroutine many_r2_k32_i32(self, keys, indexes)
+        !! runtime class descriptor per lookup and paying for one per array -- and it threads
+        !! over the keys by the rule a build follows (`pf_index_threads`), so a large probe runs
+        !! on a team while a small one, or one made from inside a parallel region, runs serially.
+        !! Lock-free and allocation-free at every team size. Not `pure`, because an OpenMP
+        !! directive may not appear in a pure procedure; the scalar `%get` and `%contains` are.
+        module subroutine many_r2_k32_i32(self, keys, indexes, valid, threads)
         class(pf_index_map), intent(in) :: self !! the map.
         integer(int32), intent(in) :: keys(:,:)
             !! the key tuples, one per ROW, shaped `(n, ncomp)`.
             integer(int32), intent(out) :: indexes(:)
             !! one answer per key, 0 where absent. Must be exactly as long as `keys` has rows.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry answers 0 without the key being looked up.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use. ABSENT means automatic: bounded by the rows, by
+            !! `index_threads`, by this process's CPU affinity, and serial when the caller is
+            !! already inside an OpenMP parallel region. `threads=1` forces serial.
         end subroutine many_r2_k32_i32
     end interface
     interface
@@ -862,13 +1019,23 @@ module parquet_index
         !!
         !! **The form to prefer in a hot loop.** It converts the map object once per call
         !! rather than once per key, which under ifx is the difference between paying for a
-        !! runtime class descriptor per lookup and paying for one per array.
-        pure module subroutine many_r2_k32_i64(self, keys, indexes)
+        !! runtime class descriptor per lookup and paying for one per array -- and it threads
+        !! over the keys by the rule a build follows (`pf_index_threads`), so a large probe runs
+        !! on a team while a small one, or one made from inside a parallel region, runs serially.
+        !! Lock-free and allocation-free at every team size. Not `pure`, because an OpenMP
+        !! directive may not appear in a pure procedure; the scalar `%get` and `%contains` are.
+        module subroutine many_r2_k32_i64(self, keys, indexes, valid, threads)
         class(pf_index_map), intent(in) :: self !! the map.
         integer(int32), intent(in) :: keys(:,:)
             !! the key tuples, one per ROW, shaped `(n, ncomp)`.
             integer(int64), intent(out) :: indexes(:)
             !! one answer per key, 0 where absent. Must be exactly as long as `keys` has rows.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry answers 0 without the key being looked up.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use. ABSENT means automatic: bounded by the rows, by
+            !! `index_threads`, by this process's CPU affinity, and serial when the caller is
+            !! already inside an OpenMP parallel region. `threads=1` forces serial.
         end subroutine many_r2_k32_i64
     end interface
     interface
@@ -876,13 +1043,23 @@ module parquet_index
         !!
         !! **The form to prefer in a hot loop.** It converts the map object once per call
         !! rather than once per key, which under ifx is the difference between paying for a
-        !! runtime class descriptor per lookup and paying for one per array.
-        pure module subroutine many_r2_k64_i32(self, keys, indexes)
+        !! runtime class descriptor per lookup and paying for one per array -- and it threads
+        !! over the keys by the rule a build follows (`pf_index_threads`), so a large probe runs
+        !! on a team while a small one, or one made from inside a parallel region, runs serially.
+        !! Lock-free and allocation-free at every team size. Not `pure`, because an OpenMP
+        !! directive may not appear in a pure procedure; the scalar `%get` and `%contains` are.
+        module subroutine many_r2_k64_i32(self, keys, indexes, valid, threads)
         class(pf_index_map), intent(in) :: self !! the map.
         integer(int64), intent(in) :: keys(:,:)
             !! the key tuples, one per ROW, shaped `(n, ncomp)`.
             integer(int32), intent(out) :: indexes(:)
             !! one answer per key, 0 where absent. Must be exactly as long as `keys` has rows.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry answers 0 without the key being looked up.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use. ABSENT means automatic: bounded by the rows, by
+            !! `index_threads`, by this process's CPU affinity, and serial when the caller is
+            !! already inside an OpenMP parallel region. `threads=1` forces serial.
         end subroutine many_r2_k64_i32
     end interface
     interface
@@ -890,13 +1067,23 @@ module parquet_index
         !!
         !! **The form to prefer in a hot loop.** It converts the map object once per call
         !! rather than once per key, which under ifx is the difference between paying for a
-        !! runtime class descriptor per lookup and paying for one per array.
-        pure module subroutine many_r2_k64_i64(self, keys, indexes)
+        !! runtime class descriptor per lookup and paying for one per array -- and it threads
+        !! over the keys by the rule a build follows (`pf_index_threads`), so a large probe runs
+        !! on a team while a small one, or one made from inside a parallel region, runs serially.
+        !! Lock-free and allocation-free at every team size. Not `pure`, because an OpenMP
+        !! directive may not appear in a pure procedure; the scalar `%get` and `%contains` are.
+        module subroutine many_r2_k64_i64(self, keys, indexes, valid, threads)
         class(pf_index_map), intent(in) :: self !! the map.
         integer(int64), intent(in) :: keys(:,:)
             !! the key tuples, one per ROW, shaped `(n, ncomp)`.
             integer(int64), intent(out) :: indexes(:)
             !! one answer per key, 0 where absent. Must be exactly as long as `keys` has rows.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry answers 0 without the key being looked up.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use. ABSENT means automatic: bounded by the rows, by
+            !! `index_threads`, by this process's CPU affinity, and serial when the caller is
+            !! already inside an OpenMP parallel region. `threads=1` forces serial.
         end subroutine many_r2_k64_i64
     end interface
 
@@ -1102,6 +1289,182 @@ module parquet_index
             !! the key tuple; `size(key)` must equal `%ncomponents()`.
             integer(int64), intent(out) :: idx !! the key's index; >= 1 always.
         end subroutine goa_t64_i64
+    end interface
+    interface
+        !> The index of every key in one call, assigning and storing the next unused one for
+        !> each key that is new.
+        !!
+        !! `%get_or_add` over a whole array, under the map's guard once rather than once per key:
+        !! the bulk dictionary-encoding primitive, and the one to factorise a key column with. A
+        !! row masked off by `valid` gets the code 0 and is neither looked up nor added. The
+        !! codes of one call are dense -- the `k` keys new to the map take the `k` values above
+        !! its watermark -- and on this serial path they are assigned in first-appearance order;
+        !! rely on a code being stable within the call rather than on that order, which a
+        !! partitioned build may later change.
+        module subroutine goam_r1_k32_i32(self, keys, codes, valid)
+        class(pf_index_map), intent(inout) :: self !! the map.
+        integer(int32), intent(in) :: keys(:) !! the keys to look up or add, one per element.
+            integer(int32), intent(out) :: codes(:)
+            !! one index per key, >= 1, or 0 for a masked row. Must be exactly as long as
+            !! `keys` has rows. A code above `huge(int32)` aborts rather than
+            !! truncating; take the codes as `int64` if the map's values can exceed it.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry is neither looked up nor added.
+        end subroutine goam_r1_k32_i32
+    end interface
+    interface
+        !> The index of every key in one call, assigning and storing the next unused one for
+        !> each key that is new.
+        !!
+        !! `%get_or_add` over a whole array, under the map's guard once rather than once per key:
+        !! the bulk dictionary-encoding primitive, and the one to factorise a key column with. A
+        !! row masked off by `valid` gets the code 0 and is neither looked up nor added. The
+        !! codes of one call are dense -- the `k` keys new to the map take the `k` values above
+        !! its watermark -- and on this serial path they are assigned in first-appearance order;
+        !! rely on a code being stable within the call rather than on that order, which a
+        !! partitioned build may later change.
+        module subroutine goam_r1_k32_i64(self, keys, codes, valid)
+        class(pf_index_map), intent(inout) :: self !! the map.
+        integer(int32), intent(in) :: keys(:) !! the keys to look up or add, one per element.
+            integer(int64), intent(out) :: codes(:)
+            !! one index per key, >= 1, or 0 for a masked row. Must be exactly as long as
+            !! `keys` has rows.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry is neither looked up nor added.
+        end subroutine goam_r1_k32_i64
+    end interface
+    interface
+        !> The index of every key in one call, assigning and storing the next unused one for
+        !> each key that is new.
+        !!
+        !! `%get_or_add` over a whole array, under the map's guard once rather than once per key:
+        !! the bulk dictionary-encoding primitive, and the one to factorise a key column with. A
+        !! row masked off by `valid` gets the code 0 and is neither looked up nor added. The
+        !! codes of one call are dense -- the `k` keys new to the map take the `k` values above
+        !! its watermark -- and on this serial path they are assigned in first-appearance order;
+        !! rely on a code being stable within the call rather than on that order, which a
+        !! partitioned build may later change.
+        module subroutine goam_r1_k64_i32(self, keys, codes, valid)
+        class(pf_index_map), intent(inout) :: self !! the map.
+        integer(int64), intent(in) :: keys(:) !! the keys to look up or add, one per element.
+            integer(int32), intent(out) :: codes(:)
+            !! one index per key, >= 1, or 0 for a masked row. Must be exactly as long as
+            !! `keys` has rows. A code above `huge(int32)` aborts rather than
+            !! truncating; take the codes as `int64` if the map's values can exceed it.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry is neither looked up nor added.
+        end subroutine goam_r1_k64_i32
+    end interface
+    interface
+        !> The index of every key in one call, assigning and storing the next unused one for
+        !> each key that is new.
+        !!
+        !! `%get_or_add` over a whole array, under the map's guard once rather than once per key:
+        !! the bulk dictionary-encoding primitive, and the one to factorise a key column with. A
+        !! row masked off by `valid` gets the code 0 and is neither looked up nor added. The
+        !! codes of one call are dense -- the `k` keys new to the map take the `k` values above
+        !! its watermark -- and on this serial path they are assigned in first-appearance order;
+        !! rely on a code being stable within the call rather than on that order, which a
+        !! partitioned build may later change.
+        module subroutine goam_r1_k64_i64(self, keys, codes, valid)
+        class(pf_index_map), intent(inout) :: self !! the map.
+        integer(int64), intent(in) :: keys(:) !! the keys to look up or add, one per element.
+            integer(int64), intent(out) :: codes(:)
+            !! one index per key, >= 1, or 0 for a masked row. Must be exactly as long as
+            !! `keys` has rows.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry is neither looked up nor added.
+        end subroutine goam_r1_k64_i64
+    end interface
+    interface
+        !> The index of every key in one call, assigning and storing the next unused one for
+        !> each key that is new.
+        !!
+        !! `%get_or_add` over a whole array, under the map's guard once rather than once per key:
+        !! the bulk dictionary-encoding primitive, and the one to factorise a key column with. A
+        !! row masked off by `valid` gets the code 0 and is neither looked up nor added. The
+        !! codes of one call are dense -- the `k` keys new to the map take the `k` values above
+        !! its watermark -- and on this serial path they are assigned in first-appearance order;
+        !! rely on a code being stable within the call rather than on that order, which a
+        !! partitioned build may later change.
+        module subroutine goam_r2_k32_i32(self, keys, codes, valid)
+        class(pf_index_map), intent(inout) :: self !! the map.
+        integer(int32), intent(in) :: keys(:,:)
+            !! the key tuples to look up or add, one per ROW, shaped `(n, ncomp)`.
+            integer(int32), intent(out) :: codes(:)
+            !! one index per key, >= 1, or 0 for a masked row. Must be exactly as long as
+            !! `keys` has rows. A code above `huge(int32)` aborts rather than
+            !! truncating; take the codes as `int64` if the map's values can exceed it.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry is neither looked up nor added.
+        end subroutine goam_r2_k32_i32
+    end interface
+    interface
+        !> The index of every key in one call, assigning and storing the next unused one for
+        !> each key that is new.
+        !!
+        !! `%get_or_add` over a whole array, under the map's guard once rather than once per key:
+        !! the bulk dictionary-encoding primitive, and the one to factorise a key column with. A
+        !! row masked off by `valid` gets the code 0 and is neither looked up nor added. The
+        !! codes of one call are dense -- the `k` keys new to the map take the `k` values above
+        !! its watermark -- and on this serial path they are assigned in first-appearance order;
+        !! rely on a code being stable within the call rather than on that order, which a
+        !! partitioned build may later change.
+        module subroutine goam_r2_k32_i64(self, keys, codes, valid)
+        class(pf_index_map), intent(inout) :: self !! the map.
+        integer(int32), intent(in) :: keys(:,:)
+            !! the key tuples to look up or add, one per ROW, shaped `(n, ncomp)`.
+            integer(int64), intent(out) :: codes(:)
+            !! one index per key, >= 1, or 0 for a masked row. Must be exactly as long as
+            !! `keys` has rows.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry is neither looked up nor added.
+        end subroutine goam_r2_k32_i64
+    end interface
+    interface
+        !> The index of every key in one call, assigning and storing the next unused one for
+        !> each key that is new.
+        !!
+        !! `%get_or_add` over a whole array, under the map's guard once rather than once per key:
+        !! the bulk dictionary-encoding primitive, and the one to factorise a key column with. A
+        !! row masked off by `valid` gets the code 0 and is neither looked up nor added. The
+        !! codes of one call are dense -- the `k` keys new to the map take the `k` values above
+        !! its watermark -- and on this serial path they are assigned in first-appearance order;
+        !! rely on a code being stable within the call rather than on that order, which a
+        !! partitioned build may later change.
+        module subroutine goam_r2_k64_i32(self, keys, codes, valid)
+        class(pf_index_map), intent(inout) :: self !! the map.
+        integer(int64), intent(in) :: keys(:,:)
+            !! the key tuples to look up or add, one per ROW, shaped `(n, ncomp)`.
+            integer(int32), intent(out) :: codes(:)
+            !! one index per key, >= 1, or 0 for a masked row. Must be exactly as long as
+            !! `keys` has rows. A code above `huge(int32)` aborts rather than
+            !! truncating; take the codes as `int64` if the map's values can exceed it.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry is neither looked up nor added.
+        end subroutine goam_r2_k64_i32
+    end interface
+    interface
+        !> The index of every key in one call, assigning and storing the next unused one for
+        !> each key that is new.
+        !!
+        !! `%get_or_add` over a whole array, under the map's guard once rather than once per key:
+        !! the bulk dictionary-encoding primitive, and the one to factorise a key column with. A
+        !! row masked off by `valid` gets the code 0 and is neither looked up nor added. The
+        !! codes of one call are dense -- the `k` keys new to the map take the `k` values above
+        !! its watermark -- and on this serial path they are assigned in first-appearance order;
+        !! rely on a code being stable within the call rather than on that order, which a
+        !! partitioned build may later change.
+        module subroutine goam_r2_k64_i64(self, keys, codes, valid)
+        class(pf_index_map), intent(inout) :: self !! the map.
+        integer(int64), intent(in) :: keys(:,:)
+            !! the key tuples to look up or add, one per ROW, shaped `(n, ncomp)`.
+            integer(int64), intent(out) :: codes(:)
+            !! one index per key, >= 1, or 0 for a masked row. Must be exactly as long as
+            !! `keys` has rows.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry is neither looked up nor added.
+        end subroutine goam_r2_k64_i64
     end interface
     interface
         !> Forgets one key.
@@ -1320,27 +1683,30 @@ module parquet_index
 
     ! ---- The build's thread rule, reported ----
 
-    !> The team an automatic `%build` would open for `n` keys.
+    !> The team an automatic `%build` over `n` keys, or an automatic `%get_many` over `n` rows,
+    !> would open.
     !!
     !! The resolved count, where `parquet_get_index_threads()` is only the cap that was asked for:
-    !! the answer also depends on the keys available, on this process's CPU affinity, and on
+    !! the answer also depends on the rows available, on this process's CPU affinity, and on
     !! whether the caller is already inside a parallel region (in which case it is 1). This is what
-    !! makes `index_threads` observable, and it is a pass-through onto the very rule `%build` runs,
-    !! never a second copy of it.
+    !! makes `index_threads` observable, and it is a pass-through onto the very rule `%build` and
+    !! `%get_many` run, never a second copy of it.
     interface pf_index_threads
         module procedure pf_index_threads_i32
         module procedure pf_index_threads_i64
     end interface pf_index_threads
 
     interface
-        !> The team an automatic build over `n` keys would open. See `pf_index_threads`.
+        !> The team an automatic build or bulk lookup over `n` rows would open. See
+        !! `pf_index_threads`.
         module function pf_index_threads_i32(n) result(nt)
-            integer(int32), intent(in) :: n !! keys the build would process.
+            integer(int32), intent(in) :: n !! keys the build, or rows the lookup, would process.
             integer :: nt !! threads it would use; 1 means serial.
         end function pf_index_threads_i32
-        !> The team an automatic build over `n` keys would open. See `pf_index_threads`.
+        !> The team an automatic build or bulk lookup over `n` rows would open. See
+        !! `pf_index_threads`.
         module function pf_index_threads_i64(n) result(nt)
-            integer(int64), intent(in) :: n !! keys the build would process.
+            integer(int64), intent(in) :: n !! keys the build, or rows the lookup, would process.
             integer :: nt !! threads it would use; 1 means serial.
         end function pf_index_threads_i64
     end interface
@@ -1359,6 +1725,20 @@ module parquet_index
         module function parquet_debug_index_threads_used() result(n)
             integer :: n !! threads the last build resolved; 1 means it ran serial.
         end function parquet_debug_index_threads_used
+    end interface
+
+    interface
+        !> Test-only. Threads the last `%get_many` resolved for itself; 1 means it ran serial.
+        !!
+        !! The lookup twin of `parquet_debug_index_threads_used`, kept separate because the two
+        !! are written from different places -- a build records under the map's guard, a bulk
+        !! lookup records lock-free from whichever thread called it -- and one counter for both
+        !! would let a probe overwrite what a build had just reported, or the reverse, under a
+        !! test that reads it. Reports what the rule RESOLVED, not the team the runtime granted,
+        !! because the decision is what a threading test of the bulk lookup is about.
+        module function parquet_debug_index_get_many_threads_used() result(n)
+            integer :: n !! threads the last bulk lookup resolved; 1 means it ran serial.
+        end function parquet_debug_index_get_many_threads_used
     end interface
 
     ! ---- Cross-submodule private helpers ----

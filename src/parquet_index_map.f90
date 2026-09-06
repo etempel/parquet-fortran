@@ -4,7 +4,11 @@
 !! are `pure`, allocate nothing, write nothing and take no lock. That last property is not a
 !! coincidence to be preserved by care -- it is what makes concurrent lookups safe at all, so a
 !! lazy allocation or a cached anything on a read path would silently withdraw the module's
-!! thread-safety contract. There is nothing on these paths to make lazy.
+!! thread-safety contract. There is nothing on these paths to make lazy. `%get_many` runs those
+!! same functions over contiguous chunks of the rows it is given, one chunk per thread of a team
+!! it resolves by the build's own rule (`ix_lookup_threads_for`); it is the one lookup that is
+!! not `pure`, because an OpenMP directive may not appear in a pure procedure, and it is still
+!! lock-free and allocation-free at every team size.
 !!
 !! **Every mutation takes one process-wide named critical, `pf_index_map_guard`**, in the same
 !! wrapper-plus-worker shape the pool uses: the public body is the guard and one call, and no
@@ -46,13 +50,13 @@ contains
 
     module procedure build_r1_k64_nov
         !$omp critical (pf_index_map_guard)
-        call ix_build_1(self, keys, method=method, threads=threads)
+        call ix_build_1(self, keys, method=method, threads=threads, valid=valid)
         !$omp end critical (pf_index_map_guard)
     end procedure build_r1_k64_nov
 
     module procedure build_r1_k64_v64
         !$omp critical (pf_index_map_guard)
-        call ix_build_1(self, keys, values=values, method=method, threads=threads)
+        call ix_build_1(self, keys, values=values, method=method, threads=threads, valid=valid)
         !$omp end critical (pf_index_map_guard)
     end procedure build_r1_k64_v64
 
@@ -61,7 +65,7 @@ contains
 
         call ix_widen_values(values, v)
         !$omp critical (pf_index_map_guard)
-        call ix_build_1(self, keys, values=v, method=method, threads=threads)
+        call ix_build_1(self, keys, values=v, method=method, threads=threads, valid=valid)
         !$omp end critical (pf_index_map_guard)
     end procedure build_r1_k64_v32
 
@@ -70,7 +74,7 @@ contains
 
         call ix_widen_keys_1(keys, k)
         !$omp critical (pf_index_map_guard)
-        call ix_build_1(self, k, method=method, threads=threads)
+        call ix_build_1(self, k, method=method, threads=threads, valid=valid)
         !$omp end critical (pf_index_map_guard)
     end procedure build_r1_k32_nov
 
@@ -79,7 +83,7 @@ contains
 
         call ix_widen_keys_1(keys, k)
         !$omp critical (pf_index_map_guard)
-        call ix_build_1(self, k, values=values, method=method, threads=threads)
+        call ix_build_1(self, k, values=values, method=method, threads=threads, valid=valid)
         !$omp end critical (pf_index_map_guard)
     end procedure build_r1_k32_v64
 
@@ -89,19 +93,19 @@ contains
         call ix_widen_keys_1(keys, k)
         call ix_widen_values(values, v)
         !$omp critical (pf_index_map_guard)
-        call ix_build_1(self, k, values=v, method=method, threads=threads)
+        call ix_build_1(self, k, values=v, method=method, threads=threads, valid=valid)
         !$omp end critical (pf_index_map_guard)
     end procedure build_r1_k32_v32
 
     module procedure build_r2_k64_nov
         !$omp critical (pf_index_map_guard)
-        call ix_build_n(self, keys, method=method, threads=threads)
+        call ix_build_n(self, keys, method=method, threads=threads, valid=valid)
         !$omp end critical (pf_index_map_guard)
     end procedure build_r2_k64_nov
 
     module procedure build_r2_k64_v64
         !$omp critical (pf_index_map_guard)
-        call ix_build_n(self, keys, values=values, method=method, threads=threads)
+        call ix_build_n(self, keys, values=values, method=method, threads=threads, valid=valid)
         !$omp end critical (pf_index_map_guard)
     end procedure build_r2_k64_v64
 
@@ -110,7 +114,7 @@ contains
 
         call ix_widen_values(values, v)
         !$omp critical (pf_index_map_guard)
-        call ix_build_n(self, keys, values=v, method=method, threads=threads)
+        call ix_build_n(self, keys, values=v, method=method, threads=threads, valid=valid)
         !$omp end critical (pf_index_map_guard)
     end procedure build_r2_k64_v32
 
@@ -119,7 +123,7 @@ contains
 
         call ix_widen_keys_n(keys, k)
         !$omp critical (pf_index_map_guard)
-        call ix_build_n(self, k, method=method, threads=threads)
+        call ix_build_n(self, k, method=method, threads=threads, valid=valid)
         !$omp end critical (pf_index_map_guard)
     end procedure build_r2_k32_nov
 
@@ -128,7 +132,7 @@ contains
 
         call ix_widen_keys_n(keys, k)
         !$omp critical (pf_index_map_guard)
-        call ix_build_n(self, k, values=values, method=method, threads=threads)
+        call ix_build_n(self, k, values=values, method=method, threads=threads, valid=valid)
         !$omp end critical (pf_index_map_guard)
     end procedure build_r2_k32_v64
 
@@ -138,7 +142,7 @@ contains
         call ix_widen_keys_n(keys, k)
         call ix_widen_values(values, v)
         !$omp critical (pf_index_map_guard)
-        call ix_build_n(self, k, values=v, method=method, threads=threads)
+        call ix_build_n(self, k, values=v, method=method, threads=threads, valid=valid)
         !$omp end critical (pf_index_map_guard)
     end procedure build_r2_k32_v32
 
@@ -177,7 +181,8 @@ contains
     end procedure map_reset
 
     ! ============================================================================================
-    ! Lookup. `pure`, lock-free, allocation-free.
+    ! Lookup. Lock-free and allocation-free; the scalar forms `pure`, the bulk form threaded over
+    ! contiguous chunks, each chunk the serial typed loop the bulk form used to be.
     ! ============================================================================================
 
     module procedure get_k32
@@ -245,98 +250,142 @@ contains
     end procedure has_t64
 
     module procedure many_r1_k32_i32
-        integer(int64) :: i, n
+        integer(int64) :: n, lo, hi
+        integer :: nt, c
+        logical :: hv
 
-        n = ix_many_rows(self, size(keys, kind=int64), size(indexes, kind=int64), 1)
-        do i = 1_int64, n
-            indexes(i) = ix_narrow(ix_get_scalar(self, int(keys(i), int64)))
+        n = ix_many_rows(self, size(keys, kind=int64), size(indexes, kind=int64), 1, "get_many")
+        hv = present(valid)
+        if (hv) call ix_check_mask_len(size(valid, kind=int64), n, "get_many")
+        nt = ix_lookup_threads_for(n, threads)
+        !$omp parallel do default(shared) private(c, lo, hi) schedule(static) num_threads(nt) &
+        !$omp     if (nt > 1)
+        do c = 1, nt
+            call ix_chunk_bounds(n, nt, c, lo, hi)
+            call ix_many_1_k32_i32(self, keys, indexes, valid, hv, lo, hi)
         end do
     end procedure many_r1_k32_i32
 
     module procedure many_r1_k32_i64
-        integer(int64) :: i, n
+        integer(int64) :: n, lo, hi
+        integer :: nt, c
+        logical :: hv
 
-        n = ix_many_rows(self, size(keys, kind=int64), size(indexes, kind=int64), 1)
-        do i = 1_int64, n
-            indexes(i) = ix_get_scalar(self, int(keys(i), int64))
+        n = ix_many_rows(self, size(keys, kind=int64), size(indexes, kind=int64), 1, "get_many")
+        hv = present(valid)
+        if (hv) call ix_check_mask_len(size(valid, kind=int64), n, "get_many")
+        nt = ix_lookup_threads_for(n, threads)
+        !$omp parallel do default(shared) private(c, lo, hi) schedule(static) num_threads(nt) &
+        !$omp     if (nt > 1)
+        do c = 1, nt
+            call ix_chunk_bounds(n, nt, c, lo, hi)
+            call ix_many_1_k32_i64(self, keys, indexes, valid, hv, lo, hi)
         end do
     end procedure many_r1_k32_i64
 
     module procedure many_r1_k64_i32
-        integer(int64) :: i, n
+        integer(int64) :: n, lo, hi
+        integer :: nt, c
+        logical :: hv
 
-        n = ix_many_rows(self, size(keys, kind=int64), size(indexes, kind=int64), 1)
-        do i = 1_int64, n
-            indexes(i) = ix_narrow(ix_get_scalar(self, keys(i)))
+        n = ix_many_rows(self, size(keys, kind=int64), size(indexes, kind=int64), 1, "get_many")
+        hv = present(valid)
+        if (hv) call ix_check_mask_len(size(valid, kind=int64), n, "get_many")
+        nt = ix_lookup_threads_for(n, threads)
+        !$omp parallel do default(shared) private(c, lo, hi) schedule(static) num_threads(nt) &
+        !$omp     if (nt > 1)
+        do c = 1, nt
+            call ix_chunk_bounds(n, nt, c, lo, hi)
+            call ix_many_1_k64_i32(self, keys, indexes, valid, hv, lo, hi)
         end do
     end procedure many_r1_k64_i32
 
     module procedure many_r1_k64_i64
-        integer(int64) :: i, n
+        integer(int64) :: n, lo, hi
+        integer :: nt, c
+        logical :: hv
 
-        n = ix_many_rows(self, size(keys, kind=int64), size(indexes, kind=int64), 1)
-        do i = 1_int64, n
-            indexes(i) = ix_get_scalar(self, keys(i))
+        n = ix_many_rows(self, size(keys, kind=int64), size(indexes, kind=int64), 1, "get_many")
+        hv = present(valid)
+        if (hv) call ix_check_mask_len(size(valid, kind=int64), n, "get_many")
+        nt = ix_lookup_threads_for(n, threads)
+        !$omp parallel do default(shared) private(c, lo, hi) schedule(static) num_threads(nt) &
+        !$omp     if (nt > 1)
+        do c = 1, nt
+            call ix_chunk_bounds(n, nt, c, lo, hi)
+            call ix_many_1_k64_i64(self, keys, indexes, valid, hv, lo, hi)
         end do
     end procedure many_r1_k64_i64
 
     module procedure many_r2_k32_i32
-        integer(int64) :: kb(pf_index_max_components)
-        integer(int64) :: i, n
-        integer :: nc, j
+        integer(int64) :: n, lo, hi
+        integer :: nt, c
+        logical :: hv
 
-        n = ix_many_rows(self, size(keys, 1, kind=int64), size(indexes, kind=int64), size(keys, 2))
-        nc = self%ncomp
-        do i = 1_int64, n
-            do j = 1, nc
-                kb(j) = int(keys(i, j), int64)
-            end do
-            indexes(i) = ix_narrow(ix_get_tuple(self, kb(1:nc)))
+        n = ix_many_rows(self, size(keys, 1, kind=int64), size(indexes, kind=int64), size(keys, 2), &
+            "get_many")
+        hv = present(valid)
+        if (hv) call ix_check_mask_len(size(valid, kind=int64), n, "get_many")
+        nt = ix_lookup_threads_for(n, threads)
+        !$omp parallel do default(shared) private(c, lo, hi) schedule(static) num_threads(nt) &
+        !$omp     if (nt > 1)
+        do c = 1, nt
+            call ix_chunk_bounds(n, nt, c, lo, hi)
+            call ix_many_n_k32_i32(self, keys, indexes, valid, hv, lo, hi)
         end do
     end procedure many_r2_k32_i32
 
     module procedure many_r2_k32_i64
-        integer(int64) :: kb(pf_index_max_components)
-        integer(int64) :: i, n
-        integer :: nc, j
+        integer(int64) :: n, lo, hi
+        integer :: nt, c
+        logical :: hv
 
-        n = ix_many_rows(self, size(keys, 1, kind=int64), size(indexes, kind=int64), size(keys, 2))
-        nc = self%ncomp
-        do i = 1_int64, n
-            do j = 1, nc
-                kb(j) = int(keys(i, j), int64)
-            end do
-            indexes(i) = ix_get_tuple(self, kb(1:nc))
+        n = ix_many_rows(self, size(keys, 1, kind=int64), size(indexes, kind=int64), size(keys, 2), &
+            "get_many")
+        hv = present(valid)
+        if (hv) call ix_check_mask_len(size(valid, kind=int64), n, "get_many")
+        nt = ix_lookup_threads_for(n, threads)
+        !$omp parallel do default(shared) private(c, lo, hi) schedule(static) num_threads(nt) &
+        !$omp     if (nt > 1)
+        do c = 1, nt
+            call ix_chunk_bounds(n, nt, c, lo, hi)
+            call ix_many_n_k32_i64(self, keys, indexes, valid, hv, lo, hi)
         end do
     end procedure many_r2_k32_i64
 
     module procedure many_r2_k64_i32
-        integer(int64) :: kb(pf_index_max_components)
-        integer(int64) :: i, n
-        integer :: nc, j
+        integer(int64) :: n, lo, hi
+        integer :: nt, c
+        logical :: hv
 
-        n = ix_many_rows(self, size(keys, 1, kind=int64), size(indexes, kind=int64), size(keys, 2))
-        nc = self%ncomp
-        do i = 1_int64, n
-            do j = 1, nc
-                kb(j) = keys(i, j)
-            end do
-            indexes(i) = ix_narrow(ix_get_tuple(self, kb(1:nc)))
+        n = ix_many_rows(self, size(keys, 1, kind=int64), size(indexes, kind=int64), size(keys, 2), &
+            "get_many")
+        hv = present(valid)
+        if (hv) call ix_check_mask_len(size(valid, kind=int64), n, "get_many")
+        nt = ix_lookup_threads_for(n, threads)
+        !$omp parallel do default(shared) private(c, lo, hi) schedule(static) num_threads(nt) &
+        !$omp     if (nt > 1)
+        do c = 1, nt
+            call ix_chunk_bounds(n, nt, c, lo, hi)
+            call ix_many_n_k64_i32(self, keys, indexes, valid, hv, lo, hi)
         end do
     end procedure many_r2_k64_i32
 
     module procedure many_r2_k64_i64
-        integer(int64) :: kb(pf_index_max_components)
-        integer(int64) :: i, n
-        integer :: nc, j
+        integer(int64) :: n, lo, hi
+        integer :: nt, c
+        logical :: hv
 
-        n = ix_many_rows(self, size(keys, 1, kind=int64), size(indexes, kind=int64), size(keys, 2))
-        nc = self%ncomp
-        do i = 1_int64, n
-            do j = 1, nc
-                kb(j) = keys(i, j)
-            end do
-            indexes(i) = ix_get_tuple(self, kb(1:nc))
+        n = ix_many_rows(self, size(keys, 1, kind=int64), size(indexes, kind=int64), size(keys, 2), &
+            "get_many")
+        hv = present(valid)
+        if (hv) call ix_check_mask_len(size(valid, kind=int64), n, "get_many")
+        nt = ix_lookup_threads_for(n, threads)
+        !$omp parallel do default(shared) private(c, lo, hi) schedule(static) num_threads(nt) &
+        !$omp     if (nt > 1)
+        do c = 1, nt
+            call ix_chunk_bounds(n, nt, c, lo, hi)
+            call ix_many_n_k64_i64(self, keys, indexes, valid, hv, lo, hi)
         end do
     end procedure many_r2_k64_i64
 
@@ -451,6 +500,78 @@ contains
         call ix_goa_tuple(self, key, idx, .false.)
         !$omp end critical (pf_index_map_guard)
     end procedure goa_t64_i64
+
+    module procedure goam_r1_k64_i64
+        !$omp critical (pf_index_map_guard)
+        call ix_goam_1(self, keys, codes, valid, .false.)
+        !$omp end critical (pf_index_map_guard)
+    end procedure goam_r1_k64_i64
+
+    module procedure goam_r1_k64_i32
+        integer(int64), allocatable :: c(:)
+
+        allocate(c(size(codes, kind=int64)))
+        !$omp critical (pf_index_map_guard)
+        call ix_goam_1(self, keys, c, valid, .true.)
+        !$omp end critical (pf_index_map_guard)
+        codes = int(c, int32)
+    end procedure goam_r1_k64_i32
+
+    module procedure goam_r1_k32_i64
+        integer(int64), allocatable :: k(:)
+
+        call ix_widen_keys_1(keys, k)
+        !$omp critical (pf_index_map_guard)
+        call ix_goam_1(self, k, codes, valid, .false.)
+        !$omp end critical (pf_index_map_guard)
+    end procedure goam_r1_k32_i64
+
+    module procedure goam_r1_k32_i32
+        integer(int64), allocatable :: k(:), c(:)
+
+        call ix_widen_keys_1(keys, k)
+        allocate(c(size(codes, kind=int64)))
+        !$omp critical (pf_index_map_guard)
+        call ix_goam_1(self, k, c, valid, .true.)
+        !$omp end critical (pf_index_map_guard)
+        codes = int(c, int32)
+    end procedure goam_r1_k32_i32
+
+    module procedure goam_r2_k64_i64
+        !$omp critical (pf_index_map_guard)
+        call ix_goam_n(self, keys, codes, valid, .false.)
+        !$omp end critical (pf_index_map_guard)
+    end procedure goam_r2_k64_i64
+
+    module procedure goam_r2_k64_i32
+        integer(int64), allocatable :: c(:)
+
+        allocate(c(size(codes, kind=int64)))
+        !$omp critical (pf_index_map_guard)
+        call ix_goam_n(self, keys, c, valid, .true.)
+        !$omp end critical (pf_index_map_guard)
+        codes = int(c, int32)
+    end procedure goam_r2_k64_i32
+
+    module procedure goam_r2_k32_i64
+        integer(int64), allocatable :: k(:,:)
+
+        call ix_widen_keys_n(keys, k)
+        !$omp critical (pf_index_map_guard)
+        call ix_goam_n(self, k, codes, valid, .false.)
+        !$omp end critical (pf_index_map_guard)
+    end procedure goam_r2_k32_i64
+
+    module procedure goam_r2_k32_i32
+        integer(int64), allocatable :: k(:,:), c(:)
+
+        call ix_widen_keys_n(keys, k)
+        allocate(c(size(codes, kind=int64)))
+        !$omp critical (pf_index_map_guard)
+        call ix_goam_n(self, k, c, valid, .true.)
+        !$omp end critical (pf_index_map_guard)
+        codes = int(c, int32)
+    end procedure goam_r2_k32_i32
 
     module procedure rm_k32
         logical :: hit
@@ -593,16 +714,20 @@ contains
     ! from here would let any caller overwrite what a build had just reported and make every test
     ! reading `parquet_debug_index_threads_used` depend on nobody having asked in between.
     module procedure pf_index_threads_i32
-        nt = ix_threads_rule(int(n, int64))
+        nt = ix_threads_rule(int(n, int64), what="build")
     end procedure pf_index_threads_i32
 
     module procedure pf_index_threads_i64
-        nt = ix_threads_rule(n)
+        nt = ix_threads_rule(n, what="build")
     end procedure pf_index_threads_i64
 
     module procedure parquet_debug_index_threads_used
         n = dbg_index_threads_used
     end procedure parquet_debug_index_threads_used
+
+    module procedure parquet_debug_index_get_many_threads_used
+        n = dbg_index_get_many_threads_used
+    end procedure parquet_debug_index_get_many_threads_used
 
     ! ============================================================================================
     ! Private workers. Everything below takes a `type(pf_index_map)` dummy, and nothing below
@@ -638,23 +763,59 @@ contains
         nc = n
     end function ix_tuple_width
 
-    !> Validates a bulk lookup's shapes and returns the row count to walk.
+    !> Validates a bulk call's shapes and returns the row count to walk.
     !!
     !! The component check is skipped for a map that was never built, so a bulk lookup against one
     !! answers 0 for every key rather than aborting -- the same rule the scalar `%get` follows.
-    pure function ix_many_rows(self, nrows, nidx, nc) result(n)
+    !! Shared by `%get_many` and `%get_or_add_many`, which is what `what` is for.
+    pure function ix_many_rows(self, nrows, nidx, nc, what) result(n)
         type(pf_index_map), intent(in) :: self !! the map.
         integer(int64), intent(in) :: nrows    !! keys presented.
         integer(int64), intent(in) :: nidx     !! length of the answer array.
         integer, intent(in) :: nc              !! components presented per key.
+        character(len=*), intent(in) :: what   !! procedure name, for the message.
         integer(int64) :: n                    !! rows to walk.
 
-        if (nrows /= nidx) error stop "pf_index_map%get_many: " // &
-            "the keys and the indexes array must have the same length"
-        if (self%ncomp > 0 .and. nc /= self%ncomp) error stop "pf_index_map%get_many: " // &
-            "the keys' component count does not match this map's"
+        if (nrows /= nidx) error stop "pf_index_map%" // what // &
+            ": the keys and the answer array must have the same length"
+        if (self%ncomp > 0 .and. nc /= self%ncomp) error stop "pf_index_map%" // what // &
+            ": the keys' component count does not match this map's"
         n = nrows
     end function ix_many_rows
+
+    !> Checks that a `valid=` mask has exactly one entry per key.
+    !!
+    !! **Deliberately NOT `pure`, although it could be.** A pure subroutine whose only effect is an
+    !! `error stop` is a call ifx 2026.1.1 deletes at `-O0 -check all` (fpm's debug profile): the
+    !! three mask-length error scenarios then walk past the mask and die on the bounds check
+    !! instead of aborting with this message, while the same binary at `-O2`, and gfortran at
+    !! both profiles, abort here. Reproduced with a twelve-line program; an impure call is never
+    !! deleted. Same family as CLAUDE.md's "A scenario whose abort is inside a `pure` function
+    !! must USE the result" -- a guard with no result to use has to be impure instead.
+    subroutine ix_check_mask_len(nmask, n, what)
+        integer(int64), intent(in) :: nmask    !! entries in the mask.
+        integer(int64), intent(in) :: n        !! keys presented.
+        character(len=*), intent(in) :: what   !! procedure name, for the message.
+
+        if (nmask /= n) error stop "pf_index_map%" // what // &
+            ": valid= must have exactly one element per key"
+    end subroutine ix_check_mask_len
+
+    !> The contiguous slice of rows `1 .. n` that chunk `c` of `nchunk` owns.
+    !!
+    !! Balanced to within one row, and a function of `c` alone, so that no chunk's bounds depend
+    !! on another's -- which is what lets the chunk loop be a plain `parallel do`. The products
+    !! stay far below `huge(int64)` for any row count an array this module is handed can have.
+    pure subroutine ix_chunk_bounds(n, nchunk, c, lo, hi)
+        integer(int64), intent(in) :: n        !! rows in all.
+        integer, intent(in) :: nchunk          !! chunks the rows are cut into; >= 1.
+        integer, intent(in) :: c               !! this chunk, in `1 .. nchunk`.
+        integer(int64), intent(out) :: lo      !! first row of the chunk.
+        integer(int64), intent(out) :: hi      !! last row of the chunk; `lo - 1` for an empty one.
+
+        lo = 1_int64 + (n * int(c - 1, int64)) / int(nchunk, int64)
+        hi = (n * int(c, int64)) / int(nchunk, int64)
+    end subroutine ix_chunk_bounds
 
     !> Narrows an index value to `int32`, aborting rather than truncating.
     pure function ix_narrow(v) result(out)
@@ -933,7 +1094,7 @@ contains
 
     ! ---- The build's thread rule ----
 
-    !> Threads a build should use for `n` keys.
+    !> Threads a build should use for `n` keys, or a bulk lookup for `n` rows.
     !!
     !! An explicit request wins and is honoured whatever the size -- the caller has said what they
     !! want -- but is still clamped to what this process's CPU affinity allows, because opening
@@ -942,14 +1103,15 @@ contains
     !! serial-inside-a-parallel-region rule and the affinity clamp live, and is then bounded by the
     !! work available so that a mid-sized build gets the few threads that pay rather than a full
     !! team that does not.
-    function ix_threads_rule(n, threads) result(nt)
-        integer(int64), intent(in) :: n              !! keys the build will process.
+    function ix_threads_rule(n, threads, what) result(nt)
+        integer(int64), intent(in) :: n              !! rows the build or lookup will process.
         integer, intent(in), optional :: threads     !! the caller's request, or absent.
+        character(len=*), intent(in) :: what         !! procedure name, for the message.
         integer :: nt                                !! threads to use; 1 means serial.
         integer(int64) :: nt_work
 
         if (present(threads)) then
-            if (threads < 1) error stop "pf_index_map%build: threads= must be at least 1"
+            if (threads < 1) error stop "pf_index_map%" // what // ": threads= must be at least 1"
             nt = parquet_clamp_to_affinity(threads, "index")
             return
         end if
@@ -977,9 +1139,28 @@ contains
         integer, intent(in), optional :: threads     !! the caller's request, or absent.
         integer :: nt                                !! threads to use; 1 means serial.
 
-        nt = ix_threads_rule(n, threads)
+        nt = ix_threads_rule(n, threads, "build")
         dbg_index_threads_used = nt
     end function ix_threads_for
+
+    !> The rule for a bulk lookup over `n` rows, and a record of what it answered for
+    !! `parquet_debug_index_get_many_threads_used`.
+    !!
+    !! The lookup twin of `ix_threads_for`, with a counter of its own for the reason the spec
+    !! gives on `dbg_index_get_many_threads_used`: this runs lock-free on whichever thread called
+    !! `%get_many`, so it must not share a store with the build's guarded record. The store is
+    !! atomic so that two bulk lookups resolving at once cannot tear it. Every `%get_many`
+    !! specific must come through here rather than through `ix_threads_rule` directly, or the
+    !! counter goes stale and the threading tests that read it assert against the previous call.
+    function ix_lookup_threads_for(n, threads) result(nt)
+        integer(int64), intent(in) :: n              !! rows the lookup will process.
+        integer, intent(in), optional :: threads     !! the caller's request, or absent.
+        integer :: nt                                !! threads to use; 1 means serial.
+
+        nt = ix_threads_rule(n, threads, "get_many")
+        !$omp atomic write
+        dbg_index_get_many_threads_used = nt
+    end function ix_lookup_threads_for
 
     ! ---- Value validation ----
 
@@ -993,12 +1174,20 @@ contains
     end subroutine ix_check_values_len
 
     !> Checks that every value is a Fortran index value, naming the first that is not.
-    subroutine ix_check_values_range(values)
-        integer(int64), intent(in) :: values(:) !! the values about to be stored.
+    !!
+    !! A row masked off by `valid` is never stored, so its value is not checked: a nullable key
+    !! column's rows carry whatever sits in the null slots, and that is exactly the case the
+    !! mask exists for.
+    subroutine ix_check_values_range(values, valid)
+        integer(int64), intent(in) :: values(:)   !! the values about to be stored.
+        logical, intent(in), optional :: valid(:) !! per row; a `.false.` row is not checked.
         integer(int64) :: i
         character(len=32) :: t, p
 
         do i = 1_int64, size(values, kind=int64)
+            if (present(valid)) then
+                if (.not. valid(i)) cycle
+            end if
             if (values(i) < 1_int64) then
                 write (t, "(i0)") values(i)
                 write (p, "(i0)") i
@@ -1105,6 +1294,216 @@ contains
             off = off + (key(j) - self%dkmin(j)) * self%dstride(j)
         end do
     end function ix_direct_off_n
+
+    ! ---- The bulk lookup's chunk loops ----
+
+    !> The serial `%get_many` loop over rows `lo .. hi`: `int32` keys, `int32` answers.
+    !!
+    !! One of eight, one per key kind x key rank x answer kind, each the typed loop its `%get_many`
+    !! specific ran serially before the bulk form was threaded; the driver cuts the rows into
+    !! chunks and calls one of these per chunk. `indexes` is `intent(inout)` rather than
+    !! `intent(out)` because each chunk of a threaded call writes only its own slice of the
+    !! caller's array, and an `intent(out)` dummy would let the compiler treat the whole array as
+    !! undefined on entry. `hv` is `present(valid)` hoisted by the driver, so the masked branch
+    !! costs one well-predicted test per row and `valid` is never touched when it is absent.
+    subroutine ix_many_1_k32_i32(self, keys, indexes, valid, hv, lo, hi)
+        type(pf_index_map), intent(in) :: self       !! the map.
+        integer(int32), intent(in) :: keys(:)          !! the caller's keys.
+        integer(int32), intent(inout) :: indexes(:)  !! the caller's answers; rows `lo .. hi` written.
+        logical, intent(in), optional :: valid(:)    !! the caller's mask, or absent.
+        logical, intent(in) :: hv                    !! `present(valid)`, hoisted.
+        integer(int64), intent(in) :: lo             !! first row this call owns.
+        integer(int64), intent(in) :: hi             !! last row this call owns.
+        integer(int64) :: i
+
+        do i = lo, hi
+            if (hv) then
+                if (.not. valid(i)) then
+                    indexes(i) = 0_int32
+                    cycle
+                end if
+            end if
+            indexes(i) = ix_narrow(ix_get_scalar(self, int(keys(i), int64)))
+        end do
+    end subroutine ix_many_1_k32_i32
+
+    !> The serial `%get_many` loop over rows `lo .. hi`: `int32` keys, `int64` answers.
+    subroutine ix_many_1_k32_i64(self, keys, indexes, valid, hv, lo, hi)
+        type(pf_index_map), intent(in) :: self       !! the map.
+        integer(int32), intent(in) :: keys(:)          !! the caller's keys.
+        integer(int64), intent(inout) :: indexes(:)  !! the caller's answers; rows `lo .. hi` written.
+        logical, intent(in), optional :: valid(:)    !! the caller's mask, or absent.
+        logical, intent(in) :: hv                    !! `present(valid)`, hoisted.
+        integer(int64), intent(in) :: lo             !! first row this call owns.
+        integer(int64), intent(in) :: hi             !! last row this call owns.
+        integer(int64) :: i
+
+        do i = lo, hi
+            if (hv) then
+                if (.not. valid(i)) then
+                    indexes(i) = 0_int64
+                    cycle
+                end if
+            end if
+            indexes(i) = ix_get_scalar(self, int(keys(i), int64))
+        end do
+    end subroutine ix_many_1_k32_i64
+
+    !> The serial `%get_many` loop over rows `lo .. hi`: `int64` keys, `int32` answers.
+    subroutine ix_many_1_k64_i32(self, keys, indexes, valid, hv, lo, hi)
+        type(pf_index_map), intent(in) :: self       !! the map.
+        integer(int64), intent(in) :: keys(:)          !! the caller's keys.
+        integer(int32), intent(inout) :: indexes(:)  !! the caller's answers; rows `lo .. hi` written.
+        logical, intent(in), optional :: valid(:)    !! the caller's mask, or absent.
+        logical, intent(in) :: hv                    !! `present(valid)`, hoisted.
+        integer(int64), intent(in) :: lo             !! first row this call owns.
+        integer(int64), intent(in) :: hi             !! last row this call owns.
+        integer(int64) :: i
+
+        do i = lo, hi
+            if (hv) then
+                if (.not. valid(i)) then
+                    indexes(i) = 0_int32
+                    cycle
+                end if
+            end if
+            indexes(i) = ix_narrow(ix_get_scalar(self, keys(i)))
+        end do
+    end subroutine ix_many_1_k64_i32
+
+    !> The serial `%get_many` loop over rows `lo .. hi`: `int64` keys, `int64` answers.
+    subroutine ix_many_1_k64_i64(self, keys, indexes, valid, hv, lo, hi)
+        type(pf_index_map), intent(in) :: self       !! the map.
+        integer(int64), intent(in) :: keys(:)          !! the caller's keys.
+        integer(int64), intent(inout) :: indexes(:)  !! the caller's answers; rows `lo .. hi` written.
+        logical, intent(in), optional :: valid(:)    !! the caller's mask, or absent.
+        logical, intent(in) :: hv                    !! `present(valid)`, hoisted.
+        integer(int64), intent(in) :: lo             !! first row this call owns.
+        integer(int64), intent(in) :: hi             !! last row this call owns.
+        integer(int64) :: i
+
+        do i = lo, hi
+            if (hv) then
+                if (.not. valid(i)) then
+                    indexes(i) = 0_int64
+                    cycle
+                end if
+            end if
+            indexes(i) = ix_get_scalar(self, keys(i))
+        end do
+    end subroutine ix_many_1_k64_i64
+
+    !> The serial `%get_many` loop over rows `lo .. hi`: `int32` tuples, `int32` answers.
+    subroutine ix_many_n_k32_i32(self, keys, indexes, valid, hv, lo, hi)
+        type(pf_index_map), intent(in) :: self       !! the map.
+        integer(int32), intent(in) :: keys(:,:)      !! the caller's tuples, one per row.
+        integer(int32), intent(inout) :: indexes(:)  !! the caller's answers; rows `lo .. hi` written.
+        logical, intent(in), optional :: valid(:)    !! the caller's mask, or absent.
+        logical, intent(in) :: hv                    !! `present(valid)`, hoisted.
+        integer(int64), intent(in) :: lo             !! first row this call owns.
+        integer(int64), intent(in) :: hi             !! last row this call owns.
+        integer(int64) :: kb(pf_index_max_components)
+        integer(int64) :: i
+        integer :: nc, j
+
+        nc = self%ncomp
+        do i = lo, hi
+            if (hv) then
+                if (.not. valid(i)) then
+                    indexes(i) = 0_int32
+                    cycle
+                end if
+            end if
+            do j = 1, nc
+                kb(j) = int(keys(i, j), int64)
+            end do
+            indexes(i) = ix_narrow(ix_get_tuple(self, kb(1:nc)))
+        end do
+    end subroutine ix_many_n_k32_i32
+
+    !> The serial `%get_many` loop over rows `lo .. hi`: `int32` tuples, `int64` answers.
+    subroutine ix_many_n_k32_i64(self, keys, indexes, valid, hv, lo, hi)
+        type(pf_index_map), intent(in) :: self       !! the map.
+        integer(int32), intent(in) :: keys(:,:)      !! the caller's tuples, one per row.
+        integer(int64), intent(inout) :: indexes(:)  !! the caller's answers; rows `lo .. hi` written.
+        logical, intent(in), optional :: valid(:)    !! the caller's mask, or absent.
+        logical, intent(in) :: hv                    !! `present(valid)`, hoisted.
+        integer(int64), intent(in) :: lo             !! first row this call owns.
+        integer(int64), intent(in) :: hi             !! last row this call owns.
+        integer(int64) :: kb(pf_index_max_components)
+        integer(int64) :: i
+        integer :: nc, j
+
+        nc = self%ncomp
+        do i = lo, hi
+            if (hv) then
+                if (.not. valid(i)) then
+                    indexes(i) = 0_int64
+                    cycle
+                end if
+            end if
+            do j = 1, nc
+                kb(j) = int(keys(i, j), int64)
+            end do
+            indexes(i) = ix_get_tuple(self, kb(1:nc))
+        end do
+    end subroutine ix_many_n_k32_i64
+
+    !> The serial `%get_many` loop over rows `lo .. hi`: `int64` tuples, `int32` answers.
+    subroutine ix_many_n_k64_i32(self, keys, indexes, valid, hv, lo, hi)
+        type(pf_index_map), intent(in) :: self       !! the map.
+        integer(int64), intent(in) :: keys(:,:)      !! the caller's tuples, one per row.
+        integer(int32), intent(inout) :: indexes(:)  !! the caller's answers; rows `lo .. hi` written.
+        logical, intent(in), optional :: valid(:)    !! the caller's mask, or absent.
+        logical, intent(in) :: hv                    !! `present(valid)`, hoisted.
+        integer(int64), intent(in) :: lo             !! first row this call owns.
+        integer(int64), intent(in) :: hi             !! last row this call owns.
+        integer(int64) :: kb(pf_index_max_components)
+        integer(int64) :: i
+        integer :: nc, j
+
+        nc = self%ncomp
+        do i = lo, hi
+            if (hv) then
+                if (.not. valid(i)) then
+                    indexes(i) = 0_int32
+                    cycle
+                end if
+            end if
+            do j = 1, nc
+                kb(j) = keys(i, j)
+            end do
+            indexes(i) = ix_narrow(ix_get_tuple(self, kb(1:nc)))
+        end do
+    end subroutine ix_many_n_k64_i32
+
+    !> The serial `%get_many` loop over rows `lo .. hi`: `int64` tuples, `int64` answers.
+    subroutine ix_many_n_k64_i64(self, keys, indexes, valid, hv, lo, hi)
+        type(pf_index_map), intent(in) :: self       !! the map.
+        integer(int64), intent(in) :: keys(:,:)      !! the caller's tuples, one per row.
+        integer(int64), intent(inout) :: indexes(:)  !! the caller's answers; rows `lo .. hi` written.
+        logical, intent(in), optional :: valid(:)    !! the caller's mask, or absent.
+        logical, intent(in) :: hv                    !! `present(valid)`, hoisted.
+        integer(int64), intent(in) :: lo             !! first row this call owns.
+        integer(int64), intent(in) :: hi             !! last row this call owns.
+        integer(int64) :: kb(pf_index_max_components)
+        integer(int64) :: i
+        integer :: nc, j
+
+        nc = self%ncomp
+        do i = lo, hi
+            if (hv) then
+                if (.not. valid(i)) then
+                    indexes(i) = 0_int64
+                    cycle
+                end if
+            end if
+            do j = 1, nc
+                kb(j) = keys(i, j)
+            end do
+            indexes(i) = ix_get_tuple(self, kb(1:nc))
+        end do
+    end subroutine ix_many_n_k64_i64
 
     ! ---- Mutation workers. Every one of these runs with the map's guard held. ----
 
@@ -1239,6 +1638,73 @@ contains
         call ix_widen_tuple(self, key, kb, nc, "get_or_add")
         call ix_goa_tuple(self, kb(1:nc), idx, want32)
     end subroutine ix_goa_tuple_i32
+
+    !> `%get_or_add_many` for rank-1 keys: `%get_or_add` per row, with the guard already held.
+    !!
+    !! The per-row work is the scalar worker's exactly -- one lookup and, for a new key, one
+    !! insert -- so what this saves over a loop of `%get_or_add` is the guard, taken once here
+    !! rather than once per key. The `int32` narrowing happens per row inside the guard, as the
+    !! scalar form does, so the abort for an oversized code fires with at most one thread on the
+    !! fatal path. Serial by construction in this version: the codes are assigned in
+    !! first-appearance order, which the doc-comment on the specifics says not to rely on.
+    subroutine ix_goam_1(self, keys, codes, valid, want32)
+        type(pf_index_map), intent(inout) :: self !! the map.
+        integer(int64), intent(in) :: keys(:)     !! the keys, already widened.
+        integer(int64), intent(out) :: codes(:)   !! one code per key; 0 for a masked row.
+        logical, intent(in), optional :: valid(:) !! the caller's mask, or absent.
+        logical, intent(in) :: want32             !! whether every code must fit `int32`.
+        integer(int64) :: i, n, idx
+        logical :: hv
+
+        call ix_check_scalar_shape(self, "get_or_add_many")
+        call ix_autoinit(self, 1)
+        n = ix_many_rows(self, size(keys, kind=int64), size(codes, kind=int64), 1, "get_or_add_many")
+        hv = present(valid)
+        if (hv) call ix_check_mask_len(size(valid, kind=int64), n, "get_or_add_many")
+        do i = 1_int64, n
+            if (hv) then
+                if (.not. valid(i)) then
+                    codes(i) = 0_int64
+                    cycle
+                end if
+            end if
+            call ix_goa_scalar(self, keys(i), idx, want32)
+            codes(i) = idx
+        end do
+    end subroutine ix_goam_1
+
+    !> `%get_or_add_many` for rank-2 keys, one tuple per row. See `ix_goam_1`.
+    subroutine ix_goam_n(self, keys, codes, valid, want32)
+        type(pf_index_map), intent(inout) :: self !! the map.
+        integer(int64), intent(in) :: keys(:,:)   !! the tuples, already widened, shaped `(n, ncomp)`.
+        integer(int64), intent(out) :: codes(:)   !! one code per row; 0 for a masked row.
+        logical, intent(in), optional :: valid(:) !! the caller's mask, or absent.
+        logical, intent(in) :: want32             !! whether every code must fit `int32`.
+        integer(int64) :: kb(pf_index_max_components)
+        integer(int64) :: i, n, idx
+        integer :: nc, j
+        logical :: hv
+
+        nc = int(size(keys, 2))
+        call ix_check_ncomp(nc, "get_or_add_many")
+        call ix_autoinit(self, nc)
+        n = ix_many_rows(self, size(keys, 1, kind=int64), size(codes, kind=int64), nc, "get_or_add_many")
+        hv = present(valid)
+        if (hv) call ix_check_mask_len(size(valid, kind=int64), n, "get_or_add_many")
+        do i = 1_int64, n
+            if (hv) then
+                if (.not. valid(i)) then
+                    codes(i) = 0_int64
+                    cycle
+                end if
+            end if
+            do j = 1, nc
+                kb(j) = keys(i, j)
+            end do
+            call ix_goa_tuple(self, kb(1:nc), idx, want32)
+            codes(i) = idx
+        end do
+    end subroutine ix_goam_n
 
     !> `%remove` for a single-component key.
     !!
@@ -1444,14 +1910,18 @@ contains
     !! two keys shared a slot, i.e. were equal, and this serial re-pass is what turns that proof
     !! into a message naming the offender. Paying for a second pass only on the error path is the
     !! right side to pay on.
-    subroutine ix_name_duplicate_1(self, keys)
+    subroutine ix_name_duplicate_1(self, keys, valid)
         type(pf_index_map), intent(inout) :: self !! the map, with its slots already scattered.
         integer(int64), intent(in) :: keys(:)     !! the keys, in the caller's order.
+        logical, intent(in), optional :: valid(:) !! the build's mask, or absent.
         integer(int64) :: i, off
         character(len=32) :: t, p
 
         self%dvals = 0_int64
         do i = 1_int64, size(keys, kind=int64)
+            if (present(valid)) then
+                if (.not. valid(i)) cycle
+            end if
             off = keys(i) - self%kmin1 + 1_int64
             if (self%dvals(off) /= 0_int64) then
                 write (t, "(i0)") keys(i)
@@ -1466,9 +1936,10 @@ contains
 
     !> Names the duplicate tuple a threaded composite direct scatter detected. See
     !! `ix_name_duplicate_1`.
-    subroutine ix_name_duplicate_n(self, keys)
+    subroutine ix_name_duplicate_n(self, keys, valid)
         type(pf_index_map), intent(inout) :: self !! the map, with its slots already scattered.
         integer(int64), intent(in) :: keys(:,:)   !! the key tuples, one per row.
+        logical, intent(in), optional :: valid(:) !! the build's mask, or absent.
         integer(int64) :: i, off
         integer :: j
         character(len=32) :: p
@@ -1476,6 +1947,9 @@ contains
 
         self%dvals = 0_int64
         do i = 1_int64, size(keys, 1, kind=int64)
+            if (present(valid)) then
+                if (.not. valid(i)) cycle
+            end if
             off = 1_int64
             do j = 1, self%ncomp
                 off = off + (keys(i, j) - self%dkmin(j)) * self%dstride(j)
@@ -1507,47 +1981,132 @@ contains
         out = out // "]"
     end subroutine ix_tuple_text
 
+    !> Counts the rows a build will store and finds the first and last of them.
+    !!
+    !! Every row when `valid` is absent. With a mask, `first` is where the min/max scans start
+    !! (the scan cannot start from row 1, which may be masked) and `last` is the largest row
+    !! number the default values will store, which is where `%get_or_add` continues from.
+    !! Both are 0 when nothing is stored, and neither is read then.
+    subroutine ix_mask_extent(n, valid, nv, first, last)
+        integer(int64), intent(in) :: n           !! rows presented.
+        logical, intent(in), optional :: valid(:) !! the build's mask, or absent.
+        integer(int64), intent(out) :: nv         !! rows that will be stored.
+        integer(int64), intent(out) :: first      !! first stored row; 0 when `nv` is 0.
+        integer(int64), intent(out) :: last       !! last stored row; 0 when `nv` is 0.
+        integer(int64) :: i
+
+        nv = n
+        first = 1_int64
+        last = n
+        if (.not. present(valid)) return
+        nv = count(valid, kind=int64)
+        first = 0_int64
+        last = 0_int64
+        if (nv == 0_int64) return
+        do i = 1_int64, n
+            if (valid(i)) then
+                first = i
+                exit
+            end if
+        end do
+        do i = n, 1_int64, -1_int64
+            if (valid(i)) then
+                last = i
+                exit
+            end if
+        end do
+    end subroutine ix_mask_extent
+
+    !> The sorted backend over the unmasked rows only: compacts the keys and their values, then
+    !> builds as usual.
+    !!
+    !! `ix_sorted_build` reads "the value of key `i` is `i`" from position and hands `pf_argsort`
+    !! one contiguous array, so a mask cannot be threaded through it without touching the one
+    !! backend the mask does not otherwise reach. Compacting once here costs a temporary of the
+    !! stored size, which the opt-in backend's own sort dwarfs.
+    subroutine ix_sorted_build_masked(self, keys, values, valid, nv, threads)
+        type(pf_index_map), intent(inout) :: self         !! the map; its sorted storage is replaced.
+        integer(int64), intent(in) :: keys(:)             !! the keys, already widened.
+        integer(int64), intent(in), optional :: values(:) !! values, or absent for the row numbers.
+        logical, intent(in) :: valid(:)                   !! the build's mask.
+        integer(int64), intent(in) :: nv                  !! rows the mask keeps; `count(valid)`.
+        integer, intent(in), optional :: threads          !! forwarded to `pf_argsort`.
+        integer(int64), allocatable :: ck(:), cv(:)
+        integer(int64) :: i, k
+
+        allocate(ck(nv), cv(nv))
+        k = 0_int64
+        do i = 1_int64, size(keys, kind=int64)
+            if (.not. valid(i)) cycle
+            k = k + 1_int64
+            ck(k) = keys(i)
+            if (present(values)) then
+                cv(k) = values(i)
+            else
+                cv(k) = i
+            end if
+        end do
+        call ix_sorted_build(self, ck, cv, threads)
+    end subroutine ix_sorted_build_masked
+
     !> Builds a single-component map from a rank-1 key array.
-    subroutine ix_build_1(self, keys, values, method, threads)
+    !!
+    !! With `valid`, a masked row is skipped by every pass -- the scan, the scatter or insert, the
+    !! duplicate count -- and the stored values stay the caller's row numbers, so the map answers
+    !! the row a key sits in even when rows before it were masked. `nv`, the rows actually stored,
+    !! is what sizes the backend choice and the table; `n`, the rows presented, is what the scan
+    !! walks and what the thread rule is bounded by.
+    subroutine ix_build_1(self, keys, values, method, threads, valid)
         type(pf_index_map), intent(inout) :: self        !! the map; rebuilt from scratch.
-        integer(int64), intent(in) :: keys(:)            !! the keys; must be unique.
-        integer(int64), intent(in), optional :: values(:) !! values, or absent for `1 .. n`.
+        integer(int64), intent(in) :: keys(:)            !! the keys; must be unique where unmasked.
+        integer(int64), intent(in), optional :: values(:) !! values, or absent for the row numbers.
         character(len=*), intent(in), optional :: method  !! backend token.
         integer, intent(in), optional :: threads          !! threads to build with.
-        integer(int64) :: n, lo, hi, span, budget, i, off, cnt
+        logical, intent(in), optional :: valid(:)         !! per row; `.false.` skips the row.
+        integer(int64) :: n, nv, first, last, lo, hi, span, budget, i, off, cnt
         integer :: want, nt
-        logical :: has_v, is_new, fits
+        logical :: has_v, hv, is_new, fits
 
         n = size(keys, kind=int64)
+        hv = present(valid)
+        if (hv) call ix_check_mask_len(size(valid, kind=int64), n, "build")
         has_v = present(values)
         if (has_v) then
             call ix_check_values_len(size(values, kind=int64), n)
-            call ix_check_values_range(values)
+            call ix_check_values_range(values, valid)
         end if
         call ix_resolve_method(method, want, .true., "build")
         call ix_reset_storage(self)
         self%ncomp = 1
-        self%nk = n
-        if (n == 0_int64) then
+        call ix_mask_extent(n, valid, nv, first, last)
+        self%nk = nv
+        if (nv == 0_int64) then
             call ix_finish_empty(self, want, 1)
             return
         end if
         if (has_v) then
-            self%next_auto = maxval(values)
+            if (hv) then
+                self%next_auto = maxval(values, mask=valid)
+            else
+                self%next_auto = maxval(values)
+            end if
         else
-            self%next_auto = n
+            self%next_auto = last
         end if
         nt = ix_threads_for(n, threads)
-        lo = keys(1)
-        hi = keys(1)
+        lo = keys(first)
+        hi = keys(first)
         !$omp parallel do default(shared) private(i) reduction(min:lo) reduction(max:hi) &
         !$omp     schedule(static) num_threads(nt) if (nt > 1)
         do i = 1_int64, n
+            if (hv) then
+                if (.not. valid(i)) cycle
+            end if
             if (keys(i) < lo) lo = keys(i)
             if (keys(i) > hi) hi = keys(i)
         end do
         if (want == IX_WANT_AUTO) then
-            budget = ix_budget(n)
+            budget = ix_budget(nv)
             call ix_span_ok(lo, hi, budget, span, fits)
             if (fits) then
                 want = IX_DIRECT
@@ -1568,6 +2127,9 @@ contains
                 !$omp parallel do default(shared) private(i, off) schedule(static) &
                 !$omp     num_threads(nt) if (nt > 1)
                 do i = 1_int64, n
+                    if (hv) then
+                        if (.not. valid(i)) cycle
+                    end if
                     off = keys(i) - lo + 1_int64
                     self%dvals(off) = values(i)
                 end do
@@ -1575,6 +2137,9 @@ contains
                 !$omp parallel do default(shared) private(i, off) schedule(static) &
                 !$omp     num_threads(nt) if (nt > 1)
                 do i = 1_int64, n
+                    if (hv) then
+                        if (.not. valid(i)) cycle
+                    end if
                     off = keys(i) - lo + 1_int64
                     self%dvals(off) = i
                 end do
@@ -1585,12 +2150,15 @@ contains
             do off = 1_int64, span
                 if (self%dvals(off) /= 0_int64) cnt = cnt + 1_int64
             end do
-            if (cnt /= n) call ix_name_duplicate_1(self, keys)
+            if (cnt /= nv) call ix_name_duplicate_1(self, keys, valid)
         case (IX_HASH)
             self%backend = IX_HASH
             self%nk = 0_int64
-            call ix_hash_reserve(self, n)
+            call ix_hash_reserve(self, nv)
             do i = 1_int64, n
+                if (hv) then
+                    if (.not. valid(i)) cycle
+                end if
                 if (has_v) then
                     call ix_hash_insert_scalar(self, keys(i), values(i), is_new)
                 else
@@ -1600,7 +2168,11 @@ contains
             end do
         case (IX_SORTED)
             self%backend = IX_SORTED
-            call ix_sorted_build(self, keys, values, threads)
+            if (hv) then
+                call ix_sorted_build_masked(self, keys, values, valid, nv, threads)
+            else
+                call ix_sorted_build(self, keys, values, threads)
+            end if
         end select
     end subroutine ix_build_1
 
@@ -1630,25 +2202,30 @@ contains
     end subroutine ix_report_duplicate_n
 
     !> Builds a map with `ncomp` components from a rank-2 key array shaped `(n, ncomp)`.
-    subroutine ix_build_n(self, keys, values, method, threads)
+    !!
+    !! With `valid`, a masked row is skipped by every pass, exactly as in `ix_build_1`.
+    subroutine ix_build_n(self, keys, values, method, threads, valid)
         type(pf_index_map), intent(inout) :: self        !! the map; rebuilt from scratch.
         integer(int64), intent(in) :: keys(:,:)          !! keys, one per row, one component per column.
-        integer(int64), intent(in), optional :: values(:) !! values, or absent for `1 .. n`.
+        integer(int64), intent(in), optional :: values(:) !! values, or absent for the row numbers.
         character(len=*), intent(in), optional :: method  !! backend token.
         integer, intent(in), optional :: threads          !! threads to build with.
+        logical, intent(in), optional :: valid(:)         !! per row; `.false.` skips the row.
         integer(int64) :: lo(pf_index_max_components), hi(pf_index_max_components)
         integer(int64) :: sp(pf_index_max_components)
-        integer(int64) :: n, budget, total, grown_total, i, off, cnt, l, h, span
+        integer(int64) :: n, nv, first, last, budget, total, grown_total, i, off, cnt, l, h, span
         integer :: want, nt, nc, j
-        logical :: has_v, is_new, fits
+        logical :: has_v, hv, is_new, fits
 
         n = size(keys, 1, kind=int64)
         nc = int(size(keys, 2))
         call ix_check_ncomp(nc, "build")
+        hv = present(valid)
+        if (hv) call ix_check_mask_len(size(valid, kind=int64), n, "build")
         has_v = present(values)
         if (has_v) then
             call ix_check_values_len(size(values, kind=int64), n)
-            call ix_check_values_range(values)
+            call ix_check_values_range(values, valid)
         end if
         call ix_resolve_method(method, want, .true., "build")
         if (want == IX_SORTED .and. nc > 1) error stop "pf_index_map%build: " // &
@@ -1656,26 +2233,34 @@ contains
             "for composite keys"
         call ix_reset_storage(self)
         self%ncomp = nc
-        self%nk = n
-        if (n == 0_int64) then
+        call ix_mask_extent(n, valid, nv, first, last)
+        self%nk = nv
+        if (nv == 0_int64) then
             call ix_finish_empty(self, want, nc)
             return
         end if
         if (has_v) then
-            self%next_auto = maxval(values)
+            if (hv) then
+                self%next_auto = maxval(values, mask=valid)
+            else
+                self%next_auto = maxval(values)
+            end if
         else
-            self%next_auto = n
+            self%next_auto = last
         end if
         nt = ix_threads_for(n, threads)
         ! One scalar-reduction pass per component. Deliberately not an array reduction over
         ! `(nc)`: support for those differs across the compilers this library is built with, and
         ! each column here is stride-1, so the separate passes cost nothing over one fused pass.
         do j = 1, nc
-            l = keys(1, j)
-            h = keys(1, j)
+            l = keys(first, j)
+            h = keys(first, j)
             !$omp parallel do default(shared) private(i) reduction(min:l) reduction(max:h) &
             !$omp     schedule(static) num_threads(nt) if (nt > 1)
             do i = 1_int64, n
+                if (hv) then
+                    if (.not. valid(i)) cycle
+                end if
                 if (keys(i, j) < l) l = keys(i, j)
                 if (keys(i, j) > h) h = keys(i, j)
             end do
@@ -1683,7 +2268,7 @@ contains
             hi(j) = h
         end do
         ! The product of the component spans, refused before it can overflow.
-        budget = ix_budget(n)
+        budget = ix_budget(nv)
         if (want == IX_DIRECT) budget = huge(0_int64)
         fits = .true.
         total = 1_int64
@@ -1733,6 +2318,9 @@ contains
                 !$omp parallel do default(shared) private(i, j, off) schedule(static) &
                 !$omp     num_threads(nt) if (nt > 1)
                 do i = 1_int64, n
+                    if (hv) then
+                        if (.not. valid(i)) cycle
+                    end if
                     off = 1_int64
                     do j = 1, nc
                         off = off + (keys(i, j) - self%dkmin(j)) * self%dstride(j)
@@ -1743,6 +2331,9 @@ contains
                 !$omp parallel do default(shared) private(i, j, off) schedule(static) &
                 !$omp     num_threads(nt) if (nt > 1)
                 do i = 1_int64, n
+                    if (hv) then
+                        if (.not. valid(i)) cycle
+                    end if
                     off = 1_int64
                     do j = 1, nc
                         off = off + (keys(i, j) - self%dkmin(j)) * self%dstride(j)
@@ -1756,12 +2347,15 @@ contains
             do off = 1_int64, total
                 if (self%dvals(off) /= 0_int64) cnt = cnt + 1_int64
             end do
-            if (cnt /= n) call ix_name_duplicate_n(self, keys)
+            if (cnt /= nv) call ix_name_duplicate_n(self, keys, valid)
         case (IX_HASH)
             self%backend = IX_HASH
             self%nk = 0_int64
-            call ix_hash_reserve(self, n)
+            call ix_hash_reserve(self, nv)
             do i = 1_int64, n
+                if (hv) then
+                    if (.not. valid(i)) cycle
+                end if
                 if (has_v) then
                     call ix_hash_insert(self, keys(i, :), values(i), is_new)
                 else
@@ -1772,7 +2366,11 @@ contains
         case (IX_SORTED)
             self%backend = IX_SORTED
             ! `keys(:, 1)` is a contiguous column, so this passes the caller's own storage.
-            call ix_sorted_build(self, keys(:, 1), values, threads)
+            if (hv) then
+                call ix_sorted_build_masked(self, keys(:, 1), values, valid, nv, threads)
+            else
+                call ix_sorted_build(self, keys(:, 1), values, threads)
+            end if
             self%kmin1 = lo(1)
             self%kmax1 = hi(1)
         end select

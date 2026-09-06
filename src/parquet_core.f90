@@ -4868,11 +4868,13 @@ contains
     !> Deduplicates `keys` and appends the distinct ones to this filter's concatenated key store,
     !> recording the new set's slice.
     !>
-    !> %get_or_add is pf_index_map's own dictionary-encoding primitive, so a caller's identifier
-    !> list may contain repeats -- which a real one produced by a join or a group-by very often
-    !> does -- without the abort pf_index_map%build would (correctly) raise on a duplicate key.
-    !> Deduplicating HERE rather than tolerating duplicates later is what lets every evaluation of
-    !> the leaf use %build, whose contract is the strict one. See feature_risks.md R-e.
+    !> %get_or_add_many is pf_index_map's own dictionary-encoding primitive, so a caller's
+    !> identifier list may contain repeats -- which a real one produced by a join or a group-by
+    !> very often does -- without the abort pf_index_map%build would (correctly) raise on a
+    !> duplicate key. Deduplicating HERE rather than tolerating duplicates later is what lets every
+    !> evaluation of the leaf use %build, whose contract is the strict one. See feature_risks.md
+    !> R-e. The mask goes straight through as the map's own `valid=`, and the codes the call
+    !> produces are a by-product: what the filter keeps is the distinct key list.
     subroutine parquet_filter_store_keys(this, name, family, keys, is_valid)
         class(parquet_filter), intent(inout) :: this !! the filter gaining a set.
         character(len=*), intent(in) :: name !! the set's name, without the '@'.
@@ -4880,16 +4882,12 @@ contains
         integer(int64), intent(in) :: keys(:) !! one key per element of the caller's array, masked entries included.
         logical, intent(in), optional :: is_valid(:) !! per-element mask; a .false. element is not in the set.
         type(pf_index_map) :: seen
-        integer(int64), allocatable :: distinct(:), tmp(:)
-        integer(int64) :: i, idx, base, ndist, held
+        integer(int64), allocatable :: distinct(:), tmp(:), codes(:)
+        integer(int64) :: base, ndist, held
 
         call seen%init()
-        do i = 1_int64, size(keys, kind=int64)
-            if (present(is_valid)) then
-                if (.not. is_valid(i)) cycle
-            end if
-            call seen%get_or_add(keys(i), idx)
-        end do
+        allocate(codes(size(keys, kind=int64)))
+        call seen%get_or_add_many(keys, codes, valid=is_valid)
         ndist = seen%nkeys()
         if (ndist > 0_int64) then
             call seen%keys(distinct)

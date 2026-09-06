@@ -58,6 +58,14 @@ contains
             new_unittest("contains agrees with get on every backend", test_contains_agrees), &
             new_unittest("get_many matches a loop of get", test_get_many_matches), &
             new_unittest("get_many rejects a length mismatch", test_get_many_length), &
+            new_unittest("get_many answers 0 for a masked row and looks up the rest", &
+                test_get_many_valid_mask), &
+            new_unittest("get_or_add_many equals a loop of get_or_add", test_get_or_add_many_matches), &
+            new_unittest("get_or_add_many skips masked rows and adds nothing for them", &
+                test_get_or_add_many_valid), &
+            new_unittest("build with valid= skips masked rows on every backend", test_build_valid_mask), &
+            new_unittest("build with valid= over composite keys and int32 forms", &
+                test_build_valid_composite), &
             new_unittest("an unbuilt map answers 0 and reports no method", test_unbuilt_map), &
             new_unittest("a cleared map answers 0 and releases its storage", test_clear_releases), &
             new_unittest("reset empties the map but keeps the allocation", test_reset_keeps_storage), &
@@ -364,6 +372,305 @@ contains
         call check(error, all(out == [1_int64, 2_int64, 3_int64]), &
             "a correctly sized get_many must be accepted")
     end subroutine test_get_many_length
+
+    !> A masked row answers 0 whether or not its key is present, and every other row answers
+    !! exactly what `%get` answers, on every backend and for both answer kinds.
+    !!
+    !! The discriminating probe is a PRESENT key under a `.false.` mask entry: a `%get_many` that
+    !! ignored the mask would answer its stored value there, so the test asserts that row is 0
+    !! while `%get` of the same key is not.
+    subroutine test_get_many_valid_mask(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: m
+        integer(int64) :: keys(6), probes(9), bulk(9), want(9), pairs(6, 2), pprobe(9, 2), i
+        integer(int32) :: bulk32(9)
+        logical :: mask(9)
+        character(len=6) :: methods(3)
+        integer :: k
+
+        keys = [100_int64, 200_int64, 300_int64, 400_int64, 500_int64, 600_int64]
+        probes = [100_int64, 150_int64, 200_int64, 600_int64, 700_int64, 0_int64, &
+            300_int64, 400_int64, 500_int64]
+        mask = [.true., .false., .true., .true., .false., .true., .false., .true., .true.]
+        methods = ["direct", "hash  ", "sorted"]
+        do k = 1, 3
+            call m%build(keys, method=trim(methods(k)))
+            do i = 1_int64, 9_int64
+                if (mask(i)) then
+                    want(i) = m%get(probes(i))
+                else
+                    want(i) = 0_int64
+                end if
+            end do
+            call m%get_many(probes, bulk, valid=mask)
+            call check(error, all(bulk == want), &
+                "a masked get_many must answer 0 for masked rows and %get for the rest on " // &
+                trim(methods(k)))
+            if (allocated(error)) return
+            call check(error, bulk(7) == 0_int64 .and. m%get(probes(7)) == 3_int64, &
+                "row 7 is a PRESENT key under a .false. mask entry: it must answer 0 while %get " // &
+                "still finds it, or the mask was ignored (" // trim(methods(k)) // ")")
+            if (allocated(error)) return
+            call m%get_many(probes, bulk32, valid=mask)
+            call check(error, all(int(bulk32, int64) == want), &
+                "the int32 answer form must honour the mask too on " // trim(methods(k)))
+            if (allocated(error)) return
+        end do
+        ! The composite form: the same mask over key tuples, on the two backends that take them.
+        pairs(:, 1) = keys
+        pairs(:, 2) = [1_int64, 2_int64, 1_int64, 2_int64, 1_int64, 2_int64]
+        pprobe(:, 1) = probes
+        pprobe(:, 2) = [1_int64, 1_int64, 2_int64, 2_int64, 1_int64, 1_int64, 1_int64, 2_int64, 1_int64]
+        do k = 1, 2
+            call m%build(pairs, method=trim(methods(k)))
+            do i = 1_int64, 9_int64
+                if (mask(i)) then
+                    want(i) = m%get(pprobe(i, :))
+                else
+                    want(i) = 0_int64
+                end if
+            end do
+            call m%get_many(pprobe, bulk, valid=mask)
+            call check(error, all(bulk == want), &
+                "a masked composite get_many must equal masked %get on " // trim(methods(k)))
+            if (allocated(error)) return
+            call check(error, bulk(7) == 0_int64 .and. m%get(pprobe(7, :)) == 3_int64, &
+                "row 7 of the composite probe is present and masked, so it must answer 0 while " // &
+                "%get finds it (" // trim(methods(k)) // ")")
+            if (allocated(error)) return
+        end do
+    end subroutine test_get_many_valid_mask
+
+    !> `%get_or_add_many` numbers exactly as a loop of `%get_or_add` does, for both key kinds,
+    !! both code kinds and both key ranks, and continues above a built map's values.
+    subroutine test_get_or_add_many_matches(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: bulk_map, loop_map
+        integer(int64) :: stream(9), codes(9), one(9), idx, i, pairs(7, 2), pc(7), po(7)
+        integer(int32) :: codes32(9)
+        integer(int64), allocatable :: none(:), nocode(:)
+
+        ! A stream with repeats: three distinct keys, so codes 1..3 in first-appearance order.
+        stream = [500_int64, 700_int64, 500_int64, 900_int64, 700_int64, 500_int64, &
+            900_int64, 900_int64, 700_int64]
+        call loop_map%init()
+        do i = 1_int64, 9_int64
+            call loop_map%get_or_add(stream(i), idx)
+            one(i) = idx
+        end do
+        call bulk_map%init()
+        call bulk_map%get_or_add_many(stream, codes)
+        call check(error, all(codes == one), "get_or_add_many must equal a loop of get_or_add")
+        if (allocated(error)) return
+        call check(error, bulk_map%nkeys() == 3_int64, "three distinct keys were added")
+        if (allocated(error)) return
+        call check(error, all(codes >= 1_int64 .and. codes <= 3_int64), &
+            "every code is within 1..k -- that is what dense means")
+        if (allocated(error)) return
+        ! int32 keys and int32 codes, on a fresh map.
+        call bulk_map%clear()
+        call bulk_map%get_or_add_many(int(stream, int32), codes32)
+        call check(error, all(int(codes32, int64) == one), &
+            "the int32 key and int32 code form must number identically")
+        if (allocated(error)) return
+        ! A second call sees the keys the first added, and continues the numbering above them.
+        call bulk_map%get_or_add_many([700_int64, 1100_int64, 500_int64], codes(1:3))
+        call check(error, all(codes(1:3) == [2_int64, 4_int64, 1_int64]), &
+            "a later call must answer the codes already assigned and continue above them")
+        if (allocated(error)) return
+        ! Above a built map's values, as %get_or_add does.
+        call bulk_map%build([1_int64, 2_int64, 3_int64], [10_int64, 20_int64, 30_int64], method="hash")
+        call bulk_map%get_or_add_many([2_int64, 4_int64, 5_int64, 4_int64], codes(1:4))
+        call check(error, all(codes(1:4) == [20_int64, 31_int64, 32_int64, 31_int64]), &
+            "on a built map the new keys continue above the largest stored value")
+        if (allocated(error)) return
+        ! An empty call is legal and changes nothing.
+        allocate(none(0), nocode(0))
+        call bulk_map%get_or_add_many(none, nocode)
+        call check(error, bulk_map%nkeys() == 5_int64, "an empty get_or_add_many adds nothing")
+        if (allocated(error)) return
+        ! Composite keys: tuples with repeats, against a loop of the tuple get_or_add.
+        pairs(:, 1) = [1_int64, 2_int64, 1_int64, 3_int64, 2_int64, 1_int64, 3_int64]
+        pairs(:, 2) = [7_int64, 7_int64, 7_int64, 8_int64, 7_int64, 8_int64, 8_int64]
+        call loop_map%clear()
+        call loop_map%init(ncomp=2)
+        do i = 1_int64, 7_int64
+            call loop_map%get_or_add(pairs(i, :), idx)
+            po(i) = idx
+        end do
+        call bulk_map%clear()
+        call bulk_map%get_or_add_many(pairs, pc)
+        call check(error, all(pc == po), &
+            "the composite get_or_add_many must equal a loop of the tuple get_or_add")
+        if (allocated(error)) return
+        call check(error, bulk_map%nkeys() == 4_int64 .and. bulk_map%ncomponents() == 2, &
+            "four distinct pairs were added to a two-component map")
+    end subroutine test_get_or_add_many_matches
+
+    !> A masked row of `%get_or_add_many` gets the code 0 and adds no key.
+    !!
+    !! The fixture's key 900 appears ONLY on masked rows, so a bulk form that ignored the mask
+    !! would add it: `%contains(900)` is the discriminating assertion, and the vacuity guard is
+    !! that the fixture really does mask every 900 and nothing else.
+    subroutine test_get_or_add_many_valid(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: m, ref
+        integer(int64) :: stream(9), codes(9), want(9), idx, i
+        logical :: mask(9)
+
+        stream = [500_int64, 700_int64, 500_int64, 900_int64, 700_int64, 500_int64, &
+            900_int64, 900_int64, 700_int64]
+        mask = [.true., .true., .true., .false., .true., .true., .false., .false., .true.]
+        call check(error, all(mask .neqv. (stream == 900_int64)), &
+            "fixture: the mask must hide exactly the rows holding 900, or the assertions below " // &
+            "cannot tell a masked row from an absent key")
+        if (allocated(error)) return
+        call ref%init()
+        do i = 1_int64, 9_int64
+            if (mask(i)) then
+                call ref%get_or_add(stream(i), idx)
+                want(i) = idx
+            else
+                want(i) = 0_int64
+            end if
+        end do
+        call m%init()
+        call m%get_or_add_many(stream, codes, valid=mask)
+        call check(error, all(codes == want), &
+            "a masked get_or_add_many must code the unmasked rows as the masked loop does and " // &
+            "the masked rows as 0")
+        if (allocated(error)) return
+        call check(error, m%nkeys() == 2_int64, "only the two unmasked distinct keys were added")
+        if (allocated(error)) return
+        call check(error, .not. m%contains(900_int64), &
+            "a key that appears only on masked rows must not be added")
+        if (allocated(error)) return
+        call check(error, codes(4) == 0_int64 .and. codes(7) == 0_int64 .and. codes(8) == 0_int64, &
+            "every masked row must answer 0")
+    end subroutine test_get_or_add_many_valid
+
+    !> `%build` with `valid=` skips masked rows: they are neither stored nor counted, their keys
+    !! may repeat a stored one, and the values stay the ORIGINAL row numbers.
+    !!
+    !! The fixture masks a duplicate of a stored key (row 3 repeats row 1's key 5) and one key
+    !! that appears nowhere else (row 5, key 11): a build that ignored the mask would abort on the
+    !! duplicate, and one that compacted the rows first would answer wrong row numbers, so both
+    !! failure modes are discriminated on every backend.
+    subroutine test_build_valid_mask(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: m
+        integer(int64) :: keys(6), idx, i
+        integer(int64), allocatable :: list(:), big(:)
+        logical :: mask(6), none(6)
+        logical, allocatable :: bigmask(:)
+        character(len=6) :: methods(3)
+        character(len=:), allocatable :: method
+        integer :: k
+
+        keys = [5_int64, 7_int64, 5_int64, 9_int64, 11_int64, 13_int64]
+        mask = [.true., .true., .false., .true., .false., .true.]
+        methods = ["direct", "hash  ", "sorted"]
+        do k = 1, 3
+            call m%build(keys, method=trim(methods(k)), valid=mask)
+            call check(error, m%nkeys() == 4_int64, &
+                "four rows are unmasked, so four keys are stored on " // trim(methods(k)))
+            if (allocated(error)) return
+            call check(error, m%get(5_int64) == 1_int64 .and. m%get(7_int64) == 2_int64 .and. &
+                m%get(9_int64) == 4_int64 .and. m%get(13_int64) == 6_int64, &
+                "the stored values must be the ORIGINAL row numbers, not compacted ones, on " // &
+                trim(methods(k)))
+            if (allocated(error)) return
+            call check(error, m%get(11_int64) == 0_int64, &
+                "a key that appears only on a masked row must be absent on " // trim(methods(k)))
+            if (allocated(error)) return
+            call m%get_method(method)
+            call check(error, method == trim(methods(k)), &
+                "the masked build must land on the backend that was asked for")
+            if (allocated(error)) return
+            call m%keys(list)
+            call check(error, size(list) == 4, "keys() lists only the stored keys after a masked build")
+            if (allocated(error)) return
+            call check(error, count(list == 11_int64) == 0 .and. count(list == 5_int64) == 1, &
+                "keys() must hold each stored key once and no masked-only key")
+            if (allocated(error)) return
+        end do
+        ! Explicit values under the mask: a masked row's value is neither stored nor checked, so
+        ! it may even be 0, which an unmasked row's value may not be.
+        call m%build(keys, [10_int64, 20_int64, 0_int64, 40_int64, 0_int64, 60_int64], &
+            method="hash", valid=mask)
+        call check(error, m%get(9_int64) == 40_int64 .and. m%get(11_int64) == 0_int64, &
+            "explicit values are stored for unmasked rows only")
+        if (allocated(error)) return
+        ! %get_or_add continues above the last STORED row number, not above the array length.
+        call m%build(keys, method="hash", valid=[.true., .true., .false., .true., .false., .false.])
+        call m%get_or_add(11_int64, idx)
+        call check(error, idx == 5_int64, &
+            "after a masked build the next automatic index is one above the last stored row")
+        if (allocated(error)) return
+        ! A mask that keeps nothing builds an empty map on the requested backend.
+        none = .false.
+        call m%build(keys, method="hash", valid=none)
+        call m%get_method(method)
+        call check(error, m%nkeys() == 0_int64 .and. method == "hash" .and. m%get(5_int64) == 0_int64, &
+            "an all-false mask builds an empty map that still reports its backend")
+        if (allocated(error)) return
+        ! The automatic choice sizes its direct budget by the STORED rows: 30000 presented rows
+        ! would buy a 120000-slot direct array, but the two stored keys span 100000 positions
+        ! against the 65536-slot floor two keys are entitled to, so this must be a hash map.
+        allocate(big(30000), bigmask(30000))
+        do i = 1_int64, 30000_int64
+            big(i) = i
+        end do
+        big(2) = 100000_int64
+        bigmask = .false.
+        bigmask(1:2) = .true.
+        call m%build(big, valid=bigmask)
+        call m%get_method(method)
+        call check(error, method == "hash" .and. m%nkeys() == 2_int64, &
+            "the automatic backend choice must budget by the stored rows, not the presented ones")
+        if (allocated(error)) return
+        call check(error, m%get(100000_int64) == 2_int64 .and. m%get(3_int64) == 0_int64, &
+            "and the masked build still answers the two stored keys and nothing else")
+    end subroutine test_build_valid_mask
+
+    !> The composite form of the masked build, on both backends that take tuples, and the int32
+    !! forwarders, which must pass the mask through as the int64 ones do.
+    subroutine test_build_valid_composite(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: m
+        integer(int64) :: pairs(5, 2)
+        logical :: mask(5)
+        character(len=6) :: methods(2)
+        integer :: k
+
+        pairs(:, 1) = [1_int64, 2_int64, 1_int64, 3_int64, 4_int64]
+        pairs(:, 2) = [7_int64, 7_int64, 7_int64, 8_int64, 9_int64]
+        ! Row 3 repeats row 1's tuple; row 5 is the only (4, 9). Both are masked.
+        mask = [.true., .true., .false., .true., .false.]
+        methods = ["direct", "hash  "]
+        do k = 1, 2
+            call m%build(pairs, method=trim(methods(k)), valid=mask)
+            call check(error, m%nkeys() == 3_int64, &
+                "three unmasked tuples are stored on " // trim(methods(k)))
+            if (allocated(error)) return
+            call check(error, m%get([1_int64, 7_int64]) == 1_int64 .and. &
+                m%get([2_int64, 7_int64]) == 2_int64 .and. m%get([3_int64, 8_int64]) == 4_int64, &
+                "stored values are the original row numbers on " // trim(methods(k)))
+            if (allocated(error)) return
+            call check(error, m%get([4_int64, 9_int64]) == 0_int64, &
+                "a tuple that appears only on a masked row is absent on " // trim(methods(k)))
+            if (allocated(error)) return
+        end do
+        ! Explicit values, int32 keys, with the mask: the int32 forwarders pass it through too.
+        call m%build(int(pairs, int32), [10_int32, 20_int32, 30_int32, 40_int32, 50_int32], &
+            method="hash", valid=mask)
+        call check(error, m%get([3_int32, 8_int32]) == 40_int64 .and. m%get([4_int32, 9_int32]) == 0_int64, &
+            "the int32 composite build honours the mask and stores the given values")
+        if (allocated(error)) return
+        call m%build(int(pairs(:, 1), int32), method="sorted", valid=mask)
+        call check(error, m%nkeys() == 3_int64 .and. m%get(3_int32) == 4_int64 .and. m%get(4_int32) == 0_int64, &
+            "the int32 rank-1 build honours the mask on the sorted backend")
+    end subroutine test_build_valid_composite
 
     ! ---- Lifecycle ----
 

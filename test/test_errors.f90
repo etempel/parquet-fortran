@@ -2241,6 +2241,18 @@ contains
                 test_index_get_many_int32_overflow_aborts), &
             new_unittest("threads=0 on a build aborts", &
                 test_index_build_threads_zero_aborts), &
+            new_unittest("a get_many mask of the wrong length aborts", &
+                test_index_get_many_valid_length_aborts), &
+            new_unittest("threads=0 on a get_many aborts", &
+                test_index_get_many_threads_zero_aborts), &
+            new_unittest("a get_or_add_many code array of the wrong length aborts", &
+                test_index_get_or_add_many_length_aborts), &
+            new_unittest("a get_or_add_many mask of the wrong length aborts", &
+                test_index_get_or_add_many_valid_length_aborts), &
+            new_unittest("a code too large for an int32 answer aborts on get_or_add_many", &
+                test_index_get_or_add_many_int32_overflow_aborts), &
+            new_unittest("a build mask of the wrong length aborts", &
+                test_index_build_valid_length_aborts), &
             new_unittest("a rank-1 key list from a composite map aborts", &
                 test_index_keys_rank1_on_composite_aborts), &
             new_unittest("every legal pf_index_map path completes", &
@@ -2779,6 +2791,63 @@ contains
             failure_message="threads=0 on %build was expected to abort", &
             required_stderr="threads= must be at least 1")
     end subroutine test_index_build_threads_zero_aborts
+    !
+    !> See `scenario_index_get_many_valid_length` (test/error_scenarios.f90). The scenario makes a
+    !> correctly sized call first, so this passing means the guard fired on the short mask only.
+    subroutine test_index_get_many_valid_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_get_many_valid_length", &
+            expect_abort=.true., &
+            failure_message="a get_many mask of the wrong length was expected to abort", &
+            required_stderr="valid= must have exactly one element per key")
+    end subroutine test_index_get_many_valid_length_aborts
+    !
+    !> See `scenario_index_get_many_threads_zero` (test/error_scenarios.f90).
+    subroutine test_index_get_many_threads_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_get_many_threads_zero", &
+            expect_abort=.true., &
+            failure_message="threads=0 on %get_many was expected to abort", &
+            required_stderr="get_many: threads= must be at least 1")
+    end subroutine test_index_get_many_threads_zero_aborts
+    !
+    !> See `scenario_index_get_or_add_many_length` (test/error_scenarios.f90).
+    subroutine test_index_get_or_add_many_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_get_or_add_many_length", &
+            expect_abort=.true., &
+            failure_message="a get_or_add_many length mismatch was expected to abort", &
+            required_stderr="get_or_add_many: the keys and the answer array must have the same length")
+    end subroutine test_index_get_or_add_many_length_aborts
+    !
+    !> See `scenario_index_get_or_add_many_valid_length` (test/error_scenarios.f90).
+    subroutine test_index_get_or_add_many_valid_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_get_or_add_many_valid_length", &
+            expect_abort=.true., &
+            failure_message="a get_or_add_many mask of the wrong length was expected to abort", &
+            required_stderr="get_or_add_many: valid= must have exactly one element per key")
+    end subroutine test_index_get_or_add_many_valid_length_aborts
+    !
+    !> See `scenario_index_get_or_add_many_int32_overflow` (test/error_scenarios.f90). The
+    !> scenario reads the boundary value back first, so this passing means the guard fired on the
+    !> code one past it and not on the largest legal one.
+    subroutine test_index_get_or_add_many_int32_overflow_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_get_or_add_many_int32_overflow", &
+            expect_abort=.true., &
+            failure_message="a code above huge(int32) was expected to abort an int32 get_or_add_many", &
+            required_stderr="too large for an int32 result")
+    end subroutine test_index_get_or_add_many_int32_overflow_aborts
+    !
+    !> See `scenario_index_build_valid_length` (test/error_scenarios.f90).
+    subroutine test_index_build_valid_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_build_valid_length", &
+            expect_abort=.true., &
+            failure_message="a build mask of the wrong length was expected to abort", &
+            required_stderr="build: valid= must have exactly one element per key")
+    end subroutine test_index_build_valid_length_aborts
     !
     !> See `scenario_index_keys_rank1_on_composite` (test/error_scenarios.f90).
     subroutine test_index_keys_rank1_on_composite_aborts(error)

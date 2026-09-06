@@ -5410,6 +5410,21 @@ gfortran release build sees it.
   scenarios here that discard a result are safe today. They are one `pure` keyword away from not
   being, which is what the check is for rather than a reason to rewrite them now.
 
+**A `pure` SUBROUTINE whose only effect is an `error stop` is the same trap with no result to use,
+and ifx deletes the CALL at `-O0`.** Measured with ifx 2026.1.1 under fpm's debug profile
+(`-O0 -check all -warn all -g -traceback`): a twelve-line program calling
+`pure subroutine check_len(nmask, n, what)` -- three `intent(in)` dummies, one `if (...) error
+stop` -- walks straight past the guard into a bounds-check failure, while the identical
+subroutine without `pure` aborts with its message; at `-O2` the pure one aborts too, and gfortran
+aborts at every level. Found by `pf_index_map`'s three mask-length scenarios, which passed on
+gfortran at both profiles and on ifx release and failed only on ifx debug -- so a guard of this
+shape is invisible to every run but one. **Write a guard-only subroutine impure**, and say in its
+doc-comment that the missing `pure` is deliberate (`ix_check_mask_len` in
+`src/parquet_index_map.f90` is the worked example); a pure guard that also returns something the
+caller uses (`ix_many_rows`, `ix_tuple_width`) is safe, because the result keeps the call alive.
+`check_scenario_uses_a_pure_result` does not see this shape -- it checks functions -- so the
+ifx debug run is the only thing that does.
+
 `check_scenario_uses_a_pure_result` (`tools/check_source_conventions.py`) enforces it, resolving
 what "pure" means at a call site from `src/` in three ways — the `pure`/`elemental` functions
 themselves, the type-bound bindings that reach them (`m%get`), and the named generic interfaces

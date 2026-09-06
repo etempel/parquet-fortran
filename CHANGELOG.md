@@ -90,6 +90,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   positions. See
   [Counting how often each value occurs](doc/pages/tables/table-mutate.md#counting-how-often-each-value-occurs)
   and [Mapping values through a lookup table](doc/pages/utilities/sorting.md#mapping-values-through-a-lookup-table).
+- **`pf_index_map` gains bulk dictionary encoding and validity masks.** `m%get_or_add_many(keys,
+  codes)` is `%get_or_add` over a whole array under one lock, the way to factorise a key column;
+  `valid=` on `%build`, `%get_many` and `%get_or_add_many` skips the rows a mask marks `.false.`, so
+  a nullable key column can be indexed or probed without compacting it first. See
+  [Filling a map as you go](doc/pages/utilities/index-maps.md#filling-a-map-as-you-go).
+
+### Changed
+
+- **`pf_index_map%get_many` threads.** A bulk lookup now cuts its keys into one chunk per thread,
+  by the rule a build follows (automatic, capped by `index_threads`, serial inside a parallel
+  region), and takes `threads=` to say otherwise; it is no longer `pure`. See
+  [Threads a build or a bulk lookup uses](doc/pages/utilities/index-maps.md#threads-a-build-or-a-bulk-lookup-uses).
 
 ### Fixed
 

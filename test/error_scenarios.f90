@@ -2746,6 +2746,18 @@ program error_scenarios
         call scenario_index_get_many_int32_overflow()
     case ("index_build_threads_zero")
         call scenario_index_build_threads_zero()
+    case ("index_get_many_valid_length")
+        call scenario_index_get_many_valid_length()
+    case ("index_get_many_threads_zero")
+        call scenario_index_get_many_threads_zero()
+    case ("index_get_or_add_many_length")
+        call scenario_index_get_or_add_many_length()
+    case ("index_get_or_add_many_valid_length")
+        call scenario_index_get_or_add_many_valid_length()
+    case ("index_get_or_add_many_int32_overflow")
+        call scenario_index_get_or_add_many_int32_overflow()
+    case ("index_build_valid_length")
+        call scenario_index_build_valid_length()
     case ("index_keys_rank1_on_composite")
         call scenario_index_keys_rank1_on_composite()
     case ("index_control")
@@ -23673,9 +23685,10 @@ contains
         print '(a,i0)', "int32 answer at the boundary was accepted, got=", out32(1)
         call m%build([1_int64], [int(huge(0_int32), int64) + 1_int64])
         call m%get_many([1_int64], out32)   ! -> aborts
-        ! `%get_many` is `pure`, so its result must be USED or the compiler may delete the call
-        ! along with the abort inside it -- see CLAUDE.md, "A scenario whose abort is inside a
-        ! `pure` function must USE the result".
+        ! The result is printed so the trailing message is a diagnostic rather than a claim.
+        ! (`%get_many` was `pure` until it threaded, and then this was also what kept the
+        ! optimiser from deleting the call -- CLAUDE.md, "A scenario whose abort is inside a
+        ! `pure` function must USE the result"; the habit costs nothing to keep.)
         print '(a,i0)', "an oversized value narrowed into an int32 answer, got=", out32(1)
     end subroutine scenario_index_get_many_int32_overflow
     !
@@ -23693,6 +23706,82 @@ contains
         call m%build([1_int64, 2_int64], threads=0)   ! -> aborts
         print '(a)', "threads=0 was accepted"
     end subroutine scenario_index_build_threads_zero
+    !
+    !> A `valid=` mask of the wrong length on a bulk lookup is refused rather than read past its
+    !> end or applied to a prefix of the keys. The control call first: a mask of the right length
+    !> must be accepted, or a guard that fired on every mask would pass here.
+    subroutine scenario_index_get_many_valid_length()
+        type(pf_index_map) :: m
+        integer(int64) :: out(3)
+
+        call m%build([1_int64, 2_int64, 3_int64])
+        call m%get_many([1_int64, 2_int64, 3_int64], out, valid=[.true., .false., .true.])
+        print '(a,i0)', "a mask of the right length was accepted, out(2)=", out(2)
+        call m%get_many([1_int64, 2_int64, 3_int64], out, valid=[.true., .false.])   ! -> aborts
+        print '(a)', "a get_many mask of the wrong length was accepted"
+    end subroutine scenario_index_get_many_valid_length
+    !
+    !> `threads=0` on a bulk lookup is refused for the reason `scenario_index_build_threads_zero`
+    !> gives: the lookup resolves its team through the same rule as the build.
+    subroutine scenario_index_get_many_threads_zero()
+        type(pf_index_map) :: m
+        integer(int64) :: out(2)
+
+        call m%build([1_int64, 2_int64])
+        call m%get_many([1_int64, 2_int64], out, threads=1)   ! control: the smallest team allowed
+        print '(a,i0)', "threads=1 was accepted, out(1)=", out(1)
+        call m%get_many([1_int64, 2_int64], out, threads=0)   ! -> aborts
+        print '(a)', "threads=0 was accepted on get_many"
+    end subroutine scenario_index_get_many_threads_zero
+    !
+    !> A `%get_or_add_many` whose code array is the wrong length is refused, as `%get_many`'s is:
+    !> a short array would leave some keys added and uncoded, with nothing to say which.
+    subroutine scenario_index_get_or_add_many_length()
+        type(pf_index_map) :: m
+        integer(int64) :: codes(2)
+
+        call m%init()
+        call m%get_or_add_many([1_int64, 2_int64, 3_int64], codes)
+        print '(a)', "a mismatched get_or_add_many was accepted"
+    end subroutine scenario_index_get_or_add_many_length
+    !
+    !> See `scenario_index_get_many_valid_length`; the bulk dictionary encoder checks its mask the
+    !> same way, and the control call shows a matching mask is accepted.
+    subroutine scenario_index_get_or_add_many_valid_length()
+        type(pf_index_map) :: m
+        integer(int64) :: codes(3)
+
+        call m%init()
+        call m%get_or_add_many([1_int64, 2_int64, 3_int64], codes, valid=[.true., .true., .false.])
+        print '(a,i0)', "a mask of the right length was accepted, codes(3)=", codes(3)
+        call m%get_or_add_many([1_int64, 2_int64, 3_int64], codes, valid=[.true.])   ! -> aborts
+        print '(a)', "a get_or_add_many mask of the wrong length was accepted"
+    end subroutine scenario_index_get_or_add_many_valid_length
+    !
+    !> A code too large for an `int32` answer aborts rather than truncating, on the bulk encoder
+    !> as on `%get_many`. Reachable with a one-key map whose stored value is `huge(int32)`: the
+    !> control reads that value back through an int32 code, and the abort is on the NEXT new key,
+    !> whose code is one above it.
+    subroutine scenario_index_get_or_add_many_int32_overflow()
+        type(pf_index_map) :: m
+        integer(int32) :: c32(1)
+
+        call m%build([1_int64], [int(huge(0_int32), int64)], method="hash")
+        call m%get_or_add_many([1_int64], c32)   ! control: the largest code an int32 can hold
+        print '(a,i0)', "int32 code at the boundary was accepted, got=", c32(1)
+        call m%get_or_add_many([2_int64], c32)   ! -> aborts
+        print '(a,i0)', "an oversized code narrowed into an int32 answer, got=", c32(1)
+    end subroutine scenario_index_get_or_add_many_int32_overflow
+    !
+    !> A `valid=` mask of the wrong length on a build is refused before anything is stored.
+    subroutine scenario_index_build_valid_length()
+        type(pf_index_map) :: m
+
+        call m%build([1_int64, 2_int64, 3_int64], valid=[.true., .false., .true.])   ! control
+        print '(a,i0)', "a build mask of the right length was accepted, nkeys=", m%nkeys()
+        call m%build([1_int64, 2_int64, 3_int64], valid=[.true., .false.])   ! -> aborts
+        print '(a)', "a build mask of the wrong length was accepted"
+    end subroutine scenario_index_build_valid_length
     !
     !> Asking a composite map for a rank-1 key list aborts rather than answering for one component.
     !>
@@ -23727,6 +23816,8 @@ contains
         pairs(:, 2) = [3_int64, 4_int64]
         call m%build([1_int64, 2_int64, 3_int64], method="direct")
         call m%get_many([1_int64, 2_int64, 3_int64], out)
+        call m%get_many([1_int64, 2_int64, 3_int64], out, valid=[.true., .false., .true.], threads=1)
+        if (out(2) /= 0_int64 .or. out(3) /= 3_int64) error stop "control: masked get_many"
         call m%set(2_int64, 9_int64)
         call m%remove(2_int64)
         call m%remove(2_int64, found)
@@ -23735,6 +23826,11 @@ contains
         if (m%get([1_int64, 3_int64]) /= 1_int64) error stop "control: composite lookup"
         call m%init(method="hash")
         call m%set(1_int64, 1_int64)
+        call m%get_or_add_many([5_int64, 1_int64, 5_int64], out, valid=[.true., .true., .false.])
+        if (out(1) /= 2_int64 .or. out(2) /= 1_int64 .or. out(3) /= 0_int64) &
+            error stop "control: get_or_add_many"
+        call m%build([1_int64, 2_int64, 2_int64], method="hash", valid=[.true., .true., .false.])
+        if (m%nkeys() /= 2_int64) error stop "control: masked build"
         print '(a)', "index control finished"
     end subroutine scenario_index_control
 

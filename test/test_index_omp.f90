@@ -45,6 +45,9 @@ contains
             new_unittest("a shared map numbers keys densely from several threads", test_shared_get_or_add), &
             new_unittest("concurrent lookups agree with serial answers", test_concurrent_lookups), &
             new_unittest("concurrent get_many agrees with serial answers", test_concurrent_get_many), &
+            new_unittest("a threaded get_many equals a serial one and resolves its team", &
+                test_threaded_get_many), &
+            new_unittest("get_many's team follows the build's rule", test_get_many_threads_rule), &
             new_unittest("a threaded build equals a serial build", test_threaded_build_matches), &
             new_unittest("a threaded composite build equals a serial one", test_threaded_composite_build), &
             new_unittest("threads= is honoured and bounded", test_threads_argument), &
@@ -262,6 +265,11 @@ contains
     end subroutine test_concurrent_lookups
 
     !> The bulk form is lock-free too, and agrees with the serial answers.
+    !!
+    !! The calls below are made from INSIDE a parallel region, where the bulk form's automatic
+    !! team resolves to 1 (the rule shared with every threaded tier here), so this is the
+    !! contract that any number of threads may run their own serial `%get_many` on one map at
+    !! once. `test_threaded_get_many` is the one that opens a team inside the call.
     subroutine test_concurrent_get_many(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
         type(pf_index_map) :: m
@@ -291,6 +299,172 @@ contains
         end do
         call check(error, bad == 0, "a concurrent get_many disagreed with the serial answer")
     end subroutine test_concurrent_get_many
+
+    !> A `%get_many` that used a team answers exactly what a serial one answers, and the team it
+    !! resolved is the one the rule reports.
+    !!
+    !! Both halves matter and neither is enough alone. The answers are identical at every thread
+    !! count by design, so the equality passes against a worker that never threads; the counter
+    !! is what tells a team that was opened from one that silently collapsed (CLAUDE.md's nested-
+    !! OpenMP note: a collapsed team is undetectable without a team assertion). The probe count is
+    !! above the work floor, so the automatic rule opens a team on any machine that can thread;
+    !! `pf_index_threads` is checked first so that a one-processor runner skips rather than
+    !! comparing serial with serial.
+    subroutine test_threaded_get_many(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: m
+        integer(int64), allocatable :: keys(:), probes(:), want(:), got(:), pairs(:,:), pprobe(:,:)
+        integer(int32), allocatable :: got32(:)
+        logical, allocatable :: mask(:)
+        integer(int64) :: i
+        integer :: k, nt, want_four
+        character(len=6) :: methods(3)
+
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it the threaded arm IS the serial arm, so " // &
+            "the equality below would hold for the wrong reason and the team assertion is moot")
+        return
+#endif
+        nt = pf_index_threads(50000_int64)
+        if (nt < 2) then
+            call skip_test(error, "this machine's affinity mask allows one processor, so no " // &
+                "team is opened and both arms of the comparison would run serially")
+            return
+        end if
+        want_four = 4
+#ifdef _OPENMP
+        want_four = min(4, omp_get_num_procs())
+#endif
+        allocate(keys(30000), probes(50000), want(50000), got(50000), got32(50000), mask(50000))
+        do i = 1_int64, 30000_int64
+            keys(i) = i * 11_int64
+        end do
+        ! About half hits and half misses, interleaved, wrapping around the key set: an even
+        ! residue lands on a stored key, an odd one between two of them.
+        do i = 1_int64, 50000_int64
+            probes(i) = (mod(i * 7_int64, 66000_int64) * 11_int64) / 2_int64
+            mask(i) = mod(i, 3_int64) /= 0_int64
+        end do
+        methods = ["direct", "hash  ", "sorted"]
+        do k = 1, 3
+            call m%build(keys, method=trim(methods(k)), threads=1)
+            call m%get_many(probes, want, threads=1)
+            call check(error, parquet_debug_index_get_many_threads_used() == 1, &
+                "threads=1 must force a serial lookup on " // trim(methods(k)))
+            if (allocated(error)) return
+            call m%get_many(probes, got)
+            call check(error, parquet_debug_index_get_many_threads_used() == nt, &
+                "an automatic get_many over 50000 rows must resolve the team pf_index_threads " // &
+                "reports, on " // trim(methods(k)))
+            if (allocated(error)) return
+            call check(error, all(got == want), &
+                "a threaded get_many answered differently from a serial one on " // trim(methods(k)))
+            if (allocated(error)) return
+            call m%get_many(probes, got, threads=4)
+            call check(error, parquet_debug_index_get_many_threads_used() == want_four, &
+                "threads=4 must be honoured, clamped only by this process's CPU affinity, on " // &
+                trim(methods(k)))
+            if (allocated(error)) return
+            call check(error, all(got == want), &
+                "a get_many with threads=4 answered differently from a serial one on " // &
+                trim(methods(k)))
+            if (allocated(error)) return
+            ! The mask under a team: masked rows 0, the rest as serial.
+            call m%get_many(probes, got, valid=mask)
+            call check(error, all(merge(want, 0_int64, mask) == got), &
+                "a masked threaded get_many must answer 0 on masked rows and the serial " // &
+                "answer elsewhere, on " // trim(methods(k)))
+            if (allocated(error)) return
+            ! The int32 answer form threads too.
+            call m%get_many(probes, got32)
+            call check(error, all(int(got32, int64) == want), &
+                "the int32 answer form of a threaded get_many must agree on " // trim(methods(k)))
+            if (allocated(error)) return
+        end do
+        ! Vacuity guard: the probe set must contain both hits and misses, or the equalities above
+        ! compare arrays of zeros.
+        call check(error, count(want /= 0_int64) > 1000 .and. count(want == 0_int64) > 1000, &
+            "fixture: the probes must mix hits and misses in the thousands")
+        if (allocated(error)) return
+        ! Composite keys under a team.
+        allocate(pairs(30000, 2), pprobe(50000, 2))
+        pairs(:, 1) = keys
+        pairs(:, 2) = mod(keys, 5_int64)
+        pprobe(:, 1) = probes
+        pprobe(:, 2) = mod(probes, 5_int64)
+        do k = 1, 2
+            call m%build(pairs, method=trim(methods(k)), threads=1)
+            call m%get_many(pprobe, want, threads=1)
+            call m%get_many(pprobe, got)
+            call check(error, parquet_debug_index_get_many_threads_used() == nt, &
+                "an automatic composite get_many must resolve the same team on " // trim(methods(k)))
+            if (allocated(error)) return
+            call check(error, all(got == want), &
+                "a threaded composite get_many answered differently from a serial one on " // &
+                trim(methods(k)))
+            if (allocated(error)) return
+        end do
+        call check(error, count(want /= 0_int64) > 1000, &
+            "fixture: the composite probes must hit in the thousands")
+    end subroutine test_threaded_get_many
+
+    !> The bulk lookup's team follows the build's rule: 1 below the work floor, 1 inside a
+    !! parallel region, and `pf_index_threads(n)` otherwise.
+    subroutine test_get_many_threads_rule(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_map) :: m
+        integer(int64) :: keys(100), probes(100), got(100), i
+        integer(int64), allocatable :: big(:), bigout(:)
+        integer :: inside, nt
+
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: the assertions below are about a team being " // &
+            "opened, or deliberately not, and without OpenMP no arm can differ from serial")
+        return
+#endif
+        do i = 1_int64, 100_int64
+            keys(i) = i
+            probes(i) = i + 50_int64
+        end do
+        call m%build(keys)
+        call m%get_many(probes, got)
+        call check(error, parquet_debug_index_get_many_threads_used() == 1, &
+            "a lookup over a hundred rows is below the work floor and must run serially")
+        if (allocated(error)) return
+        call check(error, count(got /= 0_int64) == 50, "and it still answers the fifty hits")
+        if (allocated(error)) return
+        nt = pf_index_threads(100000_int64)
+        if (nt < 2) then
+            call skip_test(error, "one processor available, so no team is ever opened and " // &
+                "the automatic arm below could not differ from the serial control")
+            return
+        end if
+        allocate(big(100000), bigout(100000))
+        do i = 1_int64, 100000_int64
+            big(i) = i
+        end do
+        call m%get_many(big, bigout)
+        call check(error, parquet_debug_index_get_many_threads_used() == nt, &
+            "above the floor the automatic team must be what pf_index_threads reports, or the " // &
+            "query is a second copy of the rule that has drifted")
+        if (allocated(error)) return
+        call check(error, count(bigout /= 0_int64) == 100, "and the hundred stored keys are found")
+        if (allocated(error)) return
+        ! Inside somebody else's parallel region the automatic answer is 1: a lookup there must
+        ! not open a nested team. Read on the same thread that made the call, before the region
+        ! closes, so that nothing else can have written the counter in between.
+        inside = 0
+        !$omp parallel default(shared) num_threads(2)
+        !$omp single
+        call m%get_many(big, bigout)
+        inside = parquet_debug_index_get_many_threads_used()
+        !$omp end single
+        !$omp end parallel
+        call check(error, inside == 1, &
+            "inside an active parallel region an automatic get_many must resolve to 1")
+        if (allocated(error)) return
+        call check(error, count(bigout /= 0_int64) == 100, "and still answers correctly there")
+    end subroutine test_get_many_threads_rule
 
     !> A build that used a team answers exactly what a serial build answers.
     !!

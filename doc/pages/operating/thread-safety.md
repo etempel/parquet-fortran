@@ -345,7 +345,9 @@ said about it.
   column, and it applies to a bare `parquet_string_column` too. Reading a column nobody is writing
   is unrestricted, and its bulk rebuilds thread internally.
 - **`pf_index_map`/`pf_index_pool`: mutations serialise, lookups do not.** Any number of threads
-  may `%get`, `%contains` or `%get_many` one map at once, taking no lock. Building one, and every
+  may `%get`, `%contains` or `%get_many` one map at once, taking no lock; a `%get_many` over a
+  large key array also threads internally, and stands down to serial inside your own parallel
+  region, like the sorts. Building one, and every
   `%insert`/`%remove`/`%get_or_add`, is serialised by the library on a single lock per type — so
   several threads streaming keys through one map's `%get_or_add` is a supported pattern, and each
   thread's returned index is unique and stable. See

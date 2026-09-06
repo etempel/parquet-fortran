@@ -4,14 +4,16 @@
 !! Driven by `bench/benchmark_index.sh`, which is where the environment variables and the
 !! `--profile release` assertion live. Modes:
 !!
-!! * `lookup`   -- ns per `%get`, per backend x {hit, miss} x key pattern, plus `%get_many` and
-!!                 the two baselines every figure is read against: a raw array read (the floor the
-!!                 direct backend should sit on) and `findloc` (the naive alternative this module
-!!                 replaces).
+!! * `lookup`   -- ns per `%get`, per backend x {hit, miss} x key pattern, plus `%get_many` serial
+!!                 and on a team (the arm the filter's per-row-group probe and the join's probe
+!!                 pay; the pair reads as the speed-up), and the two baselines every figure is
+!!                 read against: a raw array read (the floor the direct backend should sit on)
+!!                 and `findloc` (the naive alternative this module replaces).
 !! * `build`    -- ns per key to build, per backend, serial and threaded.
 !! * `tuple`    -- the same lookup sweep over composite keys at ncomp = 1, 2 and 4.
-!! * `mutate`   -- `%set` and `%get_or_add` throughput, one thread and several sharing one map:
-!!                 what the named critical costs when it is contended.
+!! * `mutate`   -- `%set`, `%get_or_add` and `%get_or_add_many` throughput, one thread and several
+!!                 sharing one map: what the named critical costs when it is contended, and what
+!!                 the bulk form saves by taking it once per call.
 !! * `pool`     -- `%get_index`/`%free_index` throughput, private and shared, and `%compact`.
 !!
 !! **Rules this program follows, from CLAUDE.md's benchmarking section.** Every array is written
@@ -159,11 +161,12 @@ contains
     subroutine mode_lookup()
         integer(int64), allocatable :: keys(:), probes(:), answers(:)
         type(pf_index_map) :: m
-        integer :: p, b, r
+        integer :: p, b, r, nt
         integer(int64) :: i, j, acc, n
         real(real64) :: t0, best
         character(len=8) :: patterns(3)
         character(len=6) :: backends(3)
+        character(len=64) :: tag
 
         write (output_unit, "(a)") "## lookup"
         patterns = ["dense   ", "strided ", "sparse  "]
@@ -228,16 +231,33 @@ contains
                 end do
                 call report(trim(patterns(p)) // " " // trim(backends(b)) // ": get, miss", &
                     best, naccess)
-                ! The bulk form, which is the documented hot-loop shape.
+                ! The bulk form, which is the documented hot-loop shape -- pinned to one thread,
+                ! because an unqualified call over this many rows would open a team and the
+                ! serial figure is the one the threaded arm below is read against.
                 best = huge(1.0_real64)
                 do r = 1, rounds
                     t0 = now()
-                    call m%get_many(probes, answers)
+                    call m%get_many(probes, answers, threads=1)
                     best = min(best, now() - t0)
                     checksum = checksum + answers(1) + answers(naccess)
                 end do
-                call report(trim(patterns(p)) // " " // trim(backends(b)) // ": get_many", &
+                call report(trim(patterns(p)) // " " // trim(backends(b)) // ": get_many, threads=1", &
                     best, naccess)
+                ! The same call on a team: the shape the filter's per-row-group probe and the
+                ! join's probe pay, at the team the library resolves for this many rows or at
+                ! the one asked for. Read the speed-up off the pair.
+                nt = threads_req
+                if (nt < 1) nt = pf_index_threads(naccess)
+                best = huge(1.0_real64)
+                do r = 1, rounds
+                    t0 = now()
+                    call m%get_many(probes, answers, threads=nt)
+                    best = min(best, now() - t0)
+                    checksum = checksum + answers(1) + answers(naccess)
+                end do
+                write (tag, "(a,i0)") trim(patterns(p)) // " " // trim(backends(b)) // &
+                    ": get_many, threads=", nt
+                call report(trim(tag), best, naccess)
             end do
             ! The naive alternative this module replaces. Deliberately over a much smaller probe
             ! count -- it is O(n) per lookup, so the same naccess would take minutes.
@@ -392,7 +412,7 @@ contains
     !! shared map from several threads actually pays.
     subroutine mode_mutate()
         type(pf_index_map) :: m
-        integer(int64), allocatable :: keys(:)
+        integer(int64), allocatable :: keys(:), codes(:)
         integer(int64) :: i, idx, acc
         integer :: r, team, t
         real(real64) :: t0, best
@@ -424,6 +444,19 @@ contains
             checksum = checksum + m%nkeys()
         end do
         call report("get_or_add: one thread, growing", best, nkeys)
+        ! The bulk form of the same encoding: one guard acquisition per call rather than per
+        ! key, over the identical key stream, so the pair reads as what the guard costs per key.
+        allocate(codes(nkeys))
+        codes = 0_int64
+        best = huge(1.0_real64)
+        do r = 1, rounds
+            call m%init()
+            t0 = now()
+            call m%get_or_add_many(keys, codes)
+            best = min(best, now() - t0)
+            checksum = checksum + m%nkeys() + codes(nkeys)
+        end do
+        call report("get_or_add_many: one thread, growing", best, nkeys)
         team = 1
 #ifdef _OPENMP
         team = omp_get_max_threads()

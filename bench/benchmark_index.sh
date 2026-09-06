@@ -23,9 +23,10 @@
 #   NACCESS=4000000 Lookups per timed arm. Independent of NKEYS: the probe walk wraps around.
 #   ROUNDS=5        Rounds per figure; the best is kept, per this repo's benchmarking rules --
 #                    the minimum is the run least disturbed by everything else on the machine.
-#   THREADS=0       Team size for the threaded build and the contended arms. 0 means "ask the
-#                    library", which is what a real caller gets; any other value is passed
-#                    through so a figure is attributable to a known team size.
+#   THREADS=0       Team size for the threaded build, the threaded get_many arm and the
+#                    contended arms. 0 means "ask the library", which is what a real caller
+#                    gets; any other value is passed through so a figure is attributable to a
+#                    known team size. The team a threaded get_many arm used is in its label.
 #   NCOMP=4         Largest component count --mode=tuple sweeps to (it visits 1, 2 and 4).
 #   MODE=all        lookup | build | tuple | mutate | pool | all.
 #   LTO=0           Set to 1 when you have appended LTO flags, so the build tree is named apart
@@ -36,6 +37,11 @@
 # NOT assert anything about FPM_CXXFLAGS. A wrapper whose timed work reaches C++ must (see
 # bench/benchmark_colindex.sh); adding a gate here that cannot fail meaningfully would be worse
 # than none.
+#
+# THE THREADED get_many ARM is read against the `threads=1` arm printed just above it: the pair is
+# the speed-up a bulk probe gains from the team, which is what the filter's per-row-group probe
+# and the join's probe actually pay. It is bandwidth-bound past a few dozen threads, so a larger
+# THREADS is not automatically a larger speed-up.
 #
 # The contended arms in --mode=mutate and --mode=pool are what the named critical costs. They are
 # the only figures here that are expected to get WORSE with more threads: every mutation of every
@@ -67,7 +73,7 @@ for arg in "$@"; do
         --rounds=*) ROUNDS="${arg#--rounds=}" ;;
         --threads=*) THREADS="${arg#--threads=}" ;;
         --ncomp=*) NCOMP="${arg#--ncomp=}" ;;
-        -h|--help) sed -n '2,46p' "$0"; finished=1; exit 0 ;;
+        -h|--help) sed -n '2,51p' "$0"; finished=1; exit 0 ;;
         *) echo "benchmark_index.sh: unknown argument '$arg'" >&2; exit 2 ;;
     esac
 done

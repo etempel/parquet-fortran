@@ -45,12 +45,19 @@ needs no special call — it releases and reconstructs.
 call m%build(keys)                      ! values default to 1..n, each key's own position
 call m%build(keys, row_of)              ! or give a value per key, each >= 1
 call m%build(keys, method="hash")        ! or force a backend; see below
+call m%build(keys, valid=ok)            ! skip every row ok(:) marks .false.
 ```
 
 Keys and values may be `integer(int32)` or `integer(int64)`, in any combination. **Every key must
 be unique**; a duplicate aborts and names the offender. There is no "first wins" or "last wins"
 option, because a map that silently answered for one of two rows would give you no way to find out
 which.
+
+`valid=` takes one logical per key and is the mask a nullable key column already carries. A
+`.false.` row is neither stored nor counted — its key may even repeat a stored one — and the
+values stay the **original row numbers** of the rows that were kept, so `m%get(key)` still answers
+the row the key sits in and nothing has to be compacted first. It is the last argument, so an
+existing positional call is unaffected.
 
 For a map you fill as you go rather than in bulk, start it empty:
 
@@ -108,13 +115,20 @@ and tell you how many slots that needed if it cannot.
 ```fortran
 j  = m%get(key)                      ! 0 when absent
 ok = m%contains(key)                 ! exactly %get(key) > 0
-call m%get_many(keys, rows)          ! one answer per key, 0 where absent
+call m%get_many(keys, rows)          ! one answer per key, 0 where absent; threads itself
+call m%get_many(keys, rows, threads=8)   ! on a team you choose
+call m%get_many(keys, rows, valid=ok)    ! a row ok(:) marks .false. answers 0, unprobed
 ```
 
-`%get_many` is **the form to prefer in a hot loop**. It converts the map object once per call
-rather than once per key, which on some compilers is the difference between paying for a runtime
-type descriptor per lookup and paying for one per array. `rows` may be `int32` or `int64` and must
-have exactly one element per key.
+`%get_many` is **the form to prefer in a hot loop**, and it is the one lookup that threads. It
+converts the map object once per call rather than once per key, which on some compilers is the
+difference between paying for a runtime type descriptor per lookup and paying for one per array;
+and it cuts the keys into one contiguous chunk per thread and probes each chunk on its own thread,
+by the same rule a build follows — automatic when you say nothing, `threads=` when you do, and
+serial inside your own parallel region (see [Threads a build or a bulk lookup
+uses](#threads-a-build-or-a-bulk-lookup-uses)). `rows` may be `int32` or `int64` and must have
+exactly one element per key. `valid=` is the same per-key mask `%build` takes: a `.false.` row
+costs one test and answers 0, so a nullable key column can be probed as it is.
 
 **Take the answer as `int64` if your stored values can exceed `huge(int32)`.** An `int32` answer
 array aborts rather than truncating when a value will not fit, and so does `%get_or_add` with an
@@ -176,6 +190,22 @@ do i = 1, n
     call m%get_or_add(raw_key(i), code(i))     ! code(i) is now in 1..k
 end do
 ```
+
+`%get_or_add_many` does the same for a whole array in one call, taking the map's lock once rather
+than once per key, and is the way to factorise a key column:
+
+```fortran
+call m%init()
+call m%get_or_add_many(raw_key, code)            ! code(:) is now in 1..k, one per raw key
+call m%get_or_add_many(raw_key, code, valid=ok)  ! a masked row gets code 0 and adds nothing
+```
+
+The codes of one call are dense — the keys new to the map take the next values above its
+watermark — and are assigned in first-appearance order on the serial path this runs today. Rely
+on a code being stable within the call rather than on that order: a later, partitioned build may
+number the same keys in another order and still be correct. Keys, like everywhere else, may be
+`int32` or `int64`, scalar or a tuple per row, and the codes may be taken as either kind — an
+`int32` code array aborts rather than truncating when a code will not fit.
 
 `%set` on a map you never built starts a hash map for you. On a **direct** map, a key outside the
 range the map was built for aborts rather than silently rebuilding as a hash map — that would
@@ -312,7 +342,10 @@ one back is a supported pattern, and so is several threads streaming keys throug
 `%get_or_add` — each thread's returned index is unique and stable.
 
 **Lookups on a map are lock-free.** Any number of threads may `%get`, `%contains` or `%get_many` a
-map nobody is mutating, at full speed.
+map nobody is mutating, at full speed. `%get_many` also opens a team of its own for a large
+enough probe (see [Threads a build or a bulk lookup uses](#threads-a-build-or-a-bulk-lookup-uses))
+and stands down to serial inside your parallel region, so calling it from your own threads costs
+nothing extra.
 
 **The pool guards its queries as well as its mutations**, so `%is_used`, `%get_max_index` and the
 counters all take the lock that a map lookup avoids. A pool query in a hot loop is not free the way
@@ -357,15 +390,18 @@ default-initialised, so the first procedure that trusts one reads garbage. A blo
 declaration inside the region is what that compiler wants instead, and is what another compiler
 segfaults on for any type with allocatable components. The per-thread array satisfies both.
 
-## Threads a build uses
+## Threads a build or a bulk lookup uses
 
-A `%build` threads its key scan and, on the direct backend, its scatter.
+A `%build` threads its key scan and, on the direct backend, its scatter; a `%get_many` threads
+its probe, one contiguous chunk of the keys per thread. Both resolve their team by the same rule,
+over the rows they are handed.
 
 ```fortran
 call m%build(keys)                   ! automatic
 call m%build(keys, threads=4)        ! an explicit request, honoured
 call m%build(keys, threads=1)        ! forced serial
-nt = pf_index_threads(size(keys, kind=int64))   ! what an automatic build would open
+call m%get_many(probes, rows, threads=4)         ! the same three spellings on a lookup
+nt = pf_index_threads(size(keys, kind=int64))   ! what an automatic build or lookup would open
 ```
 
 **The automatic answer and an explicit `threads=` are resolved differently, and only one of them is
@@ -379,8 +415,8 @@ region.
 |---|---|
 | automatic, ordinary serial code | `omp_get_max_threads()`, capped by `parquet_set_index_threads` |
 | automatic, inside any `!$omp parallel` region | **1** — serial |
-| automatic, fewer than about 8000 keys | **1** — below the work floor |
-| automatic, above it | about one thread per 4000 keys, up to the cap |
+| automatic, fewer than about 8000 keys (or rows probed) | **1** — below the work floor |
+| automatic, above it | about one thread per 4000 keys (or rows), up to the cap |
 | explicit `threads=n`, anywhere | `n` |
 | any of the above | clamped to what the process's CPU affinity allows |
 
@@ -394,7 +430,7 @@ the answer. `threads=0` is refused rather than read as "automatic".
 `threads=` to ask for more. A `method="sorted"` build sorts through `pf_argsort`, so that phase
 answers to the sorting thread knobs instead, while the key scan around it follows the rule above.
 
-Threading a build changes how fast it answers and never what it answers.
+Threading a build or a lookup changes how fast it answers and never what it answers.
 
 ## Performance notes
 
@@ -405,7 +441,11 @@ your own hardware.
   your keys are dense, which the automatic choice already does for you.
 - **A hash lookup is memory-bound**, so it costs about one cache miss. Keeping the load factor at
   0.6 is what keeps the first probe usually the hit.
-- **`%get_many` beats a loop of `%get`** by enough to be worth restructuring a hot loop for.
+- **`%get_many` beats a loop of `%get`** by enough to be worth restructuring a hot loop for, and
+  on a team it is the fastest probe there is: the chunks share nothing and a hash probe is one
+  cache miss, so the speed-up tracks the thread count until memory bandwidth saturates.
+- **`%get_or_add_many` beats a loop of `%get_or_add`** by the lock it does not take per key;
+  the hashing and the inserts cost the same either way.
 - **`%reserve` before a run of inserts** avoids the rehashes, which are the only part of
   incremental filling that is not amortised `O(1)`.
 - **The sorted backend trades speed for memory** and is the one to reach for when a map has to fit

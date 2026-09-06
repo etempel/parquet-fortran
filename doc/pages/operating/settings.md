@@ -382,25 +382,28 @@ results are bit-identical.
 [Converting a whole array at once](../utilities/healpix.html#converting-a-whole-array-at-once)
 for what the bulk forms are and what omitting `threads=` costs you.
 
-## Threads for an index build
+## Threads for an index build or a bulk lookup
 
-`parquet_set_index_threads(n)` caps the threads one `pf_index_map%build` may use. Like every other
-per-area cap it is a cap rather than a request, read per call, with `0` meaning automatic, `1`
-forcing serial, and an explicit `threads=` on the `%build` call itself still winning.
+`parquet_set_index_threads(n)` caps the threads one `pf_index_map%build` or one
+`pf_index_map%get_many` may use. Like every other per-area cap it is a cap rather than a request,
+read per call, with `0` meaning automatic, `1` forcing serial, and an explicit `threads=` on the
+call itself still winning.
 
-**It bounds the BUILD and nothing else.** A lookup is a few nanoseconds of straight-line code with
-no team to open, so there is nothing there for this knob to govern; what it caps is the key scan
-and, on the direct backend, the scatter. A `method="sorted"` build sorts through `pf_argsort`, so
-*that* phase answers to `sort_threads` instead — a sorted build reads both knobs, each for the
-phase it owns.
+**It bounds the build's key scan and scatter, and the bulk lookup's probe, and nothing else.** A
+scalar `%get` is a few nanoseconds of straight-line code with no team to open, so there is nothing
+there for this knob to govern. A `method="sorted"` build sorts through `pf_argsort`, so *that*
+phase answers to `sort_threads` instead — a sorted build reads both knobs, each for the phase it
+owns.
 
-**The answer does not depend on the thread count.** The scan is a min/max reduction and the scatter
-writes one distinct slot per unique key, so a threaded build produces the same map as a serial one.
+**The answer does not depend on the thread count.** The scan is a min/max reduction, the scatter
+writes one distinct slot per unique key, and a bulk lookup's chunks read a map nobody is writing,
+so a threaded build produces the same map as a serial one and a threaded lookup the same answers.
 
 `parquet_get_index_threads()` reports the raw setting (`0` when automatic), and
-`pf_index_threads(n)` reports what an automatic build over `n` keys would actually open — which is
-the one to read, since the team is bounded by the work as well as by this cap. See
-[Threads a build uses](../utilities/index-maps.html#threads-a-build-uses).
+`pf_index_threads(n)` reports what an automatic build over `n` keys, or lookup over `n` rows,
+would actually open — which is the one to read, since the team is bounded by the work as well as
+by this cap. See
+[Threads a build or a bulk lookup uses](../utilities/index-maps.html#threads-a-build-or-a-bulk-lookup-uses).
 
 ## Writer defaults
 

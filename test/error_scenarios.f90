@@ -710,6 +710,34 @@ program error_scenarios
         call scenario_format_column_fmt_on_temporal()
     case ("convert_control")
         call scenario_convert_control()
+    case ("explode_wrong_length")
+        call scenario_explode_wrong_length()
+    case ("explode_negative_count")
+        call scenario_explode_negative_count()
+    case ("explode_row_count_overflow")
+        call scenario_explode_row_count_overflow()
+    case ("explode_shared")
+        call scenario_explode_shared()
+    case ("duplicated_bad_keep")
+        call scenario_bad_keep("duplicated")
+    case ("drop_duplicates_bad_keep")
+        call scenario_bad_keep("drop_duplicates")
+    case ("duplicated_all_unorderable")
+        call scenario_duplicated_all_unorderable()
+    case ("duplicated_all_nothing_resident")
+        call scenario_duplicated_all_nothing_resident()
+    case ("duplicated_unknown_column")
+        call scenario_duplicated_unknown_column()
+    case ("sort_by_values_wrong_length")
+        call scenario_sort_by_values_wrong_length()
+    case ("argsort_by_values_wrong_length")
+        call scenario_argsort_by_values_wrong_length()
+    case ("drop_duplicates_shared")
+        call scenario_drop_duplicates_shared()
+    case ("sort_by_values_shared")
+        call scenario_sort_by_values_shared()
+    case ("rowverbs_control")
+        call scenario_rowverbs_control()
     case ("sortkey_remap_size_mismatch")
         call scenario_sortkey_remap_size_mismatch()
     case ("sortkey_remap_name_too_long")
@@ -8761,6 +8789,192 @@ contains
         print '(a,l1,a,a)', "every conversion path ran, bad has nulls: ", t%has_nulls("bad"), &
             ", first text: ", trim(txt(1))
     end subroutine scenario_convert_control
+
+    !> A six-row table with one group of repeats and one vector column, for the row-set verbs.
+    !> `%duplicated()` naming nothing must refuse `vec` rather than quietly leave it out.
+    subroutine build_rowverbs_fixture(t)
+        type(parquet_table), intent(out) :: t !! the table to build.
+        integer(int32) :: vec(2, 4)
+
+        vec = reshape([1_int32, 2_int32, 3_int32, 4_int32, 5_int32, 6_int32, 7_int32, 8_int32], [2, 4])
+        call parquet_new_table(t)
+        call t%add_column("id", [1_int32, 2_int32, 1_int32, 3_int32])
+        call t%add_column("x", [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64])
+        call t%add_column("vec", vec)
+    end subroutine build_rowverbs_fixture
+
+    !> %explode handed a count list that is not one entry per row.
+    subroutine scenario_explode_wrong_length()
+        type(parquet_table) :: t
+
+        call build_rowverbs_fixture(t)
+        call t%explode([1_int64, 2_int64])
+        print '(a,i0)', "unexpectedly exploded with a short count list, rows now ", t%nrows()
+    end subroutine scenario_explode_wrong_length
+
+    !> A negative count. Nothing sensible can be built from it and a silent max(0, c) would drop
+    !> the row without saying so, which is why it is refused rather than clamped.
+    subroutine scenario_explode_negative_count()
+        type(parquet_table) :: t
+
+        call build_rowverbs_fixture(t)
+        call t%explode([1_int64, -2_int64, 1_int64, 1_int64])
+        print '(a,i0)', "unexpectedly exploded with a negative count, rows now ", t%nrows()
+    end subroutine scenario_explode_negative_count
+
+    !> Counts whose sum passes huge(0_int64). The counts are huge(0_int64) itself, so the correct
+    !> path overflows nothing at all: row 1 leaves the total at huge, and row 2 is refused because
+    !> its count exceeds `huge - total`, which is zero.
+    !>
+    !> **This scenario cannot tell the check's PLACEMENT from a `total < 0` test after the
+    !> addition, and no scenario can.** A single count is at most huge, so a running total can
+    !> never jump from below 2**63 to past 2**64 in one step -- it must land in between first,
+    !> where it reads as negative -- so the two forms answer identically under wrapping arithmetic.
+    !> The reason the check sits BEFORE the addition is therefore not observable behaviour but
+    !> undefined behaviour: signed overflow is UB, and an optimiser entitled to assume it does not
+    !> happen may delete a branch that tests for it (CLAUDE.md's own Risk-94 hazard). That belongs
+    !> in the comment beside the check, which is where it is; this scenario covers the refusal.
+    subroutine scenario_explode_row_count_overflow()
+        type(parquet_table) :: t
+        integer(int64) :: big
+
+        call build_rowverbs_fixture(t)
+        big = huge(0_int64)
+        call t%explode([big, big, big, big])
+        print '(a,i0)', "unexpectedly exploded past huge(int64), rows now ", t%nrows()
+    end subroutine scenario_explode_row_count_overflow
+
+    !> %explode on a table another thread could be reading: refused like every row-structural verb.
+    subroutine scenario_explode_shared()
+        type(parquet_table) :: t
+
+        call build_rowverbs_fixture(t)
+        !$omp parallel num_threads(2) default(shared)
+        !$omp single
+        call t%explode([2_int64, 1_int64, 1_int64, 1_int64])
+        !$omp end single
+        !$omp end parallel
+        print '(a,i0)', "unexpectedly exploded a shared table, rows now ", t%nrows()
+    end subroutine scenario_explode_shared
+
+    !> An unknown `keep` token. Both verbs share the guard, and both scenarios run it, because the
+    !> message names the caller and a message blaming the wrong verb is what this pins.
+    subroutine scenario_bad_keep(which)
+        character(len=*), intent(in) :: which !! "duplicated" or "drop_duplicates".
+        type(parquet_table) :: t
+        logical, allocatable :: mask(:)
+
+        call build_rowverbs_fixture(t)
+        if (which == "duplicated") then
+            call t%duplicated(["id"], mask, keep="middle")
+            print '(a,l1)', "unexpectedly accepted keep=middle, first entry ", mask(1)
+        else
+            call t%drop_duplicates(["id"], keep="middle")
+            print '(a,i0)', "unexpectedly accepted keep=middle, rows now ", t%nrows()
+        end if
+    end subroutine scenario_bad_keep
+
+    !> `%duplicated()` naming no column over a table with a resident VECTOR column. Refused rather
+    !> than silently leaving that column out of the comparison -- see resident_key_names.
+    subroutine scenario_duplicated_all_unorderable()
+        type(parquet_table) :: t
+        logical, allocatable :: mask(:)
+
+        call build_rowverbs_fixture(t)
+        call t%duplicated(mask)
+        print '(a,l1)', "unexpectedly compared every resident column, first entry ", mask(1)
+    end subroutine scenario_duplicated_all_unorderable
+
+    !> `%drop_duplicates()` naming no column on a table nothing has read yet. Refused rather than
+    !> answered: comparing rows on no columns would make every row equal to every other and leave
+    !> ONE row, which is the opposite of what the caller asked for.
+    subroutine scenario_duplicated_all_nothing_resident()
+        type(parquet_table) :: t
+        type(parquet_writer) :: w
+        character(len=*), parameter :: file = "test_run/rowverbs_nothing_resident.parquet"
+
+        call parquet_open_writer(w, file)
+        call parquet_write_column(w, "id", [1_int32, 2_int32, 1_int32])
+        call parquet_close_writer(w)
+        call parquet_open_table(t, file)
+        call t%drop_duplicates()
+        print '(a,i0)', "unexpectedly deduplicated on no columns at all, rows now ", t%nrows()
+    end subroutine scenario_duplicated_all_nothing_resident
+
+    !> A key column that does not exist. The refusal is the sort's own lookup, and the message
+    !> must name `duplicated` rather than `sort_by`.
+    subroutine scenario_duplicated_unknown_column()
+        type(parquet_table) :: t
+        logical, allocatable :: mask(:)
+
+        call build_rowverbs_fixture(t)
+        call t%duplicated(["nope"], mask)
+        print '(a,l1)', "unexpectedly grouped by a column that does not exist, entry ", mask(1)
+    end subroutine scenario_duplicated_unknown_column
+
+    !> %sort_by_values handed a value list that is not one value per row.
+    subroutine scenario_sort_by_values_wrong_length()
+        type(parquet_table) :: t
+
+        call build_rowverbs_fixture(t)
+        call t%sort_by_values([3_int32, 1_int32])
+        print '(a,i0)', "unexpectedly sorted by a short value list, rows now ", t%nrows()
+    end subroutine scenario_sort_by_values_wrong_length
+
+    !> The same guard on the non-mutating twin, which reaches it by its own name.
+    subroutine scenario_argsort_by_values_wrong_length()
+        type(parquet_table) :: t
+        integer(int64), allocatable :: perm(:)
+
+        call build_rowverbs_fixture(t)
+        call t%argsort_by_values([3.0_real64, 1.0_real64], perm)
+        print '(a,i0)', "unexpectedly ordered by a short value list, entries ", size(perm)
+    end subroutine scenario_argsort_by_values_wrong_length
+
+    !> %drop_duplicates on a shared table.
+    subroutine scenario_drop_duplicates_shared()
+        type(parquet_table) :: t
+
+        call build_rowverbs_fixture(t)
+        !$omp parallel num_threads(2) default(shared)
+        !$omp single
+        call t%drop_duplicates(["id"])
+        !$omp end single
+        !$omp end parallel
+        print '(a,i0)', "unexpectedly deduplicated a shared table, rows now ", t%nrows()
+    end subroutine scenario_drop_duplicates_shared
+
+    !> %sort_by_values on a shared table.
+    subroutine scenario_sort_by_values_shared()
+        type(parquet_table) :: t
+
+        call build_rowverbs_fixture(t)
+        !$omp parallel num_threads(2) default(shared)
+        !$omp single
+        call t%sort_by_values([4_int32, 3_int32, 2_int32, 1_int32])
+        !$omp end single
+        !$omp end parallel
+        print '(a,i0)', "unexpectedly reordered a shared table, rows now ", t%nrows()
+    end subroutine scenario_sort_by_values_shared
+
+    !> The negative control for every guard above: each permitted spelling on the same fixture,
+    !> so a guard that fired unconditionally would be caught here rather than pass every scenario.
+    subroutine scenario_rowverbs_control()
+        type(parquet_table) :: t
+        logical, allocatable :: mask(:)
+        integer(int64), allocatable :: perm(:), origin(:)
+
+        call build_rowverbs_fixture(t)
+        call t%duplicated(["id"], mask, keep="first")           ! every keep token is accepted
+        call t%duplicated(["id"], mask, keep="last")
+        call t%duplicated("id", mask, keep="none")
+        call t%argsort_by_values([4.0_real64, 3.0_real64, 2.0_real64, 1.0_real64], perm)
+        call t%explode([1_int64, 2_int64, 1_int64, 1_int64], origin=origin)
+        call t%sort_by_values([5_int32, 4_int32, 3_int32, 2_int32, 1_int32])
+        call t%drop_duplicates(["id"], keep="last")
+        print '(a,i0,a,i0)', "every row-set verb ran, rows now ", t%nrows(), ", origin entries ", &
+            size(origin)
+    end subroutine scenario_rowverbs_control
 
     subroutine scenario_filter_set_control()
         type(parquet_writer) :: writer

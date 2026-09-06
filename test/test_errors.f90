@@ -745,7 +745,35 @@ contains
             new_unittest("format_column with fmt= on a temporal column aborts", &
                 test_format_column_fmt_on_temporal_aborts), &
             new_unittest("parse_column/format_column: every well-formed call runs", &
-                test_convert_control_succeeds) &
+                test_convert_control_succeeds), &
+            new_unittest("explode with a count list of the wrong length aborts", &
+                test_explode_wrong_length_aborts), &
+            new_unittest("explode with a negative count aborts", &
+                test_explode_negative_count_aborts), &
+            new_unittest("explode past huge(int64) rows aborts before allocating", &
+                test_explode_row_count_overflow_aborts), &
+            new_unittest("explode on a shared table aborts", &
+                test_explode_shared_aborts), &
+            new_unittest("duplicated with an unknown keep= token aborts", &
+                test_duplicated_bad_keep_aborts), &
+            new_unittest("drop_duplicates with an unknown keep= token blames itself", &
+                test_drop_duplicates_bad_keep_aborts), &
+            new_unittest("duplicated() over an unorderable resident column aborts", &
+                test_duplicated_all_unorderable_aborts), &
+            new_unittest("drop_duplicates() on a table nothing has read yet aborts", &
+                test_duplicated_all_nothing_resident_aborts), &
+            new_unittest("duplicated naming a column that is not there aborts", &
+                test_duplicated_unknown_column_aborts), &
+            new_unittest("sort_by_values with the wrong value count aborts", &
+                test_sort_by_values_wrong_length_aborts), &
+            new_unittest("argsort_by_values with the wrong value count aborts", &
+                test_argsort_by_values_wrong_length_aborts), &
+            new_unittest("drop_duplicates on a shared table aborts", &
+                test_drop_duplicates_shared_aborts), &
+            new_unittest("sort_by_values on a shared table aborts", &
+                test_sort_by_values_shared_aborts), &
+            new_unittest("explode/duplicated/drop_duplicates/sort_by_values: every well-formed call runs", &
+                test_rowverbs_control_succeeds) &
             ]
         p3 = [ &
             new_unittest("an environment value longer than the buffer aborts", &
@@ -9330,6 +9358,133 @@ contains
         call check_scenario_exit_status(error, "convert_control", expect_abort=.false., &
             failure_message="every well-formed conversion call was expected to run cleanly")
     end subroutine test_convert_control_succeeds
+
+    subroutine test_explode_wrong_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "explode_wrong_length", expect_abort=.true., &
+            failure_message="%explode with a short count list was expected to abort", &
+            required_stderr="explode: the count list has 2 entries but the table has 4 rows")
+    end subroutine test_explode_wrong_length_aborts
+
+    subroutine test_explode_negative_count_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "explode_negative_count", expect_abort=.true., &
+            failure_message="%explode with a negative count was expected to abort", &
+            required_stderr="explode: count -2 at row 2 is negative")
+    end subroutine test_explode_negative_count_aborts
+
+    subroutine test_explode_row_count_overflow_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "explode_row_count_overflow", expect_abort=.true., &
+            failure_message="%explode past huge(int64) rows was expected to abort", &
+            required_stderr="explode: the exploded row count passes huge(0_int64) at row 2")
+    end subroutine test_explode_row_count_overflow_aborts
+
+    subroutine test_explode_shared_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it the scenario's parallel region never " // &
+            "opens, so the table is never shared and the guard has nothing to refuse")
+        return
+#endif
+        call check_scenario_exit_status_and_stderr(error, "explode_shared", expect_abort=.true., &
+            failure_message="%explode on a table another thread may hold was expected to abort", &
+            required_stderr="explode: this table was not opened by this thread")
+    end subroutine test_explode_shared_aborts
+
+    subroutine test_duplicated_bad_keep_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "duplicated_bad_keep", expect_abort=.true., &
+            failure_message="%duplicated with an unknown keep= token was expected to abort", &
+            required_stderr="duplicated: keep=""middle"" is not a policy")
+    end subroutine test_duplicated_bad_keep_aborts
+
+    subroutine test_drop_duplicates_bad_keep_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "drop_duplicates_bad_keep", expect_abort=.true., &
+            failure_message="%drop_duplicates with an unknown keep= token was expected to abort", &
+            required_stderr="drop_duplicates: keep=""middle"" is not a policy")
+    end subroutine test_drop_duplicates_bad_keep_aborts
+
+    subroutine test_duplicated_all_unorderable_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "duplicated_all_unorderable", expect_abort=.true., &
+            failure_message="%duplicated() over a resident vector column was expected to abort", &
+            required_stderr="duplicated: a PK_INT32_VEC column cannot be a sort key")
+    end subroutine test_duplicated_all_unorderable_aborts
+
+    subroutine test_duplicated_all_nothing_resident_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "duplicated_all_nothing_resident", &
+            expect_abort=.true., &
+            failure_message="%drop_duplicates() with nothing resident was expected to abort", &
+            required_stderr="drop_duplicates: no column of this table has been read yet")
+    end subroutine test_duplicated_all_nothing_resident_aborts
+
+    subroutine test_duplicated_unknown_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "duplicated_unknown_column", expect_abort=.true., &
+            failure_message="%duplicated naming a column that is not there was expected to abort", &
+            required_stderr="duplicated: no column of this name")
+    end subroutine test_duplicated_unknown_column_aborts
+
+    subroutine test_sort_by_values_wrong_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sort_by_values_wrong_length", expect_abort=.true., &
+            failure_message="%sort_by_values with a short value list was expected to abort", &
+            required_stderr="sort_by_values: the value list has 2 entries but the table has 4 rows")
+    end subroutine test_sort_by_values_wrong_length_aborts
+
+    subroutine test_argsort_by_values_wrong_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "argsort_by_values_wrong_length", expect_abort=.true., &
+            failure_message="%argsort_by_values with a short value list was expected to abort", &
+            required_stderr="argsort_by_values: the value list has 2 entries")
+    end subroutine test_argsort_by_values_wrong_length_aborts
+
+    subroutine test_drop_duplicates_shared_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it the scenario's parallel region never " // &
+            "opens, so the table is never shared and the guard has nothing to refuse")
+        return
+#endif
+        call check_scenario_exit_status_and_stderr(error, "drop_duplicates_shared", expect_abort=.true., &
+            failure_message="%drop_duplicates on a table another thread may hold was expected to abort", &
+            required_stderr="drop_duplicates: this table was not opened by this thread")
+    end subroutine test_drop_duplicates_shared_aborts
+
+    subroutine test_sort_by_values_shared_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it the scenario's parallel region never " // &
+            "opens, so the table is never shared and the guard has nothing to refuse")
+        return
+#endif
+        call check_scenario_exit_status_and_stderr(error, "sort_by_values_shared", expect_abort=.true., &
+            failure_message="%sort_by_values on a table another thread may hold was expected to abort", &
+            required_stderr="sort_by_values: this table was not opened by this thread")
+    end subroutine test_sort_by_values_shared_aborts
+
+    subroutine test_rowverbs_control_succeeds(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "rowverbs_control", expect_abort=.false., &
+            failure_message="every well-formed row-set verb call was expected to run cleanly")
+    end subroutine test_rowverbs_control_succeeds
 
     subroutine test_filter_rule_too_long_aborts(error)
         type(error_type), allocatable, intent(out) :: error

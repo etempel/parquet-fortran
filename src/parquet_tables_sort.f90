@@ -43,7 +43,8 @@ contains
         ! group_offsets and group_nkeys are forwarded whether or not they were given: an absent
         ! optional dummy passed on as an optional actual stays absent (F2018 15.5.2.13), which is
         ! what lets pf_argsort keep its one-shot path for callers who asked for no boundaries.
-        call pf_argsort(skeys, perm, group_offsets=group_offsets, group_nkeys=group_nkeys)
+        call pf_argsort(skeys, perm, group_offsets=group_offsets, group_nkeys=group_nkeys, &
+            threads=threads)
     end procedure table_argsort_by_i64
     !
     module procedure table_argsort_by_i32
@@ -53,9 +54,10 @@ contains
         ! A local cannot be conditionally absent, so the branch has to be here rather than one
         ! level down -- passing an unconditional group_offsets would give up the one-shot path.
         if (present(group_offsets)) then
-            call pf_argsort(skeys, perm, group_offsets=group_offsets, group_nkeys=group_nkeys)
+            call pf_argsort(skeys, perm, group_offsets=group_offsets, &
+                group_nkeys=group_nkeys, threads=threads)
         else
-            call pf_argsort(skeys, perm, group_nkeys=group_nkeys)
+            call pf_argsort(skeys, perm, group_nkeys=group_nkeys, threads=threads)
         end if
     end procedure table_argsort_by_i32
     !
@@ -182,9 +184,10 @@ contains
         !
         call table_split_key_list(self, keys, "argsort_by", present(descending), k, d)
         if (allocated(d)) then
-            call self%argsort_by(k, perm, d, nulls_first, group_offsets, group_nkeys)
+            call self%argsort_by(k, perm, d, nulls_first, group_offsets, group_nkeys, threads)
         else
-            call self%argsort_by(k, perm, descending, nulls_first, group_offsets, group_nkeys)
+            call self%argsort_by(k, perm, descending, nulls_first, group_offsets, &
+                group_nkeys, threads)
         end if
     end procedure table_argsort_by_string_i32
     !
@@ -194,9 +197,10 @@ contains
         !
         call table_split_key_list(self, keys, "argsort_by", present(descending), k, d)
         if (allocated(d)) then
-            call self%argsort_by(k, perm, d, nulls_first, group_offsets, group_nkeys)
+            call self%argsort_by(k, perm, d, nulls_first, group_offsets, group_nkeys, threads)
         else
-            call self%argsort_by(k, perm, descending, nulls_first, group_offsets, group_nkeys)
+            call self%argsort_by(k, perm, descending, nulls_first, group_offsets, &
+                group_nkeys, threads)
         end if
     end procedure table_argsort_by_string_i64
     !

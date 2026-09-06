@@ -90,6 +90,7 @@ something a reader is expected to have.
 | [Risk-203](#risk-203--dropnas-default-is-a-union-and-one-named-column-cannot-tell-it-from-the-intersection) | %dropna's default is a UNION, and one named column cannot tell | 4 — covered |
 | [Risk-204](#risk-204--a-slot-a-drop-vacated-is-recycled-by-the-next-add_column-with-whatever-it-still-holds) | A slot a drop vacated is recycled by the next %add_column | 4 — covered |
 | [Risk-205](#risk-205--pf_from_str-must-stay-strict-and-only-one-vector-in-seven-can-tell) | pf_from_str must stay strict, and only one vector in seven can tell | 4 — covered |
+| [Risk-206](#risk-206--explode-must-not-check-for-repeats-and-must-keep-the-range-check-it-does-have) | `%explode` must not check for repeats, and must keep the range check it does have | 4 — covered |
 | [Risk-1](#risk-1--the-release-policy-regresses-silently) | The release policy regresses silently | 4 — covered |
 | [Risk-2](#risk-2--the-schema-less-write-rests-on-three-properties-that-look-incidental) | The schema-less write rests on three properties that look incidental | 4 — covered |
 | [Risk-3](#risk-3--the-screen-and-the-evaluator-can-drift-apart) | The screen and the evaluator can drift apart | 4 — covered |
@@ -1399,6 +1400,40 @@ one of the two makes the contract compiler-dependent.
 named, and the header says which one has teeth: `"5 6"` is the only one of the seven a plain `read`
 would get wrong, which is why the list is not shorter. `test_from_str_real_range` covers the
 overflow half on both mechanisms at once.
+
+### Risk-206 — `%explode` must not check for repeats, and must keep the range check it does have
+
+`%explode` (`src/parquet_tables_rowmutate.f90`) builds a row-index list in which **every repeat is
+the point** -- `counts = [2, 1, 3]` becomes `[1, 1, 2, 3, 3, 3]` -- and applies it with `%gather`,
+which permits repeats by design. Its neighbour `%top_n`, four screens up the same file, applies a
+selection with the same `%gather` and calls `check_selection` first *because repeats there are a
+library bug*. So the file contains one caller of `%gather` that must be duplicate-checked and one
+that must not, and the two are otherwise identical.
+
+**Adding `check_selection` to `%explode` is loud** -- every explode of more than one row aborts on
+the second occurrence of the first repeated row -- so that half is self-reporting.
+
+**Removing `%gather`'s per-column RANGE check is not.** That check is the only thing standing
+between a mis-built index list and a read past a column's rows into the uninitialised slack a
+geometrically grown column carries (Risk-67: `size(storage)` is `cap`, not `nrows`). A plain
+`fpm test` has no bounds checking on any machine, so the read succeeds, the values are whatever the
+allocator left there, and the exploded table looks entirely ordinary. Only `fpm test --profile
+debug` sees it.
+
+**What a future change must keep.** `%explode` validates its counts and computes the output row
+count -- including the `huge(0_int64)` guard, checked *before* the addition rather than after it,
+since a wrapped total explodes to the wrong size silently -- before touching a column; it goes to
+`%gather` and not to `check_selection`; and `%gather` keeps its own range check rather than gaining
+a `gather_trusted` twin the way `%reindex` has one. The trusted variant exists for `%sort_by`
+because a permutation there is validated once by the first column; there is no equivalent here,
+because the range check *is* the validation.
+
+**Test.** `test_explode_repeats`, `test_explode_origin` and `test_explode_string_column`
+(`test/test_table_rowverbs.f90`) assert the CONTENT of every output row over a fixture whose columns
+are row-distinct, which is what makes a wrong row visible at all; `explode_wrong_length`,
+`explode_negative_count` and `explode_row_count_overflow` (`test/error_scenarios.f90`) cover the
+three pre-flight refusals. The bounds half is covered by the whole suite under
+`fpm test --profile debug`, not by an assertion -- which is why that profile is part of the gate.
 
 ### Risk-190 — A pre-evaluated leaf's screen flags must come from its own verdict segment
 

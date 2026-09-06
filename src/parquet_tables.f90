@@ -1027,6 +1027,27 @@ module parquet_tables
         procedure, private :: table_top_n_string      !! %top_n specific, separated key string.
         !> Keeps only the n best rows, in key order. Detaching.
         generic :: top_n => table_top_n, table_top_n_string
+        procedure, private :: table_explode_i32       !! %explode specific, int32 counts.
+        procedure, private :: table_explode_i64       !! %explode specific, int64 counts.
+        !> Repeats each row as many times as a count list says. Detaching, when it changes a row.
+        generic :: explode => table_explode_i32, table_explode_i64
+        procedure, private :: table_drop_duplicates_all    !! %drop_duplicates, every resident column.
+        procedure, private :: table_drop_duplicates        !! %drop_duplicates, array of key names.
+        procedure, private :: table_drop_duplicates_string !! %drop_duplicates, separated key string.
+        !> Keeps one row out of every group of rows equal under the keys, in the table's own
+        !! order. Detaching, when it drops one.
+        generic :: drop_duplicates => table_drop_duplicates_all, table_drop_duplicates, &
+                                      table_drop_duplicates_string
+        procedure, private :: table_sort_by_values_i32       !! %sort_by_values specific, int32 values.
+        procedure, private :: table_sort_by_values_i64       !! %sort_by_values specific, int64 values.
+        procedure, private :: table_sort_by_values_f32       !! %sort_by_values specific, real32 values.
+        procedure, private :: table_sort_by_values_f64       !! %sort_by_values specific, real64 values.
+        procedure, private :: table_sort_by_values_chr       !! %sort_by_values specific, character values.
+        !> Reorders every column by VALUES the caller computed, rather than by a column.
+        !! Detaching, unless the values are already in order.
+        generic :: sort_by_values => table_sort_by_values_i32, table_sort_by_values_i64, &
+                                     table_sort_by_values_f32, table_sort_by_values_f64, &
+                                     table_sort_by_values_chr
         procedure, private :: table_join              !! %join specific, array of key names.
         procedure, private :: table_join_max_i32      !! %join specific, array names, int32 max_rows.
         procedure, private :: table_join_max_i64      !! %join specific, array names, int64 max_rows.
@@ -1053,6 +1074,32 @@ module parquet_tables
         !> The `n` best rows in order, by selection rather than a full sort. Also non-mutating.
         generic :: argsort_partial => table_argsort_partial_i32, table_argsort_partial_i64, &
                                       table_argsort_partial_string_i32, table_argsort_partial_string_i64
+        procedure, private :: table_duplicated_all    !! %duplicated, every resident column.
+        procedure, private :: table_duplicated        !! %duplicated, array of key names.
+        procedure, private :: table_duplicated_string !! %duplicated, separated key string.
+        !> The mask %drop_duplicates would apply, without applying it. Never detaches.
+        generic :: duplicated => table_duplicated_all, table_duplicated, table_duplicated_string
+        procedure, private :: table_argsort_by_values_i32_i32  !! %argsort_by_values, int32 values, int32 perm.
+        procedure, private :: table_argsort_by_values_i32_i64  !! %argsort_by_values, int32 values, int64 perm.
+        procedure, private :: table_argsort_by_values_i64_i32  !! %argsort_by_values, int64 values, int32 perm.
+        procedure, private :: table_argsort_by_values_i64_i64  !! %argsort_by_values, int64 values, int64 perm.
+        procedure, private :: table_argsort_by_values_f32_i32  !! %argsort_by_values, real32 values, int32 perm.
+        procedure, private :: table_argsort_by_values_f32_i64  !! %argsort_by_values, real32 values, int64 perm.
+        procedure, private :: table_argsort_by_values_f64_i32  !! %argsort_by_values, real64 values, int32 perm.
+        procedure, private :: table_argsort_by_values_f64_i64  !! %argsort_by_values, real64 values, int64 perm.
+        procedure, private :: table_argsort_by_values_chr_i32  !! %argsort_by_values, character values, int32 perm.
+        procedure, private :: table_argsort_by_values_chr_i64  !! %argsort_by_values, character values, int64 perm.
+        !> The order caller-computed VALUES imply, without reordering anything. Never detaches.
+        generic :: argsort_by_values => table_argsort_by_values_i32_i32, &
+                                        table_argsort_by_values_i32_i64, &
+                                        table_argsort_by_values_i64_i32, &
+                                        table_argsort_by_values_i64_i64, &
+                                        table_argsort_by_values_f32_i32, &
+                                        table_argsort_by_values_f32_i64, &
+                                        table_argsort_by_values_f64_i32, &
+                                        table_argsort_by_values_f64_i64, &
+                                        table_argsort_by_values_chr_i32, &
+                                        table_argsort_by_values_chr_i64
         procedure, private :: table_is_sorted_by        !! %is_sorted_by specific, array of key names.
         procedure, private :: table_is_sorted_by_string !! %is_sorted_by specific, key string.
         !> Whether the rows are already in that order.
@@ -7644,7 +7691,7 @@ module parquet_tables
         !! stay in range and name the wrong rows. `%generation()` is bumped by every such change:
         !! record it beside a permutation you intend to keep, and compare before reusing.
         module subroutine table_argsort_by_i32(self, keys, perm, descending, nulls_first, &
-                group_offsets, group_nkeys)
+                group_offsets, group_nkeys, threads)
             class(parquet_table), intent(in) :: self          !! the table.
             character(len=*), intent(in) :: keys(:)           !! key columns, primary first.
             integer(int32), allocatable, intent(out) :: perm(:) !! the 1-based row order.
@@ -7659,6 +7706,10 @@ module parquet_tables
             !! of them. Counts key NAMES, so `group_nkeys=1` over `["field", "mag"]` gives one group
             !! per field with the rows inside each ordered by mag. Requires `group_offsets`.
             integer, intent(in), optional :: group_nkeys
+            !> how many threads the sort may use; ABSENT is the automatic policy
+            !! `pf_sort_threads` applies everywhere else -- every available thread when the
+            !! caller is not already inside a parallel region, and serial when they are.
+            integer, intent(in), optional :: threads
         end subroutine table_argsort_by_i32
         !> The first `n` rows of the order `keys` implies, as int32 indices, length `n`.
         !!
@@ -7689,7 +7740,7 @@ module parquet_tables
         !! stay in range and name the wrong rows. `%generation()` is bumped by every such change:
         !! record it beside a permutation you intend to keep, and compare before reusing.
         module subroutine table_argsort_by_i64(self, keys, perm, descending, nulls_first, &
-                group_offsets, group_nkeys)
+                group_offsets, group_nkeys, threads)
             class(parquet_table), intent(in) :: self          !! the table.
             character(len=*), intent(in) :: keys(:)           !! key columns, primary first.
             integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based row order.
@@ -7704,6 +7755,10 @@ module parquet_tables
             !! of them. Counts key NAMES, so `group_nkeys=1` over `["field", "mag"]` gives one group
             !! per field with the rows inside each ordered by mag. Requires `group_offsets`.
             integer, intent(in), optional :: group_nkeys
+            !> how many threads the sort may use; ABSENT is the automatic policy
+            !! `pf_sort_threads` applies everywhere else -- every available thread when the
+            !! caller is not already inside a parallel region, and serial when they are.
+            integer, intent(in), optional :: threads
         end subroutine table_argsort_by_i64
         !> The first `n` rows of the order `keys` implies, as int64 indices, length `n`.
         !!
@@ -7776,8 +7831,8 @@ module parquet_tables
             logical, intent(in), optional :: nulls_first(:)   !! per key: .true. to put nulls first.
         end subroutine table_top_n_string
         !> %argsort_by over a string key list, int32 permutation; see `table_sort_by_string`.
-        module subroutine table_argsort_by_string_i32(self, keys, perm, descending, nulls_first, &
-                                                      group_offsets, group_nkeys)
+        module subroutine table_argsort_by_string_i32(self, keys, perm, descending, &
+                                                      nulls_first, group_offsets, group_nkeys, threads)
             class(parquet_table), intent(in) :: self          !! the table.
             character(len=*), intent(in) :: keys              !! key columns, separated; primary first.
             integer(int32), allocatable, intent(out) :: perm(:) !! the 1-based row order.
@@ -7786,10 +7841,11 @@ module parquet_tables
             integer(int32), allocatable, intent(out), optional :: group_offsets(:)
                 !! run boundaries: group g is perm(group_offsets(g) : group_offsets(g+1) - 1).
             integer, intent(in), optional :: group_nkeys      !! leading keys a group is defined by.
+            integer, intent(in), optional :: threads          !! sort thread request; absent = automatic.
         end subroutine table_argsort_by_string_i32
         !> %argsort_by over a string key list, int64 permutation; see `table_sort_by_string`.
-        module subroutine table_argsort_by_string_i64(self, keys, perm, descending, nulls_first, &
-                                                      group_offsets, group_nkeys)
+        module subroutine table_argsort_by_string_i64(self, keys, perm, descending, &
+                                                      nulls_first, group_offsets, group_nkeys, threads)
             class(parquet_table), intent(in) :: self          !! the table.
             character(len=*), intent(in) :: keys              !! key columns, separated; primary first.
             integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based row order.
@@ -7798,6 +7854,7 @@ module parquet_tables
             integer(int64), allocatable, intent(out), optional :: group_offsets(:)
                 !! run boundaries: group g is perm(group_offsets(g) : group_offsets(g+1) - 1).
             integer, intent(in), optional :: group_nkeys      !! leading keys a group is defined by.
+            integer, intent(in), optional :: threads          !! sort thread request; absent = automatic.
         end subroutine table_argsort_by_string_i64
         !> %argsort_partial over a string key list, int32 permutation; see `table_sort_by_string`.
         module subroutine table_argsort_partial_string_i32(self, keys, perm, n, descending, nulls_first)
@@ -7994,6 +8051,62 @@ module parquet_tables
             class(parquet_table), intent(inout) :: self !! the table.
             integer(int64), intent(in) :: n             !! rows to append.
         end subroutine table_append_null_rows_i64
+        !> Repeats each row `counts(i)` times -- the CSR expansion a one-to-many relationship
+        !! needs, and the inverse of a group-by.
+        !!
+        !! Row `i` of EVERY column becomes `counts(i)` consecutive rows of the result, so a table
+        !! of galaxies whose counts say how many groups each belongs to comes back with one row
+        !! per (galaxy, group) pair -- ready for the group ids to be written beside it with
+        !! `%add_column`. `counts` takes exactly one entry per row and no entry may be negative.
+        !!
+        !! **`keep_empty` decides what a count of zero means**, and the two answers are both in
+        !! use elsewhere: `.true.` (the default) keeps that row once, which is pandas' `explode`
+        !! and what a left join does; `.false.` drops it, which is polars' and SQL's `UNNEST`.
+        !! It is a per-call argument and deliberately not a setting -- the same table exploded in
+        !! two programs must not come back with different rows.
+        !!
+        !! **`origin` is the companion an array the table does NOT hold needs.** It comes back
+        !! with one entry per OUTPUT row naming the source row that row came from, so
+        !! `payload_out = payload(origin)` lines any parallel array up with the exploded table.
+        !! It is non-decreasing by construction. It is `integer(int64)` in both specifics and has
+        !! deliberately no int32 form: it indexes the OUTPUT, whose length the kind of `counts`
+        !! says nothing about.
+        !!
+        !! Row-structural, so it DETACHES the table from its file when it changes a row. **A
+        !! count list that is all ones changes nothing at all** -- no column is touched, no `%col`
+        !! pointer is invalidated, `%generation()` does not move and the file is kept -- and
+        !! `origin` still comes back, as `[1, 2, ..., %nrows()]`.
+        !!
+        !! Every count is checked and the output row count is computed, and checked against
+        !! `huge(0_int64)`, before a single column is touched. A column that has not been read is
+        !! skipped as it is by every other row-structural verb here.
+        module subroutine table_explode_i64(self, counts, keep_empty, origin)
+            class(parquet_table), intent(inout) :: self  !! the table.
+            integer(int64), intent(in) :: counts(:)      !! repeats per row; one entry per row, none negative.
+            !> .true. (the default) keeps a zero-count row once; .false. drops it.
+            logical, intent(in), optional :: keep_empty
+            !> per OUTPUT row, the source row it came from. Always int64; see above.
+            integer(int64), allocatable, intent(out), optional :: origin(:)
+        end subroutine table_explode_i64
+        !> `%explode` over an int32 count list. See the int64 form above, which does the work.
+        module subroutine table_explode_i32(self, counts, keep_empty, origin)
+            class(parquet_table), intent(inout) :: self  !! the table.
+            integer(int32), intent(in) :: counts(:)      !! repeats per row; one entry per row, none negative.
+            logical, intent(in), optional :: keep_empty  !! .true. (the default) keeps a zero-count row once.
+            !> per OUTPUT row, the source row it came from. Always int64, whatever `counts` is.
+            integer(int64), allocatable, intent(out), optional :: origin(:)
+        end subroutine table_explode_i32
+        !> The shared back half of every mutation that REORDERS rows: applies `perm` to every
+        !! resident column, advances `%generation()` and detaches. Private to the implementation.
+        !!
+        !! Returns without touching anything when `perm` sends every row to its own position, so
+        !! a sort of already-ordered rows keeps its file and its `%col` pointers. `perm` must be a
+        !! permutation of `1..%nrows()`; that is validated ONCE, by the first column to take it,
+        !! and trusted by every column after -- see the body for why.
+        module subroutine apply_permutation(self, perm)
+            class(parquet_table), intent(inout) :: self !! the table.
+            integer(int64), intent(in) :: perm(:)       !! source row per destination row, length %nrows().
+        end subroutine apply_permutation
         !> The shared back half of every row-structural mutation: applies `keep` to every
         !! resident column, updates the row count, and detaches. Returns without touching
         !! anything when `keep` retains every row. Private to the implementation.
@@ -8022,6 +8135,286 @@ module parquet_tables
             integer, intent(in) :: idx               !! slot index.
             logical :: ok                            !! .true. if the mutation applies to it.
         end function table_mutable_column
+    end interface
+    !
+    ! ---- Duplicates, and order from caller-computed values (parquet_tables_verbs) ----
+    interface
+        !> The mask `%drop_duplicates` would apply -- `.true.` on every row it would DROP --
+        !! without dropping anything, over every RESIDENT column.
+        !!
+        !! "Resident" and not "every column", exactly as `%dropna()` and `%join` decide it: on a
+        !! lazy table "every column" would have to read the whole file merely to decide which
+        !! rows are duplicates. Naming the columns is the explicit way to read one.
+        !!
+        !! **A resident column that cannot be a sort key is refused rather than skipped**, naming
+        !! it. Skipping it would answer about a different set of columns than the one this form
+        !! promises, and drop rows that differ only in the column that was skipped -- silently.
+        !! Name the key columns instead.
+        !!
+        !! See the array form below for the equality rule, `keep` and everything else.
+        module subroutine table_duplicated_all(self, mask, keep, threads)
+            class(parquet_table), intent(in) :: self          !! the table.
+            logical, allocatable, intent(out) :: mask(:)         !! .true. on each row a drop would remove.
+            character(len=*), intent(in), optional :: keep       !! "first" (default), "last" or "none".
+            integer, intent(in), optional :: threads             !! sort thread request; absent = automatic.
+        end subroutine table_duplicated_all
+        !> The mask `%drop_duplicates` would apply -- `.true.` on every row it would DROP --
+        !! without dropping anything.
+        !!
+        !! Rows are grouped by the key columns with the library's own sort engine, so **equality
+        !! is the sort comparator's: all nulls are one value and all NaNs are one value.** That is
+        !! what pandas' `duplicated` does and what `%argsort_by`'s `group_offsets` already
+        !! documents for its groups, and having a second notion of equality here is exactly the
+        !! drift a shared primitive exists to prevent.
+        !!
+        !! `keep` says which row of a group is NOT marked: `"first"` (the default) spares the
+        !! LOWEST row index, `"last"` the highest, and `"none"` marks every row of every group of
+        !! more than one -- pandas' `keep=False`. Lowest and highest are taken from the row
+        !! indices themselves rather than from where the sort happened to put them, so neither
+        !! answer depends on how the engine breaks ties.
+        !!
+        !! A read: no column is touched, `%generation()` does not move, no `%col` pointer is
+        !! invalidated and nothing detaches. A key column that is not resident is READ, by the
+        !! same lazy touch `%sort_by` performs.
+        module subroutine table_duplicated(self, keys, mask, keep, threads)
+            class(parquet_table), intent(in) :: self          !! the table.
+            character(len=*), intent(in) :: keys(:)              !! the key columns; rows are compared on these.
+            logical, allocatable, intent(out) :: mask(:)         !! .true. on each row a drop would remove.
+            character(len=*), intent(in), optional :: keep       !! "first" (default), "last" or "none".
+            integer, intent(in), optional :: threads             !! sort thread request; absent = automatic.
+        end subroutine table_duplicated
+        !> `%duplicated` over a comma/space separated key string. See the array form above.
+        module subroutine table_duplicated_string(self, keys, mask, keep, threads)
+            class(parquet_table), intent(in) :: self          !! the table.
+            character(len=*), intent(in) :: keys                 !! the key columns, comma/space separated.
+            logical, allocatable, intent(out) :: mask(:)         !! .true. on each row a drop would remove.
+            character(len=*), intent(in), optional :: keep       !! "first" (default), "last" or "none".
+            integer, intent(in), optional :: threads             !! sort thread request; absent = automatic.
+        end subroutine table_duplicated_string
+        !> Keeps one row out of every group of rows equal under the key columns, and drops the
+        !! rest -- `%duplicated`'s mask applied.
+        !!
+        !! **The table's ORIGINAL row order is preserved**, because a mask never reorders: the
+        !! surviving rows come back in the order they were already in, which is pandas' default
+        !! and polars' `maintain_order=True`. Equality and `keep` are `%duplicated`'s, exactly.
+        !!
+        !! Row-structural, so it DETACHES when it drops a row. **A table with no duplicate under
+        !! these keys changes nothing at all** -- no column is touched, no `%col` pointer is
+        !! invalidated, `%generation()` does not move and the file is kept.
+        module subroutine table_drop_duplicates(self, keys, keep, threads)
+            class(parquet_table), intent(inout) :: self          !! the table.
+            character(len=*), intent(in) :: keys(:)              !! the key columns; rows are compared on these.
+            character(len=*), intent(in), optional :: keep       !! "first" (default), "last" or "none".
+            integer, intent(in), optional :: threads             !! sort thread request; absent = automatic.
+        end subroutine table_drop_duplicates
+        !> `%drop_duplicates` over a comma/space separated key string. See the array form above.
+        module subroutine table_drop_duplicates_string(self, keys, keep, threads)
+            class(parquet_table), intent(inout) :: self          !! the table.
+            character(len=*), intent(in) :: keys                 !! the key columns, comma/space separated.
+            character(len=*), intent(in), optional :: keep       !! "first" (default), "last" or "none".
+            integer, intent(in), optional :: threads             !! sort thread request; absent = automatic.
+        end subroutine table_drop_duplicates_string
+        !> `%drop_duplicates` over every RESIDENT column. See `%duplicated`'s own no-name form
+        !! for what "resident" covers and why an unorderable resident column is refused.
+        !!
+        !! **`threads` comes FIRST here and last in the two named forms, and that is a language
+        !! constraint rather than a preference**: a generic cannot tell `t%drop_duplicates("id")`
+        !! from `t%drop_duplicates(keep="first")` if this form's first dummy is also a character
+        !! scalar, so the two would be indistinguishable and the generic would not compile. Pass
+        !! `keep` by keyword here, which is what a caller writes anyway.
+        module subroutine table_drop_duplicates_all(self, threads, keep)
+            class(parquet_table), intent(inout) :: self          !! the table.
+            integer, intent(in), optional :: threads             !! sort thread request; absent = automatic.
+            character(len=*), intent(in), optional :: keep       !! "first" (default), "last" or "none".
+        end subroutine table_drop_duplicates_all
+        !> Reorders every column by VALUES the caller computed, rather than by a column of the
+        !! table -- pandas' `sort_values(key=f)` without materialising `f` as a column.
+        !!
+        !! `values` carries one entry per row. `descending`, `is_valid` and `nulls_first` mean
+        !! exactly what they mean in `pf_argsort` (`parquet_sorting`), which is what computes the
+        !! order: nulls and NaNs are placed absolutely and are never flipped by `descending`.
+        !!
+        !! The same table as `%add_column("k", values)`, `%sort_by("k")`, `%drop_column("k")` --
+        !! and that equivalence is what its test asserts -- but without allocating the column or
+        !! needing a free name for it.
+        !!
+        !! Row-structural, so it DETACHES. **Values already in the order asked for change nothing
+        !! at all**: no column is touched, no `%col` pointer is invalidated, `%generation()` does
+        !! not move and the file is kept.
+        module subroutine table_sort_by_values_i32(self, values, descending, is_valid, &
+                nulls_first, threads)
+            class(parquet_table), intent(inout) :: self          !! the table.
+            integer(int32), intent(in) :: values(:)          !! one int32 sort value per row.
+            logical, intent(in), optional :: descending          !! .true. sorts high to low; default .false.
+            logical, intent(in), optional :: is_valid(:)         !! per row: .false. marks the value null.
+            logical, intent(in), optional :: nulls_first         !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads             !! sort thread request; absent = automatic.
+        end subroutine table_sort_by_values_i32
+        !> `%sort_by_values` over a int64 value list. See the int32 form above.
+        module subroutine table_sort_by_values_i64(self, values, descending, is_valid, &
+                nulls_first, threads)
+            class(parquet_table), intent(inout) :: self          !! the table.
+            integer(int64), intent(in) :: values(:)          !! one int64 sort value per row.
+            logical, intent(in), optional :: descending          !! .true. sorts high to low; default .false.
+            logical, intent(in), optional :: is_valid(:)         !! per row: .false. marks the value null.
+            logical, intent(in), optional :: nulls_first         !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads             !! sort thread request; absent = automatic.
+        end subroutine table_sort_by_values_i64
+        !> `%sort_by_values` over a real32 value list. See the int32 form above.
+        module subroutine table_sort_by_values_f32(self, values, descending, is_valid, &
+                nulls_first, threads)
+            class(parquet_table), intent(inout) :: self          !! the table.
+            real(real32), intent(in) :: values(:)            !! one real32 sort value per row.
+            logical, intent(in), optional :: descending          !! .true. sorts high to low; default .false.
+            logical, intent(in), optional :: is_valid(:)         !! per row: .false. marks the value null.
+            logical, intent(in), optional :: nulls_first         !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads             !! sort thread request; absent = automatic.
+        end subroutine table_sort_by_values_f32
+        !> `%sort_by_values` over a real64 value list. See the int32 form above.
+        module subroutine table_sort_by_values_f64(self, values, descending, is_valid, &
+                nulls_first, threads)
+            class(parquet_table), intent(inout) :: self          !! the table.
+            real(real64), intent(in) :: values(:)            !! one real64 sort value per row.
+            logical, intent(in), optional :: descending          !! .true. sorts high to low; default .false.
+            logical, intent(in), optional :: is_valid(:)         !! per row: .false. marks the value null.
+            logical, intent(in), optional :: nulls_first         !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads             !! sort thread request; absent = automatic.
+        end subroutine table_sort_by_values_f64
+        !> `%sort_by_values` over a character value list. See the int32 form above.
+        module subroutine table_sort_by_values_chr(self, values, descending, is_valid, &
+                nulls_first, threads)
+            class(parquet_table), intent(inout) :: self          !! the table.
+            character(len=*), intent(in) :: values(:)        !! one character sort value per row.
+            logical, intent(in), optional :: descending          !! .true. sorts high to low; default .false.
+            logical, intent(in), optional :: is_valid(:)         !! per row: .false. marks the value null.
+            logical, intent(in), optional :: nulls_first         !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads             !! sort thread request; absent = automatic.
+        end subroutine table_sort_by_values_chr
+        !> The row order caller-computed VALUES imply, without reordering anything -- the
+        !! non-mutating twin of `%sort_by_values`.
+        !!
+        !! Hands out row indices, so it carries `%argsort_by`'s staleness rule verbatim: the
+        !! permutation names rows of the table AS IT IS NOW, and any row-structural change
+        !! (`%filter_rows`, `%sort_by`, `%drop_duplicates`, `%explode`, `%append`, ...) makes it
+        !! meaningless. `%get_slice(parquet_slice_list(perm))` is what it is usually handed to.
+        module subroutine table_argsort_by_values_i32_i32(self, values, perm, descending, &
+                is_valid, nulls_first, threads)
+            class(parquet_table), intent(in) :: self          !! the table.
+            integer(int32), intent(in) :: values(:)          !! one int32 sort value per row.
+            integer(int32), allocatable, intent(out) :: perm(:) !! the 1-based row order.
+            logical, intent(in), optional :: descending          !! .true. sorts high to low; default .false.
+            logical, intent(in), optional :: is_valid(:)         !! per row: .false. marks the value null.
+            logical, intent(in), optional :: nulls_first         !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads             !! sort thread request; absent = automatic.
+        end subroutine table_argsort_by_values_i32_i32
+        !> `%argsort_by_values` over a int32 value list, int64 permutation.
+        !! See the first form above.
+        module subroutine table_argsort_by_values_i32_i64(self, values, perm, descending, &
+                is_valid, nulls_first, threads)
+            class(parquet_table), intent(in) :: self          !! the table.
+            integer(int32), intent(in) :: values(:)          !! one int32 sort value per row.
+            integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based row order.
+            logical, intent(in), optional :: descending          !! .true. sorts high to low; default .false.
+            logical, intent(in), optional :: is_valid(:)         !! per row: .false. marks the value null.
+            logical, intent(in), optional :: nulls_first         !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads             !! sort thread request; absent = automatic.
+        end subroutine table_argsort_by_values_i32_i64
+        !> `%argsort_by_values` over a int64 value list, int32 permutation.
+        !! See the first form above.
+        module subroutine table_argsort_by_values_i64_i32(self, values, perm, descending, &
+                is_valid, nulls_first, threads)
+            class(parquet_table), intent(in) :: self          !! the table.
+            integer(int64), intent(in) :: values(:)          !! one int64 sort value per row.
+            integer(int32), allocatable, intent(out) :: perm(:) !! the 1-based row order.
+            logical, intent(in), optional :: descending          !! .true. sorts high to low; default .false.
+            logical, intent(in), optional :: is_valid(:)         !! per row: .false. marks the value null.
+            logical, intent(in), optional :: nulls_first         !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads             !! sort thread request; absent = automatic.
+        end subroutine table_argsort_by_values_i64_i32
+        !> `%argsort_by_values` over a int64 value list, int64 permutation.
+        !! See the first form above.
+        module subroutine table_argsort_by_values_i64_i64(self, values, perm, descending, &
+                is_valid, nulls_first, threads)
+            class(parquet_table), intent(in) :: self          !! the table.
+            integer(int64), intent(in) :: values(:)          !! one int64 sort value per row.
+            integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based row order.
+            logical, intent(in), optional :: descending          !! .true. sorts high to low; default .false.
+            logical, intent(in), optional :: is_valid(:)         !! per row: .false. marks the value null.
+            logical, intent(in), optional :: nulls_first         !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads             !! sort thread request; absent = automatic.
+        end subroutine table_argsort_by_values_i64_i64
+        !> `%argsort_by_values` over a real32 value list, int32 permutation.
+        !! See the first form above.
+        module subroutine table_argsort_by_values_f32_i32(self, values, perm, descending, &
+                is_valid, nulls_first, threads)
+            class(parquet_table), intent(in) :: self          !! the table.
+            real(real32), intent(in) :: values(:)            !! one real32 sort value per row.
+            integer(int32), allocatable, intent(out) :: perm(:) !! the 1-based row order.
+            logical, intent(in), optional :: descending          !! .true. sorts high to low; default .false.
+            logical, intent(in), optional :: is_valid(:)         !! per row: .false. marks the value null.
+            logical, intent(in), optional :: nulls_first         !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads             !! sort thread request; absent = automatic.
+        end subroutine table_argsort_by_values_f32_i32
+        !> `%argsort_by_values` over a real32 value list, int64 permutation.
+        !! See the first form above.
+        module subroutine table_argsort_by_values_f32_i64(self, values, perm, descending, &
+                is_valid, nulls_first, threads)
+            class(parquet_table), intent(in) :: self          !! the table.
+            real(real32), intent(in) :: values(:)            !! one real32 sort value per row.
+            integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based row order.
+            logical, intent(in), optional :: descending          !! .true. sorts high to low; default .false.
+            logical, intent(in), optional :: is_valid(:)         !! per row: .false. marks the value null.
+            logical, intent(in), optional :: nulls_first         !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads             !! sort thread request; absent = automatic.
+        end subroutine table_argsort_by_values_f32_i64
+        !> `%argsort_by_values` over a real64 value list, int32 permutation.
+        !! See the first form above.
+        module subroutine table_argsort_by_values_f64_i32(self, values, perm, descending, &
+                is_valid, nulls_first, threads)
+            class(parquet_table), intent(in) :: self          !! the table.
+            real(real64), intent(in) :: values(:)            !! one real64 sort value per row.
+            integer(int32), allocatable, intent(out) :: perm(:) !! the 1-based row order.
+            logical, intent(in), optional :: descending          !! .true. sorts high to low; default .false.
+            logical, intent(in), optional :: is_valid(:)         !! per row: .false. marks the value null.
+            logical, intent(in), optional :: nulls_first         !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads             !! sort thread request; absent = automatic.
+        end subroutine table_argsort_by_values_f64_i32
+        !> `%argsort_by_values` over a real64 value list, int64 permutation.
+        !! See the first form above.
+        module subroutine table_argsort_by_values_f64_i64(self, values, perm, descending, &
+                is_valid, nulls_first, threads)
+            class(parquet_table), intent(in) :: self          !! the table.
+            real(real64), intent(in) :: values(:)            !! one real64 sort value per row.
+            integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based row order.
+            logical, intent(in), optional :: descending          !! .true. sorts high to low; default .false.
+            logical, intent(in), optional :: is_valid(:)         !! per row: .false. marks the value null.
+            logical, intent(in), optional :: nulls_first         !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads             !! sort thread request; absent = automatic.
+        end subroutine table_argsort_by_values_f64_i64
+        !> `%argsort_by_values` over a character value list, int32 permutation.
+        !! See the first form above.
+        module subroutine table_argsort_by_values_chr_i32(self, values, perm, descending, &
+                is_valid, nulls_first, threads)
+            class(parquet_table), intent(in) :: self          !! the table.
+            character(len=*), intent(in) :: values(:)        !! one character sort value per row.
+            integer(int32), allocatable, intent(out) :: perm(:) !! the 1-based row order.
+            logical, intent(in), optional :: descending          !! .true. sorts high to low; default .false.
+            logical, intent(in), optional :: is_valid(:)         !! per row: .false. marks the value null.
+            logical, intent(in), optional :: nulls_first         !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads             !! sort thread request; absent = automatic.
+        end subroutine table_argsort_by_values_chr_i32
+        !> `%argsort_by_values` over a character value list, int64 permutation.
+        !! See the first form above.
+        module subroutine table_argsort_by_values_chr_i64(self, values, perm, descending, &
+                is_valid, nulls_first, threads)
+            class(parquet_table), intent(in) :: self          !! the table.
+            character(len=*), intent(in) :: values(:)        !! one character sort value per row.
+            integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based row order.
+            logical, intent(in), optional :: descending          !! .true. sorts high to low; default .false.
+            logical, intent(in), optional :: is_valid(:)         !! per row: .false. marks the value null.
+            logical, intent(in), optional :: nulls_first         !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads             !! sort thread request; absent = automatic.
+        end subroutine table_argsort_by_values_chr_i64
     end interface
     !
     ! ---- Copying a whole table (parquet_tables_clone) ----

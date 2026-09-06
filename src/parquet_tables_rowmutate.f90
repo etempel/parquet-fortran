@@ -3,7 +3,13 @@
 !===========================================
 !
 !> Mutation that changes a `parquet_table`'s ROW SET: `%filter_rows`, `%sort_by`, `%top_n`,
-!! `%delete_rows`, `%truncate`, `%append` and `%append_null_rows`.
+!! `%explode`, `%delete_rows`, `%truncate`, `%append` and `%append_null_rows`.
+!!
+!! **Two shared back halves live here and are what sibling files come to**: `table_apply_keep`
+!! for anything that removes rows and `apply_permutation` for anything that reorders them.
+!! `%drop_duplicates` and `%sort_by_values` (`parquet_tables_verbs.f90`) compute a mask or a
+!! permutation and hand it to one of the two, which is what keeps the detach in ONE file and
+!! makes "which file is it in?" an honest answer to "does it detach?".
 !!
 !! **Everything in this file detaches the table when it actually changes the row set** (F-mut-7),
 !! and that is why it is a separate file from `parquet_tables_mutate.f90`. Once the row set has
@@ -13,12 +19,13 @@
 !!
 !! **A call that changes nothing changes nothing at all** -- it does not touch a column, does not
 !! invalidate a `%col` pointer, and does not detach. Detaching costs the caller their file, so it
-!! is only ever paid for when something actually required it. Five calls reach this file with
-!! nothing to do, all decided by the caller's own arguments (`%truncate(n)` with `n >= %nrows()`,
+!! is only ever paid for when something actually required it. Several calls reach this file with
+!! nothing to do, most decided by the caller's own arguments (`%truncate(n)` with `n >= %nrows()`,
 !! `%filter_rows` with an all-`.true.` mask, `%delete_rows` with no indices, `%append` of a
-!! zero-row table, `%append_null_rows(0)`), plus one decided by the data (`%sort_by` whose
-!! permutation moves no row, which includes every table of fewer than two rows). Each returns
-!! early, AFTER its own validation -- a no-op still rejects a bad argument. `%top_n` with
+!! zero-row table, `%append_null_rows(0)`, `%explode` whose every effective count is 1), and one
+!! by the data (`apply_permutation` handed a permutation that moves no row, which includes every
+!! table of fewer than two rows, and is what `%sort_by` and `%sort_by_values` both reach). Each
+!! returns early, AFTER its own validation -- a no-op still rejects a bad argument. `%top_n` with
 !! `n >= %nrows()` reaches the same place by delegating to `%sort_by`, which is where its own
 !! data-decided no-op comes from.
 !!
@@ -172,7 +179,6 @@ contains
     !
     module procedure table_sort_by
         integer(int64), allocatable :: perm(:)
-        integer, allocatable :: slots(:)
         !
         call table_check_not_shared(self, "sort_by")
         ! The open check and the key/flag-count validation live in sort_collect_keys
@@ -181,12 +187,18 @@ contains
         !
         ! Builds (and so validates every key) before a single column is touched.
         call table_build_sort_permutation(self, keys, descending, nulls_first, perm)
+        call apply_permutation(self, perm(1:self%row_count))
+    end procedure table_sort_by
+    !
+    module procedure apply_permutation
+        integer, allocatable :: slots(:)
+        !
         ! A permutation that moves no row leaves the table exactly as it was, so it costs neither
         ! a reindex (which reallocates every column) nor the file. Unlike the other early returns
         ! in this file this one depends on the DATA, not on the arguments: sorting an
         ! already-ordered column keeps the table attached, sorting the same column after an edit
         ! may not. Fewer than two rows always lands here.
-        if (permutation_moves_nothing(perm(1:self%row_count))) return
+        if (permutation_moves_nothing(perm)) return
         ! The permutation is validated ONCE, by the first column that takes it, and trusted by every
         ! column after that. `%reindex` validates unconditionally -- correctly, since it is a public
         ! entry point -- so replaying it per column re-checked one permutation the sort engine had
@@ -207,15 +219,14 @@ contains
         ! a dynamic schedule would have had to absorb anyway.
         call table_mutable_slots(self, slots)
         if (size(slots) > 0) then
-            call self%cache%cols(slots(1))%values%reindex(perm(1:self%row_count))
+            call self%cache%cols(slots(1))%values%reindex(perm)
             if (size(slots) > 1) then
-                call table_colwork(self%cache, PCW_REINDEX_TRUSTED, slots(2:), &
-                    rows=perm(1:self%row_count))
+                call table_colwork(self%cache, PCW_REINDEX_TRUSTED, slots(2:), rows=perm)
             end if
         end if
         self%cache%generation = self%cache%generation + 1_int64
         call table_detach(self)
-    end procedure table_sort_by
+    end procedure apply_permutation
     !
     module procedure table_top_n
         integer(int64), allocatable :: sel(:)
@@ -247,6 +258,89 @@ contains
         self%cache%generation = self%cache%generation + 1_int64
         call table_detach(self)
     end procedure table_top_n
+    !
+    ! ---- explode ----------------------------------------------------------------------------
+    !
+    module procedure table_explode_i32
+        call self%explode(int(counts, int64), keep_empty, origin)
+    end procedure table_explode_i32
+    !
+    module procedure table_explode_i64
+        integer(int64), allocatable :: idx(:)
+        integer, allocatable :: slots(:)
+        integer(int64) :: i, k, c, total
+        logical :: keep0, identity
+        character(len=32) :: got, want
+        !
+        call table_check_not_shared(self, "explode")
+        call table_check_open(self, "explode")
+        if (size(counts, kind=int64) /= self%row_count) then
+            write(got, "(I0)") size(counts, kind=int64)
+            write(want, "(I0)") self%row_count
+            error stop EP // "explode: the count list has " // trim(got) // " entries but the " // &
+                "table has " // trim(want) // " rows"
+        end if
+        keep0 = .true.
+        if (present(keep_empty)) keep0 = keep_empty
+        ! Pass one: validate every count and size the output, before a single column is touched
+        ! (this file's rule 1). `identity` records the one case that changes nothing -- every
+        ! EFFECTIVE count exactly 1 -- which is not the same as `total == row_count`: with
+        ! keep_empty=.false. a [0, 2] list also sums to 2 and is very much not the identity.
+        total = 0_int64
+        identity = .true.
+        do i = 1_int64, self%row_count
+            c = counts(i)
+            if (c < 0_int64) then
+                write(got, "(I0)") c
+                write(want, "(I0)") i
+                error stop EP // "explode: count " // trim(got) // " at row " // trim(want) // &
+                    " is negative; a row cannot be repeated a negative number of times"
+            end if
+            if (keep0 .and. c == 0_int64) c = 1_int64
+            if (c /= 1_int64) identity = .false.
+            ! Checked BEFORE the addition rather than after it. Testing `total < 0` afterwards
+            ! answers identically for every input -- a single count is at most huge, so a running
+            ! total cannot jump from below 2**63 to past 2**64 in one step without landing in
+            ! between, where it reads as negative -- so this is not about the answer. It is about
+            ! undefined behaviour: signed overflow is UB, and an optimiser entitled to assume it
+            ! does not happen may delete the very branch that tests for it (Risk-94's hazard).
+            ! scenario_explode_row_count_overflow's header records the same reasoning.
+            if (c > huge(total) - total) then
+                write(got, "(I0)") i
+                error stop EP // "explode: the exploded row count passes huge(0_int64) at row " // &
+                    trim(got) // "; the counts are too large for one table"
+            end if
+            total = total + c
+        end do
+        ! An identity explode that was not asked for `origin` has nothing left to do at all, so
+        ! it does not even allocate the row list -- "changes nothing" includes "allocates nothing".
+        if (identity .and. .not. present(origin)) return
+        ! `origin` is an OUTPUT the caller asked for, so it IS built when it was asked for, even
+        ! when nothing else happens -- an identity explode still answers [1, 2, ..., nrows].
+        allocate(idx(total))
+        k = 0_int64
+        do i = 1_int64, self%row_count
+            c = counts(i)
+            if (keep0 .and. c == 0_int64) c = 1_int64
+            idx(k + 1_int64:k + c) = i
+            k = k + c
+        end do
+        if (present(origin)) origin = idx
+        ! A call that changes nothing changes nothing at all: no column touched, no %col pointer
+        ! invalidated, no generation bump, and the file kept.
+        if (identity) return
+        ! `%gather` and NOT `check_selection`: a gather deliberately permits repeats, which is the
+        ! whole point here, where %top_n's selection must not have them. Adding that check would
+        ! abort every explode of more than one row. What stays is %gather's own per-column RANGE
+        ! check -- every index really is a row of the column it is applied to -- which is the only
+        ! thing standing between a mis-sized index list and a read into a column's uninitialised
+        ! slack (feature_risks.md Risk-67, and Risk-206 for this pair).
+        call table_mutable_slots(self, slots)
+        call table_colwork(self%cache, PCW_GATHER, slots, rows=idx)
+        self%row_count = total
+        self%cache%generation = self%cache%generation + 1_int64
+        call table_detach(self)
+    end procedure table_explode_i64
     !
     !> Checks that a selection really is a set of distinct rows of this table, before any column
     !! takes it.

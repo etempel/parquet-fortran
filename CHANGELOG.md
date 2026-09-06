@@ -64,6 +64,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `"5 6"` as 5, and this does not. See
   [Text to numbers and back](doc/pages/tables/table.md#text-to-numbers-and-back-parse_column-and-format_column)
   and [Reading a value back out of text](doc/pages/utilities/utils.md#reading-a-value-back-out-of-text).
+- **The row-set verbs: `%explode`, `%drop_duplicates`/`%duplicated` and
+  `%sort_by_values`/`%argsort_by_values`.** `t%explode(counts)` repeats each row as many times as a
+  count list says — the expansion a one-to-many relationship needs — with `origin=` naming each
+  output row's source row so an array the table does not hold lines up with the result, and
+  `keep_empty=` choosing whether a count of zero keeps its row (pandas) or drops it (SQL's
+  `UNNEST`). `t%drop_duplicates([keys], [keep])` keeps one row per group of rows equal under the
+  keys, in the table's own order, with `keep="first"|"last"|"none"`; `%duplicated` hands back the
+  mask it would apply without applying it. Equality is the sort engine's, so all nulls are one
+  value and all NaNs are one value. `t%sort_by_values(values)` orders every column by values the
+  caller computed rather than by a column, and `%argsort_by_values` answers with the order alone.
+  `%argsort_by` also gained a `threads=` argument. See
+  [Dropping duplicate rows](doc/pages/tables/table-mutate.md#dropping-duplicate-rows),
+  [Repeating rows](doc/pages/tables/table-mutate.md#repeating-rows-explode) and
+  [Ordering by values you computed yourself](doc/pages/tables/table-mutate.md#ordering-by-values-you-computed-yourself).
 
 ### Fixed
 

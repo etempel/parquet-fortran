@@ -178,8 +178,9 @@ individual procedure:
 | **cell** — `%fillna`, `%ffill`, `%bfill` | writes over the nulls of whole columns, in place | no |
 | **cell** — `%set_matrix` | writes several whole columns from one `(column, row)` array, in place | no |
 | **column** — `%parse_column`, `%format_column` | replaces a string column's values with numbers, or a column's values with text | no |
-| **row** — `%filter_rows`, `%sort_by`, `%top_n`, `%delete_rows`, `%truncate`, `%append`, `%append_null_rows`, `%dropna` | changes which rows exist | **yes, when it changes one** |
+| **row** — `%filter_rows`, `%sort_by`, `%top_n`, `%delete_rows`, `%truncate`, `%append`, `%append_null_rows`, `%dropna`, `%explode`, `%drop_duplicates`, `%sort_by_values` | changes which rows exist | **yes, when it changes one** |
 | **read** — `%row_mask` | reports which rows a rule selects, changing nothing | no |
+| **read** — `%duplicated`, `%argsort_by_values` | reports which rows repeat, or what order values imply, changing nothing | no |
 | **read** — `%get_matrix` | copies several whole columns out as one `(column, row)` array | no |
 | **row** — `%join` | matches another table's rows against this one's and brings its columns over | **yes, unless every row survives once and in place** |
 
@@ -384,6 +385,102 @@ drops a row, since it goes through the same path `%filter_rows` does. **If the r
 were never worth reading**, say so at the reader instead: `parquet_open_reader(..., filter="flux
 is_not_null")` never reads them at all, and the table stays attached.
 
+### Dropping duplicate rows
+
+`%drop_duplicates` keeps one row out of every group of rows that are **equal under the key
+columns**, and drops the rest. `%duplicated` is the same question asked without answering it: it
+hands back the mask a drop would apply, `.true.` on every row that would go. Optional arguments are
+shown in square brackets; they are not part of the call syntax:
+
+```fortran
+call t%drop_duplicates([keys], [keep], [threads])
+call t%duplicated([keys], mask, [keep], [threads])
+```
+
+`keys` is an array of column names or one comma/semicolon-separated string, as everywhere else in
+this API. **Naming none compares every column that is already resident** — the same rule
+[`%dropna`](#removing-the-rows-that-are-missing-something) follows, for the same reason: on a lazy
+table "every column" would mean reading the whole file merely to decide which rows are duplicates.
+Naming a column is the explicit way to read one.
+
+```fortran
+call t%drop_duplicates("uberID")                 ! one row per object
+call t%duplicated(["night", "field"], mask)      ! ... or just ask which rows repeat
+write(*,*) count(mask), "rows would be dropped"
+```
+
+**The survivors keep the table's own order.** A mask never reorders, so `%drop_duplicates` leaves
+the rows it keeps exactly where they were — pandas' default, and polars' `maintain_order=True`.
+
+`keep` says which row of a group survives:
+
+| `keep` | keeps |
+|---|---|
+| `"first"` (the default) | the **lowest** row index of each group |
+| `"last"` | the **highest** row index of each group |
+| `"none"` | nothing at all from any group of more than one row — pandas' `keep=False` |
+
+**Equality is the sort engine's, which means two things worth knowing.** All nulls are one value,
+so every row that is Null in the key columns collapses to a single survivor; and all NaNs are one
+value, which ordinary floating-point comparison would never say. That is what pandas' `duplicated`
+does, and it is the same rule
+[`group_offsets=`](#grouping) already documents for its groups — one notion of equality, not two.
+
+A vector or [container column](table.html#container-columns-in-a-table) cannot be a key, exactly as
+it cannot be a sort key. The form that names no column **refuses** rather than quietly leaving such
+a column out of the comparison: leaving it out would drop rows that differ only in it, and nothing
+downstream could tell. Name the key columns instead. It also refuses on a table nothing has read
+yet, for the same reason in reverse: comparing rows on *no* columns would make every row equal to
+every other and leave one.
+
+When you name no columns, **pass `keep` by keyword** — `t%drop_duplicates(keep="last")`. A bare
+`t%drop_duplicates("last")` is the separated-string key form and looks for a column called `last`.
+
+`%drop_duplicates` detaches when it drops a row, and does nothing at all when there is nothing to
+drop. `%duplicated` never detaches and never changes anything.
+
+### Repeating rows: `%explode`
+
+`%explode` turns one row into several — the expansion a one-to-many relationship needs, and the
+inverse of a group-by. You hand it a **count per row**, and row `i` of every column becomes
+`counts(i)` consecutive rows of the result:
+
+```fortran
+call t%explode(counts, [keep_empty], [origin])
+```
+
+```fortran
+! galaxies, and how many groups each belongs to
+call gal%explode(n_groups_of_galaxy, origin=src)
+call gal%add_column("group_id", group_id_of_pair)   ! one per (galaxy, group) pair
+```
+
+`counts` takes either integer kind and needs one entry per row; no entry may be negative. The
+exploded row count is worked out and checked before a single column is touched, so a count list
+that is too long, too short or too large is refused with the table still intact.
+
+**`keep_empty` decides what a count of zero means**, and both answers are in use elsewhere:
+`.true.` (the default) keeps that row once, which is what pandas' `explode` and a left join do;
+`.false.` drops it, which is polars' and SQL's `UNNEST`. It is a per-call argument rather than a
+setting, so the same table exploded in two programs cannot come back with different rows.
+
+**`origin` is the companion an array the table does not hold needs.** It comes back with one entry
+per *output* row, naming the source row that row came from, so any parallel array lines up with the
+exploded table in one statement:
+
+```fortran
+call gal%explode(counts, origin=src)
+payload_out = payload(src)          ! the array the table never held, now aligned
+```
+
+It is `integer(int64)` whichever kind `counts` was — it indexes the output, whose length the kind
+of `counts` says nothing about — and is non-decreasing by construction.
+
+`%explode` **detaches** when it changes a row, like every other row-changing operation here. It is
+answered even when nothing else happens, though: an explode whose every effective count is 1
+changes no row, keeps the file, leaves `%generation()` where it was, and still returns
+`origin = [1, 2, ..., %nrows()]`.
+
 ### Asking which rows a rule selects, without removing any
 
 `%row_mask` is the non-mutating half. It fills a mask of exactly `%nrows()` entries and changes
@@ -496,8 +593,10 @@ There is deliberately no `%take(indices)` taking a permutation you built yoursel
 arbitrary row order to a table is the one thing this type refuses: applied to some columns and not
 others, or applied from an array that has since gone stale, it breaks the row correspondence that
 makes a table a table, and nothing detects it. `%top_n` is safe because it builds the indices
-itself, from this table's own columns, and applies them to every column together. If you want to
-*read* rows in an order without changing anything, that is `%argsort_by` and `%get_slice`, next.
+itself, from this table's own columns, and applies them to every column together — and so is
+[`%sort_by_values`](#ordering-by-values-you-computed-yourself), which takes the *values* rather
+than the order and computes the permutation here. If you want to *read* rows in an order without
+changing anything, that is `%argsort_by` and `%get_slice`, next.
 
 ### Ordering rows without reordering them
 
@@ -523,7 +622,7 @@ call syntax:
 
 | call | what it gives |
 |---|---|
-| `call t%argsort_by(keys, perm, [descending], [nulls_first], [group_offsets], [group_nkeys])` | the row order the keys imply |
+| `call t%argsort_by(keys, perm, [descending], [nulls_first], [group_offsets], [group_nkeys], [threads])` | the row order the keys imply |
 | `call t%argsort_partial(keys, perm, n, [descending], [nulls_first])` | just the `n` best rows, by selection |
 | `call t%top_n(keys, n, [descending], [nulls_first])` | *(mutating)* keeps only those `n` rows — see [above](#keeping-only-the-best-rows) |
 | `ok = t%is_sorted_by(keys, [descending], [nulls_first])` | whether the rows are already in that order |
@@ -579,12 +678,46 @@ call t%argsort_by(["field_id", "mag     "], perm, group_offsets=go, group_nkeys=
 It counts key *names*, must be between 1 and the number of keys, and requires `group_offsets`.
 
 > **A permutation goes stale silently.** It describes the table *as it was*. Any row-structural
-> change — `%sort_by`, `%top_n`, `%filter_rows`, `%delete_rows`, `%truncate`, `%append` —
+> change — `%sort_by`, `%top_n`, `%filter_rows`, `%delete_rows`, `%truncate`, `%append`,
+> `%explode`, `%drop_duplicates`, `%sort_by_values` —
 > invalidates it, and nothing reports that: against a table that has since shrunk, the indices stay
 > in range and name the wrong rows. This is the same hazard as a saved `%col` pointer, except that a
 > stale pointer usually crashes while a stale permutation just answers wrongly. `%generation()` is
 > bumped by every such change — record it beside a permutation you intend to keep, and compare
 > before reusing it.
+
+#### Ordering by values you computed yourself
+
+Sometimes the order you want is not any column's — it is `abs(x - x0)`, or a score, or a key from
+another array entirely. `%sort_by_values` takes the **values** and does the rest:
+
+```fortran
+call t%sort_by_values(values, [descending], [is_valid], [nulls_first], [threads])
+call t%argsort_by_values(values, perm, [descending], [is_valid], [nulls_first], [threads])
+```
+
+```fortran
+call t%get("ra", ra)
+call t%get("dec", dec)
+call t%sort_by_values(angular_distance(ra, dec, ra0, dec0))   ! nearest first
+```
+
+`values` carries one entry per row and may be `integer(int32)`, `integer(int64)`, `real(real32)`,
+`real(real64)` or `character`. `descending`, `is_valid` and `nulls_first` mean what they mean
+everywhere else: nulls and NaNs are placed absolutely and are never flipped by `descending`.
+
+This is the same table you would get from `%add_column("k", values)`, `%sort_by("k")`,
+`%drop_column("k")` — and that is exactly what its test asserts — without allocating the column or
+having to find a name nothing else is using. Like `%sort_by` it **detaches**, and like `%sort_by` it
+does nothing at all when the values are already in the order asked for.
+
+`%argsort_by_values` is the non-mutating twin: it hands the order back and leaves the table alone,
+so it carries the staleness warning above word for word. `perm` may be `integer(int32)` or
+`integer(int64)`.
+
+> This is not the `%take(indices)` [above](#keeping-only-the-best-rows) explains the absence of.
+> The caller hands over *values*, never an order, so a permutation the library has not built and
+> checked itself still never reaches a column.
 
 ### Adding rows
 

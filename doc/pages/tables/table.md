@@ -160,6 +160,56 @@ it.
 
 `bench/benchmark_table.sh`'s access mode measures both on your own machine and column size.
 
+### Several columns at once, as one matrix
+
+`%get_matrix` copies a group of **scalar** columns out as a single `(column, row)` array, and
+`%set_matrix` writes one back. Optional arguments are shown in square brackets; they are not part
+of the call syntax:
+
+```fortran
+call t%get_matrix(names, arr, [is_valid])
+call t%set_matrix(names, arr, [is_valid], [modify_nulls])
+```
+
+`names` is an array of names or one comma/semicolon-separated string; `arr` is an
+`int32`/`int64`/`real32`/`real64`/`logical` allocatable of rank 2, shaped
+`(size(names), %nrows())`.
+
+**Column-major is the point.** One *row's* values across the named columns are contiguous, so a
+reduction over `dim=1` answers per row:
+
+```fortran
+real(real64), allocatable :: bands(:,:)
+integer, allocatable :: measured(:)
+
+call t%get_matrix("u, g, r, i, z", bands)
+measured = count(bands > -900.0_real64, dim=1)   ! how many bands each row has
+```
+
+A loop of `%get` gives the transpose of that, one allocation per column, and then needs a second
+pass to answer the same question.
+
+**Which columns are accepted differs between the two, and it is `%get`'s and `%set`'s own rule in
+each direction.** `%get_matrix` widens exactly as `%get` does — an `int32` column into an `int64`
+matrix, a `float32` column into a `real64` one, and nothing else, so an integer column does not
+copy into a real matrix. `%set_matrix` takes the matrix's kind exactly, because `%set` narrows
+nothing. The round trip is therefore an identity precisely when every named column already has the
+matrix's own kind; a `%get_matrix` that widened is not a matrix `%set_matrix` will take back.
+
+Every named column must be scalar. A vector column has its own rank-2 `%get`, and naming one here
+says so rather than guessing; a string, temporal or container column is refused too, naming the
+column. Every column is checked before any is copied, so a list with one bad name copies nothing.
+
+`is_valid` is the matching `(size(names), %nrows())` mask, `.true.` where the value is real —
+the same shapes-must-match rule the paired accessors follow throughout. On `%set_matrix` it marks
+rows null, and `modify_nulls=.false.` leaves each column's existing nulls alone. Naming no column
+at all yields a `(0, %nrows())` matrix rather than an error, so a computed name list that comes
+back empty still reduces to one count per row.
+
+Both read a named column that is not resident yet, exactly as `%get` does. `%set_matrix` writes in
+place: nothing is reallocated, the table does not detach, and a `%col` pointer taken beforehand
+stays valid and sees the written values.
+
 ### Reading and writing a column's nulls alongside its values
 
 `%get`, `%col`, `%get_slice` and `%set` all take an optional `is_valid=`, `.true.` where a value

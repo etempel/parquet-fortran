@@ -83,7 +83,7 @@ contains
         ! stage before nagfor ever sees it -- run it after adding entries here.
         type(unittest_type), allocatable :: p1(:), p2(:), p3(:), p4(:), p5(:), p6(:), p7(:), &
                                             p8(:), p9(:), p10(:), p11(:), p12(:), p13(:), p14(:), &
-                                            p15(:)
+                                            p15(:), p16(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -686,6 +686,40 @@ contains
                 test_dropna_bad_how_nothing_resident_aborts), &
             new_unittest("fillna/ffill/bfill/dropna: every well-formed call runs cleanly", &
                 test_fill_control_succeeds) &
+            ]
+        ! The column-shape verbs. Their own part rather than an extension of p15: a Fortran
+        ! statement may carry at most 255 continuation lines and NAG is the only compiler that
+        ! enforces it, so each family gets its own array rather than one growing until a build
+        ! elsewhere breaks.
+        p16 = [ &
+            new_unittest("get_matrix naming a string column aborts", &
+                test_get_matrix_string_column_aborts), &
+            new_unittest("get_matrix naming a vector column aborts, saying so", &
+                test_get_matrix_vector_column_aborts), &
+            new_unittest("get_matrix naming a column of another family aborts", &
+                test_get_matrix_kind_mismatch_aborts), &
+            new_unittest("get_matrix naming a column that is not there aborts", &
+                test_get_matrix_unknown_column_aborts), &
+            new_unittest("set_matrix refuses the widening get_matrix allows", &
+                test_set_matrix_no_widening_aborts), &
+            new_unittest("set_matrix with more matrix rows than names aborts", &
+                test_set_matrix_wrong_ncols_aborts), &
+            new_unittest("set_matrix with the wrong row count aborts", &
+                test_set_matrix_wrong_nrows_aborts), &
+            new_unittest("set_matrix with a mis-shaped mask aborts", &
+                test_set_matrix_mask_shape_aborts), &
+            new_unittest("drop_columns naming an absent column aborts, naming them all", &
+                test_drop_columns_missing_aborts), &
+            new_unittest("drop_columns on a predefined column without force aborts", &
+                test_drop_columns_predefined_aborts), &
+            new_unittest("keep_columns naming an absent column aborts", &
+                test_keep_columns_missing_aborts), &
+            new_unittest("keep_columns dropping a predefined column by omission aborts", &
+                test_keep_columns_predefined_aborts), &
+            new_unittest("drop_columns on a shared table aborts", &
+                test_drop_columns_shared_aborts), &
+            new_unittest("get_matrix/set_matrix/drop_columns/keep_columns: every well-formed call runs", &
+                test_matrix_control_succeeds) &
             ]
         p3 = [ &
             new_unittest("an environment value longer than the buffer aborts", &
@@ -2165,7 +2199,7 @@ contains
             new_unittest("a bounded soft qc violation warns and returns every row", &
                 test_bounded_qc_soft_warns) &
             ]
-        testsuite = [p1, p2, p13, p14, p15, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12]
+        testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12]
     end subroutine collect_tests_parquet_errors
 
 
@@ -9025,6 +9059,122 @@ contains
         call check_scenario_exit_status(error, "fill_control", expect_abort=.false., &
             failure_message="every well-formed fill and drop was expected to run cleanly")
     end subroutine test_fill_control_succeeds
+
+    subroutine test_get_matrix_string_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "get_matrix_string_column", expect_abort=.true., &
+            failure_message="%get_matrix naming a string column was expected to abort", &
+            required_stderr="get_matrix: column kind (PK_STRING) does not match a float64 matrix")
+    end subroutine test_get_matrix_string_column_aborts
+
+    subroutine test_get_matrix_vector_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "get_matrix_vector_column", expect_abort=.true., &
+            failure_message="%get_matrix naming a vector column was expected to abort", &
+            required_stderr="get_matrix: this is a VECTOR column (PK_FLOAT64_VEC)")
+    end subroutine test_get_matrix_vector_column_aborts
+
+    subroutine test_get_matrix_kind_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "get_matrix_kind_mismatch", expect_abort=.true., &
+            failure_message="%get_matrix naming an int32 column for a real64 matrix was expected to abort", &
+            required_stderr="get_matrix: column kind (PK_INT32) does not match a float64 matrix")
+    end subroutine test_get_matrix_kind_mismatch_aborts
+
+    subroutine test_get_matrix_unknown_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "get_matrix_unknown_column", expect_abort=.true., &
+            failure_message="%get_matrix naming a column the table does not have was expected to abort", &
+            required_stderr="get_matrix: no column of this name (column 'nosuch')")
+    end subroutine test_get_matrix_unknown_column_aborts
+
+    subroutine test_set_matrix_no_widening_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "set_matrix_no_widening", expect_abort=.true., &
+            failure_message="%set_matrix writing a real64 matrix into a float32 column was expected to abort", &
+            required_stderr="set_matrix: column kind (PK_FLOAT32) does not match a float64 matrix")
+    end subroutine test_set_matrix_no_widening_aborts
+
+    subroutine test_set_matrix_wrong_ncols_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "set_matrix_wrong_ncols", expect_abort=.true., &
+            failure_message="%set_matrix with more matrix rows than names was expected to abort", &
+            required_stderr="set_matrix: the matrix has 3 rows but 2 columns were named")
+    end subroutine test_set_matrix_wrong_ncols_aborts
+
+    subroutine test_set_matrix_wrong_nrows_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "set_matrix_wrong_nrows", expect_abort=.true., &
+            failure_message="%set_matrix with the wrong row count was expected to abort", &
+            required_stderr="set_matrix: the matrix has 4 rows of values but the table has 3 rows")
+    end subroutine test_set_matrix_wrong_nrows_aborts
+
+    subroutine test_set_matrix_mask_shape_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "set_matrix_mask_shape", expect_abort=.true., &
+            failure_message="%set_matrix with a mis-shaped is_valid was expected to abort", &
+            required_stderr="set_matrix: is_valid is shaped 2 x 2 but the matrix is 2 x 3")
+    end subroutine test_set_matrix_mask_shape_aborts
+
+    subroutine test_drop_columns_missing_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "drop_columns_missing", expect_abort=.true., &
+            failure_message="%drop_columns naming an absent column was expected to abort", &
+            required_stderr="drop_columns: the table has no column called nosuch, alsonot")
+    end subroutine test_drop_columns_missing_aborts
+
+    subroutine test_drop_columns_predefined_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "drop_columns_predefined", expect_abort=.true., &
+            failure_message="%drop_columns on a predefined column without force= was expected to abort", &
+            required_stderr="drop_columns: this is a predefined column")
+    end subroutine test_drop_columns_predefined_aborts
+
+    subroutine test_keep_columns_missing_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "keep_columns_missing", expect_abort=.true., &
+            failure_message="%keep_columns naming an absent column was expected to abort", &
+            required_stderr="keep_columns: the table has no column called nosuch")
+    end subroutine test_keep_columns_missing_aborts
+
+    subroutine test_keep_columns_predefined_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "keep_columns_predefined", expect_abort=.true., &
+            failure_message="%keep_columns dropping a predefined column by omission was expected to abort", &
+            required_stderr="keep_columns: this is a predefined column")
+    end subroutine test_keep_columns_predefined_aborts
+
+    subroutine test_drop_columns_shared_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it the scenario's parallel region never " // &
+            "opens, so the table is never shared and the guard has nothing to refuse")
+        return
+#endif
+        call check_scenario_exit_status_and_stderr(error, "drop_columns_shared", expect_abort=.true., &
+            failure_message="%drop_columns on a table another thread may hold was expected to abort", &
+            required_stderr="drop_columns: this table was not opened by this thread")
+    end subroutine test_drop_columns_shared_aborts
+
+    subroutine test_matrix_control_succeeds(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "matrix_control", expect_abort=.false., &
+            failure_message="every well-formed matrix and projection call was expected to run cleanly")
+    end subroutine test_matrix_control_succeeds
 
     subroutine test_filter_rule_too_long_aborts(error)
         type(error_type), allocatable, intent(out) :: error

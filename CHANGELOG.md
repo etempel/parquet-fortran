@@ -43,6 +43,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   one value may fill. `%dropna([names], [min_valid], [how])` drops the rows that are null in the
   named columns, or in every resident column when none is named. See
   [Filling in what is missing](doc/pages/tables/table-mutate.md#filling-in-what-is-missing).
+- **The column-shape verbs: `%get_matrix`, `%set_matrix`, `%drop_columns` and `%keep_columns`.**
+  `t%get_matrix(names, arr)` copies a group of scalar columns out as one `(column, row)` array, so
+  one row's values across the group are contiguous and `count(arr > lim, dim=1)` is a per-row cut;
+  `%set_matrix` writes one back. `%get_matrix` widens as `%get` does and `%set_matrix` takes the
+  column's kind exactly, as `%set` does. `t%drop_columns(names, [force], [ignore_missing])` removes
+  several columns at once and `t%keep_columns(names, [force])` removes everything else — the
+  projection, and cheap on a lazy table, since a column that was never read costs nothing to drop.
+  Neither detaches. See
+  [Several columns at once](doc/pages/tables/table.md#several-columns-at-once-as-one-matrix) and
+  [Dropping and keeping several columns](doc/pages/tables/table-mutate.md#dropping-and-keeping-several-columns).
+
+### Fixed
+
+- A column added with `%add_column` after another had been dropped could report a unit it was never
+  given — the unit of whichever column had been last — and write it into the file. Many other minor
+  fixes and improvements.
 
 ## [v2.3.0] - 2026-09-06
 

@@ -656,6 +656,34 @@ program error_scenarios
         call scenario_fillna_shared()
     case ("fill_control")
         call scenario_fill_control()
+    case ("get_matrix_string_column")
+        call scenario_get_matrix_bad_column("s")
+    case ("get_matrix_vector_column")
+        call scenario_get_matrix_bad_column("vec")
+    case ("get_matrix_kind_mismatch")
+        call scenario_get_matrix_bad_column("i")
+    case ("get_matrix_unknown_column")
+        call scenario_get_matrix_bad_column("nosuch")
+    case ("set_matrix_no_widening")
+        call scenario_set_matrix_no_widening()
+    case ("set_matrix_wrong_ncols")
+        call scenario_set_matrix_shape("ncols")
+    case ("set_matrix_wrong_nrows")
+        call scenario_set_matrix_shape("nrows")
+    case ("set_matrix_mask_shape")
+        call scenario_set_matrix_shape("mask")
+    case ("drop_columns_missing")
+        call scenario_drop_columns_missing()
+    case ("drop_columns_predefined")
+        call scenario_drop_columns_predefined()
+    case ("keep_columns_missing")
+        call scenario_keep_columns_missing()
+    case ("keep_columns_predefined")
+        call scenario_keep_columns_predefined()
+    case ("drop_columns_shared")
+        call scenario_drop_columns_shared()
+    case ("matrix_control")
+        call scenario_matrix_control()
     case ("sortkey_remap_size_mismatch")
         call scenario_sortkey_remap_size_mismatch()
     case ("sortkey_remap_name_too_long")
@@ -8397,6 +8425,155 @@ contains
         call t%dropna(["v"], min_valid=1)
         print '(a,i0,a,l1)', "every fill path ran, nrows=", t%nrows(), " nulls in v: ", t%has_nulls("v")
     end subroutine scenario_fill_control
+
+    !> The fixture every matrix scenario works from: five columns covering the four ways a
+    !> column can be refused -- an exact-kind pair to succeed with, an int32 (right family,
+    !> wrong kind), a string (wrong family altogether) and a vector (right element kind, wrong
+    !> rank). Built in memory rather than written, since none of these guards reads a file.
+    subroutine build_matrix_fixture(t)
+        type(parquet_table), intent(out) :: t !! the table to build.
+        real(real64) :: vec(2, 3)
+
+        vec = reshape([1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64, 6.0_real64], [2, 3])
+        call parquet_new_table(t)
+        call t%add_column("a", [1.0_real64, 2.0_real64, 3.0_real64])
+        call t%add_column("b", [4.0_real64, 5.0_real64, 6.0_real64])
+        call t%add_column("i", [7_int32, 8_int32, 9_int32])
+        call t%add_column("f", [1.5_real32, 2.5_real32, 3.5_real32])
+        call t%add_column("s", [character(len=2) :: "aa", "bb", "cc"])
+        call t%add_column("vec", vec)
+    end subroutine build_matrix_fixture
+
+    !> %get_matrix over a real64 matrix naming one column it cannot carry. Four scenarios share
+    !> this body, because the four refusals differ only in which column is named and every one
+    !> must leave the matrix unallocated -- which is what the print below would report if a
+    !> guard ever stopped firing.
+    subroutine scenario_get_matrix_bad_column(bad)
+        character(len=*), intent(in) :: bad !! the column to name beside a legal one.
+        type(parquet_table) :: t
+        real(real64), allocatable :: m(:,:)
+
+        call build_matrix_fixture(t)
+        ! An explicit type-spec, because an array constructor takes its element length from the
+        ! first element otherwise -- which silently truncated "nosuch" to "nos" and made the
+        ! unknown-column scenario assert a message about a column nobody named.
+        call t%get_matrix([character(len=16) :: "a", bad], m)
+        print '(a,i0,a,i0)', "unexpectedly built a matrix, shape ", size(m, 1), " x ", size(m, 2)
+    end subroutine scenario_get_matrix_bad_column
+
+    !> The other half of the widening rule: %get_matrix accepts a float32 column into a real64
+    !> matrix, and %set_matrix must NOT accept it back, because that would narrow silently.
+    !> Without this scenario "no widening on the way back" is a doc-comment nothing checks.
+    subroutine scenario_set_matrix_no_widening()
+        type(parquet_table) :: t
+        real(real64), allocatable :: m(:,:)
+
+        call build_matrix_fixture(t)
+        call t%get_matrix("a, f", m)        ! this direction is legal ...
+        call t%set_matrix("a, f", m)        ! ... and this one must not be
+        print '(a,i0)', "unexpectedly narrowed a real64 matrix into a float32 column, ncols=", t%ncols()
+    end subroutine scenario_set_matrix_no_widening
+
+    !> %set_matrix's three shape guards, which all fire before any value is written.
+    subroutine scenario_set_matrix_shape(which)
+        character(len=*), intent(in) :: which !! "ncols", "nrows" or "mask".
+        type(parquet_table) :: t
+        real(real64), allocatable :: m(:,:)
+        logical, allocatable :: mask(:,:)
+
+        call build_matrix_fixture(t)
+        select case (which)
+        case ("ncols")
+            allocate(m(3, 3))
+            m = 0.0_real64
+            call t%set_matrix("a, b", m)     ! three matrix rows, two names
+        case ("nrows")
+            allocate(m(2, 4))
+            m = 0.0_real64
+            call t%set_matrix("a, b", m)     ! four rows of values, three table rows
+        case default
+            allocate(m(2, 3), mask(2, 2))
+            m = 0.0_real64
+            mask = .true.
+            call t%set_matrix("a, b", m, is_valid=mask)
+        end select
+        print '(a,a)', "unexpectedly accepted a mis-shaped set_matrix: ", which
+    end subroutine scenario_set_matrix_shape
+
+    !> %drop_columns naming a column the table does not have, with the default policy. The
+    !> message must name EVERY absent one, so two are named here rather than one.
+    subroutine scenario_drop_columns_missing()
+        type(parquet_table) :: t
+
+        call build_matrix_fixture(t)
+        call t%drop_columns("a, nosuch, alsonot")
+        print '(a,i0)', "unexpectedly dropped an absent column, ncols=", t%ncols()
+    end subroutine scenario_drop_columns_missing
+
+    !> R8 through the list form: a predefined column may be dropped only on purpose.
+    subroutine scenario_drop_columns_predefined()
+        type(parquet_table_test) :: t
+
+        call t%init_empty(2_int32)
+        call t%drop_columns("ra, dec")
+        print '(a,i0)', "unexpectedly dropped predefined columns, ncols=", t%ncols()
+    end subroutine scenario_drop_columns_predefined
+
+    !> %keep_columns naming something that is not there. There is no ignore_missing here, so
+    !> this is the only policy it has.
+    subroutine scenario_keep_columns_missing()
+        type(parquet_table) :: t
+
+        call build_matrix_fixture(t)
+        call t%keep_columns("a, nosuch")
+        print '(a,i0)', "unexpectedly projected onto an absent column, ncols=", t%ncols()
+    end subroutine scenario_keep_columns_missing
+
+    !> R8 reached from the other side: %keep_columns drops a predefined column by NOT naming it,
+    !> which is the one route %drop_column cannot express and the reason %keep_columns has a
+    !> force= of its own.
+    subroutine scenario_keep_columns_predefined()
+        type(parquet_table_test) :: t
+
+        call t%init_empty(2_int32)
+        call t%keep_columns("uberid")
+        print '(a,i0)', "unexpectedly projected away predefined columns, ncols=", t%ncols()
+    end subroutine scenario_keep_columns_predefined
+
+    !> A slot shift on a table another thread may be holding: refused, like every other
+    !> structural change.
+    subroutine scenario_drop_columns_shared()
+        type(parquet_table) :: t
+
+        call build_matrix_fixture(t)
+        !$omp parallel num_threads(2) default(shared)
+        !$omp single
+        call t%drop_columns("a")   ! slot shift on a shared table -> aborts
+        !$omp end single
+        !$omp end parallel
+        print '(a,i0)', "unexpectedly dropped a column of a shared table, ncols=", t%ncols()
+    end subroutine scenario_drop_columns_shared
+
+    !> The negative control for every matrix scenario above: the same fixture, read and written
+    !> through both matrix verbs and projected by both drop verbs. Without it a guard that
+    !> refused everything would pass all thirteen.
+    subroutine scenario_matrix_control()
+        type(parquet_table) :: t
+        type(parquet_table_test) :: g
+        real(real64), allocatable :: m(:,:)
+        logical, allocatable :: mask(:,:)
+
+        call build_matrix_fixture(t)
+        call t%get_matrix("a, b", m, is_valid=mask)      ! exact kind, plus the mask
+        call t%set_matrix("a, b", m, is_valid=mask)      ! and straight back again
+        call t%get_matrix("a, f", m)                     ! the one widening that is allowed
+        call t%drop_columns("s, nosuch", ignore_missing=.true.)
+        call t%keep_columns("a, b, i")
+        call g%init_empty(2_int32)
+        call g%drop_columns("ra", force=.true.)          ! R8, satisfied
+        call g%keep_columns("uberid, flux", force=.true.)
+        print '(a,i0,a,i0)', "every matrix path ran, ncols=", t%ncols(), " predefined left=", g%ncols()
+    end subroutine scenario_matrix_control
 
     subroutine scenario_filter_set_control()
         type(parquet_writer) :: writer

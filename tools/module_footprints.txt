@@ -361,6 +361,7 @@ parquet_tables_join.f90
 parquet_tables_lifecycle.f90
 parquet_tables_maml.f90
 parquet_tables_materialize.f90
+parquet_tables_matrix.f90
 parquet_tables_mutate.f90
 parquet_tables_parallel.f90
 parquet_tables_predefined.f90
@@ -468,6 +469,7 @@ parquet_tables_join.f90
 parquet_tables_lifecycle.f90
 parquet_tables_maml.f90
 parquet_tables_materialize.f90
+parquet_tables_matrix.f90
 parquet_tables_mutate.f90
 parquet_tables_parallel.f90
 parquet_tables_predefined.f90

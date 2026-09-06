@@ -308,6 +308,26 @@ contains
         call dst%values%move_from(src%values)
     end procedure move_table_column
     !
+    module procedure reset_column_slot
+        if (allocated(slot%name)) deallocate(slot%name)
+        if (allocated(slot%file_name)) deallocate(slot%file_name)
+        ! `unit` is the field this procedure exists for. It is read in PREFERENCE to the
+        ! parquet_column's own (slot_unit, parquet_tables_query.f90), so a stale one does not
+        ! merely linger -- it shadows the unit the caller passed to %add_column.
+        if (allocated(slot%unit)) deallocate(slot%unit)
+        slot%declared_kind = PK_NONE
+        slot%width = 1
+        slot%width_pending = .false.
+        slot%cast_pending = .false.
+        slot%file_source = .false.
+        slot%predefined = .false.
+        slot%user_populated = .false.
+        slot%supported = .true.
+        slot%residency = RES_EMPTY
+        if (allocated(slot%rg_loaded)) deallocate(slot%rg_loaded)
+        call slot%values%clear()
+    end procedure reset_column_slot
+    !
     module procedure table_drop_column
         integer :: idx, i
         logical :: forced
@@ -342,26 +362,10 @@ contains
         do i = idx, self%cache%ncols - 1
             call move_table_column(self%cache%cols(i), self%cache%cols(i + 1))
         end do
-        ! Reset the vacated tail slot field-by-field rather than via `parquet_table_column()`:
-        ! ifx rejects a default structure constructor here (Structure constructor may not have
-        ! components with the PRIVATE attribute) because `values` is a parquet_column, whose own
-        ! components are private to a different module -- even though this constructor never
-        ! specifies `values` explicitly. `values` itself was just cleared above, so only the
-        ! metadata fields need resetting, mirroring their declared defaults in parquet_tables.f90.
-        associate (slot => self%cache%cols(self%cache%ncols))
-            if (allocated(slot%name)) deallocate(slot%name)
-            if (allocated(slot%file_name)) deallocate(slot%file_name)
-            slot%declared_kind = PK_NONE
-            slot%width = 1
-            slot%width_pending = .false.
-            slot%cast_pending = .false.
-            slot%file_source = .false.
-            slot%predefined = .false.
-            slot%user_populated = .false.
-            slot%supported = .true.
-            slot%residency = RES_EMPTY
-            if (allocated(slot%rg_loaded)) deallocate(slot%rg_loaded)
-        end associate
+        ! Reset the vacated tail slot through the shared blanker, which every vacating path and
+        ! table_new_slot itself use -- three hand-written copies of the same field list is how one
+        ! of them came to be missing `unit` (feature_risks.md Risk-204).
+        call reset_column_slot(self%cache%cols(self%cache%ncols))
         self%cache%ncols = self%cache%ncols - 1
         ! A drop shifts every slot above it down by one, so the whole name index is renumbered --
         ! an incremental fix-up would have to touch most of it anyway.

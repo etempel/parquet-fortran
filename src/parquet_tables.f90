@@ -764,6 +764,33 @@ module parquet_tables
         generic :: set => set_arr_i32, set_arr_i64, set_arr_f32, set_arr_f64, set_arr_bool, set_arr_date, set_arr_time, &
             set_arr_ts, set_arr_i32v, set_arr_i64v, set_arr_f32v, set_arr_f64v, set_arr_boolv, set_arr_datev, set_arr_timev, &
             set_arr_tsv, set_arr_chr, set_arr_chrv, set_arr_strcol, set_arr_listcol, set_arr_mapcol, set_arr_structcol
+        ! --- several columns at once, as one (column, row) matrix ---
+        procedure, private :: get_matrix_i32 !! %get_matrix specific, name array, i32 matrix.
+        procedure, private :: get_matrix_string_i32 !! %get_matrix specific, name string, i32 matrix.
+        procedure, private :: get_matrix_i64 !! %get_matrix specific, name array, i64 matrix.
+        procedure, private :: get_matrix_string_i64 !! %get_matrix specific, name string, i64 matrix.
+        procedure, private :: get_matrix_f32 !! %get_matrix specific, name array, f32 matrix.
+        procedure, private :: get_matrix_string_f32 !! %get_matrix specific, name string, f32 matrix.
+        procedure, private :: get_matrix_f64 !! %get_matrix specific, name array, f64 matrix.
+        procedure, private :: get_matrix_string_f64 !! %get_matrix specific, name string, f64 matrix.
+        procedure, private :: get_matrix_bool !! %get_matrix specific, name array, bool matrix.
+        procedure, private :: get_matrix_string_bool !! %get_matrix specific, name string, bool matrix.
+        !> Copies several scalar columns out as one (column, row) matrix.
+        generic :: get_matrix => get_matrix_i32, get_matrix_string_i32, get_matrix_i64, get_matrix_string_i64, get_matrix_f32, &
+            get_matrix_string_f32, get_matrix_f64, get_matrix_string_f64, get_matrix_bool, get_matrix_string_bool
+        procedure, private :: set_matrix_i32 !! %set_matrix specific, name array, i32 matrix.
+        procedure, private :: set_matrix_string_i32 !! %set_matrix specific, name string, i32 matrix.
+        procedure, private :: set_matrix_i64 !! %set_matrix specific, name array, i64 matrix.
+        procedure, private :: set_matrix_string_i64 !! %set_matrix specific, name string, i64 matrix.
+        procedure, private :: set_matrix_f32 !! %set_matrix specific, name array, f32 matrix.
+        procedure, private :: set_matrix_string_f32 !! %set_matrix specific, name string, f32 matrix.
+        procedure, private :: set_matrix_f64 !! %set_matrix specific, name array, f64 matrix.
+        procedure, private :: set_matrix_string_f64 !! %set_matrix specific, name string, f64 matrix.
+        procedure, private :: set_matrix_bool !! %set_matrix specific, name array, bool matrix.
+        procedure, private :: set_matrix_string_bool !! %set_matrix specific, name string, bool matrix.
+        !> Writes one (column, row) matrix back into several existing scalar columns.
+        generic :: set_matrix => set_matrix_i32, set_matrix_string_i32, set_matrix_i64, set_matrix_string_i64, set_matrix_f32, &
+            set_matrix_string_f32, set_matrix_f64, set_matrix_string_f64, set_matrix_bool, set_matrix_string_bool
         ! --- from-scratch construction ---
         procedure, private :: add_column_i32 !! %add_column specific for the i32 kind.
         procedure, private :: add_column_i64 !! %add_column specific for the i64 kind.
@@ -914,6 +941,14 @@ module parquet_tables
         procedure :: ensure_validity => table_ensure_validity !! Allocate validity storage up front, for concurrent nulling.
         ! --- mutation: whole columns (never changes the row set) ---
         procedure :: drop_column => table_drop_column     !! Remove a column; force= for a predefined one.
+        procedure, private :: table_drop_columns        !! %drop_columns specific, array of names.
+        procedure, private :: table_drop_columns_string !! %drop_columns specific, separated name string.
+        !> Removes several columns at once; force= for a predefined one.
+        generic :: drop_columns => table_drop_columns, table_drop_columns_string
+        procedure, private :: table_keep_columns        !! %keep_columns specific, array of names.
+        procedure, private :: table_keep_columns_string !! %keep_columns specific, separated name string.
+        !> Removes every column EXCEPT the ones named -- the projection df[["a", "b"]].
+        generic :: keep_columns => table_keep_columns, table_keep_columns_string
         procedure :: rename_column => table_rename_column !! Change the name a column is looked up by.
         procedure :: copy_column => table_copy_column     !! Add a copy of a column, optionally of another kind.
         procedure :: cast => table_cast                   !! Convert a column to another kind, in place.
@@ -1649,6 +1684,23 @@ module parquet_tables
             type(parquet_table_column), intent(inout) :: dst !! the slot receiving the column.
             type(parquet_table_column), intent(inout) :: src !! the slot giving it up.
         end subroutine move_table_column
+        !> Resets one slot's metadata to its declared defaults and clears its values.
+        !!
+        !! The ONE place a slot is made blank, called from every path that vacates one
+        !! (`%drop_column`, `%drop_columns`/`%keep_columns`, the shadowed-row-index drop at open)
+        !! and from `table_new_slot` before it hands a slot out. That last call is what makes the
+        !! rule hold rather than merely being followed: a slot recycled by an `%add_column` after a
+        !! drop used to inherit whatever the vacating path forgot to clear, and the field it
+        !! forgot -- `unit` -- is read in preference to the column's own, so a fresh column
+        !! reported a unit nobody gave it and wrote it into the file. See feature_risks.md
+        !! Risk-204.
+        !!
+        !! Written field-by-field rather than through a default structure constructor, which ifx
+        !! rejects for this type: `values` is a `parquet_column`, whose own components are private
+        !! to another module, even though such a constructor never specifies it.
+        module subroutine reset_column_slot(slot)
+            type(parquet_table_column), intent(inout) :: slot !! the slot to blank.
+        end subroutine reset_column_slot
         !> Appends an empty slot named `name` and returns its index, growing `cols(:)` if the
         !! headroom is used up. error stops if the name is already taken and `force` is absent.
         module subroutine table_new_slot(self, name, force, idx)
@@ -6727,6 +6779,594 @@ module parquet_tables
             character(len=*), intent(in) :: names !! the columns to fill, comma/space separated.
             integer(int64), intent(in) :: limit !! at most this many consecutive nulls may take one value.
         end subroutine table_bfill_string_limit_i64
+    end interface
+    !
+    ! ---- Several columns at once (parquet_tables_matrix) ----
+    interface
+        !> Copies several SCALAR columns out as one `(column, row)` matrix of i32 values.
+        !!
+        !! `arr` comes back shaped `(size(names), %nrows())`, column-major -- so one ROW's values
+        !! across the named columns are CONTIGUOUS, and `count(arr > lim, dim=1)` is a per-row
+        !! count over them. That is the shape a "at least eight of these bands were measured" cut
+        !! wants; a loop of `%get` builds the transpose of it, one allocation per column.
+        !!
+        !! Every named column must be SCALAR and of a kind that copies into `arr`'s under
+        !! `%get`'s own rule. Nothing else widens -- in particular an integer column does
+        !! not copy into a real matrix, because `%get` does not widen that way either, and one
+        !! rule written twice is how two rules come to disagree. A vector, string, temporal or
+        !! container column is refused, naming the column. Every column is checked before any is
+        !! copied, so a list with one bad name copies nothing.
+        !!
+        !! `is_valid`, when present, is the matching `(size(names), %nrows())` mask -- `.true.`
+        !! where the value is real -- per the shapes-must-match rule every paired accessor here
+        !! follows. A named column that is not resident is READ, by the same lazy touch `%get`
+        !! performs; nothing else changes, and naming no column at all yields a `(0, %nrows())`
+        !! matrix rather than an error.
+        module subroutine get_matrix_i32(self, names, arr, is_valid)
+            class(parquet_table), intent(in) :: self !! the table.
+            character(len=*), intent(in) :: names(:) !! the columns, in the order they take in `arr`.
+            integer(int32), allocatable, intent(out) :: arr(:,:) !! (column, row), shaped (size(names), nrows).
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: the matching validity mask.
+        end subroutine get_matrix_i32
+        !> Copies several SCALAR columns out as one `(column, row)` matrix of i32 values.
+        !!
+        !! `arr` comes back shaped `(size(names), %nrows())`, column-major -- so one ROW's values
+        !! across the named columns are CONTIGUOUS, and `count(arr > lim, dim=1)` is a per-row
+        !! count over them. That is the shape a "at least eight of these bands were measured" cut
+        !! wants; a loop of `%get` builds the transpose of it, one allocation per column.
+        !!
+        !! Every named column must be SCALAR and of a kind that copies into `arr`'s under
+        !! `%get`'s own rule. Nothing else widens -- in particular an integer column does
+        !! not copy into a real matrix, because `%get` does not widen that way either, and one
+        !! rule written twice is how two rules come to disagree. A vector, string, temporal or
+        !! container column is refused, naming the column. Every column is checked before any is
+        !! copied, so a list with one bad name copies nothing.
+        !!
+        !! `is_valid`, when present, is the matching `(size(names), %nrows())` mask -- `.true.`
+        !! where the value is real -- per the shapes-must-match rule every paired accessor here
+        !! follows. A named column that is not resident is READ, by the same lazy touch `%get`
+        !! performs; nothing else changes, and naming no column at all yields a `(0, %nrows())`
+        !! matrix rather than an error.
+        module subroutine get_matrix_string_i32(self, names, arr, is_valid)
+            class(parquet_table), intent(in) :: self !! the table.
+            character(len=*), intent(in) :: names !! the columns, comma/space separated.
+            integer(int32), allocatable, intent(out) :: arr(:,:) !! (column, row), shaped (size(names), nrows).
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: the matching validity mask.
+        end subroutine get_matrix_string_i32
+        !> Writes one `(column, row)` matrix of i32 values back into several existing columns.
+        !!
+        !! The inverse of `%get_matrix`, under `%set`'s rules rather than `%get`'s: each named
+        !! column must already EXIST, must be exactly `arr`'s kind, and the table must have
+        !! `size(arr, 2)` rows. `%add_column` in a loop is how the columns are created; there is
+        !! deliberately no sugar for that, since a new column needs a kind and a name anyway.
+        !!
+        !! **The asymmetry with `%get_matrix` is `%get`/`%set`'s own and is not an oversight**: a
+        !! `%get_matrix` widens on the way out where `%set_matrix` will not narrow on the way
+        !! back, so the round trip is an identity exactly when every named column is already the
+        !! matrix's own kind. A column of a widened kind is refused here, naming it.
+        !!
+        !! `is_valid`, when present, is the matching `(size(names), size(arr, 2))` mask and marks
+        !! a row null where it is `.false.`; `modify_nulls=.false.` leaves each column's existing
+        !! nulls exactly as they were. Values are written IN PLACE -- nothing is reallocated,
+        !! nothing detaches, and an outstanding `%col` pointer stays valid and sees them.
+        module subroutine set_matrix_i32(self, names, arr, is_valid, modify_nulls)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: names(:) !! the columns, in the order they take in `arr`.
+            integer(int32), intent(in) :: arr(:,:) !! (column, row), shaped (size(names), nrows).
+            logical, intent(in), optional :: is_valid(:,:) !! present: entries marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves existing null entries untouched.
+        end subroutine set_matrix_i32
+        !> Writes one `(column, row)` matrix of i32 values back into several existing columns.
+        !!
+        !! The inverse of `%get_matrix`, under `%set`'s rules rather than `%get`'s: each named
+        !! column must already EXIST, must be exactly `arr`'s kind, and the table must have
+        !! `size(arr, 2)` rows. `%add_column` in a loop is how the columns are created; there is
+        !! deliberately no sugar for that, since a new column needs a kind and a name anyway.
+        !!
+        !! **The asymmetry with `%get_matrix` is `%get`/`%set`'s own and is not an oversight**: a
+        !! `%get_matrix` widens on the way out where `%set_matrix` will not narrow on the way
+        !! back, so the round trip is an identity exactly when every named column is already the
+        !! matrix's own kind. A column of a widened kind is refused here, naming it.
+        !!
+        !! `is_valid`, when present, is the matching `(size(names), size(arr, 2))` mask and marks
+        !! a row null where it is `.false.`; `modify_nulls=.false.` leaves each column's existing
+        !! nulls exactly as they were. Values are written IN PLACE -- nothing is reallocated,
+        !! nothing detaches, and an outstanding `%col` pointer stays valid and sees them.
+        module subroutine set_matrix_string_i32(self, names, arr, is_valid, modify_nulls)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: names !! the columns, comma/space separated.
+            integer(int32), intent(in) :: arr(:,:) !! (column, row), shaped (size(names), nrows).
+            logical, intent(in), optional :: is_valid(:,:) !! present: entries marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves existing null entries untouched.
+        end subroutine set_matrix_string_i32
+        !> Copies several SCALAR columns out as one `(column, row)` matrix of i64 values.
+        !!
+        !! `arr` comes back shaped `(size(names), %nrows())`, column-major -- so one ROW's values
+        !! across the named columns are CONTIGUOUS, and `count(arr > lim, dim=1)` is a per-row
+        !! count over them. That is the shape a "at least eight of these bands were measured" cut
+        !! wants; a loop of `%get` builds the transpose of it, one allocation per column.
+        !!
+        !! Every named column must be SCALAR and of a kind that copies into `arr`'s under
+        !! `%get`'s own rule.
+        !! A int32 column is also accepted, widening on the way out -- exactly
+        !! the set `%get` widens, and no more. Nothing else widens -- in particular an integer column does
+        !! not copy into a real matrix, because `%get` does not widen that way either, and one
+        !! rule written twice is how two rules come to disagree. A vector, string, temporal or
+        !! container column is refused, naming the column. Every column is checked before any is
+        !! copied, so a list with one bad name copies nothing.
+        !!
+        !! `is_valid`, when present, is the matching `(size(names), %nrows())` mask -- `.true.`
+        !! where the value is real -- per the shapes-must-match rule every paired accessor here
+        !! follows. A named column that is not resident is READ, by the same lazy touch `%get`
+        !! performs; nothing else changes, and naming no column at all yields a `(0, %nrows())`
+        !! matrix rather than an error.
+        module subroutine get_matrix_i64(self, names, arr, is_valid)
+            class(parquet_table), intent(in) :: self !! the table.
+            character(len=*), intent(in) :: names(:) !! the columns, in the order they take in `arr`.
+            integer(int64), allocatable, intent(out) :: arr(:,:) !! (column, row), shaped (size(names), nrows).
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: the matching validity mask.
+        end subroutine get_matrix_i64
+        !> Copies several SCALAR columns out as one `(column, row)` matrix of i64 values.
+        !!
+        !! `arr` comes back shaped `(size(names), %nrows())`, column-major -- so one ROW's values
+        !! across the named columns are CONTIGUOUS, and `count(arr > lim, dim=1)` is a per-row
+        !! count over them. That is the shape a "at least eight of these bands were measured" cut
+        !! wants; a loop of `%get` builds the transpose of it, one allocation per column.
+        !!
+        !! Every named column must be SCALAR and of a kind that copies into `arr`'s under
+        !! `%get`'s own rule.
+        !! A int32 column is also accepted, widening on the way out -- exactly
+        !! the set `%get` widens, and no more. Nothing else widens -- in particular an integer column does
+        !! not copy into a real matrix, because `%get` does not widen that way either, and one
+        !! rule written twice is how two rules come to disagree. A vector, string, temporal or
+        !! container column is refused, naming the column. Every column is checked before any is
+        !! copied, so a list with one bad name copies nothing.
+        !!
+        !! `is_valid`, when present, is the matching `(size(names), %nrows())` mask -- `.true.`
+        !! where the value is real -- per the shapes-must-match rule every paired accessor here
+        !! follows. A named column that is not resident is READ, by the same lazy touch `%get`
+        !! performs; nothing else changes, and naming no column at all yields a `(0, %nrows())`
+        !! matrix rather than an error.
+        module subroutine get_matrix_string_i64(self, names, arr, is_valid)
+            class(parquet_table), intent(in) :: self !! the table.
+            character(len=*), intent(in) :: names !! the columns, comma/space separated.
+            integer(int64), allocatable, intent(out) :: arr(:,:) !! (column, row), shaped (size(names), nrows).
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: the matching validity mask.
+        end subroutine get_matrix_string_i64
+        !> Writes one `(column, row)` matrix of i64 values back into several existing columns.
+        !!
+        !! The inverse of `%get_matrix`, under `%set`'s rules rather than `%get`'s: each named
+        !! column must already EXIST, must be exactly `arr`'s kind, and the table must have
+        !! `size(arr, 2)` rows. `%add_column` in a loop is how the columns are created; there is
+        !! deliberately no sugar for that, since a new column needs a kind and a name anyway.
+        !!
+        !! **The asymmetry with `%get_matrix` is `%get`/`%set`'s own and is not an oversight**: a
+        !! `%get_matrix` widens on the way out where `%set_matrix` will not narrow on the way
+        !! back, so the round trip is an identity exactly when every named column is already the
+        !! matrix's own kind. A column of a widened kind is refused here, naming it.
+        !!
+        !! `is_valid`, when present, is the matching `(size(names), size(arr, 2))` mask and marks
+        !! a row null where it is `.false.`; `modify_nulls=.false.` leaves each column's existing
+        !! nulls exactly as they were. Values are written IN PLACE -- nothing is reallocated,
+        !! nothing detaches, and an outstanding `%col` pointer stays valid and sees them.
+        module subroutine set_matrix_i64(self, names, arr, is_valid, modify_nulls)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: names(:) !! the columns, in the order they take in `arr`.
+            integer(int64), intent(in) :: arr(:,:) !! (column, row), shaped (size(names), nrows).
+            logical, intent(in), optional :: is_valid(:,:) !! present: entries marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves existing null entries untouched.
+        end subroutine set_matrix_i64
+        !> Writes one `(column, row)` matrix of i64 values back into several existing columns.
+        !!
+        !! The inverse of `%get_matrix`, under `%set`'s rules rather than `%get`'s: each named
+        !! column must already EXIST, must be exactly `arr`'s kind, and the table must have
+        !! `size(arr, 2)` rows. `%add_column` in a loop is how the columns are created; there is
+        !! deliberately no sugar for that, since a new column needs a kind and a name anyway.
+        !!
+        !! **The asymmetry with `%get_matrix` is `%get`/`%set`'s own and is not an oversight**: a
+        !! `%get_matrix` widens on the way out where `%set_matrix` will not narrow on the way
+        !! back, so the round trip is an identity exactly when every named column is already the
+        !! matrix's own kind. A column of a widened kind is refused here, naming it.
+        !!
+        !! `is_valid`, when present, is the matching `(size(names), size(arr, 2))` mask and marks
+        !! a row null where it is `.false.`; `modify_nulls=.false.` leaves each column's existing
+        !! nulls exactly as they were. Values are written IN PLACE -- nothing is reallocated,
+        !! nothing detaches, and an outstanding `%col` pointer stays valid and sees them.
+        module subroutine set_matrix_string_i64(self, names, arr, is_valid, modify_nulls)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: names !! the columns, comma/space separated.
+            integer(int64), intent(in) :: arr(:,:) !! (column, row), shaped (size(names), nrows).
+            logical, intent(in), optional :: is_valid(:,:) !! present: entries marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves existing null entries untouched.
+        end subroutine set_matrix_string_i64
+        !> Copies several SCALAR columns out as one `(column, row)` matrix of f32 values.
+        !!
+        !! `arr` comes back shaped `(size(names), %nrows())`, column-major -- so one ROW's values
+        !! across the named columns are CONTIGUOUS, and `count(arr > lim, dim=1)` is a per-row
+        !! count over them. That is the shape a "at least eight of these bands were measured" cut
+        !! wants; a loop of `%get` builds the transpose of it, one allocation per column.
+        !!
+        !! Every named column must be SCALAR and of a kind that copies into `arr`'s under
+        !! `%get`'s own rule. Nothing else widens -- in particular an integer column does
+        !! not copy into a real matrix, because `%get` does not widen that way either, and one
+        !! rule written twice is how two rules come to disagree. A vector, string, temporal or
+        !! container column is refused, naming the column. Every column is checked before any is
+        !! copied, so a list with one bad name copies nothing.
+        !!
+        !! `is_valid`, when present, is the matching `(size(names), %nrows())` mask -- `.true.`
+        !! where the value is real -- per the shapes-must-match rule every paired accessor here
+        !! follows. A named column that is not resident is READ, by the same lazy touch `%get`
+        !! performs; nothing else changes, and naming no column at all yields a `(0, %nrows())`
+        !! matrix rather than an error.
+        module subroutine get_matrix_f32(self, names, arr, is_valid)
+            class(parquet_table), intent(in) :: self !! the table.
+            character(len=*), intent(in) :: names(:) !! the columns, in the order they take in `arr`.
+            real(real32), allocatable, intent(out) :: arr(:,:) !! (column, row), shaped (size(names), nrows).
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: the matching validity mask.
+        end subroutine get_matrix_f32
+        !> Copies several SCALAR columns out as one `(column, row)` matrix of f32 values.
+        !!
+        !! `arr` comes back shaped `(size(names), %nrows())`, column-major -- so one ROW's values
+        !! across the named columns are CONTIGUOUS, and `count(arr > lim, dim=1)` is a per-row
+        !! count over them. That is the shape a "at least eight of these bands were measured" cut
+        !! wants; a loop of `%get` builds the transpose of it, one allocation per column.
+        !!
+        !! Every named column must be SCALAR and of a kind that copies into `arr`'s under
+        !! `%get`'s own rule. Nothing else widens -- in particular an integer column does
+        !! not copy into a real matrix, because `%get` does not widen that way either, and one
+        !! rule written twice is how two rules come to disagree. A vector, string, temporal or
+        !! container column is refused, naming the column. Every column is checked before any is
+        !! copied, so a list with one bad name copies nothing.
+        !!
+        !! `is_valid`, when present, is the matching `(size(names), %nrows())` mask -- `.true.`
+        !! where the value is real -- per the shapes-must-match rule every paired accessor here
+        !! follows. A named column that is not resident is READ, by the same lazy touch `%get`
+        !! performs; nothing else changes, and naming no column at all yields a `(0, %nrows())`
+        !! matrix rather than an error.
+        module subroutine get_matrix_string_f32(self, names, arr, is_valid)
+            class(parquet_table), intent(in) :: self !! the table.
+            character(len=*), intent(in) :: names !! the columns, comma/space separated.
+            real(real32), allocatable, intent(out) :: arr(:,:) !! (column, row), shaped (size(names), nrows).
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: the matching validity mask.
+        end subroutine get_matrix_string_f32
+        !> Writes one `(column, row)` matrix of f32 values back into several existing columns.
+        !!
+        !! The inverse of `%get_matrix`, under `%set`'s rules rather than `%get`'s: each named
+        !! column must already EXIST, must be exactly `arr`'s kind, and the table must have
+        !! `size(arr, 2)` rows. `%add_column` in a loop is how the columns are created; there is
+        !! deliberately no sugar for that, since a new column needs a kind and a name anyway.
+        !!
+        !! **The asymmetry with `%get_matrix` is `%get`/`%set`'s own and is not an oversight**: a
+        !! `%get_matrix` widens on the way out where `%set_matrix` will not narrow on the way
+        !! back, so the round trip is an identity exactly when every named column is already the
+        !! matrix's own kind. A column of a widened kind is refused here, naming it.
+        !!
+        !! `is_valid`, when present, is the matching `(size(names), size(arr, 2))` mask and marks
+        !! a row null where it is `.false.`; `modify_nulls=.false.` leaves each column's existing
+        !! nulls exactly as they were. Values are written IN PLACE -- nothing is reallocated,
+        !! nothing detaches, and an outstanding `%col` pointer stays valid and sees them.
+        module subroutine set_matrix_f32(self, names, arr, is_valid, modify_nulls)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: names(:) !! the columns, in the order they take in `arr`.
+            real(real32), intent(in) :: arr(:,:) !! (column, row), shaped (size(names), nrows).
+            logical, intent(in), optional :: is_valid(:,:) !! present: entries marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves existing null entries untouched.
+        end subroutine set_matrix_f32
+        !> Writes one `(column, row)` matrix of f32 values back into several existing columns.
+        !!
+        !! The inverse of `%get_matrix`, under `%set`'s rules rather than `%get`'s: each named
+        !! column must already EXIST, must be exactly `arr`'s kind, and the table must have
+        !! `size(arr, 2)` rows. `%add_column` in a loop is how the columns are created; there is
+        !! deliberately no sugar for that, since a new column needs a kind and a name anyway.
+        !!
+        !! **The asymmetry with `%get_matrix` is `%get`/`%set`'s own and is not an oversight**: a
+        !! `%get_matrix` widens on the way out where `%set_matrix` will not narrow on the way
+        !! back, so the round trip is an identity exactly when every named column is already the
+        !! matrix's own kind. A column of a widened kind is refused here, naming it.
+        !!
+        !! `is_valid`, when present, is the matching `(size(names), size(arr, 2))` mask and marks
+        !! a row null where it is `.false.`; `modify_nulls=.false.` leaves each column's existing
+        !! nulls exactly as they were. Values are written IN PLACE -- nothing is reallocated,
+        !! nothing detaches, and an outstanding `%col` pointer stays valid and sees them.
+        module subroutine set_matrix_string_f32(self, names, arr, is_valid, modify_nulls)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: names !! the columns, comma/space separated.
+            real(real32), intent(in) :: arr(:,:) !! (column, row), shaped (size(names), nrows).
+            logical, intent(in), optional :: is_valid(:,:) !! present: entries marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves existing null entries untouched.
+        end subroutine set_matrix_string_f32
+        !> Copies several SCALAR columns out as one `(column, row)` matrix of f64 values.
+        !!
+        !! `arr` comes back shaped `(size(names), %nrows())`, column-major -- so one ROW's values
+        !! across the named columns are CONTIGUOUS, and `count(arr > lim, dim=1)` is a per-row
+        !! count over them. That is the shape a "at least eight of these bands were measured" cut
+        !! wants; a loop of `%get` builds the transpose of it, one allocation per column.
+        !!
+        !! Every named column must be SCALAR and of a kind that copies into `arr`'s under
+        !! `%get`'s own rule.
+        !! A float32 column is also accepted, widening on the way out -- exactly
+        !! the set `%get` widens, and no more. Nothing else widens -- in particular an integer column does
+        !! not copy into a real matrix, because `%get` does not widen that way either, and one
+        !! rule written twice is how two rules come to disagree. A vector, string, temporal or
+        !! container column is refused, naming the column. Every column is checked before any is
+        !! copied, so a list with one bad name copies nothing.
+        !!
+        !! `is_valid`, when present, is the matching `(size(names), %nrows())` mask -- `.true.`
+        !! where the value is real -- per the shapes-must-match rule every paired accessor here
+        !! follows. A named column that is not resident is READ, by the same lazy touch `%get`
+        !! performs; nothing else changes, and naming no column at all yields a `(0, %nrows())`
+        !! matrix rather than an error.
+        module subroutine get_matrix_f64(self, names, arr, is_valid)
+            class(parquet_table), intent(in) :: self !! the table.
+            character(len=*), intent(in) :: names(:) !! the columns, in the order they take in `arr`.
+            real(real64), allocatable, intent(out) :: arr(:,:) !! (column, row), shaped (size(names), nrows).
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: the matching validity mask.
+        end subroutine get_matrix_f64
+        !> Copies several SCALAR columns out as one `(column, row)` matrix of f64 values.
+        !!
+        !! `arr` comes back shaped `(size(names), %nrows())`, column-major -- so one ROW's values
+        !! across the named columns are CONTIGUOUS, and `count(arr > lim, dim=1)` is a per-row
+        !! count over them. That is the shape a "at least eight of these bands were measured" cut
+        !! wants; a loop of `%get` builds the transpose of it, one allocation per column.
+        !!
+        !! Every named column must be SCALAR and of a kind that copies into `arr`'s under
+        !! `%get`'s own rule.
+        !! A float32 column is also accepted, widening on the way out -- exactly
+        !! the set `%get` widens, and no more. Nothing else widens -- in particular an integer column does
+        !! not copy into a real matrix, because `%get` does not widen that way either, and one
+        !! rule written twice is how two rules come to disagree. A vector, string, temporal or
+        !! container column is refused, naming the column. Every column is checked before any is
+        !! copied, so a list with one bad name copies nothing.
+        !!
+        !! `is_valid`, when present, is the matching `(size(names), %nrows())` mask -- `.true.`
+        !! where the value is real -- per the shapes-must-match rule every paired accessor here
+        !! follows. A named column that is not resident is READ, by the same lazy touch `%get`
+        !! performs; nothing else changes, and naming no column at all yields a `(0, %nrows())`
+        !! matrix rather than an error.
+        module subroutine get_matrix_string_f64(self, names, arr, is_valid)
+            class(parquet_table), intent(in) :: self !! the table.
+            character(len=*), intent(in) :: names !! the columns, comma/space separated.
+            real(real64), allocatable, intent(out) :: arr(:,:) !! (column, row), shaped (size(names), nrows).
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: the matching validity mask.
+        end subroutine get_matrix_string_f64
+        !> Writes one `(column, row)` matrix of f64 values back into several existing columns.
+        !!
+        !! The inverse of `%get_matrix`, under `%set`'s rules rather than `%get`'s: each named
+        !! column must already EXIST, must be exactly `arr`'s kind, and the table must have
+        !! `size(arr, 2)` rows. `%add_column` in a loop is how the columns are created; there is
+        !! deliberately no sugar for that, since a new column needs a kind and a name anyway.
+        !!
+        !! **The asymmetry with `%get_matrix` is `%get`/`%set`'s own and is not an oversight**: a
+        !! `%get_matrix` widens on the way out where `%set_matrix` will not narrow on the way
+        !! back, so the round trip is an identity exactly when every named column is already the
+        !! matrix's own kind. A column of a widened kind is refused here, naming it.
+        !!
+        !! `is_valid`, when present, is the matching `(size(names), size(arr, 2))` mask and marks
+        !! a row null where it is `.false.`; `modify_nulls=.false.` leaves each column's existing
+        !! nulls exactly as they were. Values are written IN PLACE -- nothing is reallocated,
+        !! nothing detaches, and an outstanding `%col` pointer stays valid and sees them.
+        module subroutine set_matrix_f64(self, names, arr, is_valid, modify_nulls)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: names(:) !! the columns, in the order they take in `arr`.
+            real(real64), intent(in) :: arr(:,:) !! (column, row), shaped (size(names), nrows).
+            logical, intent(in), optional :: is_valid(:,:) !! present: entries marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves existing null entries untouched.
+        end subroutine set_matrix_f64
+        !> Writes one `(column, row)` matrix of f64 values back into several existing columns.
+        !!
+        !! The inverse of `%get_matrix`, under `%set`'s rules rather than `%get`'s: each named
+        !! column must already EXIST, must be exactly `arr`'s kind, and the table must have
+        !! `size(arr, 2)` rows. `%add_column` in a loop is how the columns are created; there is
+        !! deliberately no sugar for that, since a new column needs a kind and a name anyway.
+        !!
+        !! **The asymmetry with `%get_matrix` is `%get`/`%set`'s own and is not an oversight**: a
+        !! `%get_matrix` widens on the way out where `%set_matrix` will not narrow on the way
+        !! back, so the round trip is an identity exactly when every named column is already the
+        !! matrix's own kind. A column of a widened kind is refused here, naming it.
+        !!
+        !! `is_valid`, when present, is the matching `(size(names), size(arr, 2))` mask and marks
+        !! a row null where it is `.false.`; `modify_nulls=.false.` leaves each column's existing
+        !! nulls exactly as they were. Values are written IN PLACE -- nothing is reallocated,
+        !! nothing detaches, and an outstanding `%col` pointer stays valid and sees them.
+        module subroutine set_matrix_string_f64(self, names, arr, is_valid, modify_nulls)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: names !! the columns, comma/space separated.
+            real(real64), intent(in) :: arr(:,:) !! (column, row), shaped (size(names), nrows).
+            logical, intent(in), optional :: is_valid(:,:) !! present: entries marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves existing null entries untouched.
+        end subroutine set_matrix_string_f64
+        !> Copies several SCALAR columns out as one `(column, row)` matrix of bool values.
+        !!
+        !! `arr` comes back shaped `(size(names), %nrows())`, column-major -- so one ROW's values
+        !! across the named columns are CONTIGUOUS, and `count(arr > lim, dim=1)` is a per-row
+        !! count over them. That is the shape a "at least eight of these bands were measured" cut
+        !! wants; a loop of `%get` builds the transpose of it, one allocation per column.
+        !!
+        !! Every named column must be SCALAR and of a kind that copies into `arr`'s under
+        !! `%get`'s own rule. Nothing else widens -- in particular an integer column does
+        !! not copy into a real matrix, because `%get` does not widen that way either, and one
+        !! rule written twice is how two rules come to disagree. A vector, string, temporal or
+        !! container column is refused, naming the column. Every column is checked before any is
+        !! copied, so a list with one bad name copies nothing.
+        !!
+        !! `is_valid`, when present, is the matching `(size(names), %nrows())` mask -- `.true.`
+        !! where the value is real -- per the shapes-must-match rule every paired accessor here
+        !! follows. A named column that is not resident is READ, by the same lazy touch `%get`
+        !! performs; nothing else changes, and naming no column at all yields a `(0, %nrows())`
+        !! matrix rather than an error.
+        module subroutine get_matrix_bool(self, names, arr, is_valid)
+            class(parquet_table), intent(in) :: self !! the table.
+            character(len=*), intent(in) :: names(:) !! the columns, in the order they take in `arr`.
+            logical, allocatable, intent(out) :: arr(:,:) !! (column, row), shaped (size(names), nrows).
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: the matching validity mask.
+        end subroutine get_matrix_bool
+        !> Copies several SCALAR columns out as one `(column, row)` matrix of bool values.
+        !!
+        !! `arr` comes back shaped `(size(names), %nrows())`, column-major -- so one ROW's values
+        !! across the named columns are CONTIGUOUS, and `count(arr > lim, dim=1)` is a per-row
+        !! count over them. That is the shape a "at least eight of these bands were measured" cut
+        !! wants; a loop of `%get` builds the transpose of it, one allocation per column.
+        !!
+        !! Every named column must be SCALAR and of a kind that copies into `arr`'s under
+        !! `%get`'s own rule. Nothing else widens -- in particular an integer column does
+        !! not copy into a real matrix, because `%get` does not widen that way either, and one
+        !! rule written twice is how two rules come to disagree. A vector, string, temporal or
+        !! container column is refused, naming the column. Every column is checked before any is
+        !! copied, so a list with one bad name copies nothing.
+        !!
+        !! `is_valid`, when present, is the matching `(size(names), %nrows())` mask -- `.true.`
+        !! where the value is real -- per the shapes-must-match rule every paired accessor here
+        !! follows. A named column that is not resident is READ, by the same lazy touch `%get`
+        !! performs; nothing else changes, and naming no column at all yields a `(0, %nrows())`
+        !! matrix rather than an error.
+        module subroutine get_matrix_string_bool(self, names, arr, is_valid)
+            class(parquet_table), intent(in) :: self !! the table.
+            character(len=*), intent(in) :: names !! the columns, comma/space separated.
+            logical, allocatable, intent(out) :: arr(:,:) !! (column, row), shaped (size(names), nrows).
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: the matching validity mask.
+        end subroutine get_matrix_string_bool
+        !> Writes one `(column, row)` matrix of bool values back into several existing columns.
+        !!
+        !! The inverse of `%get_matrix`, under `%set`'s rules rather than `%get`'s: each named
+        !! column must already EXIST, must be exactly `arr`'s kind, and the table must have
+        !! `size(arr, 2)` rows. `%add_column` in a loop is how the columns are created; there is
+        !! deliberately no sugar for that, since a new column needs a kind and a name anyway.
+        !!
+        !! **The asymmetry with `%get_matrix` is `%get`/`%set`'s own and is not an oversight**: a
+        !! `%get_matrix` widens on the way out where `%set_matrix` will not narrow on the way
+        !! back, so the round trip is an identity exactly when every named column is already the
+        !! matrix's own kind. A column of a widened kind is refused here, naming it.
+        !!
+        !! `is_valid`, when present, is the matching `(size(names), size(arr, 2))` mask and marks
+        !! a row null where it is `.false.`; `modify_nulls=.false.` leaves each column's existing
+        !! nulls exactly as they were. Values are written IN PLACE -- nothing is reallocated,
+        !! nothing detaches, and an outstanding `%col` pointer stays valid and sees them.
+        module subroutine set_matrix_bool(self, names, arr, is_valid, modify_nulls)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: names(:) !! the columns, in the order they take in `arr`.
+            logical, intent(in) :: arr(:,:) !! (column, row), shaped (size(names), nrows).
+            logical, intent(in), optional :: is_valid(:,:) !! present: entries marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves existing null entries untouched.
+        end subroutine set_matrix_bool
+        !> Writes one `(column, row)` matrix of bool values back into several existing columns.
+        !!
+        !! The inverse of `%get_matrix`, under `%set`'s rules rather than `%get`'s: each named
+        !! column must already EXIST, must be exactly `arr`'s kind, and the table must have
+        !! `size(arr, 2)` rows. `%add_column` in a loop is how the columns are created; there is
+        !! deliberately no sugar for that, since a new column needs a kind and a name anyway.
+        !!
+        !! **The asymmetry with `%get_matrix` is `%get`/`%set`'s own and is not an oversight**: a
+        !! `%get_matrix` widens on the way out where `%set_matrix` will not narrow on the way
+        !! back, so the round trip is an identity exactly when every named column is already the
+        !! matrix's own kind. A column of a widened kind is refused here, naming it.
+        !!
+        !! `is_valid`, when present, is the matching `(size(names), size(arr, 2))` mask and marks
+        !! a row null where it is `.false.`; `modify_nulls=.false.` leaves each column's existing
+        !! nulls exactly as they were. Values are written IN PLACE -- nothing is reallocated,
+        !! nothing detaches, and an outstanding `%col` pointer stays valid and sees them.
+        module subroutine set_matrix_string_bool(self, names, arr, is_valid, modify_nulls)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: names !! the columns, comma/space separated.
+            logical, intent(in) :: arr(:,:) !! (column, row), shaped (size(names), nrows).
+            logical, intent(in), optional :: is_valid(:,:) !! present: entries marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves existing null entries untouched.
+        end subroutine set_matrix_string_bool
+        !> Removes several columns at once -- the list form of `%drop_column`.
+        !!
+        !! Identical to it in every respect but the arity: cheap, it does NOT detach (every
+        !! remaining column keeps its length, so the table can still read the ones it has not
+        !! read yet), dropping a column that was never read reads nothing at all, and the columns
+        !! that remain keep their order.
+        !!
+        !! Every name is checked BEFORE anything is dropped, and by default an absent one aborts
+        !! naming **every** name that is missing rather than only the first -- `%require_columns`'
+        !! rule, for its reason: a caller fixing a list one name per run is the failure mode.
+        !! `ignore_missing=.true.` is pandas' `errors="ignore"` and skips the ones that are not
+        !! there. A name repeated in the list drops that column once.
+        !!
+        !! `force=.true.` is needed to drop a PREDEFINED column, exactly as it is for
+        !! `%drop_column`, and for the same reason: a program using a generated table type's
+        !! accessors expects those columns to be there.
+        module subroutine table_drop_columns(self, names, force, ignore_missing)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: names(:) !! the columns to remove.
+            logical, intent(in), optional :: force !! .true. to drop PREDEFINED columns too.
+            !> .true. to skip names the table does not have; the default aborts naming all of them.
+            logical, intent(in), optional :: ignore_missing
+        end subroutine table_drop_columns
+        !> Removes several columns at once -- the list form of `%drop_column`.
+        !!
+        !! Identical to it in every respect but the arity: cheap, it does NOT detach (every
+        !! remaining column keeps its length, so the table can still read the ones it has not
+        !! read yet), dropping a column that was never read reads nothing at all, and the columns
+        !! that remain keep their order.
+        !!
+        !! Every name is checked BEFORE anything is dropped, and by default an absent one aborts
+        !! naming **every** name that is missing rather than only the first -- `%require_columns`'
+        !! rule, for its reason: a caller fixing a list one name per run is the failure mode.
+        !! `ignore_missing=.true.` is pandas' `errors="ignore"` and skips the ones that are not
+        !! there. A name repeated in the list drops that column once.
+        !!
+        !! `force=.true.` is needed to drop a PREDEFINED column, exactly as it is for
+        !! `%drop_column`, and for the same reason: a program using a generated table type's
+        !! accessors expects those columns to be there.
+        module subroutine table_drop_columns_string(self, names, force, ignore_missing)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: names !! the columns to remove, comma/space separated.
+            logical, intent(in), optional :: force !! .true. to drop PREDEFINED columns too.
+            !> .true. to skip names the table does not have; the default aborts naming all of them.
+            logical, intent(in), optional :: ignore_missing
+        end subroutine table_drop_columns_string
+        !> Removes every column EXCEPT the ones named -- the projection `df[["a", "b"]]`.
+        !!
+        !! The destructive twin of a name list, and the cheap way to cut a wide table down: a
+        !! column that was never read costs nothing to drop, so projecting a 300-column lazy
+        !! table onto four reads nothing at all. The kept columns keep the TABLE's order, not the
+        !! order they happen to be named in, and a name repeated in the list keeps that column
+        !! once.
+        !!
+        !! Every name must exist, and an absent one aborts naming every missing name as
+        !! `%require_columns` does. There is deliberately no `ignore_missing=` here: a projection
+        !! that silently keeps fewer columns than it was asked for is one nothing downstream can
+        !! check, whereas the same list passed to `%drop_columns` says what it is discarding.
+        !!
+        !! `force=.true.` is needed when a PREDEFINED column would be dropped -- that is, when
+        !! one is not named. It is `%drop_column`'s own R8 rule reached from the other side, and
+        !! without it a projection would be the one way to lose a generated type's columns by
+        !! omission.
+        !!
+        !! Naming nothing at all drops every column, which is legal and leaves a table with
+        !! `%nrows()` rows and no columns. Column-structural only: nothing detaches.
+        module subroutine table_keep_columns(self, names, force)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: names(:) !! the columns to keep.
+            logical, intent(in), optional :: force !! .true. to allow dropping PREDEFINED columns.
+        end subroutine table_keep_columns
+        !> Removes every column EXCEPT the ones named -- the projection `df[["a", "b"]]`.
+        !!
+        !! The destructive twin of a name list, and the cheap way to cut a wide table down: a
+        !! column that was never read costs nothing to drop, so projecting a 300-column lazy
+        !! table onto four reads nothing at all. The kept columns keep the TABLE's order, not the
+        !! order they happen to be named in, and a name repeated in the list keeps that column
+        !! once.
+        !!
+        !! Every name must exist, and an absent one aborts naming every missing name as
+        !! `%require_columns` does. There is deliberately no `ignore_missing=` here: a projection
+        !! that silently keeps fewer columns than it was asked for is one nothing downstream can
+        !! check, whereas the same list passed to `%drop_columns` says what it is discarding.
+        !!
+        !! `force=.true.` is needed when a PREDEFINED column would be dropped -- that is, when
+        !! one is not named. It is `%drop_column`'s own R8 rule reached from the other side, and
+        !! without it a projection would be the one way to lose a generated type's columns by
+        !! omission.
+        !!
+        !! Naming nothing at all drops every column, which is legal and leaves a table with
+        !! `%nrows()` rows and no columns. Column-structural only: nothing detaches.
+        module subroutine table_keep_columns_string(self, names, force)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: names !! the columns to keep, comma/space separated.
+            logical, intent(in), optional :: force !! .true. to allow dropping PREDEFINED columns.
+        end subroutine table_keep_columns_string
     end interface
     !
     ! ---- Row-structural mutation -- detaches whenever it changes the row set (parquet_tables_rowmutate) ----

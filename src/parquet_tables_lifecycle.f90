@@ -310,6 +310,7 @@ contains
             do k = i, cache%ncols - 1
                 call move_table_column(cache%cols(k), cache%cols(k + 1))
             end do
+            call reset_column_slot(cache%cols(cache%ncols))
             cache%ncols = cache%ncols - 1
             call cache_name_index_rebuild(cache)
             return
@@ -748,6 +749,12 @@ contains
         ! scattered one is not. The replace-in-place branch above bumps on its way out for a
         ! different reason -- it CLEARS a column's values, which no held pointer can survive.
         if (grew) cache%generation = cache%generation + 1_int64
+        ! Blanked before it is handed out, because slot `n` may be one a drop vacated: every
+        ! vacating path resets what it removes, and this is what makes that a property of the
+        ! slot rather than a rule three of them have to remember. `unit` is the field that
+        ! actually escaped -- it is read in preference to the parquet_column's own, so a stale
+        ! one shadowed the unit %add_column was given. See feature_risks.md Risk-204.
+        call reset_column_slot(cache%cols(n))
         cache%cols(n)%name = trim(name)
         cache%cols(n)%file_name = trim(name)
         cache%cols(n)%file_source = .false.

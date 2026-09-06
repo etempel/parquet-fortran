@@ -88,6 +88,7 @@ something a reader is expected to have.
 | [Risk-201](#risk-201--a-fill-must-clear-the-null-on-all-three-storage-classes-and-only-one-of-them-complains) | A fill must clear the null on all three storage classes | 4 — covered |
 | [Risk-202](#risk-202--a-temporal-columns-cached-null-answer-goes-stale-when-values-are-written-through-a-pointer) | A temporal column's cached null answer goes stale behind a raw pointer | 4 — covered |
 | [Risk-203](#risk-203--dropnas-default-is-a-union-and-one-named-column-cannot-tell-it-from-the-intersection) | %dropna's default is a UNION, and one named column cannot tell | 4 — covered |
+| [Risk-204](#risk-204--a-slot-a-drop-vacated-is-recycled-by-the-next-add_column-with-whatever-it-still-holds) | A slot a drop vacated is recycled by the next %add_column | 4 — covered |
 | [Risk-1](#risk-1--the-release-policy-regresses-silently) | The release policy regresses silently | 4 — covered |
 | [Risk-2](#risk-2--the-schema-less-write-rests-on-three-properties-that-look-incidental) | The schema-less write rests on three properties that look incidental | 4 — covered |
 | [Risk-3](#risk-3--the-screen-and-the-evaluator-can-drift-apart) | The screen and the evaluator can drift apart | 4 — covered |
@@ -1330,6 +1331,41 @@ different answers.
 **Test.** `test_dropna_any_is_a_union` (`test/test_table_fill.f90`), added after a mutation that
 swapped the default to `how="all"`'s threshold survived the whole suite. `test_dropna_all` and
 `test_dropna_min_valid` use non-coinciding fixtures for the same reason.
+
+### Risk-204 — A slot a drop vacated is recycled by the next %add_column, with whatever it still holds
+
+`parquet_table` keeps its columns in a slot array. `%drop_column` shifts the survivors down and
+`table_new_slot` hands the next `%add_column` the slot at `ncols + 1` -- which is the one the drop
+just vacated. Every field that vacating path forgets to blank is therefore inherited by a column
+that has nothing to do with the one that was dropped.
+
+**One field was forgotten and it is the worst of them.** `table_drop_column`'s tail reset covered
+`name`, `file_name`, `declared_kind`, `width`, the two pending flags, `file_source`, `predefined`,
+`user_populated`, `supported`, `residency` and `rg_loaded`, and not `unit` --
+and `slot_unit` (`src/parquet_tables_query.f90`) reads the SLOT's unit **in preference to** the
+parquet_column's own. So a stale one does not merely linger: it shadows the unit
+`%add_column(name, values, unit=)` was just given, and `parquet_write_table` then writes it into
+the file's MAML. Confirmed on a generated table type, where `%add_column("fresh", v)` after a drop
+reported `Jy` -- the unit of `flux`, the column that happened to be last.
+`drop_shadowed_row_index` (`src/parquet_tables_lifecycle.f90`) had no tail reset at all.
+
+**Why nothing noticed.** Every value is correct, every kind is correct, the row count is correct
+and the column reads back exactly as it was written. Only the metadata is wrong, and only for a
+program that drops a column and then adds one -- which no test did until this was written.
+
+**What a future change must keep.** `reset_column_slot` (`src/parquet_tables_mutate.f90`) is the
+ONE field list, and `table_new_slot` calls it on the slot it is about to hand out. That call is the
+guarantee: it makes recycling safe whatever a vacating path does or forgets, which is the property
+three hand-written copies of the same list could not provide. **It is deliberately redundant
+today** -- removing it fails no test, because every current vacating path also calls the blanker --
+so a future vacating path is exactly what it protects and exactly what no test can cover in
+advance. Do not delete it as dead code.
+
+**Test.** `test_recycled_slot_is_blank` (`test/test_table_matrix.f90`) runs one assertion through
+all three vacating verbs -- `%drop_column`, `%drop_columns`, `%keep_columns` -- on a fixture whose
+predefined columns carry declared units, since a table with no units anywhere cannot detect a unit
+leaking. Its positive control is a unit the caller does pass, which must survive the same path.
+Mutation-checked: dropping `unit` from the blanker fails arm 1 immediately.
 
 ### Risk-190 — A pre-evaluated leaf's screen flags must come from its own verdict segment
 

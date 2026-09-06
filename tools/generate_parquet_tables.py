@@ -98,6 +98,14 @@ FILL_VALUES = [
 ]
 FILL_VALUE_TAGS = [f[0] for f in FILL_VALUES]
 
+# %get_matrix/%set_matrix's element kinds: the five SCALAR array kinds a (column, row) matrix
+# can hold. Derived from the kind table rather than listed, so a new scalar numeric kind joins
+# both verbs by being added there. The two string kinds are excluded because a matrix is one
+# Fortran array of one element length; the temporal kinds because their nulls live inside the
+# element, so a plain array of them carries validity the mask argument would then contradict;
+# and every *_VEC kind because a vector column is already a rank-2 %get of its own.
+MATRIX_KINDS = [k for k in KINDS if k[4] == 1 and k[5] == "num"]
+
 FTYPE = {
     "i32": "int32", "i64": "int64", "f32": "float32", "f64": "float64",
     "bool": "boolean", "str": "string", "date": "date", "time": "time", "ts": "timestamp",
@@ -927,6 +935,26 @@ def gen_table_type():
         [f"set_arr_{k[0]}" for k in ARRAY_KINDS] + ["set_arr_chr", "set_arr_chrv", "set_arr_strcol"]
         + [f"set_arr_{c[0]}col" for c in CONTAINERS], 12,
         first_prefix=len("        generic :: set => ")))
+    # get_matrix / set_matrix
+    w("        ! --- several columns at once, as one (column, row) matrix ---")
+    for k in MATRIX_KINDS:
+        tag = k[0]
+        for suffix, word in (("", "name array"), ("_string", "name string")):
+            w(f"        procedure, private :: get_matrix{suffix}_{tag} "
+              f"!! %get_matrix specific, {word}, {tag} matrix.")
+    w("        !> Copies several scalar columns out as one (column, row) matrix.")
+    w("        generic :: get_matrix => " + wrap_list(
+        [f"get_matrix{s}_{k[0]}" for k in MATRIX_KINDS for s in ("", "_string")], 12,
+        first_prefix=len("        generic :: get_matrix => ")))
+    for k in MATRIX_KINDS:
+        tag = k[0]
+        for suffix, word in (("", "name array"), ("_string", "name string")):
+            w(f"        procedure, private :: set_matrix{suffix}_{tag} "
+              f"!! %set_matrix specific, {word}, {tag} matrix.")
+    w("        !> Writes one (column, row) matrix back into several existing scalar columns.")
+    w("        generic :: set_matrix => " + wrap_list(
+        [f"set_matrix{s}_{k[0]}" for k in MATRIX_KINDS for s in ("", "_string")], 12,
+        first_prefix=len("        generic :: set_matrix => ")))
     # add_column
     w("        ! --- from-scratch construction ---")
     for k in ARRAY_KINDS:
@@ -1004,6 +1032,14 @@ def gen_table_type():
         procedure :: ensure_validity => table_ensure_validity !! Allocate validity storage up front, for concurrent nulling.
         ! --- mutation: whole columns (never changes the row set) ---
         procedure :: drop_column => table_drop_column     !! Remove a column; force= for a predefined one.
+        procedure, private :: table_drop_columns        !! %drop_columns specific, array of names.
+        procedure, private :: table_drop_columns_string !! %drop_columns specific, separated name string.
+        !> Removes several columns at once; force= for a predefined one.
+        generic :: drop_columns => table_drop_columns, table_drop_columns_string
+        procedure, private :: table_keep_columns        !! %keep_columns specific, array of names.
+        procedure, private :: table_keep_columns_string !! %keep_columns specific, separated name string.
+        !> Removes every column EXCEPT the ones named -- the projection df[["a", "b"]].
+        generic :: keep_columns => table_keep_columns, table_keep_columns_string
         procedure :: rename_column => table_rename_column !! Change the name a column is looked up by.
         procedure :: copy_column => table_copy_column     !! Add a copy of a column, optionally of another kind.
         procedure :: cast => table_cast                   !! Convert a column to another kind, in place.
@@ -1759,6 +1795,23 @@ def gen_spec_interfaces():
             type(parquet_table_column), intent(inout) :: dst !! the slot receiving the column.
             type(parquet_table_column), intent(inout) :: src !! the slot giving it up.
         end subroutine move_table_column
+        !> Resets one slot's metadata to its declared defaults and clears its values.
+        !!
+        !! The ONE place a slot is made blank, called from every path that vacates one
+        !! (`%drop_column`, `%drop_columns`/`%keep_columns`, the shadowed-row-index drop at open)
+        !! and from `table_new_slot` before it hands a slot out. That last call is what makes the
+        !! rule hold rather than merely being followed: a slot recycled by an `%add_column` after a
+        !! drop used to inherit whatever the vacating path forgot to clear, and the field it
+        !! forgot -- `unit` -- is read in preference to the column's own, so a fresh column
+        !! reported a unit nobody gave it and wrote it into the file. See feature_risks.md
+        !! Risk-204.
+        !!
+        !! Written field-by-field rather than through a default structure constructor, which ifx
+        !! rejects for this type: `values` is a `parquet_column`, whose own components are private
+        !! to another module, even though such a constructor never specifies it.
+        module subroutine reset_column_slot(slot)
+            type(parquet_table_column), intent(inout) :: slot !! the slot to blank.
+        end subroutine reset_column_slot
         !> Appends an empty slot named `name` and returns its index, growing `cols(:)` if the
         !! headroom is used up. error stops if the name is already taken and `force` is absent.
         module subroutine table_new_slot(self, name, force, idx)
@@ -3534,6 +3587,131 @@ def gen_spec_interfaces():
             class(parquet_table), intent(inout) :: self !! the table.
             {names_decl} !! {names_doc}{limit_decl}
         end subroutine table_{d}fill{nsuffix}{lsuffix}""")
+    w("""    end interface""")
+    w("    !")
+    w("""    ! ---- Several columns at once (parquet_tables_matrix) ----
+    interface""")
+    for k in MATRIX_KINDS:
+        tag, pk, decl, comp, rank, cat = k
+        widens = WIDEN.get(tag, [])
+        also = ("" if not widens else "\n        !! A "
+                + ", ".join(w[0].replace("PK_", "").lower() for w in widens)
+                + " column is also accepted, widening on the way out -- exactly\n"
+                + "        !! the set `%get` widens, and no more.")
+        for names_decl, names_doc, suffix in (
+                ("character(len=*), intent(in) :: names(:)",
+                 "the columns, in the order they take in `arr`.", ""),
+                ("character(len=*), intent(in) :: names",
+                 "the columns, comma/space separated.", "_string")):
+            w(f"""        !> Copies several SCALAR columns out as one `(column, row)` matrix of {tag} values.
+        !!
+        !! `arr` comes back shaped `(size(names), %nrows())`, column-major -- so one ROW's values
+        !! across the named columns are CONTIGUOUS, and `count(arr > lim, dim=1)` is a per-row
+        !! count over them. That is the shape a "at least eight of these bands were measured" cut
+        !! wants; a loop of `%get` builds the transpose of it, one allocation per column.
+        !!
+        !! Every named column must be SCALAR and of a kind that copies into `arr`'s under
+        !! `%get`'s own rule.{also} Nothing else widens -- in particular an integer column does
+        !! not copy into a real matrix, because `%get` does not widen that way either, and one
+        !! rule written twice is how two rules come to disagree. A vector, string, temporal or
+        !! container column is refused, naming the column. Every column is checked before any is
+        !! copied, so a list with one bad name copies nothing.
+        !!
+        !! `is_valid`, when present, is the matching `(size(names), %nrows())` mask -- `.true.`
+        !! where the value is real -- per the shapes-must-match rule every paired accessor here
+        !! follows. A named column that is not resident is READ, by the same lazy touch `%get`
+        !! performs; nothing else changes, and naming no column at all yields a `(0, %nrows())`
+        !! matrix rather than an error.
+        module subroutine get_matrix{suffix}_{tag}(self, names, arr, is_valid)
+            class(parquet_table), intent(in) :: self !! the table.
+            {names_decl} !! {names_doc}
+            {decl}, allocatable, intent(out) :: arr(:,:) !! (column, row), shaped (size(names), nrows).
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: the matching validity mask.
+        end subroutine get_matrix{suffix}_{tag}""")
+        for names_decl, names_doc, suffix in (
+                ("character(len=*), intent(in) :: names(:)",
+                 "the columns, in the order they take in `arr`.", ""),
+                ("character(len=*), intent(in) :: names",
+                 "the columns, comma/space separated.", "_string")):
+            w(f"""        !> Writes one `(column, row)` matrix of {tag} values back into several existing columns.
+        !!
+        !! The inverse of `%get_matrix`, under `%set`'s rules rather than `%get`'s: each named
+        !! column must already EXIST, must be exactly `arr`'s kind, and the table must have
+        !! `size(arr, 2)` rows. `%add_column` in a loop is how the columns are created; there is
+        !! deliberately no sugar for that, since a new column needs a kind and a name anyway.
+        !!
+        !! **The asymmetry with `%get_matrix` is `%get`/`%set`'s own and is not an oversight**: a
+        !! `%get_matrix` widens on the way out where `%set_matrix` will not narrow on the way
+        !! back, so the round trip is an identity exactly when every named column is already the
+        !! matrix's own kind. A column of a widened kind is refused here, naming it.
+        !!
+        !! `is_valid`, when present, is the matching `(size(names), size(arr, 2))` mask and marks
+        !! a row null where it is `.false.`; `modify_nulls=.false.` leaves each column's existing
+        !! nulls exactly as they were. Values are written IN PLACE -- nothing is reallocated,
+        !! nothing detaches, and an outstanding `%col` pointer stays valid and sees them.
+        module subroutine set_matrix{suffix}_{tag}(self, names, arr, is_valid, modify_nulls)
+            class(parquet_table), intent(inout) :: self !! the table.
+            {names_decl} !! {names_doc}
+            {decl}, intent(in) :: arr(:,:) !! (column, row), shaped (size(names), nrows).
+            logical, intent(in), optional :: is_valid(:,:) !! present: entries marked .false. become null.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves existing null entries untouched.
+        end subroutine set_matrix{suffix}_{tag}""")
+    for names_decl, names_doc, suffix in (
+            ("character(len=*), intent(in) :: names(:)", "the columns to remove.", ""),
+            ("character(len=*), intent(in) :: names",
+             "the columns to remove, comma/space separated.", "_string")):
+        w(f"""        !> Removes several columns at once -- the list form of `%drop_column`.
+        !!
+        !! Identical to it in every respect but the arity: cheap, it does NOT detach (every
+        !! remaining column keeps its length, so the table can still read the ones it has not
+        !! read yet), dropping a column that was never read reads nothing at all, and the columns
+        !! that remain keep their order.
+        !!
+        !! Every name is checked BEFORE anything is dropped, and by default an absent one aborts
+        !! naming **every** name that is missing rather than only the first -- `%require_columns`'
+        !! rule, for its reason: a caller fixing a list one name per run is the failure mode.
+        !! `ignore_missing=.true.` is pandas' `errors="ignore"` and skips the ones that are not
+        !! there. A name repeated in the list drops that column once.
+        !!
+        !! `force=.true.` is needed to drop a PREDEFINED column, exactly as it is for
+        !! `%drop_column`, and for the same reason: a program using a generated table type's
+        !! accessors expects those columns to be there.
+        module subroutine table_drop_columns{suffix}(self, names, force, ignore_missing)
+            class(parquet_table), intent(inout) :: self !! the table.
+            {names_decl} !! {names_doc}
+            logical, intent(in), optional :: force !! .true. to drop PREDEFINED columns too.
+            !> .true. to skip names the table does not have; the default aborts naming all of them.
+            logical, intent(in), optional :: ignore_missing
+        end subroutine table_drop_columns{suffix}""")
+    for names_decl, names_doc, suffix in (
+            ("character(len=*), intent(in) :: names(:)", "the columns to keep.", ""),
+            ("character(len=*), intent(in) :: names",
+             "the columns to keep, comma/space separated.", "_string")):
+        w(f"""        !> Removes every column EXCEPT the ones named -- the projection `df[["a", "b"]]`.
+        !!
+        !! The destructive twin of a name list, and the cheap way to cut a wide table down: a
+        !! column that was never read costs nothing to drop, so projecting a 300-column lazy
+        !! table onto four reads nothing at all. The kept columns keep the TABLE's order, not the
+        !! order they happen to be named in, and a name repeated in the list keeps that column
+        !! once.
+        !!
+        !! Every name must exist, and an absent one aborts naming every missing name as
+        !! `%require_columns` does. There is deliberately no `ignore_missing=` here: a projection
+        !! that silently keeps fewer columns than it was asked for is one nothing downstream can
+        !! check, whereas the same list passed to `%drop_columns` says what it is discarding.
+        !!
+        !! `force=.true.` is needed when a PREDEFINED column would be dropped -- that is, when
+        !! one is not named. It is `%drop_column`'s own R8 rule reached from the other side, and
+        !! without it a projection would be the one way to lose a generated type's columns by
+        !! omission.
+        !!
+        !! Naming nothing at all drops every column, which is legal and leaves a table with
+        !! `%nrows()` rows and no columns. Column-structural only: nothing detaches.
+        module subroutine table_keep_columns{suffix}(self, names, force)
+            class(parquet_table), intent(inout) :: self !! the table.
+            {names_decl} !! {names_doc}
+            logical, intent(in), optional :: force !! .true. to allow dropping PREDEFINED columns.
+        end subroutine table_keep_columns{suffix}""")
     w("""    end interface""")
     w("    !")
     w("""    ! ---- Row-structural mutation -- detaches whenever it changes the row set (parquet_tables_rowmutate) ----

@@ -174,10 +174,12 @@ individual procedure:
 | class | what it does | detaches? |
 |---|---|---|
 | **cell** — `%set_element`, `%set_null`, `%clear_null` | changes values in place | no |
-| **column** — `%add_column`, `%drop_column`, `%rename_column`, `%copy_column`, `%cast` | changes which columns exist, or a column's kind | no |
+| **column** — `%add_column`, `%drop_column`, `%drop_columns`, `%keep_columns`, `%rename_column`, `%copy_column`, `%cast` | changes which columns exist, or a column's kind | no |
 | **cell** — `%fillna`, `%ffill`, `%bfill` | writes over the nulls of whole columns, in place | no |
+| **cell** — `%set_matrix` | writes several whole columns from one `(column, row)` array, in place | no |
 | **row** — `%filter_rows`, `%sort_by`, `%top_n`, `%delete_rows`, `%truncate`, `%append`, `%append_null_rows`, `%dropna` | changes which rows exist | **yes, when it changes one** |
 | **read** — `%row_mask` | reports which rows a rule selects, changing nothing | no |
+| **read** — `%get_matrix` | copies several whole columns out as one `(column, row)` array | no |
 | **row** — `%join` | matches another table's rows against this one's and brings its columns over | **yes, unless every row survives once and in place** |
 
 ```fortran
@@ -216,6 +218,45 @@ The two simplest of those are worth a sentence each, because both are cheaper th
   has not been read yet still reads from the same physical column afterwards, which is what lets a
   rename compose with a MAML [remap](table-open.html#renaming-a-files-columns-with-a-read-in-maml)
   in either order. The new name must not be blank and must not already be taken.
+
+### Dropping and keeping several columns
+
+`%drop_column` removes one column by name. Two list forms sit beside it, and both are as cheap as
+the singular one — a column that was never read costs nothing to drop, so cutting a 300-column
+lazy table down to the four you want reads nothing at all. Optional arguments are shown in square
+brackets; they are not part of the call syntax:
+
+```fortran
+call t%drop_columns(names, [force], [ignore_missing])   ! remove the ones named
+call t%keep_columns(names, [force])                     ! remove everything BUT the ones named
+```
+
+`names` is an array of names or one comma/semicolon-separated string, as everywhere else in this
+API. The columns that survive keep the **table's** order, not the order they happen to be named
+in, so `%column_names` still reads like the file.
+
+```fortran
+call t%drop_columns("scratch, tmp_a, tmp_b")   ! three at once
+call t%keep_columns("ra, dec, zphot, mass")    ! the projection df[["ra", "dec", ...]]
+```
+
+**Every name is checked before anything is dropped**, and the default aborts naming *every* name
+that is missing rather than the first — the same rule `%require_columns` follows, so a list with
+two typos is fixed in one pass rather than two. `ignore_missing=.true.` on `%drop_columns` skips
+the names that are not there. `%keep_columns` deliberately has no such option: a projection that
+silently keeps fewer columns than it was asked for is one nothing downstream can check, and the
+same list handed to `%drop_columns` says what it is discarding instead.
+
+`force=.true.` is needed to drop a **predefined** column — one bound by a
+[generated table type](../utilities/generated-tables.html)'s `%init` — exactly as it is for `%drop_column`, and a
+program using those accessors expects them to be there. `%keep_columns` reaches the same rule from
+the other side, by *not* naming one, which is the case `%drop_column` cannot express at all.
+
+Neither verb detaches: every remaining column keeps its length, so a table that has not read a
+column yet can still read it afterwards. What both do invalidate is every outstanding `%col`
+pointer and column handle, because a column that shifted down is a different column at that
+position — `%generation()` advances to say so, and only when something was actually dropped. A
+call that removes nothing leaves it untouched.
 
 ### What "detaching" means
 

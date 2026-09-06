@@ -66,6 +66,14 @@ module parquet_io
     ! reader cannot disagree about punctuation. Plumbing, not API.
     private :: parquet_split_name_list
     private :: parquet_parse_sort_key
+    ! And these six for parquet_tables' %filter_rows/%row_mask, which answers a parquet_filter
+    ! against resident columns by running the reader's own parser and leaf rules. The three widths
+    ! are parameters rather than procedures, but they are plumbing just the same: a caller needs
+    ! them only to declare the packed leaf arrays parquet_parse_filter_rules hands back.
+    private :: parquet_parse_filter_rules
+    private :: parquet_eval_filter_leaf
+    private :: parquet_eval_filter_program
+    private :: filter_leaf_name_len, filter_leaf_op_len, filter_leaf_value_len
     ! parquet_settings has to make these public so the write path (a submodule of parquet_core, a
     ! different module) can resolve a compression token, and so every module that emits can reach
     ! the output channels. Same case again: public for want of package scope, hidden here.

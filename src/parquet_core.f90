@@ -81,8 +81,17 @@ module parquet_core
     integer, parameter :: filter_max_depth = parquet_max_filter_depth
     integer, parameter :: filter_max_nodes = parquet_max_filter_nodes
     integer, parameter :: filter_max_sets = parquet_max_filter_sets
-    !> Width of one bound set's stored name. Matches filter_leaf_name_len (parquet_read.f90), so
-    !> a set name obeys the same rules a column name does and `@<name>` always fits a leaf value.
+    !> Fixed widths of the three packed per-leaf string arrays a parsed filter expression is held
+    !> in -- the shape parquet_parse_filter_rules fills, the bind(C) boundary carries
+    !> (pack_fixed_width_strings) and the in-memory evaluator reads. Declared HERE rather than in
+    !> parquet_read.f90 because a caller outside the read subtree -- parquet_tables' %row_mask --
+    !> has to declare those arrays to receive them. The raw rule text itself never crosses the
+    !> boundary, so it is not constrained by these.
+    integer, parameter :: filter_leaf_name_len = 64
+    integer, parameter :: filter_leaf_op_len = 16
+    integer, parameter :: filter_leaf_value_len = 512
+    !> Width of one bound set's stored name. Matches filter_leaf_name_len above, so a set name
+    !> obeys the same rules a column name does and `@<name>` always fits a leaf value.
     integer, parameter :: filter_set_name_len = 64
     !> Which element family a bound set holds, and therefore which columns it may be compared
     !> against and how its keys were formed. An integer set widens to int64 and is accepted
@@ -671,6 +680,106 @@ module parquet_core
         !! (or `not_in`, with `negate=.true.`). Sugar over %bind plus %add.
         generic :: add_in => add_in_i32, add_in_i64, add_in_r32, add_in_r64, add_in_chr, add_in_str
     end type parquet_filter
+
+    ! ---- Filter expression parsing and IN-MEMORY evaluation (parquet_read_filter, parquet_read_eval) ----
+    !
+    ! The three entry points a caller OUTSIDE the parquet_read subtree needs in order to answer a
+    ! parquet_filter against columns it already holds in memory: parse the rules, evaluate each
+    ! leaf against one resident column, then fold the leaves through the expression. They are
+    ! declared here (rather than in parquet_read.f90's own specification, where the parser's two
+    ! halves live) for exactly one caller -- parquet_tables' %filter_rows/%row_mask -- and both
+    ! facades hide them again, so no user-facing name is added. S1's convention 5, the move that
+    ! was already made for parquet_parse_sort_key.
+    !
+    ! What deliberately does NOT move up here is the vocabulary: the ND_* node kinds and the KL_*
+    ! Kleene values are a CONTRACT with the C++ evaluator ("two spellings of one three-state value
+    ! would be a silent wrong answer the first time either side changed"), so the walk that reads
+    ! them stays inside the subtree that owns them and the caller never names either set.
+    interface
+        !> Parses EVERY rule of `filter` into one postfix node list plus one packed leaf per
+        !> clause -- the whole-filter half of parquet_parse_filter_expr, including the AND-fold
+        !> that combines several %add calls into `(rule1) and (rule2) and ...`.
+        !>
+        !> That fold is the reason this exists as its own procedure rather than as a loop at each
+        !> call site: it is a semantic rule ("several %add calls are AND-combined"), it now has two
+        !> callers -- the reader's parquet_apply_filter and the table's %row_mask -- and a second
+        !> copy of it could drift with nothing to report the difference but a row set.
+        !>
+        !> Purely syntactic, exactly as parquet_parse_filter_expr is: reports a parse failure
+        !> through ok/errmsg rather than aborting, so each caller can attach its own context (a
+        !> file name for the reader, a table's own for the evaluator). Every schema-dependent check
+        !> -- the column exists, the value suits its type -- belongs to whichever engine runs next.
+        !>
+        !> The accumulators come back ALLOCATED even for a rule-less filter (at size 0), so a
+        !> caller may reference a zero-trip section of any of them without a further guard.
+        module subroutine parquet_parse_filter_rules(filter, node_kind, node_leaf, nnodes, leaf_name, &
+                leaf_op, leaf_value, leaf_is_string, nleaves, ok, errmsg)
+            type(parquet_filter), intent(in) :: filter !! the filter whose rules are parsed.
+            integer(int8), allocatable, intent(out) :: node_kind(:) !! ND_* kind per node.
+            integer(int32), allocatable, intent(out) :: node_leaf(:) !! 1-based leaf index per leaf node, else 0.
+            integer, intent(out) :: nnodes !! nodes in use.
+            character(len=filter_leaf_name_len), allocatable, intent(out) :: leaf_name(:) !! per-leaf column name.
+            character(len=filter_leaf_op_len), allocatable, intent(out) :: leaf_op(:) !! per-leaf operator.
+            character(len=filter_leaf_value_len), allocatable, intent(out) :: leaf_value(:) !! per-leaf value, unquoted.
+            integer(int8), allocatable, intent(out) :: leaf_is_string(:) !! 1 if the value was double-quoted.
+            integer, intent(out) :: nleaves !! leaves in use.
+            logical, intent(out) :: ok !! .true. if every rule parsed.
+            character(len=:), allocatable, intent(out) :: errmsg !! parse-failure message; "" when ok.
+        end subroutine parquet_parse_filter_rules
+        !> Answers ONE parsed leaf against ONE resident column, writing a three-valued Kleene
+        !> verdict per row -- the in-memory twin of eval_filter_clause in parquet_wrapper.cpp,
+        !> and the reason %row_mask and a filtered read agree row for row.
+        !>
+        !> Every rule the reader's engine applies is reproduced here rather than approximated: a
+        !> Null row is unknown for every operator but is_null/is_not_null; a NaN is an ordinary
+        !> VALUE, so it is false under `>`/`>=`/`<`/`<=`/`==` and true under `/=`; a string
+        !> compares BYTE-lexicographically rather than by Fortran's blank-padding rules; an
+        !> integer literal outside an int32 column's range is an error rather than a false row;
+        !> a temporal literal is converted at the column's own stored unit, so one finer than that
+        !> unit is refused on this engine exactly as it is on the reader's.
+        !>
+        !> `in`/`not_in` are answered here too, from the filter's own stored keys, through the same
+        !> pf_index_map (and, for strings, the same pf_in) the read-side pre-evaluator uses -- so
+        !> the NaN rule holds on both engines for the same reason, by no NaN ever being a key.
+        !>
+        !> Reports every failure through ok/errmsg and never aborts, so the caller supplies the
+        !> context. `kind`, `width` and `unit` are passed in rather than read off `col` because the
+        !> table already holds them for a column it has classified.
+        module subroutine parquet_eval_filter_leaf(filter, col, kind, width, unit, nrows, column, &
+                op, value, is_string, out, ok, errmsg)
+            type(parquet_filter), intent(in) :: filter !! the filter, for an in/not_in leaf's bound set.
+            type(parquet_column), intent(in), target :: col !! the resident column the clause tests.
+            integer, intent(in) :: kind !! that column's PK_* kind.
+            integer, intent(in) :: width !! values per row; anything but 1 is refused.
+            integer, intent(in) :: unit !! a temporal column's stored parquet_unit_*, else 0.
+            integer(int64), intent(in) :: nrows !! rows to answer.
+            character(len=*), intent(in) :: column !! the column's name, for the messages.
+            character(len=*), intent(in) :: op !! the clause's operator, as parsed (matched case-insensitively).
+            character(len=*), intent(in) :: value !! the clause's value text, unquoted.
+            logical, intent(in) :: is_string !! .true. if the value was double-quoted.
+            integer(int8), intent(out) :: out(:) !! one KL_* verdict per row.
+            logical, intent(out) :: ok !! .false. on any validation failure.
+            character(len=:), allocatable, intent(out) :: errmsg !! that failure's message; "" when ok.
+        end subroutine parquet_eval_filter_leaf
+        !> Folds the per-leaf verdicts through the postfix node list and collapses the result to a
+        !> plain logical mask -- the in-memory twin of evaluate_nodes in parquet_wrapper.cpp,
+        !> walking the same node list with the same three-valued stack.
+        !>
+        !> The collapse happens EXACTLY ONCE, here at the end: an unknown row is dropped, which is
+        !> what makes `not (x > 3)` keep a Null row out instead of resurrecting it, and what makes
+        !> the whole thing agree with SQL's WHERE.
+        module subroutine parquet_eval_filter_program(node_kind, node_leaf, nnodes, verdicts, nrows, &
+                keep, ok, errmsg)
+            integer(int8), intent(in) :: node_kind(:) !! ND_* kind per node.
+            integer(int32), intent(in) :: node_leaf(:) !! 1-based leaf index per leaf node, else 0.
+            integer, intent(in) :: nnodes !! nodes in use.
+            integer(int8), intent(in) :: verdicts(:, :) !! (row, leaf) Kleene verdicts, one column per leaf.
+            integer(int64), intent(in) :: nrows !! rows in use.
+            logical, intent(out) :: keep(:) !! the resulting row mask.
+            logical, intent(out) :: ok !! .false. only on a malformed node list.
+            character(len=:), allocatable, intent(out) :: errmsg !! that failure's message; "" when ok.
+        end subroutine parquet_eval_filter_program
+    end interface
 
     !> A read-time sort specification: an ordered list of sort KEYS, each naming one column and
     !> the direction to order it by. Passed as parquet_open_reader(..., sort_by=), or applied to
@@ -1331,6 +1440,14 @@ module parquet_core
     !! because they run the same parser rather than a second copy of it.
     public :: parquet_split_name_list
     public :: parquet_parse_sort_key
+    !> Public for the same reason and with the same treatment: parquet_tables' %filter_rows and
+    !! %row_mask answer a parquet_filter over columns already in memory, and they do it by running
+    !! the READER's parser and the reader's own leaf rules rather than a second grammar. The three
+    !! widths come with them because a caller has to declare the packed leaf arrays it receives.
+    public :: parquet_parse_filter_rules
+    public :: parquet_eval_filter_leaf
+    public :: parquet_eval_filter_program
+    public :: filter_leaf_name_len, filter_leaf_op_len, filter_leaf_value_len
     public :: parquet_filter
     public :: parquet_sortkey
     public :: parquet_read_qc

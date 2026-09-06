@@ -624,7 +624,35 @@ contains
             new_unittest("the RACE validates its own weights, on all four of its guards", &
                 test_weighted_race_weight_guards), &
             new_unittest("a population too large for an int32 item index aborts, on all three guards", &
-                test_weighted_int32_population_guards) &
+                test_weighted_int32_population_guards), &
+            new_unittest("row_mask: a mask whose length disagrees with the table aborts", &
+                test_row_mask_wrong_size_aborts), &
+            new_unittest("row_mask: an unparseable rule aborts with the table's own context", &
+                test_row_mask_bad_rule_aborts), &
+            new_unittest("row_mask: a clause naming a column the table lacks aborts", &
+                test_row_mask_unknown_column_aborts), &
+            new_unittest("row_mask: a clause on a vector column aborts", &
+                test_row_mask_vector_column_aborts), &
+            new_unittest("row_mask: a bound beyond int32 range aborts rather than matching nothing", &
+                test_row_mask_int32_range_aborts), &
+            new_unittest("row_mask: a non-integer bound on an integer column aborts", &
+                test_row_mask_bad_integer_aborts), &
+            new_unittest("row_mask: a NaN comparison bound aborts, naming is_nan instead", &
+                test_row_mask_nan_bound_aborts), &
+            new_unittest("row_mask: an ordering comparison on a boolean column aborts", &
+                test_row_mask_bool_ordering_aborts), &
+            new_unittest("row_mask: an unquoted bound on a string column aborts", &
+                test_row_mask_unquoted_string_aborts), &
+            new_unittest("row_mask: is_nan on an integer column aborts", &
+                test_row_mask_is_nan_on_int_aborts), &
+            new_unittest("row_mask: an unbound @name aborts through the table too", &
+                test_row_mask_unbound_set_aborts), &
+            new_unittest("row_mask: a quoted list element on a numeric column aborts", &
+                test_row_mask_list_quoted_aborts), &
+            new_unittest("row_mask: a literal finer than the column's stored unit aborts", &
+                test_row_mask_temporal_precision_aborts), &
+            new_unittest("row_mask/filter_rows: a well-formed multi-clause rule applies cleanly", &
+                test_row_mask_control_succeeds) &
             ]
         p3 = [ &
             new_unittest("an environment value longer than the buffer aborts", &
@@ -8688,6 +8716,133 @@ contains
         call check_scenario_exit_status(error, "filter_list_control", expect_abort=.false., &
             failure_message="a well-formed literal list and is_finite clause were expected to open cleanly")
     end subroutine test_filter_list_control_succeeds
+
+
+    ! ---- The table's in-memory filter evaluator ------------------------------------------------
+    !
+    ! Each of these asserts that %row_mask reports a refusal the READER also makes, and reports it
+    ! with the TABLE's own prefix and context suffix. The prefix is what the assertions are really
+    ! about: the checks are shared between the two engines (parquet_resolve_set_payload, the
+    ! literal parsers, parquet_check_set_column_shape), so a message reaching a table caller with
+    ! the reader's wording would mean the table path had gone through the reader -- and one with no
+    ! context at all would mean it had skipped table_context_suffix. Both are invisible to every
+    ! other test.
+
+    subroutine test_row_mask_wrong_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "row_mask_wrong_size", expect_abort=.true., &
+            failure_message="a mask whose length disagrees with the table was expected to abort", &
+            required_stderr="the mask has 3 entries but the table has 4 rows")
+    end subroutine test_row_mask_wrong_size_aborts
+
+    subroutine test_row_mask_bad_rule_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "row_mask_bad_rule", expect_abort=.true., &
+            failure_message="an unparseable rule was expected to abort through the table", &
+            required_stderr="invalid filter rule: filter rule 'id >' is missing a value")
+    end subroutine test_row_mask_bad_rule_aborts
+
+    subroutine test_row_mask_unknown_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "row_mask_unknown_column", expect_abort=.true., &
+            failure_message="a clause naming a column the table lacks was expected to abort", &
+            required_stderr="no column of this name")
+    end subroutine test_row_mask_unknown_column_aborts
+
+    subroutine test_row_mask_vector_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "row_mask_vector_column", expect_abort=.true., &
+            failure_message="a clause on a vector column was expected to abort", &
+            required_stderr="is a vector column; filtering only supports scalar columns")
+    end subroutine test_row_mask_vector_column_aborts
+
+    subroutine test_row_mask_int32_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "row_mask_int32_range", expect_abort=.true., &
+            failure_message="an out-of-int32-range bound was expected to abort", &
+            required_stderr="is out of int32 range for column 'id'")
+    end subroutine test_row_mask_int32_range_aborts
+
+    subroutine test_row_mask_bad_integer_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "row_mask_bad_integer", expect_abort=.true., &
+            failure_message="a non-integer bound on an integer column was expected to abort", &
+            required_stderr="is not a valid integer for column 'id'")
+    end subroutine test_row_mask_bad_integer_aborts
+
+    subroutine test_row_mask_nan_bound_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "row_mask_nan_bound", expect_abort=.true., &
+            failure_message="a NaN comparison bound was expected to abort", &
+            required_stderr="use the 'is_nan'/'is_not_nan' operators instead")
+    end subroutine test_row_mask_nan_bound_aborts
+
+    subroutine test_row_mask_bool_ordering_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "row_mask_bool_ordering", expect_abort=.true., &
+            failure_message="an ordering comparison on a boolean column was expected to abort", &
+            required_stderr="are not supported for boolean column 'flag'")
+    end subroutine test_row_mask_bool_ordering_aborts
+
+    subroutine test_row_mask_unquoted_string_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "row_mask_unquoted_string", expect_abort=.true., &
+            failure_message="an unquoted bound on a string column was expected to abort", &
+            required_stderr="value for string column 'name' must be double-quoted")
+    end subroutine test_row_mask_unquoted_string_aborts
+
+    subroutine test_row_mask_is_nan_on_int_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "row_mask_is_nan_on_int", expect_abort=.true., &
+            failure_message="is_nan on an integer column was expected to abort", &
+            required_stderr="is only supported for floating-point columns, and column 'id' is not one")
+    end subroutine test_row_mask_is_nan_on_int_aborts
+
+    subroutine test_row_mask_unbound_set_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "row_mask_unbound_set", expect_abort=.true., &
+            failure_message="an unbound @name through the table was expected to abort", &
+            required_stderr="but no set of that name is bound to this filter")
+    end subroutine test_row_mask_unbound_set_aborts
+
+    subroutine test_row_mask_list_quoted_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "row_mask_list_quoted", expect_abort=.true., &
+            failure_message="a quoted list element on a numeric column was expected to abort", &
+            required_stderr="write each member as a bare number")
+    end subroutine test_row_mask_list_quoted_aborts
+
+    subroutine test_row_mask_temporal_precision_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "row_mask_temporal_precision", expect_abort=.true., &
+            failure_message="a literal finer than the column's stored unit was expected to abort", &
+            required_stderr="is more precise than that column's stored unit can represent")
+    end subroutine test_row_mask_temporal_precision_aborts
+
+    !> The NEGATIVE CONTROL for the thirteen refusals above, and for %filter_rows as well: one rule
+    !> naming a scalar column of every family the evaluator supports, plus a literal list, applied
+    !> through both entry points. Without it, an evaluator that refused every input would pass all
+    !> thirteen.
+    subroutine test_row_mask_control_succeeds(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "row_mask_control", expect_abort=.false., &
+            failure_message="a well-formed multi-clause rule was expected to apply cleanly through " // &
+                "both %row_mask and %filter_rows")
+    end subroutine test_row_mask_control_succeeds
 
     subroutine test_filter_rule_too_long_aborts(error)
         type(error_type), allocatable, intent(out) :: error

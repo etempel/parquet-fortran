@@ -46,7 +46,10 @@
 !!
 !! Depends on `parquet_columns` (the value store) and `parquet_core` (the reader/writer it drives).
 module parquet_tables
-    use, intrinsic :: iso_fortran_env, only : int32, int64, real32, real64
+    ! int8 is here for ONE caller: the packed leaf arrays and the per-row Kleene verdicts
+    ! %row_mask exchanges with parquet_core's filter evaluator are int8, and
+    ! parquet_tables_filter.f90 has to declare them.
+    use, intrinsic :: iso_fortran_env, only : int8, int32, int64, real32, real64
 #ifdef _OPENMP
     ! Only omp_lock_kind is needed at module scope, for parquet_table_cache's own lock component.
     ! The procedures that operate on it import omp_lib themselves, exactly as unsafe_first_touch
@@ -76,7 +79,9 @@ module parquet_tables
         parquet_get_metadata_items, parquet_get_qc_columns, parquet_get_physical_row_indices, &
         parquet_get_column_time_info, parquet_size_auto, parquet_reader_adopt_transform, &
         parquet_unit_millis, parquet_unit_micros, parquet_unit_nanos, &
-        parquet_split_name_list, parquet_parse_sort_key
+        parquet_split_name_list, parquet_parse_sort_key, &
+        parquet_parse_filter_rules, parquet_eval_filter_leaf, parquet_eval_filter_program, &
+        filter_leaf_name_len, filter_leaf_op_len, filter_leaf_value_len
     ! The table layer's two solicited printers (%print_stat) and its own warnings go through the
     ! library's output channels rather than printing directly, so verbosity/message_stream apply
     ! here as everywhere -- see tools/check_source_conventions.py's `no direct printing` check.
@@ -912,8 +917,17 @@ module parquet_tables
         procedure :: rename_column => table_rename_column !! Change the name a column is looked up by.
         procedure :: copy_column => table_copy_column     !! Add a copy of a column, optionally of another kind.
         procedure :: cast => table_cast                   !! Convert a column to another kind, in place.
+        ! --- reads that answer a filter expression without changing anything ---
+        procedure, private :: table_row_mask_expr     !! %row_mask specific, expression text.
+        procedure, private :: table_row_mask_filter   !! %row_mask specific, parquet_filter object.
+        !> The row mask a filter expression selects, without applying it. Never detaches.
+        generic :: row_mask => table_row_mask_expr, table_row_mask_filter
         ! --- mutation: the row set itself -- every one of these DETACHES the table ---
-        procedure :: filter_rows => table_filter_rows !! Keep only the rows a mask selects.
+        procedure, private :: table_filter_rows        !! %filter_rows specific, logical mask.
+        procedure, private :: table_filter_rows_expr   !! %filter_rows specific, expression text.
+        procedure, private :: table_filter_rows_filter !! %filter_rows specific, parquet_filter object.
+        !> Keeps only the rows a mask, or a filter expression, selects. Detaching.
+        generic :: filter_rows => table_filter_rows, table_filter_rows_expr, table_filter_rows_filter
         procedure, private :: table_sort_by           !! %sort_by specific, array of key names.
         procedure, private :: table_sort_by_string    !! %sort_by specific, separated key string.
         !> Reorders rows by one or more key columns. Detaching.
@@ -5965,6 +5979,57 @@ module parquet_tables
             class(parquet_table), intent(inout) :: self !! the table.
             logical, intent(in) :: keep(:)              !! one entry per row; .true. to retain it.
         end subroutine table_filter_rows
+        !> Keeps only the rows one filter EXPRESSION selects -- the reader's own grammar, applied
+        !! to the rows already in memory.
+        !!
+        !! `t%filter_rows("n_obs >= 8 and score > 3")` is `t%row_mask(...)` followed by the mask
+        !! form above, so everything the mask form does applies: an all-`.true.` result removes no
+        !! row, changes nothing and does not detach.
+        !!
+        !! The expression is parsed by the SAME parser a read-time `filter=` uses and each clause
+        !! is answered by the same rules, so a rule selects the same rows here as it would at the
+        !! reader -- including the null rule (a Null row is excluded unless the clause is
+        !! `is_null`), the NaN rule (a NaN is a value, so it survives `/=` but no ordering
+        !! comparison) and every message a bad rule raises. A column the expression names is READ
+        !! if it is not resident yet, by the same lazy touch `%get` performs.
+        !!
+        !! A set-valued clause (`in`/`not_in`) works with a literal list -- `t%filter_rows("id in
+        !! (3, 5, 9)")` -- but a `@name` clause needs the set that is bound to it, so pass the
+        !! `parquet_filter` itself for that.
+        module subroutine table_filter_rows_expr(self, expr)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: expr        !! one filter expression, the reader's grammar.
+        end subroutine table_filter_rows_expr
+        !> Keeps only the rows a `parquet_filter` selects, bound sets included.
+        !!
+        !! The object form of the call above, and the only one that can answer an `in @name`
+        !! clause, since the set lives on the filter. Several `%add` rules are AND-combined exactly
+        !! as they are at the reader.
+        module subroutine table_filter_rows_filter(self, filter)
+            class(parquet_table), intent(inout) :: self !! the table.
+            type(parquet_filter), intent(in) :: filter  !! the filter whose rules select the rows.
+        end subroutine table_filter_rows_filter
+        !> The row mask a filter expression selects, WITHOUT applying it.
+        !!
+        !! The non-mutating half of `%filter_rows`: nothing is dropped, nothing is detached, and
+        !! `count(keep)` says how many rows would survive. That is what a caller wants before
+        !! deciding whether to filter at all, and it is how a selection the grammar cannot fully
+        !! express is combined with one it can (`keep = keep .and. my_own_test`).
+        !!
+        !! `keep` must have one entry per row of the table. A column the expression names is READ
+        !! if it is not resident yet -- the same lazy touch `%get` performs -- so this is a read of
+        !! the table, not merely of its metadata.
+        module subroutine table_row_mask_expr(self, expr, keep)
+            class(parquet_table), intent(in) :: self !! the table.
+            character(len=*), intent(in) :: expr     !! one filter expression, the reader's grammar.
+            logical, intent(out) :: keep(:)          !! one entry per row; .true. for a selected row.
+        end subroutine table_row_mask_expr
+        !> The row mask a `parquet_filter` selects, without applying it. Bound sets included.
+        module subroutine table_row_mask_filter(self, filter, keep)
+            class(parquet_table), intent(in) :: self   !! the table.
+            type(parquet_filter), intent(in) :: filter !! the filter whose rules select the rows.
+            logical, intent(out) :: keep(:)            !! one entry per row; .true. for a selected row.
+        end subroutine table_row_mask_filter
         !> Reorders every column's rows by one or more key columns, in memory.
         !!
         !! Runs the library's own C++ sort engine -- the same one a read-time `sort_by=` uses, so

@@ -24,6 +24,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   excluding a NaN and both infinities; like the NaN operators it is Kleene-honest about nullness, so
   a Null row is unknown for it. See
   [NaN is a value, not a Null](doc/pages/io/filter-sort-sample.md#nan-is-a-value-not-a-null).
+- **`parquet_table%filter_rows` and `%row_mask` take a filter expression.**
+  `t%filter_rows("n_obs >= 8 and score > 3")` drops the rows a rule does not select, and
+  `t%row_mask(rule, keep)` reports which rows it selects without changing anything — the mask to
+  count before deciding, or to combine with a test the grammar has no words for. Both also take a
+  `parquet_filter`, which is what carries a bound set. The rule is the read-time filter grammar and
+  selects the same rows a read-time `filter=` would, including the null, NaN, string-ordering and
+  temporal-unit rules; a column the rule names is read if it is not resident yet. See
+  [Removing rows by a filter expression](doc/pages/tables/table-mutate.md#removing-rows-by-a-filter-expression).
 
 ## [v2.3.0] - 2026-09-06
 

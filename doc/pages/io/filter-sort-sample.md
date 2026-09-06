@@ -387,6 +387,24 @@ range have no mask bits, so nothing later can return them. See
 [Memory-bounded filtering with a row-group scope](reading.html#memory-bounded-filtering-with-a-row-group-scope)
 for the full treatment, including the row-range form and pairing it with a chunked loop.
 
+### The same rules against rows already in memory
+
+Everything on this page describes filtering *while reading*. The identical grammar also applies to
+a `parquet_table` whose rows are already in memory:
+
+```fortran
+call t%filter_rows("n_obs >= 8 and score > 3")   ! drop the rows that do not match
+call t%row_mask("n_obs >= 8", keep)              ! or just ask which they are
+```
+
+Same parser, same clause rules, same messages — a rule selects the same rows either way, and both
+forms take a `parquet_filter` so a bound set works too. See
+[Removing rows by a filter expression](../tables/table-mutate.html#removing-rows-by-a-filter-expression).
+Which one to reach for is a question about *when*: a read-time `filter=` never brings the rejected
+rows into memory at all and can skip whole row groups, so it is the cheaper option whenever the
+selection is known before the file is opened; `%filter_rows` is for a selection that only becomes
+known afterwards, or one applied to a table that was built rather than read.
+
 ## Reading rows in sorted order with `parquet_sortkey`
 
 `parquet_open_reader(reader, filename, sort_by=srt)` returns the file's rows ordered by one or

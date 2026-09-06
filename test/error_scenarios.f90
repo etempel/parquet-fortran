@@ -590,6 +590,36 @@ program error_scenarios
         call scenario_filter_list_two_reals()
     case ("filter_list_control")
         call scenario_filter_list_control()
+    case ("row_mask_wrong_size")
+        call scenario_row_mask_wrong_size()
+    case ("row_mask_bad_rule")
+        call scenario_row_mask_bad_rule()
+    case ("row_mask_unknown_column")
+        call scenario_row_mask_unknown_column()
+    case ("row_mask_vector_column")
+        call scenario_row_mask_vector_column()
+    case ("row_mask_int32_range")
+        call scenario_row_mask_int32_range()
+    case ("row_mask_bad_integer")
+        call scenario_row_mask_bad_integer()
+    case ("row_mask_nan_bound")
+        call scenario_row_mask_nan_bound()
+    case ("row_mask_bool_ordering")
+        call scenario_row_mask_bool_ordering()
+    case ("row_mask_unquoted_string")
+        call scenario_row_mask_unquoted_string()
+    case ("row_mask_is_nan_on_int")
+        call scenario_row_mask_is_nan_on_int()
+    case ("row_mask_unbound_set")
+        call scenario_row_mask_unbound_set()
+    case ("row_mask_list_quoted")
+        call scenario_row_mask_list_quoted()
+    case ("row_mask_temporal_precision")
+        call scenario_row_mask_temporal_precision()
+    case ("table_filter_rows_shared")
+        call scenario_table_filter_rows_shared()
+    case ("row_mask_control")
+        call scenario_row_mask_control()
     case ("sortkey_remap_size_mismatch")
         call scenario_sortkey_remap_size_mismatch()
     case ("sortkey_remap_name_too_long")
@@ -7868,6 +7898,191 @@ contains
         call parquet_close_reader(reader)
         print '(a,i0)', "a well-formed literal list and is_finite opened cleanly, rows = ", nrows
     end subroutine scenario_filter_list_control
+
+    ! ---- The table's in-memory filter evaluator: %row_mask and %filter_rows(expr/filter) --------
+    !
+    ! Every one of these asserts that the TABLE reports a refusal the reader also makes, with the
+    ! table's own context attached ("parquet_table: row_mask: ..."). That pairing is the point: the
+    ! two engines share the checks (parquet_resolve_set_payload, parquet_check_set_column_shape,
+    ! the literal parsers), so a scenario here proves the shared half is reached from this side and
+    ! that the message is not silently the reader's.
+
+    !> The fixture every row_mask scenario reads: one column of each shape a clause can name.
+    subroutine write_row_mask_fixture(file)
+        character(len=*), intent(in) :: file !! this scenario's own fixture path.
+        type(parquet_writer) :: writer
+        type(parquet_schema) :: schema
+        integer(int32) :: vec(2, 4)
+        integer :: i
+
+        do i = 1, 4
+            vec(1, i) = i
+            vec(2, i) = 10 + i
+        end do
+        call schema%init("row_mask_scenarios")
+        call schema%add_field("id", "int32")
+        call schema%add_field("x", "float64")
+        call schema%add_field("flag", "boolean")
+        call schema%add_field("name", "string")
+        call schema%add_field("pair", "int32", col_size=2)
+        call parquet_open_writer(writer, file, schema=schema)
+        call parquet_write_column(writer, "id", [1_int32, 2_int32, 3_int32, 4_int32])
+        call parquet_write_column(writer, "x", [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64])
+        call parquet_write_column(writer, "flag", [.true., .false., .true., .false.])
+        call parquet_write_column(writer, "name", ["a   ", "b   ", "c   ", "d   "])
+        call parquet_write_column(writer, "pair", vec)
+        call parquet_close_writer(writer)
+    end subroutine write_row_mask_fixture
+
+    !> Opens the shared fixture as a table and applies one rule through %row_mask.
+    subroutine row_mask_scenario(file, rule)
+        character(len=*), intent(in) :: file !! this scenario's own fixture path.
+        character(len=*), intent(in) :: rule !! the rule to apply.
+        type(parquet_table) :: t
+        logical, allocatable :: keep(:)
+
+        call write_row_mask_fixture(file)
+        call parquet_open_table(t, file)
+        allocate(keep(t%nrows()))
+        call t%row_mask(rule, keep)
+        print '(a,i0)', "%row_mask was accepted, kept = ", count(keep)
+    end subroutine row_mask_scenario
+
+    !> A mask whose length disagrees with the table -- the evaluator's own first guard.
+    subroutine scenario_row_mask_wrong_size()
+        type(parquet_table) :: t
+        logical :: keep(3)
+        character(len=*), parameter :: file = "test_run/row_mask_wrong_size.parquet"
+
+        call write_row_mask_fixture(file)
+        call parquet_open_table(t, file)
+        call t%row_mask("id > 1", keep)
+        print '(a,i0)', "a short mask was accepted, kept = ", count(keep)
+    end subroutine scenario_row_mask_wrong_size
+
+    !> A syntactically invalid rule, reported through the table rather than the reader.
+    subroutine scenario_row_mask_bad_rule()
+        call row_mask_scenario("test_run/row_mask_bad_rule.parquet", "id >")
+    end subroutine scenario_row_mask_bad_rule
+
+    !> A clause naming a column the table does not have.
+    subroutine scenario_row_mask_unknown_column()
+        call row_mask_scenario("test_run/row_mask_unknown_column.parquet", "nope > 1")
+    end subroutine scenario_row_mask_unknown_column
+
+    !> A VECTOR column has no single value per row to compare, which is why every filter refuses
+    !> one -- here through the shape token the evaluator derives from the resident column.
+    subroutine scenario_row_mask_vector_column()
+        call row_mask_scenario("test_run/row_mask_vector_column.parquet", "pair > 1")
+    end subroutine scenario_row_mask_vector_column
+
+    !> An integer bound no int32 can hold is a mistake in the rule, not a filter matching nothing.
+    subroutine scenario_row_mask_int32_range()
+        call row_mask_scenario("test_run/row_mask_int32_range.parquet", "id > 3000000000")
+    end subroutine scenario_row_mask_int32_range
+
+    !> A bound that is not a whole number against an integer column.
+    subroutine scenario_row_mask_bad_integer()
+        call row_mask_scenario("test_run/row_mask_bad_integer.parquet", "id > 1.5")
+    end subroutine scenario_row_mask_bad_integer
+
+    !> `nan` as a comparison bound: it can only ever match nothing, so both engines refuse it and
+    !> point at is_nan instead.
+    subroutine scenario_row_mask_nan_bound()
+        call row_mask_scenario("test_run/row_mask_nan_bound.parquet", "x > nan")
+    end subroutine scenario_row_mask_nan_bound
+
+    !> Ordering comparisons are meaningless on a boolean column.
+    subroutine scenario_row_mask_bool_ordering()
+        call row_mask_scenario("test_run/row_mask_bool_ordering.parquet", "flag > true")
+    end subroutine scenario_row_mask_bool_ordering
+
+    !> A string column's bound must be double-quoted, or the rule is comparing against a name.
+    subroutine scenario_row_mask_unquoted_string()
+        call row_mask_scenario("test_run/row_mask_unquoted_string.parquet", "name == a")
+    end subroutine scenario_row_mask_unquoted_string
+
+    !> The four value-class operators are floating-point only.
+    subroutine scenario_row_mask_is_nan_on_int()
+        call row_mask_scenario("test_run/row_mask_is_nan_on_int.parquet", "id is_nan")
+    end subroutine scenario_row_mask_is_nan_on_int
+
+    !> A `@name` clause needs the set bound to it, and a bare expression cannot carry one -- so the
+    !> string form of %row_mask reports the unbound name exactly as the reader does.
+    subroutine scenario_row_mask_unbound_set()
+        call row_mask_scenario("test_run/row_mask_unbound_set.parquet", "id in @wanted")
+    end subroutine scenario_row_mask_unbound_set
+
+    !> A literal list whose elements are quoted against a numeric column: the shared payload
+    !> resolution reporting through the table's context rather than the reader's.
+    subroutine scenario_row_mask_list_quoted()
+        call row_mask_scenario("test_run/row_mask_list_quoted.parquet", 'id in ("1", "2")')
+    end subroutine scenario_row_mask_list_quoted
+
+    !> A temporal literal finer than the column's stored unit is refused rather than truncated --
+    !> the reader's rule, reached here through the unit the table recorded at classification.
+    subroutine scenario_row_mask_temporal_precision()
+        type(parquet_writer) :: writer
+        type(parquet_schema) :: schema
+        type(parquet_table) :: t
+        type(parquet_timestamp) :: ts(3)
+        logical, allocatable :: keep(:)
+        integer :: i
+        character(len=*), parameter :: file = "test_run/row_mask_temporal_precision.parquet"
+
+        do i = 1, 3
+            call ts(i)%set(2024, 1, 31, 12, 30, i - 1)
+        end do
+        call schema%init("row_mask_temporal")
+        call schema%add_field("ts", "timestamp[ms]")
+        call parquet_open_writer(writer, file, schema=schema)
+        call parquet_write_column(writer, "ts", ts)
+        call parquet_close_writer(writer)
+
+        call parquet_open_table(t, file)
+        allocate(keep(t%nrows()))
+        call t%row_mask('ts > "2024-01-31T12:30:00.0005"', keep)
+        print '(a,i0)', "a sub-millisecond literal was accepted, kept = ", count(keep)
+    end subroutine scenario_row_mask_temporal_precision
+
+    !> %filter_rows is row-structural, so a table shared across threads refuses it -- and the two
+    !! EXPRESSION forms have to run that guard themselves, because they build the mask first and
+    !! reach table_apply_keep only afterwards. A copy that forgot the guard would read every column
+    !! the rule names before discovering it may not change anything.
+    !!
+    !! In the concurrency bucket rather than the strict list, for the reason that bucket exists:
+    !! without a real -fopenmp build there is no region to be inside, the change simply succeeds
+    !! and the scenario exits 0. `!$omp single` makes it deterministic when OpenMP IS active.
+    subroutine scenario_table_filter_rows_shared()
+        type(parquet_table) :: t
+        character(len=*), parameter :: file = "test_run/table_filter_rows_shared.parquet"
+
+        call write_row_mask_fixture(file)
+        call parquet_open_table(t, file)
+        call t%materialize_all()
+        !$omp parallel num_threads(2) default(shared)
+        !$omp single
+        call t%filter_rows("id > 1")   ! row-structural change to a shared table -> aborts
+        !$omp end single
+        !$omp end parallel
+        print '(a,i0)', "unexpectedly filtered a shared table in a region, nrows=", t%nrows()
+    end subroutine scenario_table_filter_rows_shared
+
+    !> The negative control for every scenario above: the same fixture, a rule that names a scalar
+    !> column of each family, applied through both entry points. Without it, a guard that refused
+    !> everything would pass all fourteen.
+    subroutine scenario_row_mask_control()
+        type(parquet_table) :: t
+        logical, allocatable :: keep(:)
+        character(len=*), parameter :: file = "test_run/row_mask_control.parquet"
+
+        call write_row_mask_fixture(file)
+        call parquet_open_table(t, file)
+        allocate(keep(t%nrows()))
+        call t%row_mask('id > 1 and x < 4.0 and flag == true and name /= "d" and id in (2, 3)', keep)
+        call t%filter_rows("id > 1")
+        print '(a,i0,a,i0)', "%row_mask kept ", count(keep), " and %filter_rows left ", t%nrows()
+    end subroutine scenario_row_mask_control
 
     subroutine scenario_filter_set_control()
         type(parquet_writer) :: writer

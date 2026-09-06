@@ -75,14 +75,6 @@ submodule (parquet_core) parquet_read
     integer(int8), parameter :: KL_TRUE = 1_int8
     integer(int8), parameter :: KL_UNKNOWN = 2_int8
 
-    !> Fixed widths of the three packed per-leaf string arrays crossing the bind(C) boundary
-    !> (see pack_fixed_width_strings). Declared once here and host-associated to
-    !> parquet_read_filter, so the parser and the packer cannot disagree about them; the raw rule
-    !> text itself never crosses the boundary, so it is not constrained by these.
-    integer, parameter :: filter_leaf_name_len = 64
-    integer, parameter :: filter_leaf_op_len = 16
-    integer, parameter :: filter_leaf_value_len = 512
-
     !> How many uniforms parquet_apply_sample materialises at a time while building its row mask.
     !>
     !! A bound on SCRATCH, never on the answer. `pf_random_fill_draws` is a prefix-consistent view
@@ -94,7 +86,7 @@ submodule (parquet_core) parquet_read
     integer, parameter :: sample_fill_chunk = 1024
 
     !> Fixed width of the packed sort-key column-name array crossing the bind(C) boundary, the
-    !> sort counterpart of filter_leaf_name_len above. Declared once here and host-associated to
+    !> sort counterpart of parquet_core's filter_leaf_name_len. Declared here and host-associated to
     !> parquet_read_sort, so the parser and the packer cannot disagree about it.
     integer, parameter :: sort_key_name_len = 64
 
@@ -606,11 +598,11 @@ contains
         type(parquet_reader) :: rdr
         type(pf_index_map) :: keys
         type(parquet_string_column) :: str_set
-        character(len=:), allocatable :: op_low
+        character(len=:), allocatable :: op_low, col_type, col_shape, errmsg, name_suffix, set_text
         integer(int8) :: fam
-        integer :: i
+        integer :: i, set_index
         integer(int64) :: p, base
-        logical :: negate
+        logical :: negate, ok
 
         allocate(leaf_pre(max(nleaves, 1)))
         leaf_pre = 0_int32
@@ -638,8 +630,29 @@ contains
         do i = 1, nleaves
             if (leaf_pre(i) == 0_int32) cycle
             p = int(leaf_pre(i), int64)
-            call parquet_resolve_set_payload(rdr, reader, filter, context, trim(leaf_name(i)), &
-                leaf_value(i), fam, keys, str_set)
+            ! An UNBOUND NAME is reported before the file is consulted at all -- see
+            ! parquet_resolve_set_name's own note for why that order matters.
+            set_text = trim(adjustl(leaf_value(i)))
+            if (len(set_text) > 0) then
+                if (set_text(1:1) /= "(") then
+                    call parquet_resolve_set_name(filter, trim(leaf_name(i)), set_text, set_index, errmsg)
+                    if (set_index == 0) then
+                        call reader_filename_suffix(reader, name_suffix)
+                        error stop trim(context) // ": " // errmsg // name_suffix
+                    end if
+                end if
+            end if
+            ! The shape and type come from the private reader; the resolution itself is engine-free
+            ! and reports rather than aborts, so the file name is appended HERE and the identical
+            ! message reaches a %row_mask caller with the table's own context instead.
+            call parquet_get_column_shape(rdr, trim(leaf_name(i)), col_shape)
+            call parquet_get_column_type(rdr, trim(leaf_name(i)), col_type)
+            call parquet_resolve_set_payload(filter, trim(leaf_name(i)), leaf_value(i), col_type, &
+                col_shape, fam, keys, str_set, ok, errmsg)
+            if (.not. ok) then
+                call reader_filename_suffix(reader, name_suffix)
+                error stop trim(context) // ": " // errmsg // name_suffix
+            end if
             call parquet_lower_op(leaf_op(i), op_low)
             negate = (op_low == "not_in")
             base = (p - 1_int64) * pre_rows
@@ -707,6 +720,32 @@ contains
         end do
     end subroutine parquet_find_filter_set
 
+    !> Resolves a `@name` leaf value to the 1-based index of the set bound under that name, or
+    !> reports that nothing is bound under it. `set_index` is 0 exactly when `errmsg` is set.
+    !>
+    !> Split out of parquet_resolve_set_payload so that a caller can run it BEFORE it queries the
+    !> file, which is load-bearing rather than tidy: an unbound name is a property of the filter
+    !> object alone, so a rule naming a set nobody bound must say so rather than report whatever
+    !> the column turns out to be. Asking the schema first makes a filter naming both an unbound
+    !> set and a column the file lacks report the missing COLUMN, which is the less useful half and
+    !> is not what the caller got wrong. Regression-tested by filter_set_unbound_name.
+    subroutine parquet_resolve_set_name(filter, column, value, set_index, errmsg)
+        type(parquet_filter), intent(in) :: filter !! the filter whose bound sets are searched.
+        character(len=*), intent(in) :: column !! the column the clause tests, for the message.
+        character(len=*), intent(in) :: value !! the leaf's value text, `@name`, already trimmed.
+        integer, intent(out) :: set_index !! the set's 1-based index, or 0 when nothing is bound.
+        character(len=:), allocatable, intent(out) :: errmsg !! the refusal; "" when found.
+        character(len=:), allocatable :: set_name
+
+        errmsg = ""
+        call parquet_set_name_of(value, set_name)
+        call parquet_find_filter_set(filter, set_name, set_index)
+        if (set_index /= 0) return
+        errmsg = "filter rule refers to the set '" // trim(value) // &
+            "' on column '" // trim(column) // "', but no set of that name is bound to this " // &
+            "filter -- attach one with %bind before applying the filter"
+    end subroutine parquet_resolve_set_name
+
     !> Resolves one set-valued leaf's payload -- whether it NAMES a set bound with %bind or writes
     !> its members out as a LITERAL LIST -- into the one representation the evaluator reads: an
     !> element family, a built key index for the two numeric families, and a string column for the
@@ -718,26 +757,36 @@ contains
     !> what stops the two drifting apart, which they would otherwise do silently -- a literal list
     !> answered by a second code path would still return a perfectly plausible row set.
     !>
-    !> The column's shape and type are resolved here rather than inside the evaluator because the
-    !> literal path NEEDS the column type to know what its elements are: `(1, 2, 3)` is an integer
-    !> list against an integer column and a floating-point one against a float column, exactly as
-    !> the bare literal in `x == 1` is, and deciding that from the text alone would make
-    !> `x in (1, 2)` fail on a column where `x == 1` works.
-    subroutine parquet_resolve_set_payload(rdr, reader, filter, context, column, value, fam, keys, str_set)
-        type(parquet_reader), intent(in) :: rdr !! the private, transform-free reader over the file.
-        type(parquet_reader), intent(in) :: reader !! the reader being filtered; names the file in a message.
+    !> The column's shape and type are passed IN rather than resolved here because the literal path
+    !> NEEDS the column type to know what its elements are -- `(1, 2, 3)` is an integer list against
+    !> an integer column and a floating-point one against a float column, exactly as the bare
+    !> literal in `x == 1` is, and deciding that from the text alone would make `x in (1, 2)` fail
+    !> on a column where `x == 1` works -- while WHERE those two tokens come from differs between
+    !> the engines: the reader asks its file, the in-memory evaluator reads them off a column the
+    !> table already classified.
+    !>
+    !> Reports every failure through ok/errmsg rather than aborting, for the same reason: the
+    !> reader's caller appends its file name and the table's appends its own context, and the two
+    !> messages are otherwise identical because they are the same string.
+    subroutine parquet_resolve_set_payload(filter, column, value, col_type, col_shape, fam, keys, &
+            str_set, ok, errmsg)
         type(parquet_filter), intent(in) :: filter !! the filter whose bound sets a `@name` refers to.
-        character(len=*), intent(in) :: context !! calling procedure's name, used in every error-stop message.
         character(len=*), intent(in) :: column !! the column the clause tests.
         character(len=*), intent(in) :: value !! the leaf's value text: `@name` or `(...)`.
+        character(len=*), intent(in) :: col_type !! parquet_get_column_type's token for that column.
+        character(len=*), intent(in) :: col_shape !! parquet_get_column_shape's token for that column.
         integer(int8), intent(out) :: fam !! the resolved FSET_* element family.
         type(pf_index_map), intent(out) :: keys !! the built key index; left empty for a string set.
         type(parquet_string_column), intent(out) :: str_set !! the string members; left empty for another family.
-        character(len=:), allocatable :: col_type, col_shape, set_name, name_suffix, text
+        logical, intent(out) :: ok !! .false. on any resolution failure.
+        character(len=:), allocatable, intent(out) :: errmsg !! that failure's message; "" when ok.
+        character(len=:), allocatable :: text
         integer :: set_index
         integer(int64) :: i, lo, hi
         logical :: is_literal
 
+        ok = .false.
+        errmsg = ""
         call str_set%clear()
         set_index = 0
         text = trim(adjustl(value))
@@ -752,26 +801,20 @@ contains
         ! whatever the column turns out to be. The literal path cannot be checked this early, since
         ! what its elements ARE depends on the column's type.
         if (.not. is_literal) then
-            call parquet_set_name_of(text, set_name)
-            call parquet_find_filter_set(filter, set_name, set_index)
-            if (set_index == 0) then
-                call reader_filename_suffix(reader, name_suffix)
-                error stop trim(context) // ": filter rule refers to the set '" // text // &
-                    "' on column '" // trim(column) // "', but no set of that name is bound to this " // &
-                    "filter -- attach one with %bind before applying the filter" // name_suffix
-            end if
+            call parquet_resolve_set_name(filter, column, text, set_index, errmsg)
+            if (set_index == 0) return
         end if
 
-        call parquet_get_column_shape(rdr, column, col_shape)
-        call parquet_get_column_type(rdr, column, col_type)
-        call parquet_check_set_column_shape(context, column, col_shape)
+        call parquet_check_set_column_shape(column, col_shape, errmsg)
+        if (len(errmsg) > 0) return
         if (is_literal) then
-            call parquet_parse_literal_set(reader, context, column, text, col_type, fam, keys, str_set)
+            call parquet_parse_literal_set(column, text, col_type, fam, keys, str_set, ok, errmsg)
             return
         end if
 
         fam = filter%set_family(set_index)
-        call parquet_check_set_column_type(context, column, col_type, fam)
+        call parquet_check_set_column_type(column, col_type, fam, errmsg)
+        if (len(errmsg) > 0) return
         lo = filter%set_lo(set_index)
         hi = filter%set_hi(set_index)
 
@@ -796,6 +839,7 @@ contains
                 call str_set%append_from(filter%set_text, i)
             end do
         end if
+        ok = .true.
     end subroutine parquet_resolve_set_payload
 
     !> Turns a literal list -- the `(1, 2, 3)` or `("a", "b")` written in the rule itself -- into the
@@ -814,29 +858,31 @@ contains
     !> accepts a C99 hex float (`0x1p3`), which this does not. Narrower in the safe direction: a
     !> spelling this refuses is a clean parse error naming the element, never a different value.
     !> `nan` is refused for the reason `x == nan` is -- it could only ever match nothing.
-    subroutine parquet_parse_literal_set(reader, context, column, text, col_type, fam, keys, str_set)
-        type(parquet_reader), intent(in) :: reader !! the reader being filtered; names the file in a message.
-        character(len=*), intent(in) :: context !! calling procedure's name, used in every error-stop message.
+    subroutine parquet_parse_literal_set(column, text, col_type, fam, keys, str_set, ok, errmsg)
         character(len=*), intent(in) :: column !! the column the clause tests.
         character(len=*), intent(in) :: text !! the list as written, parentheses included.
         character(len=*), intent(in) :: col_type !! parquet_get_column_type's token for that column.
         integer(int8), intent(out) :: fam !! the resolved FSET_* element family.
         type(pf_index_map), intent(out) :: keys !! the built key index; left empty for a string set.
         type(parquet_string_column), intent(out) :: str_set !! the string members; left empty otherwise.
+        logical, intent(out) :: ok !! .false. on any parse or type failure.
+        character(len=:), allocatable, intent(out) :: errmsg !! that failure's message; "" when ok.
         type(parquet_string_column) :: given
-        character(len=:), allocatable :: inner, elem, name_suffix
+        character(len=:), allocatable :: inner, elem
         character(len=32) :: pos_str
         integer :: lo, hi, nelem, depth, k
         integer(int64) :: ikey, idx
         real(real64) :: rval
-        logical :: ok, quoted
+        logical :: parsed, quoted
 
-        call reader_filename_suffix(reader, name_suffix)
+        ok = .false.
+        errmsg = ""
         call parquet_set_family_for_column(col_type, fam)
         if (fam == FSET_NONE) then
-            error stop trim(context) // ": the list in the filter clause on column '" // trim(column) // &
+            errmsg = "the list in the filter clause on column '" // trim(column) // &
                 "' cannot be compared against that column, whose values are read as '" // &
-                trim(col_type) // "'" // name_suffix
+                trim(col_type) // "'"
+            return
         end if
         call keys%init()
         call given%clear()
@@ -844,10 +890,10 @@ contains
 
         inner = text(2:len(text) - 1)
         if (len_trim(inner) == 0) then
-            error stop trim(context) // ": the filter clause on column '" // trim(column) // &
+            errmsg = "the filter clause on column '" // trim(column) // &
                 "' has an empty list '()' -- a set that matches nothing is written by binding a " // &
-                "zero-length array with %bind, so an empty list here is almost certainly a mistake" // &
-                name_suffix
+                "zero-length array with %bind, so an empty list here is almost certainly a mistake"
+            return
         end if
 
         ! One pass, splitting on the commas OUTSIDE any quoted element -- a quoted member may
@@ -866,39 +912,44 @@ contains
             elem = trim(adjustl(inner(lo:hi)))
             write (pos_str, '(i0)') nelem
             if (len(elem) == 0) then
-                error stop trim(context) // ": element " // trim(pos_str) // " of the list in the " // &
+                errmsg = "element " // trim(pos_str) // " of the list in the " // &
                     "filter clause on column '" // trim(column) // "' is empty (a stray or trailing " // &
-                    "comma?)" // name_suffix
+                    "comma?)"
+                return
             end if
             quoted = (elem(1:1) == '"')
             if (quoted .neqv. (fam == FSET_STRING)) then
                 if (quoted) then
-                    error stop trim(context) // ": element " // trim(pos_str) // " of the list in the " // &
+                    errmsg = "element " // trim(pos_str) // " of the list in the " // &
                         "filter clause on column '" // trim(column) // "' is quoted, but that column's " // &
                         "values are read as '" // trim(col_type) // "' -- write each member as a bare " // &
-                        "number" // name_suffix
+                        "number"
+                    return
                 end if
-                error stop trim(context) // ": element " // trim(pos_str) // " of the list in the " // &
+                errmsg = "element " // trim(pos_str) // " of the list in the " // &
                     "filter clause on column '" // trim(column) // "' is not quoted, but that column's " // &
                     "values are read as '" // trim(col_type) // "' -- write each member in double " // &
-                    "quotes" // name_suffix
+                    "quotes"
+                return
             end if
             select case (fam)
             case (FSET_INT)
-                call parquet_parse_set_int(elem, ikey, ok)
-                if (.not. ok) then
-                    error stop trim(context) // ": element " // trim(pos_str) // " of the list in the " // &
+                call parquet_parse_set_int(elem, ikey, parsed)
+                if (.not. parsed) then
+                    errmsg = "element " // trim(pos_str) // " of the list in the " // &
                         "filter clause on column '" // trim(column) // "' is '" // elem // &
-                        "', which is not a whole number" // name_suffix
+                        "', which is not a whole number"
+                    return
                 end if
                 call keys%get_or_add(ikey, idx)
             case (FSET_REAL)
-                call parquet_parse_set_real(elem, rval, ok)
-                if (.not. ok) then
-                    error stop trim(context) // ": element " // trim(pos_str) // " of the list in the " // &
+                call parquet_parse_set_real(elem, rval, parsed)
+                if (.not. parsed) then
+                    errmsg = "element " // trim(pos_str) // " of the list in the " // &
                         "filter clause on column '" // trim(column) // "' is '" // elem // &
                         "', which is not a number (a hexadecimal float is not accepted here, and " // &
-                        "'nan' can never match -- say 'is_nan' instead)" // name_suffix
+                        "'nan' can never match -- say 'is_nan' instead)"
+                    return
                 end if
                 call keys%get_or_add(parquet_filter_real_key(rval), idx)
             case default
@@ -906,8 +957,9 @@ contains
                 ! the caller wrote it between them -- spaces included, and with no trimming, which
                 ! is what makes a quoted member comparable against a string column's own bytes.
                 if (len(elem) < 2 .or. elem(len(elem):len(elem)) /= '"') then
-                    error stop trim(context) // ": element " // trim(pos_str) // " of the list in the " // &
-                        "filter clause on column '" // trim(column) // "' is missing its closing quote" // name_suffix
+                    errmsg = "element " // trim(pos_str) // " of the list in the " // &
+                        "filter clause on column '" // trim(column) // "' is missing its closing quote"
+                    return
                 end if
                 call given%append_string(elem(2:len(elem) - 1))
             end select
@@ -919,6 +971,7 @@ contains
         ! no answer of its own. The numeric families needed no separate step -- %get_or_add IS the
         ! deduplication, and the map it leaves behind is the one the evaluator looks up in.
         if (fam == FSET_STRING) call read_unique(given, str_set)
+        ok = .true.
     end subroutine parquet_parse_literal_set
 
     !> Parses a strictly-formatted whole number: an optional sign, then digits, then nothing else.
@@ -1123,12 +1176,13 @@ contains
     !> arrives as a C++ fatal error rather than a clean Fortran one. The wording matches
     !> container_shape_word's in parquet_wrapper.cpp so the message reads the same whichever guard
     !> reports it.
-    subroutine parquet_check_set_column_shape(context, column, col_shape)
-        character(len=*), intent(in) :: context !! calling procedure's name, used in the error-stop message.
+    subroutine parquet_check_set_column_shape(column, col_shape, errmsg)
         character(len=*), intent(in) :: column !! the column the clause tests.
         character(len=*), intent(in) :: col_shape !! parquet_get_column_shape's token for that column.
+        character(len=:), allocatable, intent(out) :: errmsg !! the refusal; "" when the column is scalar.
         character(len=:), allocatable :: word
 
+        errmsg = ""
         if (col_shape == "scalar") return
         select case (col_shape)
         case ("vector")
@@ -1142,7 +1196,7 @@ contains
         case default
             word = trim(col_shape)
         end select
-        error stop trim(context) // ": filter column '" // trim(column) // "' is a " // word // &
+        errmsg = "filter column '" // trim(column) // "' is a " // word // &
             " column; filtering only supports scalar columns"
     end subroutine parquet_check_set_column_shape
 
@@ -1155,18 +1209,19 @@ contains
     !> arrive at P8a with the temporal index key; a vector, list, map or struct column is refused
     !> for the reason every filter column is -- there is no single value per row to compare, which
     !> parquet_reader_set_filter also refuses from the schema.
-    subroutine parquet_check_set_column_type(context, column, col_type, family)
-        character(len=*), intent(in) :: context !! calling procedure's name, used in the error-stop message.
+    subroutine parquet_check_set_column_type(column, col_type, family, errmsg)
         character(len=*), intent(in) :: column !! the column the clause tests.
         character(len=*), intent(in) :: col_type !! parquet_get_column_type's token for that column.
         integer(int8), intent(in) :: family !! the bound set's FSET_* family.
+        character(len=:), allocatable, intent(out) :: errmsg !! the refusal; "" when the families agree.
         character(len=:), allocatable :: word
         integer(int8) :: want
 
+        errmsg = ""
         call parquet_set_family_for_column(col_type, want)
         if (family == want) return
         call parquet_set_family_word(family, word)
-        error stop trim(context) // ": the '" // word // &
+        errmsg = "the '" // word // &
             "' set in the filter clause on column '" // trim(column) // "' cannot be compared " // &
             "against that column, whose values are read as '" // trim(col_type) // "'"
     end subroutine parquet_check_set_column_type
@@ -1303,31 +1358,18 @@ contains
         logical :: ok
         character(len=1024) :: c_err
         integer(c_long_long) :: status
-        integer :: i, nnodes, nleaves
+        integer :: nnodes, nleaves
         character(len=:), allocatable :: name_suffix !! scratch (reader_filename_suffix).
         integer(int32), allocatable :: leaf_pre(:) !! per leaf: 0, or its 1-based pre-evaluated index.
         integer(int8), allocatable :: pre_verdicts(:), pre_flags(:) !! the pre-evaluated leaves' payload.
         integer(int64) :: n_pre, pre_rows, pre_groups !! that payload's shape; all 0 with no set clause.
 
-        nnodes = 0
-        nleaves = 0
-        do i = 1, filter%n
-            call parquet_parse_filter_expr(filter%rules(i), node_kind, node_leaf, nnodes, leaf_name, &
-                leaf_op, leaf_value, leaf_is_string, nleaves, ok, errmsg)
-            if (.not. ok) then
-                call reader_filename_suffix(reader, name_suffix)
-                error stop trim(context) // ": invalid filter rule: " // errmsg // name_suffix
-            end if
-            ! Several %add calls are AND-combined -- (expr1) and (expr2) and ... -- so every rule
-            ! after the first folds onto whatever is already on the stack.
-            if (i > 1) then
-                call parquet_append_filter_node(ND_AND, node_kind, node_leaf, nnodes, ok, errmsg)
-                if (.not. ok) then
-                    call reader_filename_suffix(reader, name_suffix)
-                    error stop trim(context) // ": invalid filter rule: " // errmsg // name_suffix
-                end if
-            end if
-        end do
+        call parquet_parse_filter_rules(filter, node_kind, node_leaf, nnodes, leaf_name, &
+            leaf_op, leaf_value, leaf_is_string, nleaves, ok, errmsg)
+        if (.not. ok) then
+            call reader_filename_suffix(reader, name_suffix)
+            error stop trim(context) // ": invalid filter rule: " // errmsg // name_suffix
+        end if
         ! A rule-less filter still has something to install when a row-group scope or a physical
         ! row range was given: an all-true-within-range mask, which is how a slice-regime table
         ! carrying only sample_fraction= expresses its own bounds. With no rules AND no bounds
@@ -1336,14 +1378,6 @@ contains
         ! group" is what an absent filter already gives, whichever engine would have run.
         if (nleaves == 0 .and. row_group_lo <= 0 .and. row_group_hi <= 0 .and. &
                 row_lo <= 0 .and. row_hi <= 0) return
-
-        ! A rule-less filter (nleaves == nnodes == 0) never enters the loop above, so
-        ! parquet_parse_filter_expr never gets a chance to allocate these -- but the row-bound-only
-        ! path above still falls through to the array-section references below, and referencing
-        ! even a zero-trip section of an unallocated allocatable is invalid (ifx's runtime checks
-        ! catch this; gfortran silently tolerates it).
-        if (.not. allocated(node_kind)) allocate(node_kind(0), node_leaf(0))
-        if (.not. allocated(leaf_name)) allocate(leaf_name(0), leaf_op(0), leaf_value(0), leaf_is_string(0))
 
         call convert_temporal_filter_values(reader, context, leaf_name, leaf_op, leaf_value, leaf_is_string, nleaves)
         call parquet_render_filter_expr(node_kind, node_leaf, nnodes, leaf_name, leaf_op, leaf_value, &

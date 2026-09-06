@@ -82,6 +82,9 @@ something a reader is expected to have.
 | [Risk-195](#risk-195--two-literal-parsers-must-agree-and-only-one-oracle-test-compares-them) | Two literal parsers must agree on every spelling both accept | 4 — covered |
 | [Risk-196](#risk-196--a-literal-list-takes-its-element-family-from-the-column-and-there-is-one-rule-for-that) | A literal list takes its element family from the COLUMN | 4 — covered |
 | [Risk-197](#risk-197--the-four-value-class-operators-share-one-screen-answer-with-no-discriminator-left) | The four value-class operators share ONE screen answer | 4 — covered |
+| [Risk-198](#risk-198--two-filter-engines-answer-one-grammar-and-only-an-ab-can-see-them-disagree) | Two filter engines answer one grammar, and only an A/B can see them disagree | 4 — covered |
+| [Risk-199](#risk-199--a-string-leaf-compared-with-fortrans-own-operators-blank-pads-and-the-reader-does-not) | A string leaf compared with Fortran's own operators blank-pads | 4 — covered |
+| [Risk-200](#risk-200--the-kind-to-token-map-is-an-inverse-of-one-in-another-module) | The kind-to-token map is an inverse of one in another module | 4 — covered |
 | [Risk-1](#risk-1--the-release-policy-regresses-silently) | The release policy regresses silently | 4 — covered |
 | [Risk-2](#risk-2--the-schema-less-write-rests-on-three-properties-that-look-incidental) | The schema-less write rests on three properties that look incidental | 4 — covered |
 | [Risk-3](#risk-3--the-screen-and-the-evaluator-can-drift-apart) | The screen and the evaluator can drift apart | 4 — covered |
@@ -1172,6 +1175,78 @@ rows' elements.
 
 
 ## 4. Risks already covered, kept for what they still forbid
+
+### Risk-198 — Two filter engines answer one grammar, and only an A/B can see them disagree
+
+`parquet_table%row_mask`/`%filter_rows(expr)` answer a filter over resident `parquet_column`
+storage; the reader answers the same filter over Arrow arrays in `eval_filter_clause`
+(`src/parquet_wrapper.cpp`). Two implementations, one specification -- so the way this breaks is
+never a crash or an abort. **It is a row set that is plausible, different, and silently wrong.**
+
+Everything that CAN be shared is: the parser (`parquet_parse_filter_rules`), the Kleene vocabulary
+(`KL_*`/`ND_*`, deliberately the same numbers C++ uses), the set payload
+(`parquet_resolve_set_payload`) and its verdict rule (`parquet_set_verdict`), the literal parsers
+(`parquet_parse_set_int`/`_real`) and the temporal conversion (`temporal_literal_to_raw`). What is
+left genuinely separate is the per-row comparison in `src/parquet_read_eval.f90`.
+
+**Why an ordinary test would not notice.** Every assertion a single-engine test can make -- "this
+rule keeps three rows", "the null row is dropped" -- is satisfied by both a correct engine and one
+that differs on a case the fixture does not contain. Confirmed: three mutations to this file
+(collapsing unknown to true, flipping unknown under NOT, swapping AND for OR) all leave a perfectly
+well-formed result.
+
+**Test.** `expect_same_rows` (`test/test_table_verbs.f90`) opens the same file twice -- once through
+`parquet_open_reader(..., filter=)`, whose survivors `parquet_get_physical_row_indices` reports, and
+once as a materialized table -- and requires the two row lists to be equal element for element. Two
+properties make it a real oracle rather than two spellings of one implementation: the reader side
+crosses the bind(C) boundary and touches none of this code, and **every A/B refuses to pass on a
+degenerate answer** (a rule selecting no row, or every row, agrees with an engine that has stopped
+discriminating) unless the test opts in with `allow_degenerate=`. Twelve mutations confirmed.
+
+**What a future change must keep.** A new leaf kind, a new operator or a new column family needs a
+rule in that sweep, not merely a test that it works: a family covered on one engine only is exactly
+the state this entry exists to prevent.
+
+### Risk-199 — A string leaf compared with Fortran's own operators blank-pads, and the reader does not
+
+Fortran's `==`/`<` on `character` blank-pad the shorter operand, so `"ab"` and `"ab "` compare
+**equal**; C++'s `std::string_view`, which the reader uses, compares bytes and then lengths, so
+`"ab" < "ab "`. Writing the in-memory string leaf with the intrinsic operators is the obvious thing
+to do, costs nothing, reads correctly, and makes the two engines disagree about every value with a
+trailing space -- in a library whose string columns store bytes verbatim and never trim.
+
+`parquet_bytes_compare` (`src/parquet_read_eval.f90`) is the byte-lexicographic comparison, using
+`ichar` rather than `iachar` because the byte value is what `memcmp` compares and `iachar` is
+processor-dependent above 127.
+
+**Why a test would not notice.** A fixture of ordinary names agrees under both rules. The disagreement
+needs a value whose only distinguishing feature is a trailing space -- which no fixture has unless
+someone put one there deliberately.
+
+**Test.** `write_string_fixture` (`test/test_table_verbs.f90`) stores `"ab "` beside `"ab"`, and
+`test_ab_strings` A/Bs `s == "ab"` against the reader. Confirmed by mutation: substituting Fortran's
+operators fails that one test and nothing else.
+
+### Risk-200 — The kind-to-token map is an inverse of one in another module
+
+`parquet_filter_column_tokens` (`src/parquet_read_eval.f90`) maps a resident column's `PK_*` kind to
+the `parquet_get_column_type`/`_shape` tokens the reader would have reported, so that the checks and
+messages both engines share can be raised from a column instead of from a schema. It is the inverse
+of `table_kind_from_type` (`src/parquet_tables_read.f90`), which maps the same nine element tokens
+the other way -- two maps, in two modules, over one correspondence.
+
+**The pairing is protected by its failure DIRECTION rather than by a check**, which is why this is
+recorded rather than fixed: a kind missing from the inverse yields an empty type token, and the leaf
+evaluator then REFUSES the clause. A refusal is loud. There is no spelling of a missing entry that
+becomes a wrong answer.
+
+**What a future change must keep.** That property, not the map. If a later change gives the default
+arm a *guess* instead of a refusal -- mapping an unknown kind onto `"int64"`, say, because it is the
+widest -- the direction inverts and a new column family starts being filtered as something else.
+
+**Test.** The A/B sweep in `test/test_table_verbs.f90` covers all nine element types, so a kind
+missing from the map fails immediately; `scenario_row_mask_vector_column` and
+`scenario_row_mask_is_nan_on_int` pin the two refusals the map itself produces.
 
 ### Risk-190 — A pre-evaluated leaf's screen flags must come from its own verdict segment
 

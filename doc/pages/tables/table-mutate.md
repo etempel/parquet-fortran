@@ -129,11 +129,13 @@ individual procedure:
 | **cell** — `%set_element`, `%set_null`, `%clear_null` | changes values in place | no |
 | **column** — `%add_column`, `%drop_column`, `%rename_column`, `%copy_column`, `%cast` | changes which columns exist, or a column's kind | no |
 | **row** — `%filter_rows`, `%sort_by`, `%top_n`, `%delete_rows`, `%truncate`, `%append`, `%append_null_rows` | changes which rows exist | **yes, when it changes one** |
+| **read** — `%row_mask` | reports which rows a rule selects, changing nothing | no |
 | **row** — `%join` | matches another table's rows against this one's and brings its columns over | **yes, unless every row survives once and in place** |
 
 ```fortran
 call t%materialize("mass,age,zphot")     ! read what you want to keep, first
 call t%filter_rows(mass > 1.0e10_real64) ! keep the rows a mask selects
+call t%filter_rows("mass > 1.0e10")      ! or say it as a rule, the reader's own grammar
 call t%sort_by("-mass")                  ! or sort_by(["mass"], descending=[.true.])
 call t%drop_column("scratch")
 ```
@@ -223,6 +225,60 @@ detaching — see [What "detaching" means](#what-detaching-means).
 
 To keep rows by *rank* rather than by position or by mask — the best hundred by some column — use
 [`%top_n`](#keeping-only-the-best-rows), which is cheaper than sorting and cutting.
+
+### Removing rows by a filter expression
+
+`%filter_rows` also takes a **rule**, in the same grammar a read-time
+[`filter=`](../io/filter-sort-sample.html) uses, and applies it to the rows already in memory:
+
+```fortran
+call t%filter_rows("n_obs >= 8 and score > 3")
+call t%filter_rows('survey == "wide" or mag_r < 19.5')
+call t%filter_rows("field_id in (3, 5, 9)")
+```
+
+A rule selects the same rows here as it would at the reader. That is not a coincidence: both run
+the same parser and the same per-clause rules, so the null rule (a Null row is excluded unless the
+clause is `is_null`), the NaN rule (a NaN is a value, so it survives `/=` but no ordering
+comparison), the string ordering and every message a bad rule raises are one implementation rather
+than two. Anything the read-time grammar accepts is accepted here.
+
+**A column the rule names is READ if it is not resident yet**, by the same lazy first touch a
+`%get` performs — so a rule may name a column nothing has looked at. That also means this reads
+the table's *data*: on a table that has already detached, a rule naming an unread column fails
+with the detach message rather than quietly selecting nothing.
+
+A `@name` clause needs the set bound to it, so pass the `parquet_filter` itself for that:
+
+```fortran
+type(parquet_filter) :: filt
+call filt%bind("wanted", target_ids)
+call filt%add("field_id in @wanted")
+call t%filter_rows(filt)
+```
+
+### Asking which rows a rule selects, without removing any
+
+`%row_mask` is the non-mutating half. It fills a mask of exactly `%nrows()` entries and changes
+nothing — no row is dropped, no pointer is invalidated and the table keeps its file:
+
+```fortran
+logical, allocatable :: keep(:)
+allocate(keep(t%nrows()))
+call t%row_mask("n_obs >= 8 and score > 3", keep)
+print *, count(keep), "rows would survive"
+```
+
+That is what to reach for before deciding whether to filter at all, and it is how a selection the
+grammar cannot express is combined with one it can:
+
+```fortran
+call t%row_mask("n_obs >= 8", keep)
+keep = keep .and. my_own_test(...)      ! anything the grammar has no words for
+call t%filter_rows(keep)                ! the mask form, from further up this section
+```
+
+`%row_mask` takes a `parquet_filter` too, on the same terms as `%filter_rows` above.
 
 ### Sorting
 

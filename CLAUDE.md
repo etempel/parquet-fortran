@@ -4614,14 +4614,23 @@ that assert the refusal still reporting **PASSED** — i.e. the evidence said th
 effect, which reads as "my edit was wrong" rather than "my binary is old". `fpm clean --skip` showed
 both failing, as intended. Treat a gate that appears not to have changed as a cache symptom first.
 
-**A restored `src/parquet_wrapper.cpp` is the case fpm most reliably misses, and it bites hardest
-during mutation testing.** Reverting that file (`cp backup src/parquet_wrapper.cpp`, `git checkout`,
-a stash pop) and re-running `fpm build` repeatedly left the *mutated* object still linked — the
-suite kept failing with the mutation's own symptom after the source was demonstrably clean, which
-reads exactly like "my revert did not work" and invites a hunt for a second bug that does not
-exist. `fpm clean --skip` fixes it. **So: after reverting a C++ mutation, `fpm clean --skip` before
-believing any result** — and treat a failure that persists across a verified-correct source as a
-stale-cache symptom first, not a new defect.
+**A RESTORED file is the case fpm most reliably misses, and it bites hardest during mutation
+testing — in Fortran exactly as in C++.** Reverting a file (`cp backup <file>`, `git checkout`, a
+stash pop) and re-running `fpm build` repeatedly left the *mutated* object still linked — the suite
+kept failing with the mutation's own symptom after the source was demonstrably clean, which reads
+exactly like "my revert did not work" and invites a hunt for a second bug that does not exist.
+`fpm clean --skip` fixes it. **So: after reverting a mutation, `fpm clean --skip` before believing
+any result** — and treat a failure that persists across a verified-correct source as a stale-cache
+symptom first, not a new defect.
+
+Confirmed twice, once on `src/parquet_wrapper.cpp` and once on `src/parquet_read_eval.f90`, so do
+not read this as C++-specific: the trigger is the *content* returning to what fpm last saw, whatever
+the language. The second instance is the sharper illustration, because the symptom accused the
+source rather than the build — a filter's `and` was computing an `or` while the file plainly said
+`ND_AND`, which sends you reading the evaluator instead of the cache. **The tell is a result that
+contradicts the source you are looking at**; one `fpm clean --skip` settles it, and a mutation loop
+that restores between rounds should simply clean every time rather than reason about when it needs
+to.
 
 **`tools/coverage.sh`/`tools/coverage_cpp.sh` clean up after themselves** (they delete their own
 `build/gcov`/`build/gcov-cpp` tree on exit, since an instrumented `error_scenarios` binary left under

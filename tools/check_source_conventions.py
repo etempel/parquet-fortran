@@ -4841,6 +4841,65 @@ def _runner_registrations():
     return out
 
 
+def check_test_fixtures_live_under_test_run():
+    """A fixture a test WRITES goes under `test_run/`, never into the repository root.
+
+    The convention was universal and unenforced, which is the combination that lets it break: a
+    test writing `"my_fixture.parquet"` passes every check, passes its own assertions, and leaves
+    a file in the working tree that only a human running `ls` notices. Twenty such files appeared
+    in one change before anyone looked.
+
+    **Keyed on what CREATES a file, not on what looks like a path**, because `test/` is full of
+    path strings that are test DATA rather than filenames -- `pf_basename("/data/run3/cat.parquet")`,
+    `pv_split_path`'s whole table, and error messages quoting a path. A first version matched every
+    `.parquet` literal and reported twelve of those as findings against a correct tree, which is
+    what a real defect looks like. Three shapes are checked instead:
+
+      a. a scalar `character(len=*), parameter :: <name> = "....parquet"` -- how nearly every
+         suite here names its own fixture;
+      b. a `.parquet` literal on a line calling one of the file-opening entry points;
+      c. a path ASSEMBLED by a `write` statement ending in the `".parquet"` fragment, which must
+         carry a `"test_run/..."` prefix literal on the same line.
+
+    Deliberately NOT covered: a path built across several statements, or one handed in from a
+    variable this file cannot follow. Those exist (`test_openmp.f90` builds per-thread names) and
+    are correct today; the check would need to follow data flow to see them, which is more machinery
+    than the hazard warrants.
+    """
+    openers = re.compile(r"\b(parquet_open_writer|parquet_open_reader|parquet_open_table|"
+                         r"parquet_write_table|parquet_table_row_group_bounds)\s*\(", re.I)
+    decl = re.compile(r"parameter\s*::\s*\w+\s*=\s*\"([^\"]*\.parquet)\"", re.I)
+    literal = re.compile(r'\"([^\"]*\.parquet)\"')
+    problems = []
+    seen = 0
+    for path in sorted(TEST.glob("*.f90")):
+        for lineno, raw in enumerate(path.read_text(encoding="utf-8").split("\n"), start=1):
+            code = strip_comment(raw)
+            names = []
+            m = decl.search(code)
+            if m:
+                names.append(m.group(1))
+            elif openers.search(code):
+                names.extend(literal.findall(code))
+            elif '".parquet"' in code and "write" in code.lower():
+                # An assembled path: the prefix literal is what has to carry the directory.
+                parts = [x for x in literal.findall(code) if x != ".parquet"]
+                pre = re.findall(r'\"([^\"]*)\"', code)
+                if not any(x.startswith("test_run/") for x in pre):
+                    names.extend(parts or ["<assembled>" + code.strip()[:40]])
+            for name in names:
+                seen += 1
+                if name == ".parquet" or name.startswith("test_run/") or name.startswith("test/fixtures/"):
+                    continue
+                problems.append(
+                    "%s:%d: fixture path '%s' is not under test_run/ -- a test that writes it "
+                    "leaves the file in the repository root, where nothing but a human notices it:"
+                    "\n    %s" % (path.relative_to(REPO_ROOT), lineno, name, raw.strip()))
+    if not seen:
+        problems.append("test/*.f90: matched no fixture path at all -- this check is blind")
+    return problems
+
+
 def check_test_runner_partition():
     """The five test runners partition the suites, and the undef-safe ones reach no C++.
 
@@ -5378,6 +5437,7 @@ CHECKS = (
     ("no per-element string allocation in a bulk loop", check_no_per_element_string_alloc),
     ("every error scenario is named in the shell runner", check_scenario_list_is_complete),
     ("the test runners partition the suites", check_test_runner_partition),
+    ("test fixtures live under test_run/", check_test_fixtures_live_under_test_run),
     ("every intent(inout) temporal setter assigns all components", check_temporal_setters_assign_all),
     ("doc/pages index files agree with the page tree", check_doc_page_index_consistency),
     ("the landing page names every entry module", check_landing_page_names_every_entry_module),

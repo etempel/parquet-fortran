@@ -457,6 +457,40 @@ contains
         call append_node(kind, 0, node_kind, node_leaf, nnodes, ok, errmsg)
     end procedure parquet_append_filter_node
 
+    !> Parses every rule of one filter into a single expression -- the whole-filter half of the
+    !> parser, and the ONE place the AND-fold between separate %add calls is decided.
+    !>
+    !> Implemented here, after the two procedures it drives, because nagfor 7.2 binds a separate
+    !> module procedure's name to an implicit EXTERNAL at its first call site and then rejects the
+    !> later `module procedure` implementing it (CLAUDE.md's "implemented before it is called"
+    !> rule). gfortran, ifx and flang accept either order, so nothing else would report a swap.
+    module procedure parquet_parse_filter_rules
+        integer :: i
+
+        nnodes = 0
+        nleaves = 0
+        do i = 1, filter%n
+            call parquet_parse_filter_expr(filter%rules(i), node_kind, node_leaf, nnodes, leaf_name, &
+                leaf_op, leaf_value, leaf_is_string, nleaves, ok, errmsg)
+            if (.not. ok) return
+            ! Several %add calls are AND-combined -- (expr1) and (expr2) and ... -- so every rule
+            ! after the first folds onto whatever is already on the stack.
+            if (i > 1) then
+                call parquet_append_filter_node(ND_AND, node_kind, node_leaf, nnodes, ok, errmsg)
+                if (.not. ok) return
+            end if
+        end do
+        ! A rule-less filter never enters the loop, so parquet_parse_filter_expr never gets a
+        ! chance to allocate these -- and referencing even a zero-trip section of an unallocated
+        ! allocatable is invalid (ifx's runtime checks catch it; gfortran silently tolerates it).
+        ! Allocating here rather than at each call site is what lets the documented contract be
+        ! "they come back allocated", so no caller needs its own guard.
+        if (.not. allocated(node_kind)) allocate(node_kind(0), node_leaf(0))
+        if (.not. allocated(leaf_name)) allocate(leaf_name(0), leaf_op(0), leaf_value(0), leaf_is_string(0))
+        ok = .true.
+        errmsg = ""
+    end procedure parquet_parse_filter_rules
+
     !> The one place a node is appended: grows the accumulators, enforces filter_max_nodes, and
     !> reports (rather than aborts) when the cap is hit.
     subroutine append_node(kind, leaf_index, node_kind, node_leaf, nnodes, ok, errmsg)

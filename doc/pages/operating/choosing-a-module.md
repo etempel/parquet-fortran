@@ -59,8 +59,8 @@ in every one of them.
 | `parquet_sorting` | 22 | no | the whole sorting API, every element type, including `pf_sort_keys` |
 | `parquet_stats` | 28 | no | the `pf_*` array-statistics family: reductions over plain Fortran arrays |
 | `parquet_settings` | 3 | **yes** | the process-global knobs, and `parquet_get_arrow_version` |
-| `parquet_io` | 54 | **yes** | reading and writing Parquet files, and nothing else |
-| `parquet_tables` | 74 | **yes** | the `parquet_table` container |
+| `parquet_io` | 60 | **yes** | reading and writing Parquet files, and nothing else |
+| `parquet_tables` | 80 | **yes** | the `parquet_table` container |
 | `parquet` | 103 | **yes** | everything above, through one `use` |
 
 Four rows deserve a note.

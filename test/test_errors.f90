@@ -524,6 +524,32 @@ contains
                 test_filter_remap_name_too_long_aborts), &
             new_unittest("filter: a rule that grows past the cap when remapped aborts", &
                 test_filter_remap_rule_too_long_aborts), &
+            new_unittest("filter: a rule naming an unbound set aborts", &
+                test_filter_set_unbound_name_aborts), &
+            new_unittest("filter: 'in' taking a literal instead of @name aborts", &
+                test_filter_set_missing_at_aborts), &
+            new_unittest("filter: 'in' with no set name aborts", test_filter_set_no_value_aborts), &
+            new_unittest("filter: a real set against an integer column aborts", &
+                test_filter_set_wrong_family_aborts), &
+            new_unittest("filter: an integer set against a string column aborts", &
+                test_filter_set_on_string_column_aborts), &
+            new_unittest("filter: a NaN inside a bound real set aborts at bind", &
+                test_filter_set_nan_member_aborts), &
+            new_unittest("filter: two sets bound under one name aborts", &
+                test_filter_set_duplicate_name_aborts), &
+            new_unittest("filter: a set name containing a space aborts", &
+                test_filter_set_name_with_space_aborts), &
+            new_unittest("filter: a set name containing '@' aborts", &
+                test_filter_set_name_with_at_aborts), &
+            new_unittest("filter: a blank set name aborts", test_filter_set_blank_name_aborts), &
+            new_unittest("filter: an is_valid mask of the wrong length aborts", &
+                test_filter_set_mask_length_aborts), &
+            new_unittest("filter: more bound sets than the published limit aborts", &
+                test_filter_set_too_many_aborts), &
+            new_unittest("filter: a set clause on a vector column aborts", &
+                test_filter_set_vector_column_aborts), &
+            new_unittest("filter: a well-formed set clause opens cleanly (control)", &
+                test_filter_set_control_succeeds), &
             new_unittest("sortkey: remap_column_names with mismatched from/to sizes aborts", &
                 test_sortkey_remap_size_mismatch_aborts), &
             new_unittest("sortkey: remap_column_names to an over-long column name aborts", &
@@ -8299,6 +8325,123 @@ contains
             failure_message="opening a reader with a malformed filter rule was expected to abort", &
             required_stderr="invalid filter rule")
     end subroutine test_filter_malformed_rule_aborts
+
+    !> A rule naming a set nothing was bound under. The message names the set, because a typo in a
+    !> `@name` is the likely cause and nothing else would identify it.
+    subroutine test_filter_set_unbound_name_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_set_unbound_name", expect_abort=.true., &
+            failure_message="a rule naming an unbound set was expected to abort", &
+            required_stderr="no set of that name is bound")
+    end subroutine test_filter_set_unbound_name_aborts
+
+    subroutine test_filter_set_missing_at_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_set_missing_at", expect_abort=.true., &
+            failure_message="'in' taking a literal was expected to abort", &
+            required_stderr="takes a bound set named with a leading '@'")
+    end subroutine test_filter_set_missing_at_aborts
+
+    subroutine test_filter_set_no_value_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_set_no_value", expect_abort=.true., &
+            failure_message="'in' with no set name was expected to abort", &
+            required_stderr="is missing a set name after")
+    end subroutine test_filter_set_no_value_aborts
+
+    subroutine test_filter_set_wrong_family_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_set_wrong_family", expect_abort=.true., &
+            failure_message="a real set against an integer column was expected to abort", &
+            required_stderr="cannot be compared against that column")
+    end subroutine test_filter_set_wrong_family_aborts
+
+    subroutine test_filter_set_on_string_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_set_on_string_column", expect_abort=.true., &
+            failure_message="an integer set against a string column was expected to abort", &
+            required_stderr="cannot be compared against that column")
+    end subroutine test_filter_set_on_string_column_aborts
+
+    !> The refusal is at %bind, not at apply: a NaN member could never match any row, so accepting
+    !> it would leave a set element that is silently inert.
+    subroutine test_filter_set_nan_member_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_set_nan_member", expect_abort=.true., &
+            failure_message="a NaN inside a bound real set was expected to abort", &
+            required_stderr="is a NaN, which can never match")
+    end subroutine test_filter_set_nan_member_aborts
+
+    subroutine test_filter_set_duplicate_name_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_set_duplicate_name", expect_abort=.true., &
+            failure_message="two sets bound under one name were expected to abort", &
+            required_stderr="is already bound to this filter")
+    end subroutine test_filter_set_duplicate_name_aborts
+
+    subroutine test_filter_set_name_with_space_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_set_name_with_space", expect_abort=.true., &
+            failure_message="a set name containing a space was expected to abort", &
+            required_stderr="must not contain a space")
+    end subroutine test_filter_set_name_with_space_aborts
+
+    subroutine test_filter_set_name_with_at_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_set_name_with_at", expect_abort=.true., &
+            failure_message="a set name containing '@' was expected to abort", &
+            required_stderr="must not contain '@'")
+    end subroutine test_filter_set_name_with_at_aborts
+
+    subroutine test_filter_set_blank_name_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_set_blank_name", expect_abort=.true., &
+            failure_message="a blank set name was expected to abort", &
+            required_stderr="must not be blank")
+    end subroutine test_filter_set_blank_name_aborts
+
+    subroutine test_filter_set_mask_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_set_mask_length", expect_abort=.true., &
+            failure_message="an is_valid mask of the wrong length was expected to abort", &
+            required_stderr="is_valid has 2 entries but values has 3")
+    end subroutine test_filter_set_mask_length_aborts
+
+    subroutine test_filter_set_too_many_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_set_too_many", expect_abort=.true., &
+            failure_message="more bound sets than the published limit was expected to abort", &
+            required_stderr="maximum of 64 bound sets")
+    end subroutine test_filter_set_too_many_aborts
+
+    subroutine test_filter_set_vector_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_set_vector_column", expect_abort=.true., &
+            failure_message="a set clause on a vector column was expected to abort", &
+            required_stderr="filtering only supports scalar columns")
+    end subroutine test_filter_set_vector_column_aborts
+
+    !> The NEGATIVE CONTROL for the thirteen refusals above. Without it, a %bind that refused
+    !> every input would pass all of them.
+    subroutine test_filter_set_control_succeeds(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "filter_set_control", expect_abort=.false., &
+            failure_message="a well-formed set clause was expected to open cleanly")
+    end subroutine test_filter_set_control_succeeds
 
     subroutine test_filter_rule_too_long_aborts(error)
         type(error_type), allocatable, intent(out) :: error

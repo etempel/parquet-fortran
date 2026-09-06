@@ -29,7 +29,7 @@
 module test_filter
     use parquet
     use iso_fortran_env, only : int32, int64, real32, real64
-    use ieee_arithmetic, only : ieee_value, ieee_quiet_nan
+    use ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_is_nan
     use testdrive, only : new_unittest, unittest_type, error_type, check
     !
     implicit none
@@ -109,7 +109,31 @@ contains
             new_unittest("remap_column_names: an unparseable rule is left for the reader to report", &
                 test_remap_keeps_bad_rule), &
             new_unittest("sortkey remap_column_names: direction and nulls_first survive", &
-                test_sortkey_remap_round_trip) &
+                test_sortkey_remap_round_trip), &
+            new_unittest("in: a bound set keeps its members, repeats collapsed", test_in_basic), &
+            new_unittest("in: agrees with the ==-chain it is shorthand for", test_in_equals_chain_oracle), &
+            new_unittest("not_in: complements in, and agrees with the /= chain", test_not_in_complements_in), &
+            new_unittest("in: an empty set matches nothing, not_in everything", test_in_empty_set), &
+            new_unittest("in/not_in: a null row is UNKNOWN under both", test_in_null_is_unknown), &
+            new_unittest("in: a bound set composes with or and >", test_in_composes_with_expression), &
+            new_unittest("not (v in @s) equals v not_in @s", test_not_of_in_equals_not_in), &
+            new_unittest("not (v in @s) does not admit null rows", test_not_of_in_keeps_nulls_out), &
+            new_unittest("is_null is the only way a null row enters a set result", &
+                test_is_null_readmits_null_rows), &
+            new_unittest("two bound sets on two columns are AND-combined", test_two_bound_sets), &
+            new_unittest("in: an integer set widens across kinds", test_in_integer_kinds_widen), &
+            new_unittest("in: a real set matches exactly, and -0.0 keys as +0.0", &
+                test_in_real_set_and_zero_signs), &
+            new_unittest("in: a NaN row matches nothing and survives not_in", &
+                test_in_nan_row_matches_nothing), &
+            new_unittest("in: a string set, from an array and from a string column", test_in_string_set), &
+            new_unittest("bind: is_valid= drops the masked-off members", test_bind_mask_drops_elements), &
+            new_unittest("in: a set clause survives remap_column_names", test_in_survives_remap), &
+            new_unittest("remap_column_names cannot rewrite a set NAME", &
+                test_remap_leaves_set_name_alone), &
+            new_unittest("a copied filter carries its bound sets", test_filter_copy_carries_sets), &
+            new_unittest("in: the bounded engine agrees with the unscoped one", &
+                test_in_bounded_matches_unscoped) &
             ]
     end subroutine collect_tests_filter
     !
@@ -1754,4 +1778,581 @@ contains
             "a remapped sort key did not order the rows the way the direct key does")
     end subroutine test_sortkey_remap_round_trip
     !
+    !
+    ! ---- Set-valued clauses: `in` / `not_in` over a bound set ----
+    !
+    !> Reads column "v" of `file` under a filter carrying one bound integer set, and returns the
+    !> surviving values. The set is bound with %add_in, the one-set-one-column sugar.
+    subroutine filtered_in(file, column, want, values, negate)
+        character(len=*), intent(in) :: file !! fixture to read.
+        character(len=*), intent(in) :: column !! the column the clause tests.
+        integer(int32), intent(in) :: want(:) !! the set's members.
+        integer(int32), allocatable, intent(out) :: values(:) !! surviving rows of column "v".
+        logical, intent(in), optional :: negate !! .true. spells the clause `not_in`.
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int64) :: nrows
+
+        call filt%add_in(column, want, negate=negate)
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        allocate(values(nrows))
+        if (nrows > 0) call parquet_read_column(reader, "v", values)
+        call parquet_close_reader(reader)
+    end subroutine filtered_in
+    !
+    !> The baseline: `v in @s` keeps exactly the rows whose value is a member, and a REPEATED
+    !> member in the caller's array is collapsed rather than refused.
+    !>
+    !> The repeat is not incidental. A real identifier list comes out of a join or a group-by and
+    !> very often carries one; pf_index_map%build refuses a duplicate key by contract, so %bind has
+    !> to deduplicate before it ever gets there. Drop that dedup and this test aborts.
+    subroutine test_in_basic(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: got(:)
+        character(len=*), parameter :: file = "test_run/filter_in_basic.parquet"
+
+        call write_grid_fixture(file)
+        call filtered_in(file, "v", [3, 7, 7, 9], got)
+        call check(error, size(got) == 3, "in: expected 3 surviving rows from a set with one repeat")
+        if (allocated(error)) return
+        call check(error, all(got == [3, 7, 9]), "in: expected rows 3, 7, 9")
+    end subroutine test_in_basic
+    !
+    !> `in` must agree with the `==` chain it is shorthand for, row for row.
+    !>
+    !> An INDEPENDENT oracle in the strict sense: the chain never touches %bind, pf_index_map, the
+    !> verdict array or the pre-evaluated leaf kind, so the two spellings share no machinery below
+    !> the parser. The same pattern test_filter.f90 already uses for `is_nan` against
+    !> `not (x >= 0 or x < 0)`.
+    subroutine test_in_equals_chain_oracle(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: by_set(:), by_chain(:)
+        character(len=*), parameter :: file = "test_run/filter_in_oracle.parquet"
+
+        call write_grid_fixture(file)
+        call filtered_in(file, "v", [2, 5, 6, 10], by_set)
+        call filtered_v(file, "v == 2 or v == 5 or v == 6 or v == 10", by_chain)
+        call check(error, size(by_set) == size(by_chain), &
+            "in vs ==-chain: the two spellings kept different row counts")
+        if (allocated(error)) return
+        call check(error, all(by_set == by_chain), "in vs ==-chain: the two spellings kept different rows")
+    end subroutine test_in_equals_chain_oracle
+    !
+    !> `not_in` is the complement of `in` over the non-null rows, and both spellings agree with
+    !> their `==`/`/=` chains.
+    subroutine test_not_in_complements_in(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: kept(:), dropped(:), by_chain(:)
+        character(len=*), parameter :: file = "test_run/filter_not_in.parquet"
+
+        call write_grid_fixture(file)
+        call filtered_in(file, "v", [4, 8], kept)
+        call filtered_in(file, "v", [4, 8], dropped, negate=.true.)
+        call check(error, size(kept) + size(dropped) == 10, &
+            "not_in: in and not_in must partition a null-free column")
+        if (allocated(error)) return
+        call filtered_v(file, "v /= 4 and v /= 8", by_chain)
+        call check(error, size(dropped) == size(by_chain), "not_in: row count differs from the /= chain")
+        if (allocated(error)) return
+        call check(error, all(dropped == by_chain), "not_in: rows differ from the /= chain")
+    end subroutine test_not_in_complements_in
+    !
+    !> An EMPTY set matches nothing under `in` and everything (non-null) under `not_in`.
+    !>
+    !> Worth its own test precisely because "nothing survived" is otherwise the signature of a bug:
+    !> here it is the right answer, and the screen's own counterpart (every row group pruned) is
+    !> asserted in test_filter_screen.f90.
+    subroutine test_in_empty_set(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: none(:), all_rows(:)
+        character(len=*), parameter :: file = "test_run/filter_in_empty.parquet"
+
+        call write_grid_fixture(file)
+        call filtered_in(file, "v", [integer(int32) ::], none)
+        call check(error, size(none) == 0, "in with an empty set must keep no row")
+        if (allocated(error)) return
+        call filtered_in(file, "v", [integer(int32) ::], all_rows, negate=.true.)
+        call check(error, size(all_rows) == 10, "not_in with an empty set must keep every row")
+    end subroutine test_in_empty_set
+    !
+    !> A NULL row is UNKNOWN under both `in` and `not_in`, exactly as under every comparison --
+    !> `is_null` stays the only way a null row enters a result.
+    !>
+    !> The negative control is the second half: if `not_in` admitted null rows (two-valued
+    !> negation), rows 3 and 4 would survive it. They must not.
+    subroutine test_in_null_is_unknown(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: f_in, f_not
+        integer(int32), allocatable :: got(:)
+        integer(int64) :: nrows
+        character(len=*), parameter :: file = "test_run/filter_in_nulls.parquet"
+
+        call write_null_fixture(file)
+        ! v = [1, 2, NULL, NULL, 5, 6]; the set names one present value and one absent one.
+        call f_in%add_in("v", [2, 99])
+        call parquet_open_reader(reader, file, filter=f_in)
+        call parquet_get_nrows(reader, nrows)
+        allocate(got(nrows))
+        if (nrows > 0) call parquet_read_column(reader, "u", got)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 1, "in: a null row must not match, so only row 2 survives")
+        if (allocated(error)) return
+        call check(error, got(1) == 2, "in: the surviving row must be row 2")
+        if (allocated(error)) return
+
+        deallocate(got)
+        call f_not%add_in("v", [2, 99], negate=.true.)
+        call parquet_open_reader(reader, file, filter=f_not)
+        call parquet_get_nrows(reader, nrows)
+        allocate(got(nrows))
+        if (nrows > 0) call parquet_read_column(reader, "u", got)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 3, &
+            "not_in: a null row is UNKNOWN, not true -- only the three non-null non-members survive")
+        if (allocated(error)) return
+        call check(error, all(got == [1, 5, 6]), "not_in: expected rows 1, 5 and 6")
+    end subroutine test_in_null_is_unknown
+    !
+    !> A bound set composes with the rest of the grammar: `or`, `not` and parentheses all see an
+    !> ordinary leaf, which is the whole reason the clause is text and only its payload an array.
+    subroutine test_in_composes_with_expression(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32), allocatable :: got(:)
+        integer(int64) :: nrows
+        character(len=*), parameter :: file = "test_run/filter_in_expression.parquet"
+
+        call write_grid_fixture(file)
+        call filt%bind("wanted", [3_int32, 7_int32])
+        call filt%add("v in @wanted or v > 8")
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        allocate(got(nrows))
+        if (nrows > 0) call parquet_read_column(reader, "v", got)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 4, "in inside an expression: expected 4 surviving rows")
+        if (allocated(error)) return
+        call check(error, all(got == [3, 7, 9, 10]), "in inside an expression: expected rows 3, 7, 9, 10")
+    end subroutine test_in_composes_with_expression
+    !
+    !> `not (v in @s)` equals `v not_in @s` on a null-free column -- the enclosing `not` node
+    !> negates a pre-evaluated leaf through the ordinary Kleene negation, so the two spellings meet.
+    subroutine test_not_of_in_equals_not_in(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32), allocatable :: negated(:), direct(:)
+        integer(int64) :: nrows
+        character(len=*), parameter :: file = "test_run/filter_in_negated.parquet"
+
+        call write_grid_fixture(file)
+        call filt%bind("s", [2_int32, 4_int32, 6_int32])
+        call filt%add("not (v in @s)")
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        allocate(negated(nrows))
+        if (nrows > 0) call parquet_read_column(reader, "v", negated)
+        call parquet_close_reader(reader)
+
+        call filtered_in(file, "v", [2, 4, 6], direct, negate=.true.)
+        call check(error, size(negated) == size(direct), "not(in) vs not_in: different row counts")
+        if (allocated(error)) return
+        call check(error, all(negated == direct), "not(in) vs not_in: different rows")
+    end subroutine test_not_of_in_equals_not_in
+    !
+    !> Two independent sets in one filter, on two columns, AND-combined.
+    subroutine test_two_bound_sets(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32), allocatable :: got(:)
+        integer(int64) :: nrows
+        character(len=*), parameter :: file = "test_run/filter_in_two_sets.parquet"
+
+        call write_grid_fixture(file)
+        ! v = 1..10 and w = 10..1, so row k has v = k and w = 11 - k.
+        call filt%bind("vs", [2_int32, 4_int32, 6_int32, 8_int32])
+        call filt%bind("ws", [7_int32, 5_int32])
+        call filt%add("v in @vs")
+        call filt%add("w in @ws")
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        allocate(got(nrows))
+        if (nrows > 0) call parquet_read_column(reader, "v", got)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 2, "two sets: expected rows 4 and 6 (w = 7 and 5)")
+        if (allocated(error)) return
+        call check(error, all(got == [4, 6]), "two sets: expected v = 4 and 6")
+    end subroutine test_two_bound_sets
+    !
+    !> An int32 set matches an int64 column and the reverse: an integer set widens to int64 and is
+    !> accepted against any integer column, exactly as an integer literal is.
+    subroutine test_in_integer_kinds_widen(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: f32, f64
+        integer(int64) :: big(6) = [10_int64, 20_int64, 30_int64, 40_int64, 50_int64, 60_int64]
+        integer(int64), allocatable :: got(:)
+        integer(int64) :: nrows
+        character(len=*), parameter :: file = "test_run/filter_in_kinds.parquet"
+
+        call parquet_open_writer(writer, file)
+        call parquet_write_column(writer, "big", big)
+        call parquet_close_writer(writer)
+
+        call f32%add_in("big", [20_int32, 50_int32])
+        call parquet_open_reader(reader, file, filter=f32)
+        call parquet_get_nrows(reader, nrows)
+        allocate(got(nrows))
+        if (nrows > 0) call parquet_read_column(reader, "big", got)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 2, "an int32 set against an int64 column: expected 2 rows")
+        if (allocated(error)) return
+        call check(error, all(got == [20_int64, 50_int64]), "an int32 set against an int64 column: wrong rows")
+        if (allocated(error)) return
+
+        deallocate(got)
+        call f64%add_in("big", [30_int64, 60_int64])
+        call parquet_open_reader(reader, file, filter=f64)
+        call parquet_get_nrows(reader, nrows)
+        allocate(got(nrows))
+        if (nrows > 0) call parquet_read_column(reader, "big", got)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 2, "an int64 set against an int64 column: expected 2 rows")
+        if (allocated(error)) return
+        call check(error, all(got == [30_int64, 60_int64]), "an int64 set against an int64 column: wrong rows")
+    end subroutine test_in_integer_kinds_widen
+    !
+    !> A REAL set matches by exact IEEE equality, and -0.0 and +0.0 are ONE key in both directions.
+    !>
+    !> The zero pair is the sharp half, and it is the mutation this test exists for: drop the
+    !> normalisation on either side and a column holding -0.0 stops matching a set holding +0.0,
+    !> which is a bit pattern nothing produces unless a test asks for it. Both zeros are built at
+    !> RUNTIME (negated from a variable) rather than written as literals, because the sign of a
+    !> negative zero in a constant expression is its own portability question.
+    subroutine test_in_real_set_and_zero_signs(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        real(real64) :: col(4), zero, neg_zero
+        real(real64), allocatable :: got(:)
+        integer(int64) :: nrows
+        character(len=*), parameter :: file = "test_run/filter_in_real.parquet"
+
+        zero = 0.0_real64
+        neg_zero = -zero
+        ! The fixture's precondition: this toolchain really does distinguish the two patterns.
+        ! Without it a compiler that loses the sign would fail this test blaming the library.
+        call check(error, transfer(neg_zero, 0_int64) /= transfer(zero, 0_int64), &
+            "fixture precondition: this build does not represent -0.0 distinctly, so the test " // &
+            "cannot say anything about the normalisation")
+        if (allocated(error)) return
+
+        col = [1.5_real64, neg_zero, 2.5_real64, 3.5_real64]
+        call parquet_open_writer(writer, file)
+        call parquet_write_column(writer, "x", col)
+        call parquet_close_writer(writer)
+
+        ! A set holding +0.0 must match the column's -0.0.
+        call filt%add_in("x", [zero, 2.5_real64])
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        allocate(got(nrows))
+        if (nrows > 0) call parquet_read_column(reader, "x", got)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 2, "a real set: +0.0 in the set must match -0.0 in the column")
+        if (allocated(error)) return
+        call check(error, got(1) == 0.0_real64 .and. got(2) == 2.5_real64, &
+            "a real set: expected the zero row and 2.5")
+    end subroutine test_in_real_set_and_zero_signs
+    !
+    !> A NaN ROW matches nothing under `in`, and therefore survives `not_in` -- the filter's own
+    !> IEEE rule, not pf_in's (where a NaN equals another NaN).
+    !>
+    !> It holds by construction rather than by a check: %bind refuses a NaN, so no NaN pattern is
+    !> ever a key and a NaN row's lookup finds nothing whatever payload bits it carries. See
+    !> feature_risks.md R-j.
+    subroutine test_in_nan_row_matches_nothing(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: f_in, f_not
+        real(real64) :: col(4)
+        real(real64), allocatable :: got(:)
+        integer(int64) :: nrows
+        character(len=*), parameter :: file = "test_run/filter_in_nan.parquet"
+
+        col = [1.0_real64, ieee_value(1.0_real64, ieee_quiet_nan), 2.0_real64, 3.0_real64]
+        call parquet_open_writer(writer, file)
+        call parquet_write_column(writer, "x", col)
+        call parquet_close_writer(writer)
+
+        call f_in%add_in("x", [1.0_real64, 2.0_real64])
+        call parquet_open_reader(reader, file, filter=f_in)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 2, "in: a NaN row must not match a set of ordinary values")
+        if (allocated(error)) return
+
+        call f_not%add_in("x", [1.0_real64, 2.0_real64], negate=.true.)
+        call parquet_open_reader(reader, file, filter=f_not)
+        call parquet_get_nrows(reader, nrows)
+        allocate(got(nrows))
+        if (nrows > 0) call parquet_read_column(reader, "x", got)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 2, &
+            "not_in: a NaN row is a VALUE that matches nothing, so it survives -- unlike a Null")
+        if (allocated(error)) return
+        call check(error, ieee_is_nan(got(1)) .or. ieee_is_nan(got(2)), &
+            "not_in: the NaN row must be among the survivors")
+    end subroutine test_in_nan_row_matches_nothing
+    !
+    !> A STRING set, bound from a character array and from a parquet_string_column, selects the
+    !> same rows -- and each element of the character array is trimmed on the way in.
+    subroutine test_in_string_set(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: f_arr, f_col
+        type(parquet_string_column) :: set_col
+        character(len=8) :: names(5) = ["alpha   ", "beta    ", "gamma   ", "delta   ", "epsilon "]
+        character(len=16), allocatable :: got(:)
+        integer(int64) :: n_arr, n_col
+        character(len=*), parameter :: file = "test_run/filter_in_strings.parquet"
+
+        call parquet_open_writer(writer, file)
+        call parquet_write_column(writer, "name", names)
+        call parquet_close_writer(writer)
+
+        ! The array form: elements are blank-padded to len=8 and must be trimmed, or nothing matches.
+        call f_arr%add_in("name", ["beta ", "delta"])
+        call parquet_open_reader(reader, file, filter=f_arr)
+        call parquet_get_nrows(reader, n_arr)
+        allocate(got(n_arr))
+        if (n_arr > 0) call parquet_read_column(reader, "name", got)
+        call parquet_close_reader(reader)
+        call check(error, n_arr == 2, "a string set from a character array: expected 2 rows")
+        if (allocated(error)) return
+        call check(error, trim(got(1)) == "beta" .and. trim(got(2)) == "delta", &
+            "a string set from a character array: expected beta and delta")
+        if (allocated(error)) return
+
+        ! The parquet_string_column form must select exactly the same rows.
+        call set_col%append_string("beta")
+        call set_col%append_string("delta")
+        call f_col%add_in("name", set_col)
+        call parquet_open_reader(reader, file, filter=f_col)
+        call parquet_get_nrows(reader, n_col)
+        call parquet_close_reader(reader)
+        call check(error, n_col == n_arr, &
+            "a string set: the character-array and parquet_string_column forms disagree")
+    end subroutine test_in_string_set
+    !
+    !> An `is_valid=` mask drops the elements it marks, and a NULL element of a bound
+    !> parquet_string_column is likewise not in the set.
+    subroutine test_bind_mask_drops_elements(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: got(:)
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int64) :: nrows
+        character(len=*), parameter :: file = "test_run/filter_in_masked.parquet"
+
+        call write_grid_fixture(file)
+        ! Only the first and third elements are admitted, so 5 and 9 are not in the set at all.
+        call filt%add_in("v", [3, 5, 8, 9], is_valid=[.true., .false., .true., .false.])
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        allocate(got(nrows))
+        if (nrows > 0) call parquet_read_column(reader, "v", got)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 2, "is_valid= on %bind must drop the masked-off members")
+        if (allocated(error)) return
+        call check(error, all(got == [3, 8]), "is_valid= on %bind: expected rows 3 and 8")
+    end subroutine test_bind_mask_drops_elements
+    !
+    !> A set-valued clause survives %remap_column_names, which is the property that made the
+    !> payload an array and the clause TEXT rather than a second, non-text path.
+    subroutine test_in_survives_remap(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32), allocatable :: got(:)
+        integer(int64) :: nrows
+        character(len=*), parameter :: file = "test_run/filter_in_remap.parquet"
+
+        call write_grid_fixture(file)
+        call filt%add_in("value", [3, 7])
+        ! The rule was written in the caller's own vocabulary; the file calls that column "v".
+        call filt%remap_column_names(["value"], ["v    "])
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        allocate(got(nrows))
+        if (nrows > 0) call parquet_read_column(reader, "v", got)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 2, "a renamed set clause: expected 2 surviving rows")
+        if (allocated(error)) return
+        call check(error, all(got == [3, 7]), "a renamed set clause: expected rows 3 and 7")
+    end subroutine test_in_survives_remap
+    !
+    !> A filter is COPIED by intrinsic assignment, sets and all -- which is how a parquet_table
+    !> keeps the filter it was opened with, and how %clone reattaches it. A set that was referenced
+    !> rather than copied would read freed memory here with nothing to notice.
+    subroutine test_filter_copy_carries_sets(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: original, copy
+        integer(int32), allocatable :: got(:)
+        integer(int64) :: nrows
+        character(len=*), parameter :: file = "test_run/filter_in_copied.parquet"
+
+        call write_grid_fixture(file)
+        block
+            integer(int32), allocatable :: transient(:)
+            transient = [2, 5, 8]
+            call original%add_in("v", transient)
+            deallocate(transient)   ! the caller's array is gone before the filter is ever applied
+        end block
+        copy = original
+        call parquet_open_reader(reader, file, filter=copy)
+        call parquet_get_nrows(reader, nrows)
+        allocate(got(nrows))
+        if (nrows > 0) call parquet_read_column(reader, "v", got)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 3, "a copied filter must carry its bound sets")
+        if (allocated(error)) return
+        call check(error, all(got == [2, 5, 8]), "a copied filter: expected rows 2, 5 and 8")
+    end subroutine test_filter_copy_carries_sets
+    !
+    !> A set clause reaches the same answer through the BOUNDED (row-group-scoped) engine as
+    !> through the caching one, on a fixture whose row groups the screen prunes unevenly.
+    !>
+    !> This is the coordinate-system test, and the pruning is what gives it teeth: the unscoped
+    !> engine gathers a pre-evaluated leaf's verdicts into the LIVE layout, which skips pruned row
+    !> groups entirely, while the scoped engine reads them at a physical base per row group. Slice
+    !> either one wrongly and the two arms disagree by exactly a pruned row group's length, with
+    !> both answers still looking like plausible row sets. See feature_risks.md R-b.
+    subroutine test_in_bounded_matches_unscoped(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: unscoped(:), bounded(:)
+        character(len=*), parameter :: file = "test_run/filter_in_bounded.parquet"
+
+        call write_chunked_fixture(file, 40, 5)
+        call in_through_table(file, [3, 7, 33, 38], .false., unscoped)
+        call in_through_table(file, [3, 7, 33, 38], .true., bounded)
+        call check(error, size(unscoped) == 4, "the unscoped engine kept the wrong number of rows")
+        if (allocated(error)) return
+        call check(error, size(bounded) == size(unscoped), &
+            "bounded vs unscoped: a set clause kept different row counts on the two engines")
+        if (allocated(error)) return
+        call check(error, all(bounded == unscoped), &
+            "bounded vs unscoped: a set clause kept different rows on the two engines")
+    end subroutine test_in_bounded_matches_unscoped
+    !
+    !> Opens `file` as a table with one bound integer set, optionally memory-bounded, and returns
+    !> the surviving values of column "v".
+    subroutine in_through_table(file, want, bounded, values)
+        character(len=*), intent(in) :: file !! fixture to read.
+        integer(int32), intent(in) :: want(:) !! the set's members.
+        logical, intent(in) :: bounded !! .true. reads one row group at a time.
+        integer(int32), allocatable, intent(out) :: values(:) !! surviving rows of column "v".
+        type(parquet_table) :: tbl
+        type(parquet_filter) :: filt
+
+        call filt%add_in("v", want)
+        call parquet_open_table(tbl, file, filter=filt, bounded=bounded)
+        call tbl%get("v", values)
+    end subroutine in_through_table
+
+    !
+    !> `not (v in @s)` must NOT admit a null row -- the negation of UNKNOWN is UNKNOWN.
+    !>
+    !> This is the ONE observation that separates a null answering UNKNOWN from a null answering
+    !> FALSE. Under a bare `in` or `not_in` clause the two are indistinguishable, because unknown
+    !> collapses to false at the end anyway; it is only an enclosing `not` that turns a two-valued
+    !> false into a surviving true. A mutation replacing KL_UNKNOWN with KL_FALSE passes every
+    !> other test in this suite and fails this one.
+    subroutine test_not_of_in_keeps_nulls_out(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32), allocatable :: got(:)
+        integer(int64) :: nrows
+        character(len=*), parameter :: file = "test_run/filter_in_not_nulls.parquet"
+
+        call write_null_fixture(file)   ! v = [1, 2, NULL, NULL, 5, 6]
+        call filt%bind("s", [2_int32])
+        call filt%add("not (v in @s)")
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        allocate(got(nrows))
+        if (nrows > 0) call parquet_read_column(reader, "u", got)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 3, &
+            "not (v in @s): a null row is UNKNOWN and negating it leaves it UNKNOWN, so only the " // &
+            "three non-null non-members survive -- five rows would mean the nulls were negated in")
+        if (allocated(error)) return
+        call check(error, all(got == [1, 5, 6]), "not (v in @s): expected rows 1, 5 and 6")
+    end subroutine test_not_of_in_keeps_nulls_out
+    !
+    !> The positive control for the rule above: `is_null` really is the way a null row gets in, and
+    !> it composes with a set clause through an ordinary `or`.
+    subroutine test_is_null_readmits_null_rows(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32), allocatable :: got(:)
+        integer(int64) :: nrows
+        character(len=*), parameter :: file = "test_run/filter_in_or_isnull.parquet"
+
+        call write_null_fixture(file)   ! v = [1, 2, NULL, NULL, 5, 6]
+        call filt%bind("s", [5_int32])
+        call filt%add("v in @s or v is_null")
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        allocate(got(nrows))
+        if (nrows > 0) call parquet_read_column(reader, "u", got)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 3, "in or is_null: the one member plus the two null rows")
+        if (allocated(error)) return
+        call check(error, all(got == [3, 4, 5]), "in or is_null: expected rows 3, 4 and 5")
+    end subroutine test_is_null_readmits_null_rows
+
+    !
+    !> A set name is in the VALUE position, so `%remap_column_names` must leave it alone even when a
+    !> column happens to share its spelling.
+    !>
+    !> Structurally guaranteed today -- the remap matches on `leaf_name` and assigns only
+    !> `leaf_name`, never `leaf_value` -- but the guarantee lives in one loop that a future change
+    !> to the renderer or the matcher could quietly widen, and the failure would be an unbound-set
+    !> abort in a program that had renamed something unrelated. The fixture is deliberately
+    !> adversarial: the set and the column being renamed have the SAME name.
+    subroutine test_remap_leaves_set_name_alone(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32), allocatable :: got(:)
+        integer(int64) :: nrows
+        character(len=*), parameter :: file = "test_run/filter_in_remap_collision.parquet"
+
+        call write_grid_fixture(file)
+        call filt%bind("w", [3_int32, 7_int32])   ! a set named exactly like the column below
+        call filt%add("v in @w")
+        call filt%remap_column_names(["w"], ["z"])  ! renames the COLUMN w, which this rule never names
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        allocate(got(nrows))
+        if (nrows > 0) call parquet_read_column(reader, "v", got)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 2, &
+            "remap must not rewrite '@w' into '@z' -- a set name is a value, not a column name")
+        if (allocated(error)) return
+        call check(error, all(got == [3, 7]), "remap collision: expected rows 3 and 7")
+    end subroutine test_remap_leaves_set_name_alone
+
 end module test_filter

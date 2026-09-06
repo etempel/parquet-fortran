@@ -247,6 +247,11 @@ parquet_columns_util.f90
 parquet_columns_validity.f90
 parquet_core.f90
 parquet_expkey.f90
+parquet_index.f90
+parquet_index_hash.f90
+parquet_index_map.f90
+parquet_index_pool.f90
+parquet_index_sorted.f90
 parquet_io.f90
 parquet_list.f90
 parquet_maml_base.f90
@@ -280,6 +285,7 @@ parquet_sorting_unique.f90
 parquet_strings.f90
 parquet_struct.f90
 parquet_temporal.f90
+parquet_utils.f90
 parquet_wrapper.cpp
 parquet_write.f90
 parquet_write_list.f90
@@ -304,6 +310,11 @@ parquet_columns_util.f90
 parquet_columns_validity.f90
 parquet_core.f90
 parquet_expkey.f90
+parquet_index.f90
+parquet_index_hash.f90
+parquet_index_map.f90
+parquet_index_pool.f90
+parquet_index_sorted.f90
 parquet_list.f90
 parquet_maml_base.f90
 parquet_maml_base_add_col_qc.f90
@@ -357,6 +368,7 @@ parquet_tables_slice.f90
 parquet_tables_sort.f90
 parquet_tables_write.f90
 parquet_temporal.f90
+parquet_utils.f90
 parquet_wrapper.cpp
 parquet_write.f90
 parquet_write_list.f90

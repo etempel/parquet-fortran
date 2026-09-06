@@ -74,6 +74,11 @@ something a reader is expected to have.
 
 | risk | what a future change can break | section |
 |---|---|---|
+| [Risk-190](#risk-190--a-pre-evaluated-leafs-screen-flags-must-come-from-its-own-verdict-segment) | A pre-evaluated leaf's screen flags must come from its own verdict segment | 4 — covered |
+| [Risk-191](#risk-191--the-verdict-array-is-indexed-by-physical-row-and-the-reader-has-three-coordinate-systems) | The verdict array is indexed by PHYSICAL row | 4 — covered |
+| [Risk-192](#risk-192--a-bound-sets-keys-are-deduplicated-copied-and-keyed-with--00-normalised) | A bound set's keys are deduplicated, copied, and keyed with -0.0 normalised | 4 — covered |
+| [Risk-193](#risk-193--a-nan-never-matches-a-bound-set-and-a-null-under-a-set-clause-is-unknown-not-false) | A NaN never matches a bound set; a null is UNKNOWN not FALSE | 4 — covered |
+| [Risk-194](#risk-194--a-pre-evaluated-leafs-column-must-not-be-read-again-and-its-shape-must-be-checked-first) | A pre-evaluated leaf's column must not be read again | 4 — covered |
 | [Risk-1](#risk-1--the-release-policy-regresses-silently) | The release policy regresses silently | 4 — covered |
 | [Risk-2](#risk-2--the-schema-less-write-rests-on-three-properties-that-look-incidental) | The schema-less write rests on three properties that look incidental | 4 — covered |
 | [Risk-3](#risk-3--the-screen-and-the-evaluator-can-drift-apart) | The screen and the evaluator can drift apart | 4 — covered |
@@ -1164,6 +1169,113 @@ rows' elements.
 
 
 ## 4. Risks already covered, kept for what they still forbid
+
+### Risk-190 — A pre-evaluated leaf's screen flags must come from its own verdict segment
+
+An `in`/`not_in` clause is answered in Fortran before the filter is installed, and its three
+`KleenePossible` flags per row group are derived from the verdicts it just wrote
+(`parquet_evaluate_set_leaf`, `src/parquet_read.f90`) rather than from any statistic. Deriving
+`may_true` from something coarser -- the statistics path, `nn > 0`, "this row group is non-empty" --
+merely prunes less, which is harmless. Deriving it from a **mis-sliced** segment is not: an
+off-by-one in the row-group bounds the flags are computed over prunes a row group that holds
+members, and the rows in it vanish from the answer.
+
+**Why a test would not notice.** The output is a perfectly valid row set; nothing is missing that a
+row count could reveal. Only a fixture whose members sit beside a row-group boundary -- in the last
+row of one, or the first row of the next -- distinguishes a correct segment from one shifted by a
+row.
+
+**Test.** `test_set_clause_prunes`, `test_set_clause_prunes_on_gaps`, `test_empty_set_prunes_everything`
+and `test_not_in_prunes_saturated_groups` (`test/test_filter_screen.f90`) each assert the pruned
+count exactly, not merely that the two arms agree -- equality alone passes against a screen that
+never prunes. `test_set_spanning_prunes_nothing` is the negative control. Confirmed by mutation:
+deriving `may_true` from the row count instead of the verdicts fails four of them, and an
+off-by-one in the C++ `pre_flags` row-group offset fails the same four.
+
+### Risk-191 — The verdict array is indexed by PHYSICAL row, and the reader has three coordinate systems
+
+`pre_verdicts` carries one Kleene value per **physical** row of the file, and the C++ side gathers
+from it into whichever coordinate system the evaluation is working in: a contiguous physical run for
+the scoped (bounded) engine, one row group at a time, and the **live** layout for the unscoped one,
+which omits pruned row groups entirely (`fill_pre_leaf`, `src/parquet_wrapper.cpp`). Slicing it by
+live row where physical was meant misaligns every row group after the first pruned one, by exactly
+that row group's length.
+
+This is the same trap Risk-131 records for the sample mask, and the reason the length is checked at
+the boundary rather than trusted.
+
+**Why a test would not notice.** The surviving row count can still come out right -- the rows are
+shifted, not lost -- so only comparing the *values* of the surviving rows against a second engine
+reveals it, and only on a fixture where the screen actually pruned something.
+
+**Test.** `test_in_bounded_matches_unscoped` (`test/test_filter.f90`) reads the same set clause
+through both engines on a fixture the screen prunes unevenly, and compares the surviving values.
+Confirmed by mutation: gathering at `src[live_off + i]` instead of `src[first_row + i]` fails it.
+
+### Risk-192 — A bound set's keys are deduplicated, copied, and keyed with -0.0 normalised
+
+Three properties of `%bind` (`src/parquet_core.f90`), each failing differently:
+
+* **Deduplicated.** `pf_index_map%build` refuses a duplicate key by contract, so a caller's ID list
+  with one repeat -- which a list produced by a join or a group-by very often has -- would abort.
+  That failure is loud; the danger is the fix a contributor then reaches for, `%set` instead of
+  `%build`, which silently keeps one row per key and changes which.
+* **Copied, never referenced.** A filter is copied by intrinsic assignment at least twice on the way
+  into a `parquet_table` (`cache%read_filter`, then `%clone`). A referenced array would leave a
+  later `parquet_reader_set_filter` reading freed memory -- which usually *works*, because the
+  caller's array is usually still alive.
+* **`-0.0` normalised to `+0.0` on both sides.** They compare equal under `==`, so an `in` clause
+  must agree, and their bit patterns differ. Dropping the normalisation makes a `-0.0` in a column
+  miss a `+0.0` in a set.
+
+**Why a test would not notice.** The third is one bit pattern that nothing produces unless a test
+asks for it; the second usually works.
+
+**Test.** `test_in_basic` binds a set with a repeat; `test_filter_copy_carries_sets` deallocates the
+caller's array before the filter is ever applied; `test_in_real_set_and_zero_signs` builds both
+zeros at runtime and asserts its own precondition first (all in `test/test_filter.f90`). All three
+confirmed by mutation.
+
+### Risk-193 — A NaN never matches a bound set, and a null under a set clause is UNKNOWN not FALSE
+
+Two rules that hold **by construction** rather than by a check, which is what makes them easy to
+break while making the code look simpler:
+
+* A NaN is refused *inside* a bound real set at `%bind`, so no NaN pattern is ever a key; a NaN
+  **row** therefore looks up 0 whatever payload bits it carries, and matches nothing under `in` --
+  the filter's IEEE rule, deliberately unlike `pf_in`, where a NaN equals another NaN. "Fixing" the
+  bind-time refusal into an accepted key would make one NaN payload match and every other not.
+* A null row answers `KL_UNKNOWN`, not `KL_FALSE` (`parquet_set_verdict`, `src/parquet_read.f90`).
+
+**Why a test would not notice the second.** Under a bare `in` or `not_in` clause the two are
+**indistinguishable**: unknown collapses to false at the end anyway, so the null row is dropped
+either way. Only an enclosing `not` separates them -- two-valued false negates to true and the null
+row survives. This was found by mutation, after the mutation survived the whole suite.
+
+**Test.** `test_not_of_in_keeps_nulls_out` is the one observation that separates them, with
+`test_is_null_readmits_null_rows` as its positive control; `test_in_nan_row_matches_nothing` covers
+the NaN row on both spellings (all in `test/test_filter.f90`).
+
+### Risk-194 — A pre-evaluated leaf's column must not be read again, and its shape must be checked first
+
+Two ordering properties of the set clause, both invisible when the answer happens to be right:
+
+* **Its column is deliberately absent from `touched_indices`** (`parquet_reader_set_filter`,
+  `src/parquet_wrapper.cpp`). Fortran has already read it one row group at a time; adding it back
+  would make the unscoped path read the whole column again to evaluate a clause that is already
+  evaluated, and on a `bounded=` read it would undo the bound outright -- with the answer unchanged,
+  so only a memory measurement could see it.
+* **The container-shape check runs before the first chunk read** (`parquet_check_set_column_shape`).
+  C++ refuses a vector/list/map/struct filter column from the schema, but only *after* the
+  pre-evaluation has run -- so without the Fortran check the caller's abort comes from the chunk
+  reader ("type mismatch for column: vec"), says nothing about the filter, and arrives as a C++
+  fatal error rather than a clean Fortran one. Found exactly that way while writing
+  `filter_set_vector_column`.
+
+**Test.** The shape half is `filter_set_vector_column` (`test/error_scenarios.f90`), which asserts
+the message text and not merely the abort. The read half has no test: nothing in the suite asserts
+memory, and `g_debug_force_whole_column_read_error` fires on the whole-column path generally rather
+than per leaf. Left as a rule with its reasoning at the call site.
 
 ### Risk-184 — The non-detaching join is a computed condition, and BOTH halves of it are load-bearing
 

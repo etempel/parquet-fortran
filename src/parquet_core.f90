@@ -15,13 +15,16 @@
 !> ...) use it, but its name and contents may change in any release.
 module parquet_core
     use iso_c_binding
-    use iso_fortran_env, only: int32, int64, real32, real64
+    use iso_fortran_env, only: int8, int32, int64, real32, real64
+    use ieee_arithmetic, only: core_is_nan => ieee_is_nan
     use parquet_bindings
     ! Default accessibility here is `private`, so the names this brings in are NOT re-exported from
     ! parquet_core -- a user reaches them through the `parquet` facade's own `use parquet_settings`.
     ! What this import is for is the limit aliases a few lines below.
+    use parquet_index, only: pf_index_map
+    use parquet_sorting, only: pf_unique
     use parquet_settings, only: parquet_max_filter_rule_len, parquet_max_filter_depth, parquet_max_filter_nodes, &
-        parquet_max_sort_keys, parquet_max_sort_key_len
+        parquet_max_sort_keys, parquet_max_sort_key_len, parquet_max_filter_sets
     use parquet_maml_base, only: parquet_maml_file
     use parquet_strings, only: parquet_string_column, parquet_string, parquet_string_column_raw_buffers
     ! parquet_list for the container type the LIST read specifics fill; parquet_columns for the
@@ -77,6 +80,44 @@ module parquet_core
     integer, parameter :: filter_max_rule_len = parquet_max_filter_rule_len
     integer, parameter :: filter_max_depth = parquet_max_filter_depth
     integer, parameter :: filter_max_nodes = parquet_max_filter_nodes
+    integer, parameter :: filter_max_sets = parquet_max_filter_sets
+    !> Width of one bound set's stored name. Matches filter_leaf_name_len (parquet_read.f90), so
+    !> a set name obeys the same rules a column name does and `@<name>` always fits a leaf value.
+    integer, parameter :: filter_set_name_len = 64
+    !> Which element family a bound set holds, and therefore which columns it may be compared
+    !> against and how its keys were formed. An integer set widens to int64 and is accepted
+    !> against any integer column; a real set is keyed by real64 bit pattern and is accepted
+    !> against the families the text path compares as doubles; a string set is accepted against a
+    !> string column. Boolean, temporal and container columns are refused -- see the element-family
+    !> rules in doc/pages/io/filter-sort-sample.md.
+    integer(int8), parameter :: FSET_INT = 1_int8
+    integer(int8), parameter :: FSET_REAL = 2_int8
+    integer(int8), parameter :: FSET_STRING = 3_int8
+
+    ! ---- Bound-set key conversion (implemented in parquet_read) ----
+    !> The int64 key a real64 value is stored under in a bound set, and the same key every lookup
+    !> against one is made with: the value's own IEEE bit pattern, with -0.0 mapped onto +0.0's.
+    !>
+    !> Comparing bit patterns *is* exact IEEE equality once NaN is excluded, which is what lets one
+    !> pf_index_map serve integer and real sets alike with no second backend and no epsilon. The
+    !> two exclusions are the whole content of the function:
+    !>
+    !>  - **-0.0 and +0.0 are one key.** They compare equal under `==`, so an `in` clause must
+    !>    agree, and their bit patterns differ. Written as a comparison against zero followed by an
+    !>    assignment of the literal key, rather than as a float assignment (`if (x == 0.0) x = 0.0`,
+    !>    which an optimiser may delete as a no-op) or a test against the most-negative int64
+    !>    constant (which nagfor 7.2 mis-evaluates against a runtime value -- see CLAUDE.md).
+    !>    `v == 0.0_real64` is true for both zeros, and the key taken is the +0.0 pattern.
+    !>  - **A NaN is never a key.** It is refused at %bind, so no NaN pattern reaches the map; a NaN
+    !>    ROW therefore looks up 0 whatever payload bits it carries, which is the filter's own rule
+    !>    (a NaN matches nothing, so `not_in` is true for it) holding by construction on both
+    !>    engines rather than by a separate check in each. See feature_risks.md R-j.
+    interface
+        elemental module function parquet_filter_real_key(v) result(key)
+            real(real64), intent(in) :: v !! the value to key.
+            integer(int64) :: key !! that value's set key.
+        end function parquet_filter_real_key
+    end interface
     integer, parameter :: sortkey_max_key_len = parquet_max_sort_key_len
     integer, parameter :: sortkey_max_keys = parquet_max_sort_keys
 
@@ -579,10 +620,50 @@ module parquet_core
         !! parenthesised multi-clause expression is not constrained by a fixed component width.
         character(len=:), allocatable :: rules(:)
         integer :: n = 0 !! Number of rules actually in use.
+        !> The BOUND SETS behind this filter's `in`/`not_in` clauses -- one entry per %bind call,
+        !! named so that a rule can refer to it as `@name`. Everything below is the payload of
+        !! those clauses; a filter with no `in` clause carries none of it.
+        !!
+        !! Stored as the DISTINCT KEYS rather than as a built pf_index_map, deliberately: a filter
+        !! is copied by intrinsic assignment at least twice on the way into a parquet_table
+        !! (cache%read_filter, then %clone), so the minimal representation is the one to copy, and
+        !! rebuilding the map costs one O(m) pass beside a pass over a file. A set is COPIED at
+        !! %bind, never referenced -- the caller's array may change or vanish afterwards.
+        character(len=filter_set_name_len), allocatable :: set_name(:) !! each set's name, without the '@'.
+        integer(int8), allocatable :: set_family(:) !! FSET_INT / FSET_REAL / FSET_STRING per set.
+        !> Each set's inclusive slice of `set_keys` (integer and real families) or of `set_text`
+        !! (string family). `set_hi < set_lo` marks an EMPTY set, which is legal and matches
+        !! nothing -- see the screen rule in doc/pages/io/filter-sort-sample.md.
+        integer(int64), allocatable :: set_lo(:), set_hi(:)
+        !> Every integer/real set's keys, concatenated. A real key is the bit pattern of its
+        !! real64 value with -0.0 normalised to +0.0 (parquet_filter_real_key), which makes exact
+        !! IEEE equality an integer comparison and lets one pf_index_map serve both families.
+        integer(int64), allocatable :: set_keys(:)
+        type(parquet_string_column), allocatable :: set_text !! every string set's keys, concatenated.
+        integer :: nsets = 0 !! Number of sets actually bound.
+        integer :: gen_sets = 0 !! Sets named by %add_in so far; the counter behind the `__in<k>` names.
     contains
         procedure :: add => parquet_filter_add !! Appends one AND-combined filter expression.
         !> Renames the columns every rule refers to, in place: `from(k)` becomes `to(k)`.
         procedure :: remap_column_names => parquet_filter_remap_column_names
+        procedure, private :: bind_i32 !! %bind specific taking an int32 array.
+        procedure, private :: bind_i64 !! %bind specific taking an int64 array.
+        procedure, private :: bind_r32 !! %bind specific taking a real32 array.
+        procedure, private :: bind_r64 !! %bind specific taking a real64 array.
+        procedure, private :: bind_chr !! %bind specific taking a character array.
+        procedure, private :: bind_str !! %bind specific taking a parquet_string_column.
+        !> Attaches `values` to this filter under `name`, so that an `in`/`not_in` clause can
+        !! refer to the set as `@name`. See parquet_filter's own doc-comment.
+        generic :: bind => bind_i32, bind_i64, bind_r32, bind_r64, bind_chr, bind_str
+        procedure, private :: add_in_i32 !! %add_in specific taking an int32 array.
+        procedure, private :: add_in_i64 !! %add_in specific taking an int64 array.
+        procedure, private :: add_in_r32 !! %add_in specific taking a real32 array.
+        procedure, private :: add_in_r64 !! %add_in specific taking a real64 array.
+        procedure, private :: add_in_chr !! %add_in specific taking a character array.
+        procedure, private :: add_in_str !! %add_in specific taking a parquet_string_column.
+        !> Binds `values` under a generated name and adds the one clause `<column> in @<that name>`
+        !! (or `not_in`, with `negate=.true.`). Sugar over %bind plus %add.
+        generic :: add_in => add_in_i32, add_in_i64, add_in_r32, add_in_r64, add_in_chr, add_in_str
     end type parquet_filter
 
     !> A read-time sort specification: an ordered list of sort KEYS, each naming one column and
@@ -4550,6 +4631,398 @@ contains
             end if
         end do
     end subroutine parquet_split_name_list
+
+    !> Checks one %bind name against the rules a column name follows, and against this filter's
+    !> remaining set capacity. Called before anything is stored, so a rejected bind leaves the
+    !> filter exactly as it was.
+    subroutine parquet_filter_check_bind(this, name, context)
+        class(parquet_filter), intent(in) :: this !! the filter about to gain a set.
+        character(len=*), intent(in) :: name !! the proposed set name, without the '@'.
+        character(len=*), intent(in) :: context !! calling binding's name, for the message.
+        character(len=32) :: cap_str
+        integer :: k
+
+        if (len_trim(name) == 0) error stop trim(context) // ": a set name must not be blank"
+        if (len_trim(name) > filter_set_name_len) then
+            write(cap_str, '(i0)') filter_set_name_len
+            error stop trim(context) // ": set name '" // trim(name) // "' is longer than the " // &
+                trim(cap_str) // "-character limit"
+        end if
+        if (index(trim(name), " ") > 0) then
+            error stop trim(context) // ": set name '" // trim(name) // "' must not contain a space"
+        end if
+        if (index(trim(name), "@") > 0) then
+            error stop trim(context) // ": set name '" // trim(name) // &
+                "' must not contain '@' -- the '@' belongs in the rule text, not in the name"
+        end if
+        do k = 1, this%nsets
+            if (trim(this%set_name(k)) == trim(name)) then
+                error stop trim(context) // ": a set named '" // trim(name) // &
+                    "' is already bound to this filter"
+            end if
+        end do
+        if (this%nsets >= filter_max_sets) then
+            write(cap_str, '(i0)') filter_max_sets
+            error stop trim(context) // ": this filter already holds the maximum of " // &
+                trim(cap_str) // " bound sets (parquet_max_filter_sets)"
+        end if
+    end subroutine parquet_filter_check_bind
+
+    !> Checks an optional per-element mask's length against the array it masks.
+    subroutine parquet_filter_check_mask(n, is_valid, context)
+        integer(int64), intent(in) :: n !! the bound array's element count.
+        logical, intent(in), optional :: is_valid(:) !! the caller's mask, if any.
+        character(len=*), intent(in) :: context !! calling binding's name, for the message.
+        character(len=32) :: got_str, want_str
+        if (.not. present(is_valid)) return
+        if (size(is_valid, kind=int64) /= n) then
+            write(got_str, '(i0)') size(is_valid, kind=int64)
+            write(want_str, '(i0)') n
+            error stop trim(context) // ": is_valid has " // trim(got_str) // " entries but values has " // &
+                trim(want_str)
+        end if
+    end subroutine parquet_filter_check_mask
+
+    !> Refuses a NaN inside a bound real set, naming its position.
+    !>
+    !> Refused at BIND rather than tolerated at apply, because a NaN key could never match: the
+    !> filter grammar treats a NaN as an IEEE value that equals nothing, exactly as it refuses
+    !> `"x == nan"` as a literal. Accepting one would silently give a set member that can never
+    !> select a row, which is indistinguishable from a typo. A masked-off element is not checked --
+    !> it is not in the set, so its value never matters.
+    subroutine parquet_filter_refuse_nan(values, is_valid, context)
+        real(real64), intent(in) :: values(:) !! the set's members, already widened to real64.
+        logical, intent(in), optional :: is_valid(:) !! per-element mask; a .false. element is skipped.
+        character(len=*), intent(in) :: context !! calling binding's name, for the message.
+        character(len=32) :: pos_str
+        integer(int64) :: i
+        do i = 1_int64, size(values, kind=int64)
+            if (present(is_valid)) then
+                if (.not. is_valid(i)) cycle
+            end if
+            if (core_is_nan(values(i))) then
+                write(pos_str, '(i0)') i
+                error stop trim(context) // ": element " // trim(pos_str) // " of the set is a NaN, " // &
+                    "which can never match -- a filter compares a NaN as IEEE does, so no row is " // &
+                    "equal to it (the same reason 'x == nan' is refused as a literal)"
+            end if
+        end do
+    end subroutine parquet_filter_refuse_nan
+
+    !> Grows this filter's per-set descriptor arrays by one and fills the new entry's name and
+    !> family, leaving its slice bounds for the caller to set. Shared by every %bind specific, so
+    !> the descriptor layout has exactly one definition.
+    subroutine parquet_filter_new_set(this, name, family)
+        class(parquet_filter), intent(inout) :: this !! the filter gaining a set.
+        character(len=*), intent(in) :: name !! the set's name, without the '@'.
+        integer(int8), intent(in) :: family !! FSET_INT, FSET_REAL or FSET_STRING.
+        character(len=filter_set_name_len), allocatable :: tmp_name(:)
+        integer(int8), allocatable :: tmp_family(:)
+        integer(int64), allocatable :: tmp_lo(:), tmp_hi(:)
+        integer :: m
+
+        m = this%nsets
+        if (.not. allocated(this%set_name)) then
+            allocate(this%set_name(1), this%set_family(1), this%set_lo(1), this%set_hi(1))
+        else if (m >= size(this%set_name)) then
+            allocate(tmp_name(m + 1), tmp_family(m + 1), tmp_lo(m + 1), tmp_hi(m + 1))
+            tmp_name(1:m) = this%set_name(1:m)
+            tmp_family(1:m) = this%set_family(1:m)
+            tmp_lo(1:m) = this%set_lo(1:m)
+            tmp_hi(1:m) = this%set_hi(1:m)
+            call move_alloc(tmp_name, this%set_name)
+            call move_alloc(tmp_family, this%set_family)
+            call move_alloc(tmp_lo, this%set_lo)
+            call move_alloc(tmp_hi, this%set_hi)
+        end if
+        this%nsets = m + 1
+        this%set_name(this%nsets) = name
+        this%set_family(this%nsets) = family
+        this%set_lo(this%nsets) = 1_int64
+        this%set_hi(this%nsets) = 0_int64
+    end subroutine parquet_filter_new_set
+
+    !> Deduplicates `keys` and appends the distinct ones to this filter's concatenated key store,
+    !> recording the new set's slice.
+    !>
+    !> %get_or_add is pf_index_map's own dictionary-encoding primitive, so a caller's identifier
+    !> list may contain repeats -- which a real one produced by a join or a group-by very often
+    !> does -- without the abort pf_index_map%build would (correctly) raise on a duplicate key.
+    !> Deduplicating HERE rather than tolerating duplicates later is what lets every evaluation of
+    !> the leaf use %build, whose contract is the strict one. See feature_risks.md R-e.
+    subroutine parquet_filter_store_keys(this, name, family, keys, is_valid)
+        class(parquet_filter), intent(inout) :: this !! the filter gaining a set.
+        character(len=*), intent(in) :: name !! the set's name, without the '@'.
+        integer(int8), intent(in) :: family !! FSET_INT or FSET_REAL.
+        integer(int64), intent(in) :: keys(:) !! one key per element of the caller's array, masked entries included.
+        logical, intent(in), optional :: is_valid(:) !! per-element mask; a .false. element is not in the set.
+        type(pf_index_map) :: seen
+        integer(int64), allocatable :: distinct(:), tmp(:)
+        integer(int64) :: i, idx, base, ndist, held
+
+        call seen%init()
+        do i = 1_int64, size(keys, kind=int64)
+            if (present(is_valid)) then
+                if (.not. is_valid(i)) cycle
+            end if
+            call seen%get_or_add(keys(i), idx)
+        end do
+        ndist = seen%nkeys()
+        if (ndist > 0_int64) then
+            call seen%keys(distinct)
+        else
+            allocate(distinct(0))
+        end if
+
+        held = 0_int64
+        if (allocated(this%set_keys)) held = size(this%set_keys, kind=int64)
+        allocate(tmp(held + ndist))
+        if (held > 0_int64) tmp(1:held) = this%set_keys(1:held)
+        if (ndist > 0_int64) tmp(held + 1:held + ndist) = distinct(1:ndist)
+        call move_alloc(tmp, this%set_keys)
+
+        base = held
+        call parquet_filter_new_set(this, name, family)
+        this%set_lo(this%nsets) = base + 1_int64
+        this%set_hi(this%nsets) = base + ndist
+    end subroutine parquet_filter_store_keys
+
+    !> Appends `distinct`'s strings to this filter's concatenated string store, recording the new
+    !> set's slice. The caller has already deduplicated and dropped nulls with pf_unique.
+    subroutine parquet_filter_store_text(this, name, distinct)
+        class(parquet_filter), intent(inout) :: this !! the filter gaining a set.
+        character(len=*), intent(in) :: name !! the set's name, without the '@'.
+        type(parquet_string_column), intent(in) :: distinct !! the set's distinct, non-null members.
+        integer(int64) :: base, ndist
+
+        if (.not. allocated(this%set_text)) then
+            allocate(this%set_text)
+            call this%set_text%clear()
+        end if
+        base = this%set_text%size()
+        ndist = distinct%size()
+        ! One bulk append rather than a get/append_string loop: %get materialises a deferred-length
+        ! string per element, which is the per-element allocation feature_risks.md Risk-60 is about.
+        call this%set_text%append_column(distinct)
+
+        call parquet_filter_new_set(this, name, FSET_STRING)
+        this%set_lo(this%nsets) = base + 1_int64
+        this%set_hi(this%nsets) = base + ndist
+    end subroutine parquet_filter_store_text
+
+    !> %bind specific taking an int32 array; see the %bind generic.
+    subroutine bind_i32(this, name, values, is_valid)
+        class(parquet_filter), intent(inout) :: this !! filter gaining the set.
+        character(len=*), intent(in) :: name !! the set's name, without the '@'.
+        integer(int32), intent(in) :: values(:) !! the set's members; repeats are collapsed.
+        logical, intent(in), optional :: is_valid(:) !! per-element mask; a .false. element is not in the set.
+        call parquet_filter_check_bind(this, name, "parquet_filter%bind")
+        call parquet_filter_check_mask(size(values, kind=int64), is_valid, "parquet_filter%bind")
+        call parquet_filter_store_keys(this, name, FSET_INT, int(values, int64), is_valid)
+    end subroutine bind_i32
+
+    !> %bind specific taking an int64 array; see the %bind generic.
+    subroutine bind_i64(this, name, values, is_valid)
+        class(parquet_filter), intent(inout) :: this !! filter gaining the set.
+        character(len=*), intent(in) :: name !! the set's name, without the '@'.
+        integer(int64), intent(in) :: values(:) !! the set's members; repeats are collapsed.
+        logical, intent(in), optional :: is_valid(:) !! per-element mask; a .false. element is not in the set.
+        call parquet_filter_check_bind(this, name, "parquet_filter%bind")
+        call parquet_filter_check_mask(size(values, kind=int64), is_valid, "parquet_filter%bind")
+        call parquet_filter_store_keys(this, name, FSET_INT, values, is_valid)
+    end subroutine bind_i64
+
+    !> %bind specific taking a real32 array; see the %bind generic.
+    subroutine bind_r32(this, name, values, is_valid)
+        class(parquet_filter), intent(inout) :: this !! filter gaining the set.
+        character(len=*), intent(in) :: name !! the set's name, without the '@'.
+        real(real32), intent(in) :: values(:) !! the set's members; repeats are collapsed, a NaN is refused.
+        logical, intent(in), optional :: is_valid(:) !! per-element mask; a .false. element is not in the set.
+        real(real64), allocatable :: wide(:)
+        call parquet_filter_check_bind(this, name, "parquet_filter%bind")
+        call parquet_filter_check_mask(size(values, kind=int64), is_valid, "parquet_filter%bind")
+        wide = real(values, real64)
+        call parquet_filter_refuse_nan(wide, is_valid, "parquet_filter%bind")
+        call parquet_filter_store_keys(this, name, FSET_REAL, parquet_filter_real_key(wide), is_valid)
+    end subroutine bind_r32
+
+    !> %bind specific taking a real64 array; see the %bind generic.
+    subroutine bind_r64(this, name, values, is_valid)
+        class(parquet_filter), intent(inout) :: this !! filter gaining the set.
+        character(len=*), intent(in) :: name !! the set's name, without the '@'.
+        real(real64), intent(in) :: values(:) !! the set's members; repeats are collapsed, a NaN is refused.
+        logical, intent(in), optional :: is_valid(:) !! per-element mask; a .false. element is not in the set.
+        call parquet_filter_check_bind(this, name, "parquet_filter%bind")
+        call parquet_filter_check_mask(size(values, kind=int64), is_valid, "parquet_filter%bind")
+        call parquet_filter_refuse_nan(values, is_valid, "parquet_filter%bind")
+        call parquet_filter_store_keys(this, name, FSET_REAL, parquet_filter_real_key(values), is_valid)
+    end subroutine bind_r64
+
+    !> %bind specific taking a character array; see the %bind generic. Each element is TRIMMED, the
+    !> rule every character ARRAY argument in this library follows: an array's elements share one
+    !> declared length, so the blank padding a shorter value carries cannot be what the caller
+    !> meant. A parquet_string_column set (bind_str) is not trimmed, for the same reason.
+    subroutine bind_chr(this, name, values, is_valid)
+        class(parquet_filter), intent(inout) :: this !! filter gaining the set.
+        character(len=*), intent(in) :: name !! the set's name, without the '@'.
+        character(len=*), intent(in) :: values(:) !! the set's members; repeats are collapsed, each trimmed.
+        logical, intent(in), optional :: is_valid(:) !! per-element mask; a .false. element is not in the set.
+        type(parquet_string_column) :: given, distinct
+        integer(int64) :: i
+
+        call parquet_filter_check_bind(this, name, "parquet_filter%bind")
+        call parquet_filter_check_mask(size(values, kind=int64), is_valid, "parquet_filter%bind")
+        call given%clear()
+        do i = 1_int64, size(values, kind=int64)
+            if (present(is_valid)) then
+                if (.not. is_valid(i)) cycle
+            end if
+            call given%append_string(trim(values(i)))
+        end do
+        call pf_unique(given, distinct)
+        call parquet_filter_store_text(this, name, distinct)
+    end subroutine bind_chr
+
+    !> %bind specific taking a parquet_string_column; see the %bind generic. Bytes are taken
+    !> verbatim (no trimming -- the column stores exactly what was appended to it), and a NULL
+    !> element is simply not in the set.
+    subroutine bind_str(this, name, values, is_valid)
+        class(parquet_filter), intent(inout) :: this !! filter gaining the set.
+        character(len=*), intent(in) :: name !! the set's name, without the '@'.
+        type(parquet_string_column), intent(in) :: values !! the set's members; repeats and nulls are dropped.
+        logical, intent(in), optional :: is_valid(:) !! per-element mask; a .false. element is not in the set.
+        type(parquet_string_column) :: given, distinct
+        integer(int64) :: i
+
+        call parquet_filter_check_bind(this, name, "parquet_filter%bind")
+        call parquet_filter_check_mask(values%size(), is_valid, "parquet_filter%bind")
+        call given%clear()
+        do i = 1_int64, values%size()
+            if (present(is_valid)) then
+                if (.not. is_valid(i)) cycle
+            end if
+            if (values%is_null(i)) cycle
+            ! %append_from copies the element's bytes straight across; %get would build a
+            ! deferred-length string for every member of the set (feature_risks.md Risk-60).
+            call given%append_from(values, i)
+        end do
+        call pf_unique(given, distinct)
+        call parquet_filter_store_text(this, name, distinct)
+    end subroutine bind_str
+
+    !> The next `__in<k>` name %add_in binds under, and the one clause that refers to it.
+    !>
+    !> The name is VISIBLE: it appears in the rule text, so parquet_reader_print_stat and
+    !> %expr_text show `ID in @__in1` rather than what the caller wrote. That is the deliberate
+    !> trade for keeping %add_in sugar over %bind rather than a second, non-text path -- a
+    !> non-text set could never be negated, combined with `or`, or carried through
+    !> %remap_column_names, all of which the clause gets for free by being ordinary text. The
+    !> leading underscores put the generated name outside the rules a user's own %bind name must
+    !> follow, so the two can never collide.
+    subroutine parquet_filter_next_set_name(this, name)
+        class(parquet_filter), intent(inout) :: this !! the filter gaining a generated set.
+        character(len=:), allocatable, intent(out) :: name !! the generated name, without the '@'.
+        character(len=32) :: num_str
+        this%gen_sets = this%gen_sets + 1
+        write(num_str, '(i0)') this%gen_sets
+        name = "__in" // trim(num_str)
+    end subroutine parquet_filter_next_set_name
+
+    !> Adds the one clause `<column> in @<name>` (or `not_in`, when `negate` is .true.). Shared by
+    !> every %add_in specific, so the clause is spelled in one place.
+    subroutine parquet_filter_add_in_rule(this, column, name, negate)
+        class(parquet_filter), intent(inout) :: this !! the filter gaining the clause.
+        character(len=*), intent(in) :: column !! the column the clause tests.
+        character(len=*), intent(in) :: name !! the bound set's generated name, without the '@'.
+        logical, intent(in), optional :: negate !! .true. spells the clause `not_in`.
+        logical :: neg
+        neg = .false.
+        if (present(negate)) neg = negate
+        if (neg) then
+            call parquet_filter_add(this, trim(column) // " not_in @" // trim(name))
+        else
+            call parquet_filter_add(this, trim(column) // " in @" // trim(name))
+        end if
+    end subroutine parquet_filter_add_in_rule
+
+    !> %add_in specific taking an int32 array; see the %add_in generic.
+    subroutine add_in_i32(this, column, values, is_valid, negate)
+        class(parquet_filter), intent(inout) :: this !! filter gaining the set and the clause.
+        character(len=*), intent(in) :: column !! the column the clause tests.
+        integer(int32), intent(in) :: values(:) !! the set's members; repeats are collapsed.
+        logical, intent(in), optional :: is_valid(:) !! per-element mask; a .false. element is not in the set.
+        logical, intent(in), optional :: negate !! .true. spells the clause `not_in`.
+        character(len=:), allocatable :: name
+        call parquet_filter_next_set_name(this, name)
+        call bind_i32(this, name, values, is_valid)
+        call parquet_filter_add_in_rule(this, column, name, negate)
+    end subroutine add_in_i32
+
+    !> %add_in specific taking an int64 array; see the %add_in generic.
+    subroutine add_in_i64(this, column, values, is_valid, negate)
+        class(parquet_filter), intent(inout) :: this !! filter gaining the set and the clause.
+        character(len=*), intent(in) :: column !! the column the clause tests.
+        integer(int64), intent(in) :: values(:) !! the set's members; repeats are collapsed.
+        logical, intent(in), optional :: is_valid(:) !! per-element mask; a .false. element is not in the set.
+        logical, intent(in), optional :: negate !! .true. spells the clause `not_in`.
+        character(len=:), allocatable :: name
+        call parquet_filter_next_set_name(this, name)
+        call bind_i64(this, name, values, is_valid)
+        call parquet_filter_add_in_rule(this, column, name, negate)
+    end subroutine add_in_i64
+
+    !> %add_in specific taking a real32 array; see the %add_in generic.
+    subroutine add_in_r32(this, column, values, is_valid, negate)
+        class(parquet_filter), intent(inout) :: this !! filter gaining the set and the clause.
+        character(len=*), intent(in) :: column !! the column the clause tests.
+        real(real32), intent(in) :: values(:) !! the set's members; repeats are collapsed, a NaN is refused.
+        logical, intent(in), optional :: is_valid(:) !! per-element mask; a .false. element is not in the set.
+        logical, intent(in), optional :: negate !! .true. spells the clause `not_in`.
+        character(len=:), allocatable :: name
+        call parquet_filter_next_set_name(this, name)
+        call bind_r32(this, name, values, is_valid)
+        call parquet_filter_add_in_rule(this, column, name, negate)
+    end subroutine add_in_r32
+
+    !> %add_in specific taking a real64 array; see the %add_in generic.
+    subroutine add_in_r64(this, column, values, is_valid, negate)
+        class(parquet_filter), intent(inout) :: this !! filter gaining the set and the clause.
+        character(len=*), intent(in) :: column !! the column the clause tests.
+        real(real64), intent(in) :: values(:) !! the set's members; repeats are collapsed, a NaN is refused.
+        logical, intent(in), optional :: is_valid(:) !! per-element mask; a .false. element is not in the set.
+        logical, intent(in), optional :: negate !! .true. spells the clause `not_in`.
+        character(len=:), allocatable :: name
+        call parquet_filter_next_set_name(this, name)
+        call bind_r64(this, name, values, is_valid)
+        call parquet_filter_add_in_rule(this, column, name, negate)
+    end subroutine add_in_r64
+
+    !> %add_in specific taking a character array; see the %add_in generic. Elements are trimmed,
+    !> per bind_chr.
+    subroutine add_in_chr(this, column, values, is_valid, negate)
+        class(parquet_filter), intent(inout) :: this !! filter gaining the set and the clause.
+        character(len=*), intent(in) :: column !! the column the clause tests.
+        character(len=*), intent(in) :: values(:) !! the set's members; repeats are collapsed, each trimmed.
+        logical, intent(in), optional :: is_valid(:) !! per-element mask; a .false. element is not in the set.
+        logical, intent(in), optional :: negate !! .true. spells the clause `not_in`.
+        character(len=:), allocatable :: name
+        call parquet_filter_next_set_name(this, name)
+        call bind_chr(this, name, values, is_valid)
+        call parquet_filter_add_in_rule(this, column, name, negate)
+    end subroutine add_in_chr
+
+    !> %add_in specific taking a parquet_string_column; see the %add_in generic.
+    subroutine add_in_str(this, column, values, is_valid, negate)
+        class(parquet_filter), intent(inout) :: this !! filter gaining the set and the clause.
+        character(len=*), intent(in) :: column !! the column the clause tests.
+        type(parquet_string_column), intent(in) :: values !! the set's members; repeats and nulls are dropped.
+        logical, intent(in), optional :: is_valid(:) !! per-element mask; a .false. element is not in the set.
+        logical, intent(in), optional :: negate !! .true. spells the clause `not_in`.
+        character(len=:), allocatable :: name
+        call parquet_filter_next_set_name(this, name)
+        call bind_str(this, name, values, is_valid)
+        call parquet_filter_add_in_rule(this, column, name, negate)
+    end subroutine add_in_str
 
     !> Appends one AND-combined filter expression; see parquet_filter's own doc
     !> comment for the rule grammar. Unvalidated here -- the reader parses and

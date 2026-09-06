@@ -252,10 +252,47 @@ answer are worth knowing before you rely on this:
   hundred megabytes at a billion rows, and roughly eight times that transiently while the filter is
   being installed. That is the floor of the whole approach, and it grows with the file's row count
   rather than with the number of rows that survive.
+- **Not bounded:** one byte per row of the file for each `in`/`not_in` clause, while the filter is
+  being installed — the same shape and size as the mask `sample_fraction=` builds, and released
+  once the filter is in place. The set's own distinct keys are held for as long as the filter is.
 - **Not bounded:** a variable-length `LIST` column from a foreign writer whose width has to be
   measured from the data. Under a filter that measurement still reads the column whole. Open with
   `list_columns="container"` to skip it — see
   [`list_columns=`: keep a `LIST` column as a list](#list_columns-keep-a-list-column-as-a-list).
+
+
+#### Restricting one file by another file's results
+
+The one thing a `bounded=` read cannot express with the verbs is *"keep the rows whose ID appears
+in this other table"*. Every in-memory route — `pf_in` then `%filter_rows`, or a semi `%join` —
+needs the key column resident in full and then **detaches** the table, which is exactly the memory
+cost `bounded=` exists to avoid. It has to be a *filter*, so that the cut happens while the second
+file is read:
+
+```fortran
+type(parquet_table)  :: t1, t2
+type(parquet_filter) :: f1, f2
+integer(int64), allocatable :: ids(:)
+logical, allocatable :: ok(:)
+
+! File 1: an aggressive cut, one row group at a time.
+call f1%add("snr > 10 and mag_g < 23.5 and quality == 0")
+call parquet_open_table(t1, "survey_a.parquet", filter=f1, bounded=.true.)
+call t1%get("ID", ids, is_valid=ok)          ! the survivors' IDs, assembled per row group
+
+! File 2: only the rows whose ID is in that set, also one row group at a time.
+call f2%add_in("ID", ids, is_valid=ok)       ! bound as an ARRAY, never as text
+call f2%add("flag == 0")                     ! composes with ordinary rules as usual
+call parquet_open_table(t2, "survey_b.parquet", filter=f2, bounded=.true.)
+
+call t2%get("mag_r", mag_r)                  ! every column now holds just the matching rows
+```
+
+Both files stay bounded. The membership test is evaluated before any of the second file's data
+columns are read, so the row-group screen knows exactly which row groups hold a member — and on a
+file clustered or sorted by `ID`, most of it is skipped without being read at all. See
+[Membership in a set](../io/filter-sort-sample.html#membership-in-a-set-in-and-not_in) for the
+null and NaN rules, the element families accepted, and what the clause costs.
 
 **`sort=` is refused with it.** A sort reorders rows across the whole file, so a sorted row
 belongs to no row group and no column can be assembled one row group at a time. Open without it,

@@ -522,6 +522,34 @@ program error_scenarios
         call scenario_filter_remap_name_too_long()
     case ("filter_remap_rule_too_long")
         call scenario_filter_remap_rule_too_long()
+    case ("filter_set_unbound_name")
+        call scenario_filter_set_unbound_name()
+    case ("filter_set_missing_at")
+        call scenario_filter_set_missing_at()
+    case ("filter_set_no_value")
+        call scenario_filter_set_no_value()
+    case ("filter_set_wrong_family")
+        call scenario_filter_set_wrong_family()
+    case ("filter_set_on_string_column")
+        call scenario_filter_set_on_string_column()
+    case ("filter_set_nan_member")
+        call scenario_filter_set_nan_member()
+    case ("filter_set_duplicate_name")
+        call scenario_filter_set_duplicate_name()
+    case ("filter_set_name_with_space")
+        call scenario_filter_set_name_with_space()
+    case ("filter_set_name_with_at")
+        call scenario_filter_set_name_with_at()
+    case ("filter_set_blank_name")
+        call scenario_filter_set_blank_name()
+    case ("filter_set_mask_length")
+        call scenario_filter_set_mask_length()
+    case ("filter_set_too_many")
+        call scenario_filter_set_too_many()
+    case ("filter_set_vector_column")
+        call scenario_filter_set_vector_column()
+    case ("filter_set_control")
+        call scenario_filter_set_control()
     case ("sortkey_remap_size_mismatch")
         call scenario_sortkey_remap_size_mismatch()
     case ("sortkey_remap_name_too_long")
@@ -7328,6 +7356,187 @@ contains
         call filt%add(repeat("a", 8193))
         print '(a)', "unexpectedly accepted a filter rule longer than the supported maximum"
     end subroutine scenario_filter_rule_too_long
+
+    !> A rule naming a set nothing was bound under. The name is reported, because a typo in it is
+    !> the overwhelmingly likely cause and nothing else in the message would identify it.
+    subroutine scenario_filter_set_unbound_name()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+
+        call filt%bind("wanted", [1_int32, 2_int32])
+        call filt%add("ra in @wnated")            ! the name is misspelt
+        call parquet_open_reader(reader, "test/fixtures/has_null.parquet", filter=filt)
+        print '(a)', "unexpectedly opened a reader naming a set that is not bound"
+    end subroutine scenario_filter_set_unbound_name
+
+    !> `in` takes a BOUND SET named with a leading '@', never a literal. Refused in the tokenizer,
+    !> so the message names the operator and shows the offending text.
+    subroutine scenario_filter_set_missing_at()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+
+        call filt%add("ra in 5")
+        call parquet_open_reader(reader, "test/fixtures/has_null.parquet", filter=filt)
+        print '(a)', "unexpectedly opened a reader with an 'in' clause taking a literal"
+    end subroutine scenario_filter_set_missing_at
+
+    !> `in` with nothing after it at all.
+    subroutine scenario_filter_set_no_value()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+
+        call filt%add("ra in")
+        call parquet_open_reader(reader, "test/fixtures/has_null.parquet", filter=filt)
+        print '(a)', "unexpectedly opened a reader with a valueless 'in' clause"
+    end subroutine scenario_filter_set_no_value
+
+    !> A REAL set against an INTEGER column, refused exactly as `"id == 1.5"` is: the set's element
+    !> family decides which columns it may be compared against.
+    subroutine scenario_filter_set_wrong_family()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: file = "test_run/filter_set_wrong_family.parquet"
+
+        call parquet_open_writer(writer, file)
+        call parquet_write_column(writer, "id", [1_int32, 2_int32, 3_int32])
+        call parquet_close_writer(writer)
+
+        call filt%add_in("id", [1.5_real64, 2.5_real64])
+        call parquet_open_reader(reader, file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with a real set against an integer column"
+    end subroutine scenario_filter_set_wrong_family
+
+    !> An INTEGER set against a STRING column: the same family rule from the other side.
+    subroutine scenario_filter_set_on_string_column()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: file = "test_run/filter_set_string_column.parquet"
+
+        call parquet_open_writer(writer, file)
+        call parquet_write_column(writer, "name", ["alpha", "beta ", "gamma"])
+        call parquet_close_writer(writer)
+
+        call filt%add_in("name", [1_int32, 2_int32])
+        call parquet_open_reader(reader, file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with an integer set against a string column"
+    end subroutine scenario_filter_set_on_string_column
+
+    !> A NaN INSIDE a bound real set, refused at %bind rather than at apply: the filter compares a
+    !> NaN as IEEE does, so a NaN member could never match any row and is almost certainly a
+    !> mistake. The same reason `"x == nan"` is refused as a literal.
+    subroutine scenario_filter_set_nan_member()
+        use ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(parquet_filter) :: filt
+        real(real64) :: members(3)
+
+        members = [1.0_real64, ieee_value(1.0_real64, ieee_quiet_nan), 2.0_real64]
+        call filt%bind("s", members)
+        print '(a)', "unexpectedly accepted a NaN inside a bound real set"
+    end subroutine scenario_filter_set_nan_member
+
+    !> Two sets bound under one name: the second would silently shadow or be shadowed by the first,
+    !> and which of the two a rule then meant would depend on lookup order.
+    subroutine scenario_filter_set_duplicate_name()
+        type(parquet_filter) :: filt
+
+        call filt%bind("s", [1_int32, 2_int32])
+        call filt%bind("s", [3_int32, 4_int32])
+        print '(a)', "unexpectedly accepted two sets bound under one name"
+    end subroutine scenario_filter_set_duplicate_name
+
+    !> A set name containing a space could never be written in a rule, since the lexer splits on
+    !> whitespace -- so it is refused where it is created rather than where it fails to parse.
+    subroutine scenario_filter_set_name_with_space()
+        type(parquet_filter) :: filt
+
+        call filt%bind("two words", [1_int32])
+        print '(a)', "unexpectedly accepted a set name containing a space"
+    end subroutine scenario_filter_set_name_with_space
+
+    !> The '@' belongs in the rule text, not in the name -- accepting it here would make
+    !> `%bind("@s", ...)` and `%bind("s", ...)` two different sets that look identical in a rule.
+    subroutine scenario_filter_set_name_with_at()
+        type(parquet_filter) :: filt
+
+        call filt%bind("@s", [1_int32])
+        print '(a)', "unexpectedly accepted a set name containing '@'"
+    end subroutine scenario_filter_set_name_with_at
+
+    !> A blank set name.
+    subroutine scenario_filter_set_blank_name()
+        type(parquet_filter) :: filt
+
+        call filt%bind("   ", [1_int32])
+        print '(a)', "unexpectedly accepted a blank set name"
+    end subroutine scenario_filter_set_blank_name
+
+    !> An is_valid= mask that does not match the array it masks -- there is no reading of "these
+    !> five values, four of which are valid".
+    subroutine scenario_filter_set_mask_length()
+        type(parquet_filter) :: filt
+
+        call filt%bind("s", [1_int32, 2_int32, 3_int32], is_valid=[.true., .false.])
+        print '(a)', "unexpectedly accepted an is_valid mask of the wrong length"
+    end subroutine scenario_filter_set_mask_length
+
+    !> More bound sets than parquet_max_filter_sets. A sanity bound on the number of DISTINCT sets,
+    !> not on any set's length: one set of ten million identifiers is ordinary use.
+    subroutine scenario_filter_set_too_many()
+        type(parquet_filter) :: filt
+        character(len=8) :: name
+        integer :: k
+
+        do k = 1, parquet_max_filter_sets + 1
+            write(name, '(a,i0)') "s", k
+            call filt%bind(trim(name), [int(k, int32)])
+        end do
+        print '(a)', "unexpectedly accepted more bound sets than the published limit"
+    end subroutine scenario_filter_set_too_many
+
+    !> A set clause on a VECTOR column, refused for the reason every filter column is: a vector row
+    !> holds no single value to compare against a set.
+    subroutine scenario_filter_set_vector_column()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int64) :: vec(2, 3)
+        character(len=*), parameter :: file = "test_run/filter_set_vector_column.parquet"
+
+        vec(:, 1) = [1_int64, 2_int64]
+        vec(:, 2) = [3_int64, 4_int64]
+        vec(:, 3) = [5_int64, 6_int64]
+        call parquet_open_writer(writer, file)
+        call parquet_write_column(writer, "vec", vec)
+        call parquet_close_writer(writer)
+
+        call filt%add_in("vec", [1_int64, 2_int64])
+        call parquet_open_reader(reader, file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with a set clause on a vector column"
+    end subroutine scenario_filter_set_vector_column
+
+    !> The NEGATIVE CONTROL for every scenario above: a well-formed set clause on a column of the
+    !> right family opens cleanly and selects rows. Without it, a %bind that refused everything
+    !> would pass all thirteen refusal scenarios.
+    subroutine scenario_filter_set_control()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int64) :: nrows
+        character(len=*), parameter :: file = "test_run/filter_set_control.parquet"
+
+        call parquet_open_writer(writer, file)
+        call parquet_write_column(writer, "id", [1_int32, 2_int32, 3_int32, 4_int32])
+        call parquet_close_writer(writer)
+
+        call filt%bind("wanted", [1_int32, 2_int32, 3_int32], is_valid=[.true., .true., .false.])
+        call filt%add("id in @wanted")
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_close_reader(reader)
+        print '(a,i0)', "a well-formed set clause opened cleanly, rows = ", nrows
+    end subroutine scenario_filter_set_control
 
     !> from and to are parallel arrays, so a size mismatch cannot be resolved -- there is no
     !> sensible reading of "rename these three names to these two".

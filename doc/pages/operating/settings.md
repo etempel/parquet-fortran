@@ -770,6 +770,7 @@ limits (read-only)
   parquet_max_filter_rule_len      8192
   parquet_max_filter_depth         32
   parquet_max_filter_nodes         1024
+  parquet_max_filter_sets          64
   parquet_max_sort_keys            16
   parquet_max_sort_key_len         320
   parquet_max_maml_line_len        1024
@@ -789,6 +790,7 @@ published so that code assembling any of those from user or configuration input 
 | `parquet_max_filter_rule_len` | 8192 | characters in one `filt%add` rule |
 | `parquet_max_filter_depth` | 32 | parenthesis/`not` nesting levels within one rule |
 | `parquet_max_filter_nodes` | 1024 | expression nodes across every `%add` of one filter |
+| `parquet_max_filter_sets` | 64 | value sets bound to one filter with `%bind`/`%add_in` |
 | `parquet_max_sort_keys` | 16 | keys across every `%add` of one `parquet_sortkey` |
 | `parquet_max_sort_key_len` | 320 | characters in one `srt%add` key |
 | `parquet_max_maml_line_len` | 1024 | characters in one line of a MAML file |

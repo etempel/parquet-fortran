@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Row filters accept a bound set: `in` and `not_in`.** `filt%add_in("ID", ids)` keeps the rows
+  whose value appears in an array you attach, and `filt%bind("wanted", ids)` plus
+  `filt%add("ID in @wanted or flag == 7")` puts the same set inside an ordinary expression. Integer,
+  floating-point and string sets are accepted, with an optional `is_valid=` mask. The membership
+  test is evaluated before the file's data columns are read, so a set clause prunes row groups where
+  a min/max rule cannot — on a string column, on a file written without statistics, and on a
+  scattered set — which is what lets `parquet_open_table(..., bounded=.true.)` restrict one file by
+  another file's results without either becoming resident. Adds the read-only limit
+  `parquet_max_filter_sets`. See
+  [Membership in a set](doc/pages/io/filter-sort-sample.md#membership-in-a-set-in-and-not_in).
+
 ## [v2.3.0] - 2026-09-06
 
 ### Added

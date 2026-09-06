@@ -6528,6 +6528,14 @@ extern "C"
 	struct ScreenLeaf
 	{
 		bool usable = false;
+		// Nonzero for a PRE-EVALUATED leaf -- a set-valued (in/not_in) clause already answered in
+		// Fortran by pf_index_map. Its per-row-group screen answer is then read straight off the
+		// flags that arrived with its verdicts, and NOTHING below is consulted: no statistics, no
+		// bounds, no sort order. That is strictly stronger than the min/max rules -- it prunes on
+		// a string column, on a file written with no statistics at all, and on a scattered set
+		// whose members fall in the gaps between row groups' ranges -- and it has no NaN subtlety,
+		// because no bound is involved. See feature_risks.md R-a.
+		int pre_index = 0;
 		int leaf_index = -1;             // Parquet flat-leaf column index, for ColumnChunk()
 		ScreenFamily family = ScreenFamily::kNone;
 		bool is_null_test = false;       // is_null / is_not_null: needs only the null count
@@ -6774,8 +6782,19 @@ extern "C"
 	// column-chunk statistics alone. Reads no column data and cannot fail: every uncertainty is a
 	// decline.
 	static KleenePossible screen_leaf_in_row_group(ParquetReaderHandle *reader_handle,
-		const ScreenLeaf &leaf, int64_t rg)
+		const ScreenLeaf &leaf, int64_t rg,
+		const int8_t *pre_flags, int64_t pre_groups)
 	{
+		// A pre-evaluated leaf: its three flags for this row group were derived from its own
+		// verdict segment, before this call and before anything was read, so they are EXACT rather
+		// than an over-approximation. Read them and return; the statistics path below is not
+		// merely unnecessary here, it has nothing to say about a membership test.
+		if (leaf.pre_index > 0)
+		{
+			const int8_t *f = pre_flags + (static_cast<int64_t>(leaf.pre_index) - 1) * pre_groups * 3
+				+ (rg - 1) * 3;
+			return KleenePossible{f[0] != 0, f[1] != 0, f[2] != 0};
+		}
 		if (!leaf.usable) return kScreenAnything;
 		auto *file_metadata = reader_handle->reader->parquet_reader()->metadata().get();
 		auto chunk = file_metadata->RowGroup(static_cast<int>(rg - 1))->ColumnChunk(leaf.leaf_index);
@@ -6954,7 +6973,8 @@ extern "C"
 	static void screen_row_groups(ParquetReaderHandle *reader_handle,
 		const std::vector<ScreenLeaf> &leaves,
 		const int8_t *node_kind, const int32_t *node_leaf, int64_t n_nodes,
-		int64_t rg_lo, int64_t rg_hi)
+		int64_t rg_lo, int64_t rg_hi,
+		const int8_t *pre_flags, int64_t pre_groups)
 	{
 		reader_handle->row_group_live.assign(static_cast<size_t>(reader_handle->num_row_groups), 1);
 		reader_handle->row_groups_pruned = 0;
@@ -6992,7 +7012,8 @@ extern "C"
 						break;
 					}
 					// GCOVR_EXCL_STOP
-					stack.push_back(screen_leaf_in_row_group(reader_handle, leaves[static_cast<size_t>(li)], rg));
+					stack.push_back(screen_leaf_in_row_group(reader_handle, leaves[static_cast<size_t>(li)], rg,
+						pre_flags, pre_groups));
 				}
 				else if (kind == 4) // not
 				{
@@ -7073,9 +7094,38 @@ extern "C"
 		const char *expr_text,
 		int64_t rg_lo, int64_t rg_hi,
 		int64_t row_lo, int64_t row_hi,
+		const int32_t *leaf_pre, int64_t n_pre, int64_t pre_rows, int64_t pre_groups,
+		const int8_t *pre_verdicts, const int8_t *pre_flags,
 		char *err_out, int64_t err_cap)
 	{
 		auto reader_handle = as_reader_handle(handle);
+
+		// PRE-EVALUATED LEAVES. A set-valued (in/not_in) clause is answered in Fortran, by
+		// pf_index_map, one row group of its key column at a time -- so the library has ONE lookup
+		// engine rather than a second sorted vector or hash set living inside eval_filter_clause,
+		// and what arrives here is a copy of a mask rather than a set and a search. Everything
+		// below treats such a leaf as an opaque source of Kleene values: it is never passed to
+		// eval_filter_clause, its column is never read on account of it, and its screen answer
+		// comes from pre_flags instead of from statistics.
+		//
+		// pre_rows is the file's PHYSICAL row count, and the verdicts are indexed by physical row.
+		// That is checked here rather than trusted: the reader has three coordinate systems
+		// (physical, live after the screen, surviving after the mask), and a leaf sliced in the
+		// wrong one is misaligned by exactly a pruned row group's length while still producing a
+		// plausible row count. Same check, same reason, as parquet_reader_set_sample's own.
+		if (n_pre > 0)
+		{
+			if (pre_rows != reader_handle->total_nrows || pre_groups != reader_handle->num_row_groups)
+			{
+				std::snprintf(err_out, static_cast<size_t>(err_cap),
+					"pre-evaluated filter leaves describe %lld row(s) in %lld row group(s), "
+					"but the file has %lld row(s) in %lld row group(s)",
+					static_cast<long long>(pre_rows), static_cast<long long>(pre_groups),
+					static_cast<long long>(reader_handle->total_nrows),
+					static_cast<long long>(reader_handle->num_row_groups));
+				return 1;
+			}
+		}
 
 		// rg_lo = -1 means "the caller named no row-group range at all" -- the SENTINEL the Fortran
 		// side passes from parquet_open_reader(..., filter=) and from the two-argument
@@ -7260,13 +7310,21 @@ extern "C"
 
 			auto resolved = resolve_struct_path(reader_handle->schema, name);
 			int idx = static_cast<int>(get_column_index(reader_handle, resolved.top_level_name.c_str()));
-			if (std::find(touched_indices.begin(), touched_indices.end(), idx) == touched_indices.end())
+			// A PRE-EVALUATED leaf's column is deliberately NOT touched. Fortran has already read
+			// it, one row group at a time, and handed over the answer; adding it here would make
+			// the unscoped path read the whole column again to evaluate a clause that is already
+			// evaluated -- and on a bounded read it would undo the bound outright. The clause is
+			// still recorded for print_stat just below, which is why the index is resolved at all.
+			if (leaf_pre[i] == 0)
 			{
-				touched_indices.push_back(idx);
-			}
-			if (std::find(touched_names.begin(), touched_names.end(), name) == touched_names.end())
-			{
-				touched_names.push_back(name);
+				if (std::find(touched_indices.begin(), touched_indices.end(), idx) == touched_indices.end())
+				{
+					touched_indices.push_back(idx);
+				}
+				if (std::find(touched_names.begin(), touched_names.end(), name) == touched_names.end())
+				{
+					touched_names.push_back(name);
+				}
 			}
 
 			// Retain this clause (operator+value, column name stripped) for the
@@ -7297,10 +7355,19 @@ extern "C"
 			screen_leaves.reserve(leaf_names.size());
 			for (size_t li = 0; li < leaf_names.size(); ++li)
 			{
+				if (leaf_pre[static_cast<int64_t>(li)] != 0)
+				{
+					// Nothing to resolve: this leaf's screen answer is exact and already computed.
+					ScreenLeaf pre;
+					pre.pre_index = static_cast<int>(leaf_pre[static_cast<int64_t>(li)]);
+					screen_leaves.push_back(pre);
+					continue;
+				}
 				screen_leaves.push_back(resolve_screen_leaf(reader_handle, leaf_names[li], leaf_ops[li],
 					leaf_is_string[li], leaf_values[li]));
 			}
-			screen_row_groups(reader_handle, screen_leaves, node_kind, node_leaf, n_nodes, rg_lo, rg_hi);
+			screen_row_groups(reader_handle, screen_leaves, node_kind, node_leaf, n_nodes, rg_lo, rg_hi,
+				pre_flags, pre_groups);
 		}
 
 		// The unscoped path's filter-column read, moved here from Fortran (it used to be
@@ -7356,8 +7423,16 @@ extern "C"
 		}
 		if (!scoped)
 		{
-			for (const auto &leaf_name : leaf_names)
+			for (size_t li = 0; li < leaf_names.size(); ++li)
 			{
+				// A pre-evaluated leaf has no array and needs none; the placeholder keeps this
+				// vector parallel to the leaves, which is what the node list indexes into.
+				if (leaf_pre[static_cast<int64_t>(li)] != 0)
+				{
+					leaf_arrays.push_back(nullptr);
+					continue;
+				}
+				const std::string &leaf_name = leaf_names[li];
 				auto resolved = resolve_struct_path(reader_handle->schema, leaf_name);
 				auto idx = get_column_index(reader_handle, resolved.top_level_name.c_str());
 				auto array = reader_handle->column_cache.at(static_cast<int>(idx));
@@ -7373,8 +7448,44 @@ extern "C"
 		// nesting cap (filter_max_depth, parquet.f90) bounds; a flat chain of any length keeps
 		// exactly one vector live. Shared by both paths: the unscoped one calls it once over the
 		// whole-file arrays, the scoped one once per row group over that row group's chunks.
+		//
+		// A pre-evaluated leaf's verdicts, gathered out of the PHYSICAL-row array into whichever
+		// coordinate system this evaluation is working in. `phys_base >= 0` means the call covers a
+		// contiguous physical run starting there (the scoped path, one row group per call);
+		// `phys_base < 0` means the LIVE layout (the unscoped path, one call over the concatenated
+		// live row groups), where each live row group's segment is copied from its own physical
+		// offset to its own live offset and a pruned row group contributes nothing at all.
+		//
+		// This gather is the whole of feature_risks.md R-b: slicing the array by live row instead
+		// of physical row misaligns every row group after the first pruned one, by exactly that row
+		// group's length, and the surviving row count can still come out right.
+		auto fill_pre_leaf = [&](int pre_index, int64_t phys_base, size_t rows, std::vector<uint8_t> &out)
+		{
+			const int8_t *src = pre_verdicts + (static_cast<int64_t>(pre_index) - 1) * pre_rows;
+			out.assign(rows, kFalse);
+			if (phys_base >= 0)
+			{
+				for (size_t i = 0; i < rows; ++i)
+				{
+					out[i] = static_cast<uint8_t>(src[phys_base + static_cast<int64_t>(i)]);
+				}
+				return;
+			}
+			for (int64_t rg = 1; rg <= reader_handle->num_row_groups; ++rg)
+			{
+				int64_t live_off = reader_handle->row_group_live_offsets[static_cast<size_t>(rg - 1)];
+				if (live_off < 0) continue; // excluded row group: no slots in the live layout
+				int64_t first_row = reader_handle->row_group_offsets[static_cast<size_t>(rg - 1)];
+				int64_t rg_rows = row_group_rows(reader_handle, rg);
+				for (int64_t i = 0; i < rg_rows; ++i)
+				{
+					out[static_cast<size_t>(live_off + i)] = static_cast<uint8_t>(src[first_row + i]);
+				}
+			}
+		};
+
 		auto evaluate_nodes = [&](const std::vector<std::shared_ptr<arrow::Array>> &arrays, size_t rows,
-			std::vector<uint8_t> &out, std::string &err) -> bool
+			int64_t phys_base, std::vector<uint8_t> &out, std::string &err) -> bool
 		{
 			std::vector<std::vector<uint8_t>> stack;
 			for (int64_t k = 0; k < n_nodes; ++k)
@@ -7390,6 +7501,13 @@ extern "C"
 						return false;
 					}
 					// GCOVR_EXCL_STOP
+					if (leaf_pre[li] != 0)
+					{
+						std::vector<uint8_t> leaf_result;
+						fill_pre_leaf(static_cast<int>(leaf_pre[li]), phys_base, rows, leaf_result);
+						stack.push_back(std::move(leaf_result));
+						continue;
+					}
 					std::vector<uint8_t> leaf_result(rows);
 					if (!eval_filter_clause(arrays[static_cast<size_t>(li)], leaf_names[static_cast<size_t>(li)],
 						leaf_ops[static_cast<size_t>(li)], leaf_is_string[static_cast<size_t>(li)],
@@ -7448,6 +7566,7 @@ extern "C"
 				if (reader_handle->row_group_live[static_cast<size_t>(rg - 1)] == 0) continue;
 				int64_t rows = row_group_rows(reader_handle, rg);
 				int64_t offset = reader_handle->row_group_live_offsets[static_cast<size_t>(rg - 1)];
+				int64_t first_row = reader_handle->row_group_offsets[static_cast<size_t>(rg - 1)];
 				// This row group's chunk of every leaf column, read and then released with the
 				// vector when the iteration ends -- read_row_group_array_for_measuring rather than
 				// get_row_group_chunk_array, so measuring the filter does not mark the row group
@@ -7456,13 +7575,22 @@ extern "C"
 				std::vector<std::shared_ptr<arrow::Array>> rg_arrays;
 				rg_arrays.reserve(leaf_names.size());
 				auto t_rg = std::chrono::steady_clock::now();
-				for (const auto &leaf_name : leaf_names)
+				for (size_t li = 0; li < leaf_names.size(); ++li)
 				{
-					rg_arrays.push_back(read_row_group_array_for_measuring(reader_handle, leaf_name.c_str(), rg));
+					// A pre-evaluated leaf is already answered for every physical row of this row
+					// group; reading its chunk here would be pure waste on the one path whose
+					// entire purpose is to read as little as possible.
+					if (leaf_pre[static_cast<int64_t>(li)] != 0)
+					{
+						rg_arrays.push_back(nullptr);
+						continue;
+					}
+					rg_arrays.push_back(
+						read_row_group_array_for_measuring(reader_handle, leaf_names[li].c_str(), rg));
 				}
 				t_rg = charge_phase(t_rg, g_debug_filter_decode_nanos);
 				std::vector<uint8_t> local;
-				if (!evaluate_nodes(rg_arrays, static_cast<size_t>(rows), local, eval_err))
+				if (!evaluate_nodes(rg_arrays, static_cast<size_t>(rows), first_row, local, eval_err))
 				{
 					std::snprintf(err_out, static_cast<size_t>(err_cap), "filter rule: %s", eval_err.c_str());
 					return 1;
@@ -7482,7 +7610,7 @@ extern "C"
 			// rather than being scattered by row-group offset the way it used to be.
 			std::vector<uint8_t> local;
 			auto t_ev = std::chrono::steady_clock::now();
-			if (!evaluate_nodes(leaf_arrays, static_cast<size_t>(live_rows), local, eval_err))
+			if (!evaluate_nodes(leaf_arrays, static_cast<size_t>(live_rows), -1, local, eval_err))
 			{
 				// Tag the clause-level message so it is unambiguously a row-filter error (vs a
 				// read-time qc check, which labels its own messages). The other set_filter

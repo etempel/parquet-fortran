@@ -45,21 +45,97 @@ parentheses:
    not_expr := [ not ] not_expr | primary
    primary  := '(' expr ')' | clause
    clause   := <column> <op> [ <value> ]
+   value    := ... | '@' NAME          ! for in / not_in: a set attached with %bind
 ```
 
 | | |
 |---|---|
 | **Precedence** | `not` binds tightest, then `and`, then `or` — so `a or b and c` means `a or (b and c)`, and `not a and b` means `(not a) and b`. Parentheses override. |
 | **Keywords** | `and` / `or` / `not`, in any case (`AND`, `And`, `and`). Only whole tokens are keywords, so a column named `android` or `nothing` is unaffected. Fortran-style `.and.` and C-style `&&` are *not* accepted. |
-| **Operators** | `>`, `>=`, `<`, `<=`, `==`, `/=`, `is_null`, `is_not_null`, `is_nan`, `is_not_nan`. A clause's operator must be surrounded by spaces (`"v > 3"`, not `"v>3"`); parentheses need no surrounding spaces. `is_nan`/`is_not_nan` are accepted only for a floating-point column (`float32`/`float64`, and a `half_float` column written by some other tool) — any other column type is rejected, since no value of it could ever be a NaN. |
-| **Values** | A bare number for a numeric column (`ra > 180`), `true`/`false` for a boolean column (`flag == true`), a **double-quoted** string for a `string` column (`name == "abell_1"`), or a **double-quoted ISO-8601 literal** for a `date`/`time`/`timestamp` column (see below). `is_null`/`is_not_null`/`is_nan`/`is_not_nan` take no value. A quoted value may contain spaces, parentheses, and the keywords themselves — it is read as one token. An `inf`/`-inf` value is accepted as an ordinary bound (`v < inf`); a bare `nan` is **rejected**, because every comparison against a NaN is false and every `/=` against it is true, so such a clause could only ever match nothing or everything — say `is_nan`/`is_not_nan` instead. |
+| **Operators** | `>`, `>=`, `<`, `<=`, `==`, `/=`, `in`, `not_in`, `is_null`, `is_not_null`, `is_nan`, `is_not_nan`. A clause's operator must be surrounded by spaces (`"v > 3"`, not `"v>3"`); parentheses need no surrounding spaces. `is_nan`/`is_not_nan` are accepted only for a floating-point column (`float32`/`float64`, and a `half_float` column written by some other tool) — any other column type is rejected, since no value of it could ever be a NaN. |
+| **Values** | A bare number for a numeric column (`ra > 180`), `true`/`false` for a boolean column (`flag == true`), a **double-quoted** string for a `string` column (`name == "abell_1"`), or a **double-quoted ISO-8601 literal** for a `date`/`time`/`timestamp` column (see below). `is_null`/`is_not_null`/`is_nan`/`is_not_nan` take no value, and `in`/`not_in` take the **name of a bound set** rather than a literal (`ID in @wanted` — see [Membership in a set](#membership-in-a-set-in-and-not_in) below). A quoted value may contain spaces, parentheses, and the keywords themselves — it is read as one token. An `inf`/`-inf` value is accepted as an ordinary bound (`v < inf`); a bare `nan` is **rejected**, because every comparison against a NaN is false and every `/=` against it is true, so such a clause could only ever match nothing or everything — say `is_nan`/`is_not_nan` instead. |
 | **Column names** | May be a dotted struct-leaf path (`main.inner.age > 35`). A column name cannot contain spaces. |
 | **Several `%add` calls** | **AND-combined**: two calls mean `(expr1) and (expr2)`. So a filter written as one clause per call means the conjunction of its clauses; write `or` inside a single rule when you want alternatives. |
-| **Limits** | 32 levels of nesting, 1024 expression terms per filter, 8192 characters per rule, and, within one clause, 64 characters per column name and 512 per value — each reported as a clean error rather than a crash. The first three are published constants you can check a rule against beforehand; see [Read-only limits](../operating/settings.html#read-only-limits). |
+| **Limits** | 32 levels of nesting, 1024 expression terms per filter, 64 bound sets per filter, 8192 characters per rule, and, within one clause, 64 characters per column name and 512 per value — each reported as a clean error rather than a crash. The first three are published constants you can check a rule against beforehand; see [Read-only limits](../operating/settings.html#read-only-limits). |
 
-`in`, `between` and wildcard/`like` matching are deliberately not supported: the first two are
-shorthand for what the grammar already expresses (`x in (1,2,3)` is `x == 1 or x == 2 or x == 3`;
-`x between 1 and 9` is `x >= 1 and x <= 9`), and pattern matching is genuinely different work.
+`between` and wildcard/`like` matching are not supported: the first is shorthand for what the
+grammar already expresses (`x between 1 and 9` is `x >= 1 and x <= 9`), and pattern matching is
+genuinely different work. `in` and `not_in` **are** supported, but only over a set you attach as an
+array — not over a literal list, which really would be shorthand for an `==` chain. That is the
+next section.
+
+### Membership in a set: `in` and `not_in`
+
+`in` keeps the rows whose value appears in a set you attach to the filter as an **array**:
+
+```fortran
+type(parquet_filter) :: filt
+integer(int64), allocatable :: ids(:)
+
+call filt%add_in("ID", ids)                  ! keep rows whose ID is one of these
+call parquet_open_reader(reader, "survey.parquet", filter=filt)
+```
+
+`%add_in(column, values, [is_valid], [negate])` is the one-set-one-column form. The general form
+attaches the array under a **name** and refers to it from ordinary rule text with a leading `@`,
+which is what lets a set combine with `or`, `not` and parentheses like any other clause:
+
+```fortran
+call filt%bind("wanted", ids)                ! attach the array under a name
+call filt%add("ID in @wanted or flag == 7")  ! ... and use it in an expression
+call filt%add("src not_in @bad or src is_null")
+```
+
+The spelling is pandas' `query("ID in @ids")`. `%bind` accepts `integer(int32)`, `integer(int64)`,
+`real(real32)`, `real(real64)`, a `character` array, or a `parquet_string_column`, each with an
+optional `is_valid=` mask marking the elements to leave out of the set.
+
+**What the set is compared against.** An integer set matches any integer column; a real set matches
+a `float32`/`float64` column; a string set matches a `string` column. Anything else is refused
+naming the column, exactly as a mistyped literal is. A `boolean` column is refused because a set of
+booleans is `==` with extra steps, and a vector, `list`, `map` or `struct` column is refused for the
+reason every filter column is — there is no single value per row to compare.
+
+**The set is copied, and deduplicated, at `%bind`.** Your array may change or go out of scope
+afterwards. Repeats are collapsed rather than rejected, which matters because an identifier list
+produced by a join or a group-by very often carries some. A `character` array's elements are
+trimmed on the way in; a `parquet_string_column`'s are taken verbatim, and a Null element of one is
+simply not in the set.
+
+**Nulls and NaNs follow the filter's own rules**, not those of the in-memory `pf_in`:
+
+| the row's value | `x in @s` | `x not_in @s` |
+|---|---|---|
+| a member of the set | true | false |
+| not a member | false | true |
+| Null | unknown — dropped, as under every comparison | unknown — dropped |
+| NaN | false (it matches nothing) | **true** |
+
+So `is_null` remains the only way a Null row enters a result, and a NaN row survives `not_in` for
+the same reason it survives `/=`: IEEE says it equals nothing. A NaN **inside** a bound set is
+rejected at `%bind`, because it could never match — the same reason a bare `nan` literal is
+rejected.
+
+**An empty set matches nothing**, so `in` keeps no rows and `not_in` keeps every non-null row.
+
+**A set clause prunes row groups better than any other clause can.** The membership test is
+evaluated before the file's data columns are read — one row group of the key column at a time, by
+the library's own key index — so by the time the row-group screen runs it knows, exactly, which row
+groups hold a member. That means it prunes where a min/max rule cannot: on a **string** column, on a
+file written with **no statistics at all**, and on a scattered set whose values fall in the gaps
+between row groups' ranges. On a file clustered or sorted by the key, most of it is skipped without
+being read.
+
+**What it costs.** The distinct keys, once per copy of the filter (about 8 bytes each for a numeric
+set), plus one byte per row of the file per `in` clause while the filter is being installed — the
+same shape and size as the mask `sample_fraction=` already builds. Under `bounded=.true.` that array
+is, like the filter's own row mask, one of the things that still scale with the file's row count.
+`bench/benchmark_filter_set.sh` measures the evaluation against the row-group decode it precedes.
+
+**This is the one filter clause a `bounded=.true.` read can use to restrict a second file by a first
+one's results** — see [Opening a table](../tables/table-open.html#reading-a-file-larger-than-memory-bounded).
+The in-memory alternatives (`pf_in` then `%filter_rows`, or a semi `%join`) both need the key column
+resident in full and both detach the table, which is exactly the cost `bounded=` exists to avoid.
 
 ### Null values follow SQL's three-valued logic
 

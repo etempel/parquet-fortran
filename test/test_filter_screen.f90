@@ -115,7 +115,19 @@ contains
                 test_time_timestamp_operators), &
             new_unittest("every ordering operator on a float64 and a float32 column", &
                 test_float_all_operators), &
-            new_unittest("every ordering operator on a string column", test_string_all_operators) &
+            new_unittest("every ordering operator on a string column", test_string_all_operators), &
+            new_unittest("a set clause prunes every row group it cannot match", test_set_clause_prunes), &
+            new_unittest("a set whose members fall in the gaps prunes the whole file", &
+                test_set_clause_prunes_on_gaps), &
+            new_unittest("an empty set prunes every row group", test_empty_set_prunes_everything), &
+            new_unittest("a set spanning every row group prunes nothing", &
+                test_set_spanning_prunes_nothing), &
+            new_unittest("not_in prunes exactly the saturated row groups", &
+                test_not_in_prunes_saturated_groups), &
+            new_unittest("a set clause prunes a file written without statistics", &
+                test_set_clause_prunes_without_statistics), &
+            new_unittest("a set clause and an ordinary leaf prune together", &
+                test_set_clause_combines_with_ordinary_leaf) &
             ]
     end subroutine collect_tests_filter_screen
     !
@@ -1470,4 +1482,223 @@ contains
     !> `filter_bool_ordering` scenario (test/error_scenarios.f90) rather than here.
     !
     !
+    !
+    ! ---- The pre-evaluated (`in`/`not_in`) leaf's own screen ----
+    !
+    !> Reads column "id" of `file` under one bound integer set, with the screen either on or off,
+    !> returning the surviving values and how many row groups were pruned. The set-clause twin of
+    !> read_under_rule, which cannot serve here because a set reaches the filter as an array rather
+    !> than as rule text.
+    subroutine read_under_set(file, want, negate, screen_on, values, pruned)
+        character(len=*), intent(in) :: file !! fixture to read.
+        integer(int32), intent(in) :: want(:) !! the set's members.
+        logical, intent(in) :: negate !! .true. spells the clause `not_in`.
+        logical, intent(in) :: screen_on !! .false. disables the statistics screen.
+        integer(int32), allocatable, intent(out) :: values(:) !! surviving rows of column "id".
+        integer(int64), intent(out) :: pruned !! row groups the screen ruled out.
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int64) :: nrows
+
+        call parquet_set_statistics_prescreen(screen_on)
+        call filt%add_in("id", want, negate=negate)
+        call parquet_open_reader(reader, file, filter=filt)
+        pruned = parquet_debug_get_row_groups_pruned()
+        call parquet_get_nrows(reader, nrows)
+        allocate(values(nrows))
+        if (nrows > 0) call parquet_read_column(reader, "id", values)
+        call parquet_close_reader(reader)
+        call parquet_set_statistics_prescreen(.true.)
+    end subroutine read_under_set
+    !
+    !> The A/B harness for a set clause: reads twice, once screened and once not, and reports
+    !> whether the two agree plus the screened run's pruned count.
+    subroutine compare_set_screened(file, want, negate, agree, pruned, nrows)
+        character(len=*), intent(in) :: file !! fixture to read.
+        integer(int32), intent(in) :: want(:) !! the set's members.
+        logical, intent(in) :: negate !! .true. spells the clause `not_in`.
+        logical, intent(out) :: agree !! .true. if screened and unscreened results are identical.
+        integer(int64), intent(out) :: pruned !! row groups the screened run ruled out.
+        integer, intent(out) :: nrows !! surviving row count.
+        integer(int32), allocatable :: screened(:), plain(:)
+        integer(int64) :: pruned_off
+
+        call read_under_set(file, want, negate, .true., screened, pruned)
+        call read_under_set(file, want, negate, .false., plain, pruned_off)
+        nrows = size(screened)
+        agree = (size(screened) == size(plain))
+        if (agree) then
+            if (size(screened) > 0) agree = all(screened == plain)
+        end if
+    end subroutine compare_set_screened
+    !
+    !> A set hitting one row group must leave every other one pruned -- and the answer must be
+    !> identical with the screen off.
+    !>
+    !> Equality alone would pass just as happily against a screen that never prunes, which is why
+    !> the pruned count is asserted too. A set clause's screen answer is EXACT (it is read off the
+    !> leaf's own verdicts, not from min/max), so the expected count is stated exactly.
+    subroutine test_set_clause_prunes(error)
+        type(error_type), allocatable, intent(out) :: error
+        logical :: agree
+        integer(int64) :: pruned
+        integer :: nrows
+        character(len=*), parameter :: file = "test_run/screen_set_one_group.parquet"
+
+        call write_screen_fixture(file, 40, 10)   ! 4 row groups: ids 1-10, 11-20, 21-30, 31-40
+        call compare_set_screened(file, [13, 17], .false., agree, pruned, nrows)
+        call check(error, agree, "a set clause: screened and unscreened results must be identical")
+        if (allocated(error)) return
+        call check(error, nrows == 2, "a set clause: expected the two named rows")
+        if (allocated(error)) return
+        call check(error, pruned == 3_int64, &
+            "a set clause hitting only row group 2 must prune the other three")
+    end subroutine test_set_clause_prunes
+    !
+    !> A set every one of whose members falls in the GAPS between row groups' ranges prunes the
+    !> whole file -- the case a min/max rule provably cannot prune, and the sharpest demonstration
+    !> that a pre-evaluated leaf's screen is reading its verdicts rather than the footer.
+    !>
+    !> Every member lies inside the file's overall id range, so a bound-based leaf's [min, max]
+    !> test would admit every row group; here every row group's verdicts are uniformly false, so
+    !> every one is ruled out.
+    subroutine test_set_clause_prunes_on_gaps(error)
+        type(error_type), allocatable, intent(out) :: error
+        logical :: agree
+        integer(int64) :: pruned
+        integer :: nrows
+        character(len=*), parameter :: file = "test_run/screen_set_gaps.parquet"
+
+        ! Row groups hold ids 1-10, 11-20, 21-30, 31-40. Every member below is absent from the
+        ! file entirely while sitting well inside its overall range.
+        call write_screen_fixture(file, 40, 10)
+        call compare_set_screened(file, [-5, 100, 1000], .false., agree, pruned, nrows)
+        call check(error, agree, "a set clause on absent values: the two arms must agree")
+        if (allocated(error)) return
+        call check(error, nrows == 0, "a set clause on absent values must keep no row")
+        if (allocated(error)) return
+        call check(error, pruned == 4_int64, &
+            "a set clause no row group can satisfy must prune every row group")
+    end subroutine test_set_clause_prunes_on_gaps
+    !
+    !> An EMPTY set prunes every row group. The one case where "everything was pruned" is the right
+    !> answer rather than the signature of a bug, so it is pinned rather than left implicit.
+    subroutine test_empty_set_prunes_everything(error)
+        type(error_type), allocatable, intent(out) :: error
+        logical :: agree
+        integer(int64) :: pruned
+        integer :: nrows
+        character(len=*), parameter :: file = "test_run/screen_set_empty.parquet"
+
+        call write_screen_fixture(file, 40, 10)
+        call compare_set_screened(file, [integer(int32) ::], .false., agree, pruned, nrows)
+        call check(error, agree, "an empty set: the two arms must agree")
+        if (allocated(error)) return
+        call check(error, nrows == 0, "an empty set must keep no row")
+        if (allocated(error)) return
+        call check(error, pruned == 4_int64, "an empty set must prune every row group")
+    end subroutine test_empty_set_prunes_everything
+    !
+    !> A set spanning every row group prunes nothing -- the negative control for the three tests
+    !> above, without which a screen that pruned unconditionally would pass all of them.
+    subroutine test_set_spanning_prunes_nothing(error)
+        type(error_type), allocatable, intent(out) :: error
+        logical :: agree
+        integer(int64) :: pruned
+        integer :: nrows
+        character(len=*), parameter :: file = "test_run/screen_set_spanning.parquet"
+
+        call write_screen_fixture(file, 40, 10)
+        call compare_set_screened(file, [2, 12, 22, 32], .false., agree, pruned, nrows)
+        call check(error, agree, "a spanning set: the two arms must agree")
+        if (allocated(error)) return
+        call check(error, nrows == 4, "a spanning set: expected one row from each row group")
+        if (allocated(error)) return
+        call check(error, pruned == 0_int64, &
+            "a set with a member in every row group must prune nothing -- the negative control " // &
+            "for every pruning assertion in this group")
+    end subroutine test_set_spanning_prunes_nothing
+    !
+    !> `not_in` prunes exactly the row groups every row of which is a member -- and prunes nothing
+    !> when even one row of each escapes the set.
+    subroutine test_not_in_prunes_saturated_groups(error)
+        type(error_type), allocatable, intent(out) :: error
+        logical :: agree
+        integer(int64) :: pruned
+        integer :: nrows
+        integer(int32) :: whole_group(10)
+        integer :: i
+        character(len=*), parameter :: file = "test_run/screen_set_notin.parquet"
+
+        call write_screen_fixture(file, 40, 10)
+        ! Row group 1 holds ids 1..10 exactly, so naming all ten saturates it: every row of that
+        ! row group is a member, every verdict is false under not_in, and it prunes.
+        do i = 1, 10
+            whole_group(i) = i
+        end do
+        call compare_set_screened(file, whole_group, .true., agree, pruned, nrows)
+        call check(error, agree, "not_in: the two arms must agree")
+        if (allocated(error)) return
+        call check(error, nrows == 30, "not_in over a whole row group: expected the other 30 rows")
+        if (allocated(error)) return
+        call check(error, pruned == 1_int64, &
+            "not_in must prune exactly the row group every row of which is a member")
+    end subroutine test_not_in_prunes_saturated_groups
+    !
+    !> A set clause prunes a file written with NO STATISTICS AT ALL, which no ordinary leaf can do.
+    !>
+    !> This is the distinguishing property of a pre-evaluated leaf and the test that proves its
+    !> screen reads its own verdicts rather than the footer: on the same fixture,
+    !> test_no_stats_declines asserts that an ordinary `c > 250.0` prunes nothing.
+    subroutine test_set_clause_prunes_without_statistics(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int64) :: pruned, nrows, n_groups
+        character(len=*), parameter :: file = "test/fixtures/no_stats.parquet"
+
+        ! The fixture is written with statistics disabled outright. A set naming no value the
+        ! column holds therefore cannot be pruned by any footer rule -- and must still be pruned
+        ! here, because the verdicts say so.
+        call parquet_set_statistics_prescreen(.true.)
+        call filt%add_in("c", [-1.0_real64, -2.0_real64])
+        call parquet_open_reader(reader, file, filter=filt)
+        pruned = parquet_debug_get_row_groups_pruned()
+        call parquet_get_nrows(reader, nrows)
+        call parquet_get_num_row_groups(reader, n_groups)
+        call parquet_close_reader(reader)
+
+        call check(error, nrows == 0_int64, "no statistics: a set of absent values must keep no row")
+        if (allocated(error)) return
+        call check(error, pruned == n_groups, &
+            "no statistics: a set clause must still prune every row group -- its screen answer " // &
+            "comes from its own verdicts, not from a footer the file does not carry")
+    end subroutine test_set_clause_prunes_without_statistics
+    !
+    !> A set clause combines with an ordinary leaf through the unchanged combinators: an AND prunes
+    !> a row group that EITHER leaf rules out.
+    subroutine test_set_clause_combines_with_ordinary_leaf(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int64) :: pruned, nrows
+        character(len=*), parameter :: file = "test_run/screen_set_combined.parquet"
+
+        call write_screen_fixture(file, 40, 10)
+        ! The set alone would leave row groups 2 and 4 live; `id > 30` alone would leave only row
+        ! group 4. Together only row group 4 can match, so three are pruned.
+        call parquet_set_statistics_prescreen(.true.)
+        call filt%bind("s", [13_int32, 35_int32])
+        call filt%add("id in @s and id > 30")
+        call parquet_open_reader(reader, file, filter=filt)
+        pruned = parquet_debug_get_row_groups_pruned()
+        call parquet_get_nrows(reader, nrows)
+        call parquet_close_reader(reader)
+
+        call check(error, nrows == 1_int64, "a set AND an ordinary leaf: expected only id = 35")
+        if (allocated(error)) return
+        call check(error, pruned == 3_int64, &
+            "a set AND an ordinary leaf must prune a row group either one rules out")
+    end subroutine test_set_clause_combines_with_ordinary_leaf
+
 end module test_filter_screen

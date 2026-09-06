@@ -83,6 +83,7 @@ module parquet_settings
     public :: parquet_max_filter_rule_len
     public :: parquet_max_filter_depth
     public :: parquet_max_filter_nodes
+    public :: parquet_max_filter_sets
     public :: parquet_max_sort_keys
     public :: parquet_max_sort_key_len
     public :: parquet_max_maml_line_len
@@ -118,6 +119,11 @@ module parquet_settings
     integer, parameter :: parquet_max_filter_depth = 32
     !> Maximum number of expression nodes across every `%add` call of one `parquet_filter`.
     integer, parameter :: parquet_max_filter_nodes = 1024
+    !> Maximum number of value sets bound to one `parquet_filter` with `%bind`/`%add_in`, the
+    !! payload behind an `in`/`not_in` clause. A sanity bound on the number of DISTINCT sets, not
+    !! on any set's length, which is unbounded: one set of ten million identifiers is ordinary use,
+    !! sixty-five sets in one filter is a program that has lost track of what it is building.
+    integer, parameter :: parquet_max_filter_sets = 64
     !> Maximum number of keys across every `%add` call of one `parquet_sortkey`.
     integer, parameter :: parquet_max_sort_keys = 16
     !> Maximum number of characters in one `parquet_sortkey%add` key ("<column> [asc|desc]").
@@ -1237,6 +1243,7 @@ contains
         call print_one(u, "parquet_max_filter_rule_len", parquet_max_filter_rule_len)
         call print_one(u, "parquet_max_filter_depth", parquet_max_filter_depth)
         call print_one(u, "parquet_max_filter_nodes", parquet_max_filter_nodes)
+        call print_one(u, "parquet_max_filter_sets", parquet_max_filter_sets)
         call print_one(u, "parquet_max_sort_keys", parquet_max_sort_keys)
         call print_one(u, "parquet_max_sort_key_len", parquet_max_sort_key_len)
         call print_one(u, "parquet_max_maml_line_len", parquet_max_maml_line_len)

@@ -1030,7 +1030,8 @@ module parquet_bindings
         !> unchanged.
         function c_reader_set_filter(reader, names_packed, name_len, ops_packed, op_len, &
                 values_packed, value_len, is_string_flags, n, node_kind, node_leaf, n_nodes, &
-                expr_text, rg_lo, rg_hi, row_lo, row_hi, err_out, err_cap) &
+                expr_text, rg_lo, rg_hi, row_lo, row_hi, leaf_pre, n_pre, pre_rows, pre_groups, &
+                pre_verdicts, pre_flags, err_out, err_cap) &
                 bind(C, name="parquet_reader_set_filter") result(status)
             import
             type(c_ptr), value :: reader
@@ -1050,6 +1051,23 @@ module parquet_bindings
             integer(c_long_long), value :: rg_hi
             integer(c_long_long), value :: row_lo
             integer(c_long_long), value :: row_hi
+            !> Per leaf: 0 for an ordinary clause C++ evaluates itself, or the 1-based index of its
+            !! PRE-EVALUATED verdicts within the two arrays below. A pre-evaluated leaf is a
+            !! set-valued (`in`/`not_in`) clause, already answered in Fortran by pf_index_map, so
+            !! eval_filter_clause is never called for it and no set ever crosses this boundary.
+            integer(c_int32_t) :: leaf_pre(*)
+            integer(c_long_long), value :: n_pre !! how many leaves are pre-evaluated.
+            integer(c_long_long), value :: pre_rows !! the file's PHYSICAL row count; checked C++-side.
+            integer(c_long_long), value :: pre_groups !! the file's row-group count; checked C++-side.
+            !> n_pre * pre_rows Kleene values (0 false, 1 true, 2 unknown), leaf-major: leaf p's
+            !! verdict for physical row r is at (p-1)*pre_rows + r. Indexed by PHYSICAL row --
+            !! never by live or surviving row, the coordinate-system trap feature_risks.md Risk-131
+            !! records for the sample mask, whose shape and size this array deliberately matches.
+            integer(c_int8_t) :: pre_verdicts(*)
+            !> n_pre * pre_groups * 3 screen flags (may_true, may_false, may_unknown), leaf-major
+            !! then row-group-major, derived from the verdicts above rather than from statistics --
+            !! which is why a pre-evaluated leaf prunes on a file that carries none.
+            integer(c_int8_t) :: pre_flags(*)
             character(kind=c_char) :: err_out(*)
             integer(c_long_long), value :: err_cap
             integer(c_long_long) :: status

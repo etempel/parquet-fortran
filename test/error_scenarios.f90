@@ -684,6 +684,32 @@ program error_scenarios
         call scenario_drop_columns_shared()
     case ("matrix_control")
         call scenario_matrix_control()
+    case ("parse_column_non_string")
+        call scenario_parse_column_bad_source("i")
+    case ("parse_column_vector_source")
+        call scenario_parse_column_bad_source("vec")
+    case ("parse_column_bad_target")
+        call scenario_parse_column_bad_target()
+    case ("parse_column_invalid_token")
+        call scenario_parse_column_invalid_token()
+    case ("parse_column_malformed")
+        call scenario_parse_column_malformed(.false.)
+    case ("parse_column_malformed_long")
+        call scenario_parse_column_malformed(.true.)
+    case ("parse_column_to_name_exists")
+        call scenario_parse_column_to_name_exists()
+    case ("parse_column_shared")
+        call scenario_parse_column_shared()
+    case ("reload_after_parse_column")
+        call scenario_reload_after_parse_column()
+    case ("format_column_string_source")
+        call scenario_format_column_bad_source("s")
+    case ("format_column_vector_source")
+        call scenario_format_column_bad_source("vec")
+    case ("format_column_fmt_on_temporal")
+        call scenario_format_column_fmt_on_temporal()
+    case ("convert_control")
+        call scenario_convert_control()
     case ("sortkey_remap_size_mismatch")
         call scenario_sortkey_remap_size_mismatch()
     case ("sortkey_remap_name_too_long")
@@ -8574,6 +8600,167 @@ contains
         call g%keep_columns("uberid, flux", force=.true.)
         print '(a,i0,a,i0)', "every matrix path ran, ncols=", t%ncols(), " predefined left=", g%ncols()
     end subroutine scenario_matrix_control
+
+    !> The fixture every conversion scenario works from: a text column that parses, one that
+    !> does not, and the three kinds of column neither verb will take -- a numeric one (nothing
+    !> to parse), a vector one (no per-row scalar to render) and a date (nothing a `fmt` could
+    !> vary). Built in memory, since none of these guards reads a file.
+    subroutine build_convert_fixture(t)
+        type(parquet_table), intent(out) :: t !! the table to build.
+        character(len=4) :: vec(2, 3)
+        type(parquet_date) :: d(3)
+        integer :: k
+
+        vec = reshape([character(len=4) :: "a", "b", "c", "d", "e", "f"], [2, 3])
+        do k = 1, 3
+            call d(k)%set(2024, 1, k)
+        end do
+        call parquet_new_table(t)
+        call t%add_column("s", [character(len=4) :: "1", "2", "3"])
+        call t%add_column("bad", [character(len=4) :: "1", "2 3", "z"])
+        call t%add_column("i", [7_int32, 8_int32, 9_int32])
+        call t%add_column("vec", vec)
+        call t%add_column("d", d)
+    end subroutine build_convert_fixture
+
+    !> %parse_column naming a column that is not a scalar string one. Two scenarios share this
+    !> body: a numeric column and a string VECTOR, which are refused by the same guard for the
+    !> same reason and must both name the kind they actually hold.
+    subroutine scenario_parse_column_bad_source(bad)
+        character(len=*), intent(in) :: bad !! the column to name.
+        type(parquet_table) :: t
+
+        call build_convert_fixture(t)
+        call t%parse_column(bad, PK_INT64)
+        print '(a,i0)', "unexpectedly parsed a non-string column, kind is now ", t%kind(bad)
+    end subroutine scenario_parse_column_bad_source
+
+    !> A target kind %parse_column has no parser for. PK_STRING is the sharpest case: it is a
+    !> real kind, and asking for it is the mistake of calling this verb when %format_column was
+    !> meant, so the message says which is which.
+    subroutine scenario_parse_column_bad_target()
+        type(parquet_table) :: t
+
+        call build_convert_fixture(t)
+        call t%parse_column("s", PK_STRING)
+        print '(a,i0)', "unexpectedly parsed into an unsupported target, kind is now ", t%kind("s")
+    end subroutine scenario_parse_column_bad_target
+
+    !> An `invalid=` token that is neither "error" nor "null". Accepting it silently would apply
+    !> the DEFAULT policy, i.e. abort on the first bad row -- the opposite of what a caller
+    !> writing invalid="skip" is asking for.
+    subroutine scenario_parse_column_invalid_token()
+        type(parquet_table) :: t
+
+        call build_convert_fixture(t)
+        call t%parse_column("s", PK_INT64, invalid="skip")
+        print '(a,i0)', "unexpectedly accepted an unknown invalid= policy, kind is now ", t%kind("s")
+    end subroutine scenario_parse_column_invalid_token
+
+    !> The default policy meeting text it cannot read. The message must name the ROW, the COLUMN
+    !> and the TEXT: a caller fixing a data file needs all three, and a message naming only the
+    !> column is one they cannot act on.
+    !!
+    !! `long` picks the overlong-text case instead, which exercises the preview cap. That cap is
+    !! not cosmetic -- ifx's ERROR STOP runtime corrupts the heap once the composed message
+    !! reaches 8192 bytes, and a "this text is not a number" guard is by construction reached
+    !! with text the caller controls.
+    subroutine scenario_parse_column_malformed(long)
+        logical, intent(in) :: long !! .true. to use a 300-character unreadable value.
+        type(parquet_table) :: t
+        character(len=300) :: wide(3)
+
+        if (long) then
+            wide = repeat("z", 300)
+            call parquet_new_table(t)
+            call t%add_column("bad", wide)
+        else
+            call build_convert_fixture(t)
+        end if
+        call t%parse_column("bad", PK_INT32)
+        print '(a,i0)', "unexpectedly parsed malformed text, kind is now ", t%kind("bad")
+    end subroutine scenario_parse_column_malformed
+
+    !> `to_name` naming a column that already exists. %copy_column's rule, reached through a
+    !> different verb: a new column never silently replaces one that is there.
+    subroutine scenario_parse_column_to_name_exists()
+        type(parquet_table) :: t
+
+        call build_convert_fixture(t)
+        call t%parse_column("s", PK_INT64, to_name="i")
+        print '(a,i0)', "unexpectedly wrote over an existing column, ncols=", t%ncols()
+    end subroutine scenario_parse_column_to_name_exists
+
+    !> A conversion on a table another thread may be using. Both verbs replace a column's
+    !> storage, which is exactly the class of change table_check_not_shared refuses.
+    subroutine scenario_parse_column_shared()
+        type(parquet_table) :: t
+
+        call build_convert_fixture(t)
+        !$omp parallel num_threads(2) default(shared)
+        !$omp single
+        call t%parse_column("s", PK_INT64)
+        !$omp end single
+        !$omp end parallel
+        print '(a,i0)', "unexpectedly converted a column of a shared table, kind is now ", t%kind("s")
+    end subroutine scenario_parse_column_shared
+
+    !> %reload on a parsed column. The abort is %reload's own user_populated guard, and this is
+    !> what makes the claim %parse_column stakes observable: the file holds text, so re-reading
+    !> it into the parsed kind is not something the reader can do.
+    subroutine scenario_reload_after_parse_column()
+        type(parquet_table) :: t
+        type(parquet_writer) :: w
+        character(len=*), parameter :: file = "test_run/convert_reload_scenario.parquet"
+
+        call parquet_open_writer(w, file)
+        call parquet_write_column(w, "s", [character(len=4) :: "1", "2", "3"])
+        call parquet_close_writer(w)
+        call parquet_open_table(t, file)
+        call t%parse_column("s", PK_INT32)
+        call t%reload("s")
+        print '(a,i0)', "unexpectedly reloaded a parsed column, kind is now ", t%kind("s")
+    end subroutine scenario_reload_after_parse_column
+
+    !> %format_column naming a column it cannot render one string per row from. Two scenarios
+    !> share this body: a column that is already text (nothing to render, and a `fmt` would be
+    !> silently ignored) and a vector column (no per-row scalar at all).
+    subroutine scenario_format_column_bad_source(bad)
+        character(len=*), intent(in) :: bad !! the column to name.
+        type(parquet_table) :: t
+
+        call build_convert_fixture(t)
+        call t%format_column(bad)
+        print '(a,i0)', "unexpectedly rendered an unsupported column, kind is now ", t%kind(bad)
+    end subroutine scenario_format_column_bad_source
+
+    !> `fmt=` on a temporal column. Refused rather than ignored: %to_string writes ISO-8601 and
+    !> has no format to vary, so accepting the argument would silently discard it.
+    subroutine scenario_format_column_fmt_on_temporal()
+        type(parquet_table) :: t
+
+        call build_convert_fixture(t)
+        call t%format_column("d", fmt="(i0)")
+        print '(a,i0)', "unexpectedly accepted fmt= on a temporal column, kind is now ", t%kind("d")
+    end subroutine scenario_format_column_fmt_on_temporal
+
+    !> The negative control for every conversion scenario above: the same fixture, taken through
+    !> both verbs, both policies, both `to_name` forms and a `fmt`. Without it a guard that
+    !> refused everything would pass all twelve.
+    subroutine scenario_convert_control()
+        type(parquet_table) :: t
+        character(len=:), allocatable :: txt(:)
+
+        call build_convert_fixture(t)
+        call t%parse_column("s", PK_INT64)                     ! in place, default policy
+        call t%parse_column("bad", PK_INT32, invalid="null")   ! the malformed rows become Null
+        call t%format_column("s", to_name="s_txt")             ! a new column beside it
+        call t%format_column("i", fmt="(i4.4)")                ! in place, with a format
+        call t%format_column("d")                              ! ISO-8601, no fmt
+        call t%get("s_txt", txt)
+        print '(a,l1,a,a)', "every conversion path ran, bad has nulls: ", t%has_nulls("bad"), &
+            ", first text: ", trim(txt(1))
+    end subroutine scenario_convert_control
 
     subroutine scenario_filter_set_control()
         type(parquet_writer) :: writer

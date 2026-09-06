@@ -934,6 +934,65 @@ columns included — and with one, converts by `%cast`'s rules. It differs in on
 `exact` defaults to `.true.` here, because a copy is usually taken in order to keep something, so a
 value that would not survive the round trip is refused rather than truncated.
 
+### Text to numbers and back: `%parse_column` and `%format_column`
+
+`%cast` refuses string ↔ numeric on purpose, and that is not the same as it being unavailable.
+What is different in kind about text is not the conversion but the **failure**: `"abc"` has no
+number in it, and the library will not pick one for you. So the pair that does this conversion
+puts the failure policy in the caller's hands and has no silent option at all.
+
+```fortran
+call t%parse_column(name, to_kind, [invalid], [to_name])   ! text -> numbers
+call t%format_column(name, [fmt], [to_name])               ! numbers -> text
+```
+
+```fortran
+call t%parse_column("uberID", PK_INT64)                    ! aborts naming the offending row
+call t%parse_column("mag", PK_FLOAT64, invalid="null")     ! bad rows become Null instead
+call t%format_column("count", fmt="(i6.6)", to_name="id")  ! a new text column beside it
+```
+
+**`invalid="error"` is the default.** The first row whose text cannot be read stops the program,
+with a message naming the **row**, the **column** and the **text** — the three things you need to
+go and look at the data. `invalid="null"` is pandas' `errors="coerce"` and polars' `strict=False`:
+that row is marked Null and the scan carries on. Those two tokens are the whole vocabulary, and a
+third spelling is refused rather than treated as the default.
+
+**A Null stays Null.** A row that was already missing is never parsed and `invalid=` has no say
+over it, so the two cases stay distinguishable afterwards: what is Null now is what was Null
+before, plus exactly the rows that could not be read.
+
+`to_kind` is `PK_INT32`, `PK_INT64`, `PK_FLOAT32`, `PK_FLOAT64`, `PK_LOGICAL`, `PK_DATE`,
+`PK_TIME` or `PK_TIMESTAMP`. The parse is
+[`pf_from_str`](../utilities/utils.html#reading-a-value-back-out-of-text)'s for the first five and
+each temporal type's own `%parse` for the last three, so it is strict at every target: `"5 6"` is
+not a number, `"3.9"` is not an integer, and `"1e300"` is not a `float32`. The source must be a
+scalar string column — a numeric one has nothing to parse, and is refused naming its kind.
+
+**`%format_column` is the other direction**, over any scalar numeric, logical or temporal column.
+`fmt` is a Fortran format specification with its parentheses, handed to
+[`pf_to_str`](../utilities/utils.html#turning-a-value-into-text), so it defaults to `(i0)` for the
+integer kinds and `(g0)` for the reals, and a `logical` renders as `true`/`false` without one. A
+temporal column renders as ISO-8601 and takes no `fmt` — passing one is refused rather than
+ignored. A Null stays Null and is not rendered as the word `null` or as anything else.
+
+**Pass `fmt` whenever the exact text matters**: the default rendering of a real is not portable
+between compilers, which is `pf_to_str`'s own rule and applies here unchanged.
+
+Both convert **in place** by default — the column keeps its name, its position and its unit, and
+only its kind and values change, so a schema-less write afterwards sees the column where it was.
+`to_name=` writes the result into a new column beside the original instead, and refuses a name
+that is already taken.
+
+> **A pointer from `%col` does not survive either verb**, for `%cast`'s reason: the column's
+> storage is replaced, so `%generation()` advances and the pointer must be taken again. Neither
+> changes a row, so neither **detaches** the table — a column it has not read yet is still
+> readable afterwards.
+
+One consequence worth knowing: a converted column is marked as holding values you wrote, so
+`%reload` and `%evict_column` refuse it without `force=.true.`. That is not caution — the file
+holds text, and re-reading it into the parsed kind is not something the reader can do.
+
 ## Seeing what a table holds
 
 `call t%print_stat()` prints one line per **materialized** column to standard output — its kind

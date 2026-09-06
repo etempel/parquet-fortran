@@ -275,6 +275,12 @@ module parquet_tables
     ! every later one (a clone's, a per-thread one) draw the identical rows. It stays out of the
     ! `use parquet` namespace via this module's default-private accessibility.
     use parquet_random, only : pf_random_seed
+    ! %parse_column and %format_column are the string<->number pair, and both sides of it already
+    ! live in the leaf parquet_utils: the strict reader and the renderer it inverts. Free in
+    ! compile terms -- parquet_utils.f90 is already in this module's footprint through
+    ! parquet_index, so this is a namespace import rather than a new dependency, exactly as the
+    ! three container element types above are.
+    use parquet_utils, only : pf_from_str, pf_to_str
     !
     implicit none
     private
@@ -1043,6 +1049,8 @@ def gen_table_type():
         procedure :: rename_column => table_rename_column !! Change the name a column is looked up by.
         procedure :: copy_column => table_copy_column     !! Add a copy of a column, optionally of another kind.
         procedure :: cast => table_cast                   !! Convert a column to another kind, in place.
+        procedure :: parse_column => table_parse_column   !! Read a string column's text back as another kind.
+        procedure :: format_column => table_format_column !! Render a column's values as text, in place.
         ! --- mutation: missing data (values only -- none of these changes the row set) ---
         procedure, private :: table_fillna_i32 !! %fillna specific, name array, int32 value.
         procedure, private :: table_fillna_i64 !! %fillna specific, name array, int64 value.
@@ -3713,6 +3721,86 @@ def gen_spec_interfaces():
             logical, intent(in), optional :: force !! .true. to allow dropping PREDEFINED columns.
         end subroutine table_keep_columns{suffix}""")
     w("""    end interface""")
+    w("    !")
+    w("""    ! ---- String to number and back (parquet_tables_convert) ----
+    interface
+        !> Reads a STRING column's text back as numbers, in place -- `.astype(int)` on a column
+        !! the file holds as text, and the one conversion `%cast` deliberately refuses.
+        !!
+        !! `to_kind` is one of `PK_INT32`, `PK_INT64`, `PK_FLOAT32`, `PK_FLOAT64`, `PK_LOGICAL`,
+        !! `PK_DATE`, `PK_TIME` or `PK_TIMESTAMP`. The source must be a `PK_STRING` column; a
+        !! vector, container or already-numeric one is refused naming its kind.
+        !!
+        !! **The failure policy is the whole design, and there is deliberately no silent option.**
+        !! `invalid` defaults to `"error"`: the first row whose text is not readable as `to_kind`
+        !! aborts, naming the row, the column and the offending text. `invalid="null"` is pandas'
+        !! `errors="coerce"` and polars' `strict=False` -- that row becomes Null and the scan
+        !! carries on. Those two tokens are the whole vocabulary; anything else is refused.
+        !!
+        !! The parse is `pf_from_str`'s (`parquet_utils`) for the numeric and logical kinds and
+        !! each temporal type's own `%parse` for the three temporal ones, so it is strict in the
+        !! same way at every target: `"5 6"` is not a number, `"3.9"` is not an integer, and a
+        !! value the kind cannot hold (`"1e300"` into a `float32`) is not readable into it. See
+        !! `pf_from_str` for exactly what each kind accepts.
+        !!
+        !! **A Null stays Null** and its text is never looked at, so `invalid=` has no say over
+        !! rows that were already missing.
+        !!
+        !! In place by default: the column keeps its name, its position and its unit, and only its
+        !! kind and its values change. `to_name` writes the result into a NEW column of that name
+        !! instead and leaves the text column exactly as it was.
+        !!
+        !! **This replaces the column's storage, so it invalidates any pointer previously taken
+        !! from `%col` and advances `%generation()`** -- as `%cast` does, and for that reason. It
+        !! changes no row, so the table does NOT detach and a column it has not read yet can still
+        !! be read. The converted column is marked as holding written values, so `%reload` and
+        !! `%evict_column` refuse it without `force=.true.`: the file holds text, and re-reading
+        !! that text into the new kind is not something the reader can do.
+        !!
+        !! A parsed DATE/TIME/TIMESTAMP column carries no recorded resolution, exactly as one
+        !! added by `%add_column` does, so a schema-less `parquet_write_table` writes it at the
+        !! writer's default. Pass a schema when the resolution matters.
+        module subroutine table_parse_column(self, name, to_kind, invalid, to_name)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! the string column to read.
+            integer, intent(in) :: to_kind              !! target PK_* kind.
+            !> `"error"` (the default) to abort on the first unreadable row, `"null"` to null it.
+            character(len=*), intent(in), optional :: invalid
+            !> name for a NEW column to hold the result; absent converts in place.
+            character(len=*), intent(in), optional :: to_name
+        end subroutine table_parse_column
+        !> Renders a column's values as text -- `.astype(str)`, and the inverse of
+        !! `%parse_column`.
+        !!
+        !! The source may be any scalar numeric, logical or temporal column, and the result is a
+        !! `PK_STRING` column. A column that is ALREADY `PK_STRING` is refused rather than copied:
+        !! there is nothing to render, and accepting it would silently ignore a `fmt` that was
+        !! passed. A vector or container column is refused too.
+        !!
+        !! `fmt` is a Fortran format specification including its parentheses, handed straight to
+        !! `pf_to_str` (`parquet_utils`) -- so it defaults to `'(i0)'` for the two integer kinds
+        !! and `'(g0)'` for the two reals, and a `logical` renders as `true`/`false` without one.
+        !! **A temporal column takes no `fmt` and passing one is refused**: `%to_string` writes
+        !! ISO-8601 and has no format to vary.
+        !!
+        !! **The default rendering of a real is not portable** -- `(g0)` gives
+        !! `3.1400000000000001` on one compiler and `3.140000000000000` on another for the same
+        !! value -- so pass `fmt` whenever the exact text matters.
+        !!
+        !! **A Null stays Null**, and is not rendered as `"null"` or as anything else.
+        !!
+        !! In place by default, with `to_name` for a new column beside it, and `%parse_column`'s
+        !! pointer rule exactly: storage is replaced, `%generation()` advances, nothing detaches,
+        !! and the result is marked as holding written values.
+        module subroutine table_format_column(self, name, fmt, to_name)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! the column to render.
+            !> format specification with parentheses; absent uses `pf_to_str`'s own default.
+            character(len=*), intent(in), optional :: fmt
+            !> name for a NEW column to hold the text; absent converts in place.
+            character(len=*), intent(in), optional :: to_name
+        end subroutine table_format_column
+    end interface""")
     w("    !")
     w("""    ! ---- Row-structural mutation -- detaches whenever it changes the row set (parquet_tables_rowmutate) ----
     interface

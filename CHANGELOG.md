@@ -53,12 +53,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Neither detaches. See
   [Several columns at once](doc/pages/tables/table.md#several-columns-at-once-as-one-matrix) and
   [Dropping and keeping several columns](doc/pages/tables/table-mutate.md#dropping-and-keeping-several-columns).
+- **Text to numbers and back: `%parse_column`, `%format_column` and `pf_from_str`.**
+  `t%parse_column("uberID", PK_INT64)` reads a string column's text as numbers, in place, which is
+  the one conversion `%cast` refuses — and refuses because the interesting part is the failure:
+  `invalid="error"` (the default) stops naming the row, the column and the offending text, and
+  `invalid="null"` marks that row missing and carries on. `%format_column` renders a numeric,
+  logical or temporal column as text, with an optional `fmt`. Both take `to_name=` for a new column
+  beside the original, and neither detaches. `pf_from_str` in `parquet_utils` is the strict
+  single-value parser underneath, the inverse of `pf_to_str`: a list-directed `read` accepts
+  `"5 6"` as 5, and this does not. See
+  [Text to numbers and back](doc/pages/tables/table.md#text-to-numbers-and-back-parse_column-and-format_column)
+  and [Reading a value back out of text](doc/pages/utilities/utils.md#reading-a-value-back-out-of-text).
 
 ### Fixed
 
 - A column added with `%add_column` after another had been dropped could report a unit it was never
-  given — the unit of whichever column had been last — and write it into the file. Many other minor
-  fixes and improvements.
+  given — the unit of whichever column had been last — and write it into the file.
+- Many other minor fixes and improvements.
 
 ## [v2.3.0] - 2026-09-06
 

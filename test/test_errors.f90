@@ -719,7 +719,33 @@ contains
             new_unittest("drop_columns on a shared table aborts", &
                 test_drop_columns_shared_aborts), &
             new_unittest("get_matrix/set_matrix/drop_columns/keep_columns: every well-formed call runs", &
-                test_matrix_control_succeeds) &
+                test_matrix_control_succeeds), &
+            new_unittest("parse_column on a numeric column aborts, naming its kind", &
+                test_parse_column_non_string_aborts), &
+            new_unittest("parse_column on a string VECTOR column aborts", &
+                test_parse_column_vector_source_aborts), &
+            new_unittest("parse_column into a kind it has no parser for aborts", &
+                test_parse_column_bad_target_aborts), &
+            new_unittest("parse_column with an unknown invalid= policy aborts", &
+                test_parse_column_invalid_token_aborts), &
+            new_unittest("parse_column on unreadable text aborts, naming row, column and text", &
+                test_parse_column_malformed_aborts), &
+            new_unittest("parse_column caps the offending text it echoes", &
+                test_parse_column_malformed_long_aborts), &
+            new_unittest("parse_column to_name naming an existing column aborts", &
+                test_parse_column_to_name_exists_aborts), &
+            new_unittest("parse_column on a shared table aborts", &
+                test_parse_column_shared_aborts), &
+            new_unittest("reload of a parsed column aborts without force", &
+                test_reload_after_parse_column_aborts), &
+            new_unittest("format_column on a column that is already text aborts", &
+                test_format_column_string_source_aborts), &
+            new_unittest("format_column on a vector column aborts", &
+                test_format_column_vector_source_aborts), &
+            new_unittest("format_column with fmt= on a temporal column aborts", &
+                test_format_column_fmt_on_temporal_aborts), &
+            new_unittest("parse_column/format_column: every well-formed call runs", &
+                test_convert_control_succeeds) &
             ]
         p3 = [ &
             new_unittest("an environment value longer than the buffer aborts", &
@@ -9175,6 +9201,135 @@ contains
         call check_scenario_exit_status(error, "matrix_control", expect_abort=.false., &
             failure_message="every well-formed matrix and projection call was expected to run cleanly")
     end subroutine test_matrix_control_succeeds
+
+    subroutine test_parse_column_non_string_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "parse_column_non_string", expect_abort=.true., &
+            failure_message="%parse_column on a column that is not text was expected to abort", &
+            required_stderr="parse_column: this column holds PK_INT32, not text")
+    end subroutine test_parse_column_non_string_aborts
+
+    subroutine test_parse_column_vector_source_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "parse_column_vector_source", expect_abort=.true., &
+            failure_message="%parse_column on a string VECTOR column was expected to abort", &
+            required_stderr="parse_column: this column holds PK_STRING_VEC, not text")
+    end subroutine test_parse_column_vector_source_aborts
+
+    subroutine test_parse_column_bad_target_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "parse_column_bad_target", expect_abort=.true., &
+            failure_message="%parse_column into a kind it has no parser for was expected to abort", &
+            required_stderr="parse_column: PK_STRING is not a target this verb can parse into")
+    end subroutine test_parse_column_bad_target_aborts
+
+    subroutine test_parse_column_invalid_token_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "parse_column_invalid_token", expect_abort=.true., &
+            failure_message="%parse_column with an unknown invalid= policy was expected to abort", &
+            required_stderr="parse_column: invalid=""skip"" is not a policy")
+    end subroutine test_parse_column_invalid_token_aborts
+
+    !> The message must carry all three of the row, the column and the text. Asserted as three
+    !! separate checks rather than one long string, so a failure says WHICH of the three went
+    !! missing -- and because a caller fixing a data file cannot act on a message naming only the
+    !! column.
+    subroutine test_parse_column_malformed_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "parse_column_malformed", expect_abort=.true., &
+            failure_message="%parse_column meeting unreadable text was expected to abort", &
+            required_stderr="parse_column: row 2 holds")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "parse_column_malformed", expect_abort=.true., &
+            failure_message="%parse_column meeting unreadable text was expected to abort", &
+            required_stderr="""2 3"", which is not readable as int32")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "parse_column_malformed", expect_abort=.true., &
+            failure_message="%parse_column meeting unreadable text was expected to abort", &
+            required_stderr="column 'bad'")
+    end subroutine test_parse_column_malformed_aborts
+
+    !> A 300-character unreadable value is echoed truncated. Not cosmetic: ifx's ERROR STOP
+    !! runtime corrupts the heap once the composed message reaches 8192 bytes, and this guard is
+    !! by construction reached with text the caller controls.
+    subroutine test_parse_column_malformed_long_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "parse_column_malformed_long", expect_abort=.true., &
+            failure_message="%parse_column on overlong unreadable text was expected to abort", &
+            required_stderr=repeat("z", 100) // "...")
+        if (allocated(error)) return
+        ! The negative half: 101 z's must NOT appear, or the cap did nothing.
+        call check_scenario_exit_status_and_no_output(error, "parse_column_malformed_long", &
+            expect_abort=.true., &
+            failure_message="%parse_column on overlong unreadable text was expected to abort", &
+            forbidden_text=repeat("z", 101))
+    end subroutine test_parse_column_malformed_long_aborts
+
+    subroutine test_parse_column_to_name_exists_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "parse_column_to_name_exists", expect_abort=.true., &
+            failure_message="%parse_column writing over an existing column was expected to abort", &
+            required_stderr="parse_column: to_name=""i"" is already a column of this table")
+    end subroutine test_parse_column_to_name_exists_aborts
+
+    subroutine test_parse_column_shared_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it the scenario's parallel region never " // &
+            "opens, so the table is never shared and the guard has nothing to refuse")
+        return
+#endif
+        call check_scenario_exit_status_and_stderr(error, "parse_column_shared", expect_abort=.true., &
+            failure_message="%parse_column on a table another thread may hold was expected to abort", &
+            required_stderr="parse_column: this table was not opened by this thread")
+    end subroutine test_parse_column_shared_aborts
+
+    subroutine test_reload_after_parse_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "reload_after_parse_column", expect_abort=.true., &
+            failure_message="%reload of a parsed column was expected to abort without force=", &
+            required_stderr="reload: this column holds values written into the table")
+    end subroutine test_reload_after_parse_column_aborts
+
+    subroutine test_format_column_string_source_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "format_column_string_source", expect_abort=.true., &
+            failure_message="%format_column on a column that is already text was expected to abort", &
+            required_stderr="format_column: this column is already text")
+    end subroutine test_format_column_string_source_aborts
+
+    subroutine test_format_column_vector_source_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "format_column_vector_source", expect_abort=.true., &
+            failure_message="%format_column on a vector column was expected to abort", &
+            required_stderr="format_column: a PK_STRING_VEC column cannot be rendered")
+    end subroutine test_format_column_vector_source_aborts
+
+    subroutine test_format_column_fmt_on_temporal_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "format_column_fmt_on_temporal", expect_abort=.true., &
+            failure_message="%format_column with fmt= on a temporal column was expected to abort", &
+            required_stderr="format_column: fmt= is not accepted for a PK_DATE column")
+    end subroutine test_format_column_fmt_on_temporal_aborts
+
+    subroutine test_convert_control_succeeds(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "convert_control", expect_abort=.false., &
+            failure_message="every well-formed conversion call was expected to run cleanly")
+    end subroutine test_convert_control_succeeds
 
     subroutine test_filter_rule_too_long_aborts(error)
         type(error_type), allocatable, intent(out) :: error

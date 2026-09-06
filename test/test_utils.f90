@@ -34,6 +34,8 @@ module test_utils
     use parquet_utils
     use test_path_vectors
     use iso_fortran_env, only: int32, int64, real32, real64
+    use, intrinsic :: ieee_arithmetic, only: ieee_support_flag, ieee_get_flag, &
+        ieee_set_flag, ieee_underflow
     implicit none
     private
 
@@ -56,6 +58,13 @@ contains
             new_unittest("to_str renders reals and logicals", test_to_str_reals_logicals), &
             new_unittest("to_str fmt renders and min_width then pads", test_to_str_fmt), &
             new_unittest("to_str returns asterisks, and for three different reasons", test_to_str_bad_fmt), &
+            new_unittest("from_str refuses every strictness vector", test_from_str_strictness), &
+            new_unittest("from_str reads integers, and refuses what will not fit", test_from_str_integers), &
+            new_unittest("from_str reads every real literal shape and no other", test_from_str_reals), &
+            new_unittest("from_str refuses a real the kind cannot hold, but rounds one it can", &
+                test_from_str_real_range), &
+            new_unittest("from_str reads exactly six logical spellings", test_from_str_logical), &
+            new_unittest("from_str inverts to_str", test_from_str_round_trip), &
             new_unittest("join_path matches CPython at every arity", test_join_matches_python), &
             new_unittest("join_path array form matches the scalar forms", test_join_many_agrees), &
             new_unittest("join_path array form on 0, 1 and n elements", test_join_many_degenerate), &
@@ -493,6 +502,273 @@ contains
         if (allocated(error)) return
         call check(error, got(397:400) == "1.00", "the 400-character rendering must be the number, right-justified")
     end subroutine test_to_str_bad_fmt
+
+    ! ================================================================================
+    ! Text to value
+    ! ================================================================================
+
+    !> The seven vectors the design named, at every specific that could plausibly accept them.
+    !!
+    !! `"5 6"` is the one that matters and the reason this procedure exists at all: a
+    !! list-directed `read` accepts it with `iostat == 0` and yields 5, so an ID with a stray
+    !! space silently becomes a different, plausible ID. Substituting a `read` back in is the
+    !! mutation this test exists to catch (feature_risks.md, R-g), and it is the ONLY one of the
+    !! seven a `read` would get wrong -- which is exactly why the vector list is not shorter.
+    subroutine test_from_str_strictness(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+        integer(int32) :: n32
+        integer(int64) :: n64
+        real(real64) :: x
+        logical :: ok
+
+        call pf_from_str("5 6", n32, ok)
+        call check(error, .not. ok, "an integer with an embedded blank is refused, not read as 5")
+        if (allocated(error)) return
+        call pf_from_str("5 6", x, ok)
+        call check(error, .not. ok, "and a real with one is refused too")
+        if (allocated(error)) return
+        call pf_from_str("3.9", n64, ok)
+        call check(error, .not. ok, "a real is not an integer")
+        if (allocated(error)) return
+        call pf_from_str("+", n32, ok)
+        call check(error, .not. ok, "a sign with no digits is not a number")
+        if (allocated(error)) return
+        call pf_from_str("", n32, ok)
+        call check(error, .not. ok, "empty text is not a number")
+        if (allocated(error)) return
+        call pf_from_str("   ", x, ok)
+        call check(error, .not. ok, "and neither is text that is all blanks")
+        if (allocated(error)) return
+        call pf_from_str(" 12 ", n32, ok)
+        call check(error, ok, "leading and trailing blanks are trimmed")
+        if (allocated(error)) return
+        call check(error, n32 == 12, "and what is left reads as its own value")
+        if (allocated(error)) return
+        call pf_from_str("1e3", n64, ok)
+        call check(error, .not. ok, "an exponent form is not an integer")
+        if (allocated(error)) return
+        call pf_from_str("1e3", x, ok)
+        call check(error, ok .and. x == 1000.0_real64, "but it is a real")
+        if (allocated(error)) return
+        call pf_from_str("0x10", n32, ok)
+        call check(error, .not. ok, "hexadecimal is not accepted as an integer")
+        if (allocated(error)) return
+        call pf_from_str("0x10", x, ok)
+        call check(error, .not. ok, "nor as a real")
+    end subroutine test_from_str_strictness
+
+    !> Signs, leading zeros, and the range of each integer kind.
+    !!
+    !! The range half is per-KIND and that is the point: `"2147483648"` is a perfectly good
+    !! number that an `int32` cannot hold, so it must be refused there and read here. A parser
+    !! that let the `read` wrap would return a plausible negative instead.
+    subroutine test_from_str_integers(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+        integer(int32) :: n32
+        integer(int64) :: n64
+        logical :: ok
+
+        call pf_from_str("-7", n32, ok)
+        call check(error, ok .and. n32 == -7, "a negative sign is read")
+        if (allocated(error)) return
+        call pf_from_str("+7", n32, ok)
+        call check(error, ok .and. n32 == 7, "an explicit positive sign is read")
+        if (allocated(error)) return
+        call pf_from_str("007", n32, ok)
+        call check(error, ok .and. n32 == 7, "leading zeros are read")
+        if (allocated(error)) return
+        call pf_from_str("12abc", n32, ok)
+        call check(error, .not. ok, "trailing rubbish is refused, not ignored")
+        if (allocated(error)) return
+        call pf_from_str("2147483647", n32, ok)
+        call check(error, ok .and. n32 == 2147483647_int32, "the largest int32 reads")
+        if (allocated(error)) return
+        call pf_from_str("2147483648", n32, ok)
+        call check(error, .not. ok, "one past it does not")
+        if (allocated(error)) return
+        call pf_from_str("2147483648", n64, ok)
+        call check(error, ok .and. n64 == 2147483648_int64, "and reads perfectly well as an int64")
+        if (allocated(error)) return
+        call pf_from_str("9223372036854775807", n64, ok)
+        call check(error, ok .and. n64 == huge(0_int64), "the largest int64 reads")
+        if (allocated(error)) return
+        call pf_from_str("9223372036854775808", n64, ok)
+        call check(error, .not. ok, "one past it does not")
+    end subroutine test_from_str_integers
+
+    !> Every shape of the documented real grammar, and the shapes just outside it.
+    subroutine test_from_str_reals(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+        real(real64) :: x
+        logical :: ok
+
+        call pf_from_str("12", x, ok)
+        call check(error, ok .and. x == 12.0_real64, "an integer with no point reads as a real")
+        if (allocated(error)) return
+        call pf_from_str("12.", x, ok)
+        call check(error, ok .and. x == 12.0_real64, "a trailing point reads")
+        if (allocated(error)) return
+        call pf_from_str(".5", x, ok)
+        call check(error, ok .and. x == 0.5_real64, "a leading point reads")
+        if (allocated(error)) return
+        call pf_from_str("-.5", x, ok)
+        call check(error, ok .and. x == -0.5_real64, "signed, so does it")
+        if (allocated(error)) return
+        call pf_from_str("1d3", x, ok)
+        call check(error, ok .and. x == 1000.0_real64, "a d exponent reads")
+        if (allocated(error)) return
+        call pf_from_str("1E-3", x, ok)
+        call check(error, ok .and. abs(x - 0.001_real64) < 1.0e-15_real64, "a signed E exponent reads")
+        if (allocated(error)) return
+        call pf_from_str(".", x, ok)
+        call check(error, .not. ok, "a bare point is not a number")
+        if (allocated(error)) return
+        call pf_from_str("1.2.3", x, ok)
+        call check(error, .not. ok, "two points are not a number")
+        if (allocated(error)) return
+        call pf_from_str("1e", x, ok)
+        call check(error, .not. ok, "an exponent letter with no digits is not a number")
+        if (allocated(error)) return
+        call pf_from_str("1e+", x, ok)
+        call check(error, .not. ok, "nor one with only a sign")
+        if (allocated(error)) return
+        call pf_from_str("e5", x, ok)
+        call check(error, .not. ok, "nor an exponent with no significand")
+        if (allocated(error)) return
+        call pf_from_str("1q3", x, ok)
+        call check(error, .not. ok, "q is not one of the accepted exponent letters")
+        if (allocated(error)) return
+        call pf_from_str("1.0_real64", x, ok)
+        call check(error, .not. ok, "a Fortran kind suffix is not accepted")
+        if (allocated(error)) return
+        ! The two spellings the design refuses on purpose: neither is a Fortran literal, and text
+        ! reading `nan` in a data column is far more often a missing-value placeholder than a
+        ! deliberate NaN -- under %parse_column's invalid="null" that row becomes Null, which is
+        ! what the caller meant.
+        call pf_from_str("nan", x, ok)
+        call check(error, .not. ok, "nan is refused")
+        if (allocated(error)) return
+        call pf_from_str("inf", x, ok)
+        call check(error, .not. ok, "and so is inf")
+    end subroutine test_from_str_reals
+
+    !> Overflow is refused per KIND; rounding is not overflow.
+    !!
+    !! The two compilers in this project's fleet report the overflow differently -- nagfor 7.2
+    !! through `iostat` with the variable untouched, gfortran 15.2 with `iostat == 0` and an
+    !! Infinity -- so this test is what pins the CONTRACT to one answer across both. Dropping
+    !! either half of `pf_from_str`'s check leaves it passing on one compiler and failing on the
+    !! other.
+    subroutine test_from_str_real_range(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+        real(real32) :: x32
+        real(real64) :: x64
+        logical :: ok, has_flag, saved
+
+        call pf_from_str("1e300", x64, ok)
+        call check(error, ok, "1e300 is an ordinary real64")
+        if (allocated(error)) return
+        call pf_from_str("1e300", x32, ok)
+        call check(error, .not. ok, "and is refused for a real32, which cannot hold it")
+        if (allocated(error)) return
+        call pf_from_str("-1e300", x32, ok)
+        call check(error, .not. ok, "the negative overflow is refused too")
+        if (allocated(error)) return
+        call pf_from_str("1e400", x64, ok)
+        call check(error, .not. ok, "and 1e400 is refused even for a real64")
+        if (allocated(error)) return
+        call pf_from_str("0.1", x32, ok)
+        call check(error, ok .and. abs(x32 - 0.1_real32) < 1.0e-7_real32, &
+            "a value that merely rounds is read, not refused")
+        if (allocated(error)) return
+        ! An underflow to zero is rounding too, and asserting it needs the IEEE flag saved and
+        ! restored: the fixture raises IEEE_UNDERFLOW by construction under nagfor, which would
+        ! otherwise surface as an unexplained warning at the end of the whole run and read as a
+        ! defect in whatever ran last (CLAUDE.md's own rule for a deliberately extreme fixture).
+        has_flag = ieee_support_flag(ieee_underflow, x32)
+        saved = .false.
+        if (has_flag) then
+            call ieee_get_flag(ieee_underflow, saved)
+            call ieee_set_flag(ieee_underflow, .false.)
+        end if
+        call pf_from_str("1e-300", x32, ok)
+        if (has_flag) call ieee_set_flag(ieee_underflow, saved)
+        call check(error, ok .and. x32 == 0.0_real32, "an underflow rounds to zero rather than being refused")
+    end subroutine test_from_str_real_range
+
+    !> The six accepted spellings, and the plausible ones that are not accepted.
+    subroutine test_from_str_logical(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+        logical :: v, ok
+
+        call pf_from_str("true", v, ok)
+        call check(error, ok .and. v, "true reads")
+        if (allocated(error)) return
+        call pf_from_str("FALSE", v, ok)
+        call check(error, ok .and. .not. v, "FALSE reads, case-insensitively")
+        if (allocated(error)) return
+        call pf_from_str("T", v, ok)
+        call check(error, ok .and. v, "T reads")
+        if (allocated(error)) return
+        call pf_from_str("f", v, ok)
+        call check(error, ok .and. .not. v, "f reads")
+        if (allocated(error)) return
+        call pf_from_str("1", v, ok)
+        call check(error, ok .and. v, "1 reads")
+        if (allocated(error)) return
+        call pf_from_str("0", v, ok)
+        call check(error, ok .and. .not. v, "0 reads")
+        if (allocated(error)) return
+        ! Refused deliberately, and named in the interface's own doc-comment: guessing what "yes"
+        ! meant is the class of silent decision this module has none of.
+        call pf_from_str("yes", v, ok)
+        call check(error, .not. ok, "yes is not accepted")
+        if (allocated(error)) return
+        call pf_from_str(".true.", v, ok)
+        call check(error, .not. ok, "nor is Fortran's own .true. spelling")
+        if (allocated(error)) return
+        call pf_from_str("truex", v, ok)
+        call check(error, .not. ok, "nor a prefix with trailing rubbish")
+        if (allocated(error)) return
+        call pf_from_str("2", v, ok)
+        call check(error, .not. ok, "nor any digit but 1 and 0")
+    end subroutine test_from_str_logical
+
+    !> `pf_to_str` then `pf_from_str` returns the value it started with.
+    !!
+    !! The real half uses values that are exact in binary, so it asserts equality rather than a
+    !! tolerance -- but it must not assert the TEXT, which `pf_to_str`'s own contract says is
+    !! compiler-dependent for a real. The round trip is the portable oracle.
+    subroutine test_from_str_round_trip(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+        character(len=:), allocatable :: text
+        integer(int64) :: back_n
+        integer(int64), parameter :: ns(4) = [-huge(0_int64), -1_int64, 0_int64, huge(0_int64)]
+        real(real64) :: back_x
+        real(real64), parameter :: xs(4) = [0.0_real64, -0.5_real64, 3.25_real64, 1.0e10_real64]
+        logical :: b, back_b, ok
+        integer :: k
+
+        do k = 1, 4
+            call pf_to_str(ns(k), text)
+            call pf_from_str(text, back_n, ok)
+            call check(error, ok .and. back_n == ns(k), "an int64 survives to_str then from_str")
+            if (allocated(error)) return
+        end do
+        do k = 1, 4
+            call pf_to_str(xs(k), text)
+            call pf_from_str(text, back_x, ok)
+            call check(error, ok .and. back_x == xs(k), "a real64 survives it exactly")
+            if (allocated(error)) return
+        end do
+        do k = 1, 2
+            b = k == 1
+            call pf_to_str(b, text)
+            call pf_from_str(text, back_b, ok)
+            call check(error, ok .and. (back_b .eqv. b), "a logical survives it")
+            if (allocated(error)) return
+        end do
+    end subroutine test_from_str_round_trip
 
     ! ================================================================================
     ! Path joining

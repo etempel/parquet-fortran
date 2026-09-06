@@ -177,6 +177,7 @@ individual procedure:
 | **column** — `%add_column`, `%drop_column`, `%drop_columns`, `%keep_columns`, `%rename_column`, `%copy_column`, `%cast` | changes which columns exist, or a column's kind | no |
 | **cell** — `%fillna`, `%ffill`, `%bfill` | writes over the nulls of whole columns, in place | no |
 | **cell** — `%set_matrix` | writes several whole columns from one `(column, row)` array, in place | no |
+| **column** — `%parse_column`, `%format_column` | replaces a string column's values with numbers, or a column's values with text | no |
 | **row** — `%filter_rows`, `%sort_by`, `%top_n`, `%delete_rows`, `%truncate`, `%append`, `%append_null_rows`, `%dropna` | changes which rows exist | **yes, when it changes one** |
 | **read** — `%row_mask` | reports which rows a rule selects, changing nothing | no |
 | **read** — `%get_matrix` | copies several whole columns out as one `(column, row)` array | no |
@@ -197,10 +198,11 @@ set at all: a join in which every row of this table survives exactly once, in pl
 columns, so it keeps its file and everything that follows from having one — see [When the join
 detaches](table-join.html#when-the-join-detaches-and-when-it-does-not).
 
-Two of the five are explained on the neighbouring page rather than here, because both are really
+Four of them are explained on the neighbouring page rather than here, because all four are really
 about a column's *type* rather than about mutating a table: `%cast` converts a column to another
-numeric kind in place, and `%copy_column` adds a converted (or plain) copy beside the original —
-see [Changing a column's type](table.html#changing-a-columns-type). The other three are here.
+numeric kind in place, `%copy_column` adds a converted (or plain) copy beside the original, and
+`%parse_column`/`%format_column` are the string ↔ number pair `%cast` refuses — see [Changing a
+column's type](table.html#changing-a-columns-type). The rest are here.
 
 **A [container column](table.html#container-columns-in-a-table) goes through all of this like any
 other**, with two exceptions: it may not be a sort key (see [Sorting](#sorting) below), and `%cast`

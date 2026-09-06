@@ -50,6 +50,7 @@ program run_tester_cpp
     use test_table_verbs, only : collect_tests_table_verbs
     use test_table_fill, only : collect_tests_table_fill
     use test_table_matrix, only : collect_tests_table_matrix
+    use test_table_convert, only : collect_tests_table_convert
     use test_temporal_cpp, only : collect_tests_parquet_temporal_cpp
     use test_writing, only : collect_tests_parquet_writing
     use parquet_bindings, only : parquet_warmup_memory_pool
@@ -92,6 +93,7 @@ program run_tester_cpp
         new_testsuite("table_verbs", collect_tests_table_verbs), &
         new_testsuite("table_fill", collect_tests_table_fill), &
         new_testsuite("table_matrix", collect_tests_table_matrix), &
+        new_testsuite("table_convert", collect_tests_table_convert), &
         new_testsuite("container_nested", collect_tests_container_nested), &
         new_testsuite("settings", collect_tests_parquet_settings), &
         new_testsuite("module_surface", collect_tests_module_surface), &

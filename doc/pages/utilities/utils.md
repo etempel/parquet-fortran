@@ -3,8 +3,8 @@ title: Text and path helpers with parquet_utils
 ---
 
 `parquet_utils` is a small module of things a program built on this library keeps needing and
-Fortran does not supply: ASCII case folding, turning a value into text, and joining and taking
-apart POSIX paths.
+Fortran does not supply: ASCII case folding, turning a value into text and reading it back, and
+joining and taking apart POSIX paths.
 
 It is a leaf. `use parquet_utils` compiles **one** of this library's Fortran files and imports
 nothing but `iso_fortran_env`, so its Fortran graph never reaches the C++ bindings. That is
@@ -143,6 +143,60 @@ are in scope at once under `use parquet`, so this is worth knowing before it sur
 
 The default rendering of a real is **not** portable — `(g0)` produces a different number of digits
 on different compilers. Pass `fmt` whenever the exact text matters.
+
+## Reading a value back out of text
+
+```fortran
+call pf_from_str(text, value, ok)
+```
+
+The inverse of `pf_to_str`, over the same five types — `integer(int32)`, `integer(int64)`,
+`real(real32)`, `real(real64)` and `logical`. `ok` says whether the text could be read at all.
+
+```fortran
+call pf_from_str("42", n, ok)          ! ok = .true.,  n = 42
+call pf_from_str("42x", n, ok)         ! ok = .false., n is NOT set
+call pf_from_str(" 3.5 ", x, ok)       ! ok = .true.,  x = 3.5
+call pf_from_str("true", flag, ok)     ! ok = .true.,  flag = .true.
+```
+
+**Do not read `value` unless `ok` came back `.true.`** — it is deliberately left unset. Writing a
+zero into it instead would hand a caller who forgot to test `ok` a plausible wrong number for
+`"abc"`, which is the exact failure this procedure exists to prevent.
+
+**It is strict, and that is the whole reason it exists rather than a `read`.** A list-directed
+`read(text, *, iostat=)` rejects `"5abc"` and `"3.9"` as you would hope, and accepts **`"5 6"`
+with `iostat == 0`, yielding 5** — so an identifier with a stray space silently becomes a
+different, plausible identifier. Here the shape is checked first and the `read` runs only once it
+is known to be sound.
+
+Leading and trailing blanks are trimmed before anything else — a `character` array element is
+blank-padded by construction, so trailing blanks cannot carry meaning — and after that no blank is
+allowed anywhere. What each type then accepts:
+
+| target | accepted | rejected |
+|---|---|---|
+| `integer(int32)`, `integer(int64)` | an optional `+`/`-`, then digits, then nothing else | `"3.9"`, `"1e3"`, `"0x10"`, `"12abc"`, `"+"`, `""` |
+| `real(real32)`, `real(real64)` | a Fortran real literal: optional sign, digits with an optional `.` and fraction (`"12"`, `"12."`, `".5"` all read), optional `e`/`E`/`d`/`D` exponent with its own sign | `"1.2.3"`, `"1e"`, `"1q3"`, `"1.0_real64"`, `"nan"`, `"inf"` |
+| `logical` | `true`, `false`, `t`, `f`, `1`, `0`, case-insensitively | `"yes"`, `"on"`, `".true."`, `"2"` |
+
+The logical set is exactly what this library's two renderers produce — `pf_to_str` writes
+`true`/`false` and `pf_str` writes `T`/`F` — plus the `1`/`0` a shell or a CSV produces. Guessing
+what `"yes"` meant is the kind of silent decision this module has none of.
+
+**`"nan"` and `"inf"` are refused deliberately.** Neither is a Fortran literal, and text reading
+`nan` in a data file is far more often a placeholder for a missing value than a deliberate NaN —
+under [`%parse_column`](../tables/table.html#changing-a-columns-type)'s `invalid="null"` such a row
+becomes Null, which is usually what was meant. Build a NaN with `ieee_value` if you want one.
+
+**A value the target kind cannot hold is not readable into it**, so strictness is per kind:
+`"2147483648"` reads as an `integer(int64)` and not as an `integer(int32)`, and `"1e300"` reads as
+a `real(real64)` and not as a `real(real32)`. **Rounding is not overflow** — `"0.1"` and
+`"1e-300"` read into a `real32` as the nearest value it has, exactly as any other narrowing here
+rounds silently.
+
+`%parse_column` on a [`parquet_table`](../tables/table.html#changing-a-columns-type) is this
+procedure applied to a whole column, with a policy for what to do about the rows that fail.
 
 ## Joining paths
 

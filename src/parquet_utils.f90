@@ -60,6 +60,7 @@ module parquet_utils
 
     public :: pf_to_lower, pf_to_upper
     public :: pf_to_str
+    public :: pf_from_str
     public :: pf_join_path
     public :: pf_dirname, pf_basename, pf_path_ext, pf_path_stem
     public :: pf_split_path, pf_path_add_suffix
@@ -145,6 +146,56 @@ module parquet_utils
         module procedure pf_to_str_r64 !! `real(real64)`; `fmt` defaults to `'(g0)'`, `pad` to `" "`.
         module procedure pf_to_str_log !! `logical`; renders `true`/`false`, `pad` defaults to `" "`.
     end interface pf_to_str
+
+    ! ---- Text to value ----
+
+    !> Reads one value back out of text: `call pf_from_str(text, value, ok)`.
+    !!
+    !! The inverse of `pf_to_str`, with five specifics over the same types -- `integer(int32)`,
+    !! `integer(int64)`, `real(real32)`, `real(real64)` and `logical`. `text` is the text to read,
+    !! `value` receives the number and `ok` says whether it could be read at all.
+    !!
+    !! **`value` is NOT assigned when `ok` is `.false.`, and must not be read then.** Assigning a
+    !! zero instead would hand a caller who forgets to test `ok` a plausible wrong number for
+    !! `"abc"` -- which is the exact failure this parser exists to prevent. Leaving it undefined
+    !! means a checking build (nagfor's `-nan`, or `-C=undefined`) reports that caller instead of
+    !! agreeing with them.
+    !!
+    !! **It is STRICT, and that is the whole reason it exists rather than a `read`.** A
+    !! list-directed `read(text, *, iostat=)` rejects `"5abc"` and `"3.9"` as you would hope, and
+    !! accepts **`"5 6"` with `iostat == 0`, yielding 5** -- so an ID with a stray space silently
+    !! becomes a different, plausible ID. `parquet_settings`' own environment parser documents the
+    !! same trap and checks the digits by hand for the same reason. Here the shape is checked
+    !! first and the `read` runs only once it is known to be sound.
+    !!
+    !! **What each specific accepts**, after leading and trailing blanks are trimmed (a
+    !! `character` array element is blank-padded by construction, so trailing blanks cannot carry
+    !! meaning) and with **no embedded blank anywhere**:
+    !!
+    !! * an integer: an optional `+` or `-`, then one or more digits, then nothing else;
+    !! * a real: a Fortran real literal -- an optional sign, then digits with an optional `.` and
+    !!   optional fractional digits (`"12"`, `"12."`, `".5"` all read), then an optional exponent
+    !!   `e`/`E`/`d`/`D` with its own optional sign and one or more digits. No kind suffix
+    !!   (`"1.0_real64"`), no `q` exponent, and **no `"nan"` or `"inf"`**: neither is a Fortran
+    !!   literal, and text reading `nan` in a data file is far more often a missing-value
+    !!   placeholder than a deliberate NaN;
+    !! * a logical: `true`, `false`, `t`, `f`, `1` or `0`, case-insensitively, and nothing else.
+    !!   That set is exactly what this library's two renderers produce -- `pf_to_str` writes
+    !!   `true`/`false` and `pf_str` in `parquet_logging` writes `T`/`F` -- plus the `1`/`0` a
+    !!   shell or a CSV produces. `on`/`off`/`yes`/`no` are deliberately not accepted.
+    !!
+    !! **A value the target kind cannot represent is not readable into it**, so `"1e300"` reads
+    !! into a `real(real64)` and not into a `real(real32)`, and `"2147483648"` reads into an
+    !! `integer(int64)` and not into an `integer(int32)`. **Rounding is not overflow**: `"0.1"`
+    !! and `"1e-300"` read into a `real32` as the nearest value it has, exactly as any other
+    !! narrowing in this library rounds silently.
+    interface pf_from_str
+        module procedure pf_from_str_i32 !! `integer(int32)`; optional sign then digits.
+        module procedure pf_from_str_i64 !! `integer(int64)`; optional sign then digits.
+        module procedure pf_from_str_r32 !! `real(real32)`; a Fortran real literal.
+        module procedure pf_from_str_r64 !! `real(real64)`; a Fortran real literal.
+        module procedure pf_from_str_log !! `logical`; `true`/`false`/`t`/`f`/`1`/`0`.
+    end interface pf_from_str
 
     ! ---- Path joining ----
 
@@ -493,6 +544,225 @@ contains
             call finish_to_str("false", res, min_width, pad, " ", .false.)
         end if
     end subroutine pf_to_str_log
+
+    ! ================================================================================
+    ! Text to value
+    ! ================================================================================
+
+    !> The bounds of `text` with its leading and trailing blanks removed, as an index pair.
+    !!
+    !! Returned as indices rather than as a trimmed copy on purpose: `pf_from_str` is called once
+    !! per ROW by `parquet_table`'s `%parse_column`, and a `character(len=:), allocatable` copy
+    !! there would be one allocation per element -- the shape `check_no_per_element_string_alloc`
+    !! exists to keep out of this library. A `text(lo:hi)` section costs nothing.
+    !!
+    !! `hi < lo` means the text was empty or all blanks, which every specific refuses.
+    pure subroutine text_span(text, lo, hi)
+        character(len=*), intent(in) :: text !! the text to measure.
+        integer, intent(out) :: lo !! index of the first non-blank character.
+        integer, intent(out) :: hi !! index of the last non-blank character; `< lo` when there is none.
+
+        hi = len_trim(text)
+        lo = 1
+        do while (lo <= hi)
+            if (text(lo:lo) /= " ") exit
+            lo = lo + 1
+        end do
+    end subroutine text_span
+
+    !> `.true.` when every character of `s` is an ASCII digit, and there is at least one.
+    pure logical function all_digits(s) result(res)
+        character(len=*), intent(in) :: s !! the span to test; may be zero length.
+        integer :: k
+
+        res = len(s) > 0
+        do k = 1, len(s)
+            if (s(k:k) < "0" .or. s(k:k) > "9") then
+                res = .false.
+                return
+            end if
+        end do
+    end function all_digits
+
+    !> `.true.` when `s` is an optional sign followed by one or more digits and nothing else.
+    !!
+    !! This is the check that makes the parser strict: `read` accepts `"5 6"`, and this does not.
+    pure logical function integer_shape_ok(s) result(res)
+        character(len=*), intent(in) :: s !! the trimmed span.
+        integer :: first
+
+        first = 1
+        if (len(s) >= 1) then
+            if (s(1:1) == "+" .or. s(1:1) == "-") first = 2
+        end if
+        res = len(s) >= first
+        if (res) res = all_digits(s(first:))
+    end function integer_shape_ok
+
+    !> `.true.` when `s` is a Fortran real literal with no blank, no kind suffix and no exponent
+    !! letter other than `e`/`E`/`d`/`D`.
+    !!
+    !! The grammar, and it is the whole specification:
+    !! `[+|-] ( digits [ "." [digits] ] | "." digits ) [ (e|E|d|D) [+|-] digits ]`.
+    !! An integer with no point and no exponent reads as a real, which is what a column of counts
+    !! written as text needs.
+    pure logical function real_shape_ok(s) result(res)
+        character(len=*), intent(in) :: s !! the trimmed span.
+        integer :: p, dot, expo, n
+
+        res = .false.
+        n = len(s)
+        p = 1
+        if (p <= n) then
+            if (s(p:p) == "+" .or. s(p:p) == "-") p = p + 1
+        end if
+        ! The exponent letter, if any: it ends the significand and starts the exponent.
+        expo = 0
+        do dot = p, n
+            if (index("eEdD", s(dot:dot)) > 0) then
+                expo = dot
+                exit
+            end if
+        end do
+        if (expo == 0) then
+            if (.not. significand_ok(s(p:n))) return
+        else
+            if (.not. significand_ok(s(p:expo - 1))) return
+            dot = expo + 1
+            if (dot <= n) then
+                if (s(dot:dot) == "+" .or. s(dot:dot) == "-") dot = dot + 1
+            end if
+            if (.not. all_digits(s(min(dot, n + 1):n))) return
+        end if
+        res = .true.
+    end function real_shape_ok
+
+    !> `.true.` when `s` is `digits`, `digits.`, `digits.digits` or `.digits` -- the significand of
+    !! a real literal, with its sign and exponent already removed.
+    pure logical function significand_ok(s) result(res)
+        character(len=*), intent(in) :: s !! the significand span.
+        integer :: dot
+
+        res = .false.
+        dot = index(s, ".")
+        if (dot == 0) then
+            res = all_digits(s)
+            return
+        end if
+        if (index(s(dot + 1:), ".") > 0) return   ! a second point: "1.2.3"
+        if (dot == 1) then
+            res = all_digits(s(2:))               ! ".5"
+        else if (dot == len(s)) then
+            res = all_digits(s(1:dot - 1))        ! "12."
+        else
+            res = all_digits(s(1:dot - 1)) .and. all_digits(s(dot + 1:))
+        end if
+    end function significand_ok
+
+    !> Reads one `integer(int32)`. See the `pf_from_str` interface for the full contract.
+    pure subroutine pf_from_str_i32(text, value, ok)
+        character(len=*), intent(in) :: text !! the text to read.
+        integer(int32), intent(out) :: value !! the value read; NOT assigned when `ok` is `.false.`.
+        logical, intent(out) :: ok !! `.true.` when the text was read; `.false.` leaves `value` unset.
+        integer :: lo, hi, ios
+
+        call text_span(text, lo, hi)
+        ok = hi >= lo
+        if (ok) ok = integer_shape_ok(text(lo:hi))
+        if (.not. ok) return
+        ! The shape is sound, so the only failure left is a value too large for the kind -- which
+        ! every compiler in this project's fleet reports through `iostat` rather than wrapping.
+        read (text(lo:hi), *, iostat=ios) value
+        ok = ios == 0
+    end subroutine pf_from_str_i32
+
+    !> Reads one `integer(int64)`. See the `pf_from_str` interface for the full contract.
+    pure subroutine pf_from_str_i64(text, value, ok)
+        character(len=*), intent(in) :: text !! the text to read.
+        integer(int64), intent(out) :: value !! the value read; NOT assigned when `ok` is `.false.`.
+        logical, intent(out) :: ok !! `.true.` when the text was read; `.false.` leaves `value` unset.
+        integer :: lo, hi, ios
+
+        call text_span(text, lo, hi)
+        ok = hi >= lo
+        if (ok) ok = integer_shape_ok(text(lo:hi))
+        if (.not. ok) return
+        read (text(lo:hi), *, iostat=ios) value
+        ok = ios == 0
+    end subroutine pf_from_str_i64
+
+    !> Reads one `real(real32)`. See the `pf_from_str` interface for the full contract.
+    !!
+    !! **The overflow test is needed on top of `iostat`, because the compilers disagree about
+    !! which of the two reports it.** `"1e300"` into a `real32` gives `iostat = 215` and an
+    !! untouched variable under nagfor 7.2, and `iostat = 0` with `Infinity` under gfortran 15.2 --
+    !! both measured. Taking either mechanism alone would make this procedure answer differently
+    !! on the two compilers; taking both makes the CONTRACT compiler-independent even though the
+    !! mechanism is not. The same split is what `rendered_ok` above exists for, one direction over.
+    !!
+    !! An ordering comparison is safe here where it would not be on caller data: `real_shape_ok`
+    !! admits only a decimal literal, and no decimal literal reads back as a NaN -- so `value` is
+    !! finite or infinite and never the NaN that would raise `IEEE_INVALID` on `>`. Widening the
+    !! shape to accept `"nan"` would break that, which is one reason it does not.
+    pure subroutine pf_from_str_r32(text, value, ok)
+        character(len=*), intent(in) :: text !! the text to read.
+        real(real32), intent(out) :: value !! the value read; NOT assigned when `ok` is `.false.`.
+        logical, intent(out) :: ok !! `.true.` when the text was read; `.false.` leaves `value` unset.
+        integer :: lo, hi, ios
+
+        call text_span(text, lo, hi)
+        ok = hi >= lo
+        if (ok) ok = real_shape_ok(text(lo:hi))
+        if (.not. ok) return
+        read (text(lo:hi), *, iostat=ios) value
+        ok = ios == 0
+        if (ok) ok = .not. (value > huge(value) .or. value < -huge(value))
+    end subroutine pf_from_str_r32
+
+    !> Reads one `real(real64)`. See `pf_from_str_r32` for why the overflow test is there as well
+    !! as the `iostat`, and the `pf_from_str` interface for the full contract.
+    pure subroutine pf_from_str_r64(text, value, ok)
+        character(len=*), intent(in) :: text !! the text to read.
+        real(real64), intent(out) :: value !! the value read; NOT assigned when `ok` is `.false.`.
+        logical, intent(out) :: ok !! `.true.` when the text was read; `.false.` leaves `value` unset.
+        integer :: lo, hi, ios
+
+        call text_span(text, lo, hi)
+        ok = hi >= lo
+        if (ok) ok = real_shape_ok(text(lo:hi))
+        if (.not. ok) return
+        read (text(lo:hi), *, iostat=ios) value
+        ok = ios == 0
+        if (ok) ok = .not. (value > huge(value) .or. value < -huge(value))
+    end subroutine pf_from_str_r64
+
+    !> Reads one `logical`. See the `pf_from_str` interface for the accepted spellings.
+    !!
+    !! No `read` at all: the six accepted tokens are matched directly, which is both faster and
+    !! stricter than list-directed input, whose `logical` form accepts `.TRUE.`, a bare `T`
+    !! followed by arbitrary trailing text, and more besides.
+    pure subroutine pf_from_str_log(text, value, ok)
+        character(len=*), intent(in) :: text !! the text to read.
+        logical, intent(out) :: value !! the value read; NOT assigned when `ok` is `.false.`.
+        logical, intent(out) :: ok !! `.true.` when the text was read; `.false.` leaves `value` unset.
+        integer :: lo, hi
+        character(len=5) :: tok
+
+        call text_span(text, lo, hi)
+        ok = hi >= lo
+        if (ok) ok = hi - lo + 1 <= len(tok)
+        if (.not. ok) return
+        tok = text(lo:hi)
+        call pf_to_lower(tok)
+        select case (trim(tok))
+        case ("true", "t", "1")
+            value = .true.
+        case ("false", "f", "0")
+            value = .false.
+        case default
+            ok = .false.
+        end select
+    end subroutine pf_from_str_log
 
     ! ================================================================================
     ! Path joining

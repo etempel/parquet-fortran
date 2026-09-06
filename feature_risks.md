@@ -89,6 +89,7 @@ something a reader is expected to have.
 | [Risk-202](#risk-202--a-temporal-columns-cached-null-answer-goes-stale-when-values-are-written-through-a-pointer) | A temporal column's cached null answer goes stale behind a raw pointer | 4 — covered |
 | [Risk-203](#risk-203--dropnas-default-is-a-union-and-one-named-column-cannot-tell-it-from-the-intersection) | %dropna's default is a UNION, and one named column cannot tell | 4 — covered |
 | [Risk-204](#risk-204--a-slot-a-drop-vacated-is-recycled-by-the-next-add_column-with-whatever-it-still-holds) | A slot a drop vacated is recycled by the next %add_column | 4 — covered |
+| [Risk-205](#risk-205--pf_from_str-must-stay-strict-and-only-one-vector-in-seven-can-tell) | pf_from_str must stay strict, and only one vector in seven can tell | 4 — covered |
 | [Risk-1](#risk-1--the-release-policy-regresses-silently) | The release policy regresses silently | 4 — covered |
 | [Risk-2](#risk-2--the-schema-less-write-rests-on-three-properties-that-look-incidental) | The schema-less write rests on three properties that look incidental | 4 — covered |
 | [Risk-3](#risk-3--the-screen-and-the-evaluator-can-drift-apart) | The screen and the evaluator can drift apart | 4 — covered |
@@ -1366,6 +1367,38 @@ all three vacating verbs -- `%drop_column`, `%drop_columns`, `%keep_columns` -- 
 predefined columns carry declared units, since a table with no units anywhere cannot detect a unit
 leaking. Its positive control is a unit the caller does pass, which must survive the same path.
 Mutation-checked: dropping `unit` from the blanker fails arm 1 immediately.
+
+### Risk-205 — pf_from_str must stay strict, and only one vector in seven can tell
+
+`pf_from_str` (`src/parquet_utils.f90`) checks a number's SHAPE by hand -- optional sign, digits,
+nothing else -- and only then lets a `read` do the conversion. The obvious simplification is to
+delete the hand check and keep the `read`, which is shorter, reads as idiomatic Fortran, and is
+what almost every Fortran program does.
+
+**It is wrong for exactly one input.** A list-directed `read(text, *, iostat=)` rejects `"5abc"`,
+`"3.9"`, `"+"` and `""` as you would hope, and accepts **`"5 6"` with `iostat == 0`, yielding 5**.
+So an identifier with a stray space -- a copy-paste, a column exported with a thousands separator,
+a shell variable that expanded to two words -- silently becomes a different, plausible identifier.
+`parquet_settings`' own `env_int64` documents the same trap for the same reason, and this is that
+check made public.
+
+**Why nothing else notices.** Every well-formed fixture parses identically under both
+implementations, so the whole test suite, every round-trip property and every `%parse_column` test
+stays green. The failure is one row of one column of one file, and the value it produces is inside
+the column's range and looks like every other value in it.
+
+**What a future change must keep.** The hand check runs FIRST and the `read` runs only after it.
+Two smaller properties travel with it and are just as easy to lose: `value` is deliberately NOT
+assigned when `ok` is `.false.` (writing a zero there would hand a caller who forgot to test `ok` a
+plausible wrong number, which is the failure this exists to prevent), and the real specifics test
+the RESULT for overflow as well as the `iostat`, because nagfor 7.2 reports `"1e300"` into a
+`real32` through `iostat` while gfortran 15.2 reports `iostat == 0` and an Infinity -- keeping only
+one of the two makes the contract compiler-dependent.
+
+**Test.** `test_from_str_strictness` (`test/test_utils.f90`) walks the seven vectors the design
+named, and the header says which one has teeth: `"5 6"` is the only one of the seven a plain `read`
+would get wrong, which is why the list is not shorter. `test_from_str_real_range` covers the
+overflow half on both mechanisms at once.
 
 ### Risk-190 — A pre-evaluated leaf's screen flags must come from its own verdict segment
 

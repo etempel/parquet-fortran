@@ -69,8 +69,8 @@ the two generators meant to be copied into your own project.
   or section your program never read. Safe to call from inside an OpenMP parallel region, and it
   writes the effective configuration back out.
 - [Text and path helpers with `parquet_utils`](utils.html) — ASCII case folding, turning a value
-  into text with a minimum width or a format of your choosing, and joining and taking apart POSIX
-  paths by CPython's `posixpath` rules. A leaf module that cannot fail: nothing in it validates,
+  into text with a minimum width or a format of your choosing and strictly reading one back, and
+  joining and taking apart POSIX paths by CPython's `posixpath` rules. A leaf module that cannot fail: nothing in it validates,
   aborts or prints, and every result comes back allocated.
 - [Generated table types](generated-tables.html) — `tools/generate_user_table_code.py`: named,
   typed accessors on your own `parquet_table` extension, generated from a MAML schema. Opening one

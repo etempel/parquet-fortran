@@ -16,8 +16,8 @@ rows — and joined against another table on one or more key columns.
 
 - [Whole tables in memory: the basics](table.html) — opening a table and reaching a column with
   `%get` or `%col`, nulls, laziness and what it costs, what a table can tell you about itself, the
-  row and column handles, row selections, string and container columns, changing a column's type,
-  and the current limitations and memory cost.
+  row and column handles, row selections, string and container columns, changing a column's type
+  and reading a text column back as numbers, and the current limitations and memory cost.
 - [Opening a table: slices, filters and renaming](table-open.html) — reading part of a file (the
   slice regime), filtering, sorting and qc-checking rows as they are read, reading a filtered file
   larger than memory one row group at a time, renaming columns and carrying units through a

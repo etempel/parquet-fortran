@@ -15,9 +15,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   test is evaluated before the file's data columns are read, so a set clause prunes row groups where
   a min/max rule cannot — on a string column, on a file written without statistics, and on a
   scattered set — which is what lets `parquet_open_table(..., bounded=.true.)` restrict one file by
-  another file's results without either becoming resident. Adds the read-only limit
-  `parquet_max_filter_sets`. See
+  another file's results without either becoming resident. A short set can also be written out in
+  the rule itself — `filt%add("field_id in (3, 5, 9)")` — and means exactly what the same members
+  bound with `%bind` mean. Adds the read-only limit `parquet_max_filter_sets`. See
   [Membership in a set](doc/pages/io/filter-sort-sample.md#membership-in-a-set-in-and-not_in).
+- **Row filters accept `is_finite` and `is_not_finite`** on a floating-point column, alongside the
+  existing `is_nan`/`is_not_nan`. `x is_finite` keeps the values you can do arithmetic with,
+  excluding a NaN and both infinities; like the NaN operators it is Kleene-honest about nullness, so
+  a Null row is unknown for it. See
+  [NaN is a value, not a Null](doc/pages/io/filter-sort-sample.md#nan-is-a-value-not-a-null).
 
 ## [v2.3.0] - 2026-09-06
 

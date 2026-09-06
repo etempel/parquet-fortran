@@ -90,6 +90,7 @@ module parquet_core
     !> against the families the text path compares as doubles; a string set is accepted against a
     !> string column. Boolean, temporal and container columns are refused -- see the element-family
     !> rules in doc/pages/io/filter-sort-sample.md.
+    integer(int8), parameter :: FSET_NONE = 0_int8 !! no family suits this column: it can hold no set clause.
     integer(int8), parameter :: FSET_INT = 1_int8
     integer(int8), parameter :: FSET_REAL = 2_int8
     integer(int8), parameter :: FSET_STRING = 3_int8
@@ -597,8 +598,13 @@ module parquet_core
     !> three-valued logic: a comparison against a Null is unknown, unknown never
     !> survives, and is_null/is_not_null are the only way to select on nullness.
     !> A NaN is a value, not a Null: it compares false against >, >=, <, <= and
-    !> ==, so it survives /= and any negated comparison; is_nan/is_not_nan
-    !> (floating-point columns only) select on it directly.
+    !> ==, so it survives /= and any negated comparison; the four value-class
+    !> operators is_nan/is_not_nan/is_finite/is_not_finite (floating-point
+    !> columns only) select on it directly, is_finite excluding the infinities
+    !> as well. in/not_in take a SET rather than a single value: either a set
+    !> attached with %bind and named `@name`, or a parenthesised list written
+    !> out in the rule, `x in (1, 2, 3)` / `x in ("a", "b")`. A list's elements
+    !> take their type from the column, exactly as a bare literal does.
     !> Rules are unvalidated here -- the expression is parsed, and every clause
     !> validated (column exists, is a scalar column, value is well-formed for
     !> that column's type), once a reader actually applies the filter. See "Row

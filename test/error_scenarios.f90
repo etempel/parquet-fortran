@@ -550,6 +550,46 @@ program error_scenarios
         call scenario_filter_set_vector_column()
     case ("filter_set_control")
         call scenario_filter_set_control()
+    case ("filter_list_empty")
+        call scenario_filter_list_empty()
+    case ("filter_list_quoted_on_numeric")
+        call scenario_filter_list_quoted_on_numeric()
+    case ("filter_list_unquoted_on_string")
+        call scenario_filter_list_unquoted_on_string()
+    case ("filter_list_bad_number")
+        call scenario_filter_list_bad_number()
+    case ("filter_list_non_integer")
+        call scenario_filter_list_non_integer()
+    case ("filter_list_nan_member")
+        call scenario_filter_list_nan_member()
+    case ("filter_list_trailing_comma")
+        call scenario_filter_list_trailing_comma()
+    case ("filter_list_nested_paren")
+        call scenario_filter_list_nested_paren()
+    case ("filter_list_unclosed")
+        call scenario_filter_list_unclosed()
+    case ("filter_list_unclosed_quote")
+        call scenario_filter_list_unclosed_quote()
+    case ("filter_list_on_bool_column")
+        call scenario_filter_list_on_bool_column()
+    case ("filter_set_temporal_column")
+        call scenario_filter_set_temporal_column()
+    case ("is_finite_on_int_column")
+        call scenario_is_finite_on_int_column()
+    case ("is_finite_takes_no_value")
+        call scenario_is_finite_takes_no_value()
+    case ("filter_list_expr_text")
+        call scenario_filter_list_expr_text()
+    case ("filter_list_bare_dot")
+        call scenario_filter_list_bare_dot()
+    case ("filter_list_fortran_exponent")
+        call scenario_filter_list_fortran_exponent()
+    case ("filter_list_two_numbers")
+        call scenario_filter_list_two_numbers()
+    case ("filter_list_two_reals")
+        call scenario_filter_list_two_reals()
+    case ("filter_list_control")
+        call scenario_filter_list_control()
     case ("sortkey_remap_size_mismatch")
         call scenario_sortkey_remap_size_mismatch()
     case ("sortkey_remap_name_too_long")
@@ -7519,6 +7559,316 @@ contains
     !> The NEGATIVE CONTROL for every scenario above: a well-formed set clause on a column of the
     !> right family opens cleanly and selects rows. Without it, a %bind that refused everything
     !> would pass all thirteen refusal scenarios.
+    !> Writes the small numeric fixture the literal-list scenarios below filter against. Each caller
+    !> passes its own path: the scenarios run concurrently under xargs -P, so a shared fixture path
+    !> is a truncated file for whichever process reads while another writes.
+    subroutine write_list_scenario_fixture(file)
+        character(len=*), intent(in) :: file !! this scenario's own fixture path.
+        type(parquet_writer) :: writer
+
+        call parquet_open_writer(writer, file)
+        call parquet_write_column(writer, "id", [1_int32, 2_int32, 3_int32, 4_int32])
+        call parquet_write_column(writer, "x", [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64])
+        call parquet_write_column(writer, "flag", [.true., .false., .true., .false.])
+        call parquet_write_column(writer, "name", ["a   ", "b   ", "c   ", "d   "])
+        call parquet_close_writer(writer)
+    end subroutine write_list_scenario_fixture
+
+    !> A literal list must reach print_stat's expression line EXACTLY as the caller wrote it,
+    !> unusual spacing included. That is what the plan asked for and what the verbatim capture in
+    !> capture_literal_list (src/parquet_read_filter.f90) delivers -- reassembling the list from its
+    !> tokens would compile, run, select the right rows, and quietly print `( 1,2,3 )` instead. The
+    !> only observable is this line, so nothing else in the suite can see it.
+    subroutine scenario_filter_list_expr_text()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int64) :: nrows
+        character(len=*), parameter :: file = "test_run/filter_list_expr_text.parquet"
+
+        call parquet_open_writer(writer, file)
+        call parquet_write_column(writer, "id", [1_int32, 2_int32, 3_int32, 4_int32])
+        call parquet_close_writer(writer)
+
+        ! Deliberately irregular spacing, so a reassembled list could not reproduce it by accident.
+        call filt%add("id in ( 1,3 , 4)")
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_close_reader(reader, print_stat=.true.)
+        print '(a,i0)', "literal list expr_text scenario read rows = ", nrows
+    end subroutine scenario_filter_list_expr_text
+
+    !> A bare "." as a list element. gfortran and nagfor reject it through `read`'s own iostat;
+    !> FLANG accepts it as 0.0 with iostat 0 (measured), so without the mantissa-digit check this
+    !> rule would silently mean `x in (0.0)` on one compiler in the fleet and abort on the others.
+    !> The scenario therefore discriminates only under flang -- and asserts the right behaviour
+    !> everywhere.
+    subroutine scenario_filter_list_bare_dot()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: file = "test_run/filter_list_bare_dot.parquet"
+
+        call write_list_scenario_fixture(file)
+        call filt%add("x in (.)")
+        call parquet_open_reader(reader, file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with a bare '.' as a list element"
+    end subroutine scenario_filter_list_bare_dot
+
+    !> Fortran's own `d` exponent is refused, which is a NARROWING and deliberately so: C++'s
+    !> strtod does not accept `x == 1d3` for a bare literal, so accepting it inside a list would
+    !> make the list the more permissive of the two parsers -- the divergence feature_risks.md
+    !> Risk-195 exists to forbid. `read` would happily accept it, so only the shape check refuses.
+    subroutine scenario_filter_list_fortran_exponent()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: file = "test_run/filter_list_fortran_exponent.parquet"
+
+        call write_list_scenario_fixture(file)
+        call filt%add("x in (1d3)")
+        call parquet_open_reader(reader, file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with a Fortran 'd' exponent in a list element"
+    end subroutine scenario_filter_list_fortran_exponent
+
+    !> Two numbers in ONE element -- `(1 2)` rather than `(1, 2)`. The hazard CLAUDE.md records for
+    !> a list-directed `read`: it accepts "5 6" with iostat 0 and quietly yields 5, so without the
+    !> hand-rolled shape check this rule would silently mean `id in (1)` and select a row set nobody
+    !> asked for. The abort is what proves the shape check runs before the read.
+    subroutine scenario_filter_list_two_numbers()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: file = "test_run/filter_list_two_numbers.parquet"
+
+        call write_list_scenario_fixture(file)
+        call filt%add("id in (1 2)")
+        call parquet_open_reader(reader, file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with two numbers in one integer list element"
+    end subroutine scenario_filter_list_two_numbers
+
+    !> The same hazard on the REAL parser, which has its own shape check: a process aborts once, so
+    !> the integer scenario above cannot also cover this one.
+    subroutine scenario_filter_list_two_reals()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: file = "test_run/filter_list_two_reals.parquet"
+
+        call write_list_scenario_fixture(file)
+        call filt%add("x in (1.0 2.0)")
+        call parquet_open_reader(reader, file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with two numbers in one real list element"
+    end subroutine scenario_filter_list_two_reals
+
+    !> An empty literal list is refused rather than silently matching nothing: a set that matches
+    !> nothing is expressible (%bind with a zero-length array), so `()` in rule text is a typo.
+    subroutine scenario_filter_list_empty()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: file = "test_run/filter_list_empty.parquet"
+
+        call write_list_scenario_fixture(file)
+        call filt%add("id in ()")
+        call parquet_open_reader(reader, file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with an empty literal list"
+    end subroutine scenario_filter_list_empty
+
+    !> A quoted element against a numeric column: the quoting must agree with the column, which is
+    !> the one thing about a list element that IS read off the text rather than the column type.
+    subroutine scenario_filter_list_quoted_on_numeric()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: file = "test_run/filter_list_quoted_numeric.parquet"
+
+        call write_list_scenario_fixture(file)
+        call filt%add('id in ("2")')
+        call parquet_open_reader(reader, file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with a quoted list element on an integer column"
+    end subroutine scenario_filter_list_quoted_on_numeric
+
+    !> The mirror: a bare element against a string column.
+    subroutine scenario_filter_list_unquoted_on_string()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: file = "test_run/filter_list_unquoted_string.parquet"
+
+        call write_list_scenario_fixture(file)
+        call filt%add("name in (a, b)")
+        call parquet_open_reader(reader, file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with an unquoted list element on a string column"
+    end subroutine scenario_filter_list_unquoted_on_string
+
+    !> An element that is not a number at all. The message names the element and its position, so a
+    !> long list does not have to be read back character by character to find the offender.
+    subroutine scenario_filter_list_bad_number()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: file = "test_run/filter_list_bad_number.parquet"
+
+        call write_list_scenario_fixture(file)
+        call filt%add("id in (1, zz)")
+        call parquet_open_reader(reader, file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with a non-numeric list element"
+    end subroutine scenario_filter_list_bad_number
+
+    !> A fractional element against an INTEGER column, which strtoll refuses for `id == 1.5` too --
+    !> the list's element grammar follows the column's family, so it refuses it for the same reason.
+    subroutine scenario_filter_list_non_integer()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: file = "test_run/filter_list_non_integer.parquet"
+
+        call write_list_scenario_fixture(file)
+        call filt%add("id in (1, 1.5)")
+        call parquet_open_reader(reader, file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with a fractional element on an integer column"
+    end subroutine scenario_filter_list_non_integer
+
+    !> A NaN member is refused for the reason `x == nan` is: every comparison against a NaN is
+    !> false, so it could only ever match nothing. Refusing it is also what makes the NaN ROW rule
+    !> hold by construction -- no NaN pattern is ever a key, so a NaN row's lookup finds nothing.
+    subroutine scenario_filter_list_nan_member()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: file = "test_run/filter_list_nan_member.parquet"
+
+        call write_list_scenario_fixture(file)
+        call filt%add("x in (1.0, nan)")
+        call parquet_open_reader(reader, file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with a NaN inside a literal list"
+    end subroutine scenario_filter_list_nan_member
+
+    !> A trailing comma leaves an empty element, which is reported as such rather than silently
+    !> dropped -- a dropped one would quietly change what the filter selects.
+    subroutine scenario_filter_list_trailing_comma()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: file = "test_run/filter_list_trailing_comma.parquet"
+
+        call write_list_scenario_fixture(file)
+        call filt%add("id in (1, 2, )")
+        call parquet_open_reader(reader, file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with a trailing comma in a literal list"
+    end subroutine scenario_filter_list_trailing_comma
+
+    !> A '(' inside a list is refused rather than read as a grouping operator: inside a list the
+    !> parenthesis has already changed meaning once, and letting it change back would make
+    !> `id in (1, (2))` parse as something no reader could predict.
+    subroutine scenario_filter_list_nested_paren()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: file = "test_run/filter_list_nested_paren.parquet"
+
+        call write_list_scenario_fixture(file)
+        call filt%add("id in (1, (2))")
+        call parquet_open_reader(reader, file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with a nested parenthesis in a literal list"
+    end subroutine scenario_filter_list_nested_paren
+
+    !> An unclosed list runs to the end of the rule and is reported there.
+    subroutine scenario_filter_list_unclosed()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: file = "test_run/filter_list_unclosed.parquet"
+
+        call write_list_scenario_fixture(file)
+        call filt%add("id in (1, 2")
+        call parquet_open_reader(reader, file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with an unclosed literal list"
+    end subroutine scenario_filter_list_unclosed
+
+    !> An element that opens a quote and does not close it before the comma or the ')'.
+    subroutine scenario_filter_list_unclosed_quote()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: file = "test_run/filter_list_unclosed_quote.parquet"
+
+        call write_list_scenario_fixture(file)
+        call filt%add('name in ("a" b)')
+        call parquet_open_reader(reader, file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with an unterminated quoted list element"
+    end subroutine scenario_filter_list_unclosed_quote
+
+    !> A BOOLEAN column takes no set clause at all: a boolean set is `==` with extra steps, so
+    !> accepting one would add a spelling with no meaning of its own.
+    subroutine scenario_filter_list_on_bool_column()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: file = "test_run/filter_list_bool.parquet"
+
+        call write_list_scenario_fixture(file)
+        call filt%add("flag in (1)")
+        call parquet_open_reader(reader, file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with a set clause on a boolean column"
+    end subroutine scenario_filter_list_on_bool_column
+
+    !> A set clause on a TEMPORAL column is refused by the set rules, naming the column's type --
+    !> not by the temporal literal conversion, which would otherwise report a missing ISO-8601
+    !> literal and say nothing about the set.
+    subroutine scenario_filter_set_temporal_column()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        type(parquet_schema) :: sch
+        type(parquet_date) :: d(3)
+        character(len=*), parameter :: file = "test_run/filter_set_temporal.parquet"
+
+        call d(1)%set(2024, 1, 1)
+        call d(2)%set(2024, 1, 2)
+        call d(3)%set(2024, 1, 3)
+        call sch%init("temporal_set")
+        call sch%add_field("d", "date")
+        call parquet_parse_maml(sch)
+        call parquet_open_writer(writer, file, sch)
+        call parquet_write_column(writer, "d", d)
+        call parquet_close_writer(writer)
+
+        call filt%add_in("d", [1_int32, 2_int32])
+        call parquet_open_reader(reader, file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with a set clause on a date column"
+    end subroutine scenario_filter_set_temporal_column
+
+    !> is_finite is restricted to floating-point columns, exactly as is_nan is: no integer value
+    !> could ever be non-finite, so accepting one would answer a constant for what is almost
+    !> certainly a mistyped column name.
+    subroutine scenario_is_finite_on_int_column()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: file = "test_run/filter_is_finite_int.parquet"
+
+        call write_list_scenario_fixture(file)
+        call filt%add("id is_finite")
+        call parquet_open_reader(reader, file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with is_finite on an integer column"
+    end subroutine scenario_is_finite_on_int_column
+
+    !> is_finite takes no value, so a value after it is a syntax error rather than a silently
+    !> ignored token.
+    subroutine scenario_is_finite_takes_no_value()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: file = "test_run/filter_is_finite_value.parquet"
+
+        call write_list_scenario_fixture(file)
+        call filt%add("x is_finite 3")
+        call parquet_open_reader(reader, file, filter=filt)
+        print '(a)', "unexpectedly opened a reader with a value after is_finite"
+    end subroutine scenario_is_finite_takes_no_value
+
+    !> The NEGATIVE CONTROL for the eighteen refusals above: a well-formed literal list and a
+    !> well-formed is_finite clause in one rule must open cleanly and exit 0. Without it every
+    !> assertion above would pass just as happily against a guard that refused everything.
+    subroutine scenario_filter_list_control()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int64) :: nrows
+        character(len=*), parameter :: file = "test_run/filter_list_control.parquet"
+
+        call write_list_scenario_fixture(file)
+        call filt%add('id in (1, 3) and x is_finite and name not_in ("d")')
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_close_reader(reader)
+        print '(a,i0)', "a well-formed literal list and is_finite opened cleanly, rows = ", nrows
+    end subroutine scenario_filter_list_control
+
     subroutine scenario_filter_set_control()
         type(parquet_writer) :: writer
         type(parquet_reader) :: reader

@@ -327,6 +327,20 @@ contains
                 end if
             end do
 
+            ! A LITERAL LIST -- `x in (1, 2, 3)` -- is the one place a parenthesis is part of a
+            ! clause rather than a grouping operator, so it is captured here, where the operator
+            ! collected so far says which reading applies. Anywhere else a '(' still opens a group.
+            if (taken == 2) then
+                if (is_set_valued_op(clause_text)) then
+                    if (pos <= ntok) then
+                        if (kinds(pos) == TK_LPAREN) then
+                            call capture_literal_list(clause_text, sub_ok, sub_err)
+                            if (.not. sub_ok) return
+                        end if
+                    end if
+                end if
+            end if
+
             call parquet_tokenize_filter_rule(clause_text, pname, pop, pvalue, pis_string, sub_ok, sub_err)
             if (.not. sub_ok) return
             call emit_leaf(pname, pop, pvalue, pis_string, sub_ok, sub_err)
@@ -339,8 +353,52 @@ contains
             character(len=:), allocatable :: last
             last = ascii_lower(clause_text(index(clause_text, " ", back=.true.) + 1:))
             res = last == "is_null" .or. last == "is_not_null" .or. &
-                last == "is_nan" .or. last == "is_not_nan"
+                last == "is_nan" .or. last == "is_not_nan" .or. &
+                last == "is_finite" .or. last == "is_not_finite"
         end function is_valueless_op
+        !> Whether the clause text collected so far ends in one of the two set-valued operators,
+        !> which are the only ones whose value may be a parenthesised list.
+        pure logical function is_set_valued_op(clause_text) result(res)
+            character(len=*), intent(in) :: clause_text !! the "<name> <op>" text collected so far.
+            character(len=:), allocatable :: last
+            last = ascii_lower(clause_text(index(clause_text, " ", back=.true.) + 1:))
+            res = last == "in" .or. last == "not_in"
+        end function is_set_valued_op
+        !> Appends a literal list -- everything from the '(' at `pos` through its matching ')' --
+        !> to `clause_text`, and steps `pos` past it.
+        !>
+        !> The text is lifted VERBATIM out of `rule` rather than reassembled from its tokens, so
+        !> the caller's own spacing survives into the leaf's value and therefore into expr_text and
+        !> print_stat: `x in (1, 2, 3)` is shown as written, not as `x in (1, 2, 3)` reconstructed
+        !> by luck. The scan is over TOKENS rather than characters, which is what makes a quoted
+        !> element containing '(' , ')' or ',' safe -- the lexer has already made each one a single
+        !> TK_QUOTED token.
+        subroutine capture_literal_list(clause_text, sub_ok, sub_err)
+            character(len=:), allocatable, intent(inout) :: clause_text !! "<name> <op>"; gains the list.
+            logical, intent(out) :: sub_ok !! .true. if a balanced list was captured.
+            character(len=:), allocatable, intent(out) :: sub_err !! failure message; "" when sub_ok.
+            integer :: lp, rp
+
+            sub_ok = .false.
+            sub_err = ""
+            lp = pos
+            do rp = lp + 1, ntok
+                if (kinds(rp) == TK_RPAREN) exit
+                if (kinds(rp) == TK_LPAREN) then
+                    sub_err = "filter expression '" // trim(rule) // "': a list after 'in'/'not_in' " // &
+                        "may not contain a nested '('"
+                    return
+                end if
+            end do
+            if (rp > ntok) then
+                sub_err = "filter expression '" // trim(rule) // "': the list after 'in'/'not_in' " // &
+                    "is missing its closing ')'"
+                return
+            end if
+            clause_text = clause_text // " " // rule(tok_lo(lp):tok_hi(rp))
+            pos = rp + 1
+            sub_ok = .true.
+        end subroutine capture_literal_list
         !> Counts one nesting level, refusing to go deeper than filter_max_depth. The cap keeps
         !> adversarial input ("((((((...") a clean error stop rather than a stack overflow, and
         !> bounds the C++ evaluator's peak memory, which is (live operands) * nrows bytes.

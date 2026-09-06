@@ -46,23 +46,25 @@ parentheses:
    primary  := '(' expr ')' | clause
    clause   := <column> <op> [ <value> ]
    value    := ... | '@' NAME          ! for in / not_in: a set attached with %bind
+             | '(' item { ',' item } ')'   ! for in / not_in: a list written out here
 ```
 
 | | |
 |---|---|
 | **Precedence** | `not` binds tightest, then `and`, then `or` — so `a or b and c` means `a or (b and c)`, and `not a and b` means `(not a) and b`. Parentheses override. |
 | **Keywords** | `and` / `or` / `not`, in any case (`AND`, `And`, `and`). Only whole tokens are keywords, so a column named `android` or `nothing` is unaffected. Fortran-style `.and.` and C-style `&&` are *not* accepted. |
-| **Operators** | `>`, `>=`, `<`, `<=`, `==`, `/=`, `in`, `not_in`, `is_null`, `is_not_null`, `is_nan`, `is_not_nan`. A clause's operator must be surrounded by spaces (`"v > 3"`, not `"v>3"`); parentheses need no surrounding spaces. `is_nan`/`is_not_nan` are accepted only for a floating-point column (`float32`/`float64`, and a `half_float` column written by some other tool) — any other column type is rejected, since no value of it could ever be a NaN. |
-| **Values** | A bare number for a numeric column (`ra > 180`), `true`/`false` for a boolean column (`flag == true`), a **double-quoted** string for a `string` column (`name == "abell_1"`), or a **double-quoted ISO-8601 literal** for a `date`/`time`/`timestamp` column (see below). `is_null`/`is_not_null`/`is_nan`/`is_not_nan` take no value, and `in`/`not_in` take the **name of a bound set** rather than a literal (`ID in @wanted` — see [Membership in a set](#membership-in-a-set-in-and-not_in) below). A quoted value may contain spaces, parentheses, and the keywords themselves — it is read as one token. An `inf`/`-inf` value is accepted as an ordinary bound (`v < inf`); a bare `nan` is **rejected**, because every comparison against a NaN is false and every `/=` against it is true, so such a clause could only ever match nothing or everything — say `is_nan`/`is_not_nan` instead. |
+| **Operators** | `>`, `>=`, `<`, `<=`, `==`, `/=`, `in`, `not_in`, `is_null`, `is_not_null`, `is_nan`, `is_not_nan`, `is_finite`, `is_not_finite`. A clause's operator must be surrounded by spaces (`"v > 3"`, not `"v>3"`); parentheses need no surrounding spaces. The four value-class operators — `is_nan`/`is_not_nan`/`is_finite`/`is_not_finite` — are accepted only for a floating-point column (`float32`/`float64`, and a `half_float` column written by some other tool); any other column type is rejected, since no value of it could ever be a NaN or an infinity. |
+| **Values** | A bare number for a numeric column (`ra > 180`), `true`/`false` for a boolean column (`flag == true`), a **double-quoted** string for a `string` column (`name == "abell_1"`), or a **double-quoted ISO-8601 literal** for a `date`/`time`/`timestamp` column (see below). The four value-class operators take no value, and `in`/`not_in` take a **set** rather than a single literal — either the name of one attached with `%bind` (`ID in @wanted`) or a list written out in the rule (`ID in (3, 5, 9)`); see [Membership in a set](#membership-in-a-set-in-and-not_in) below. A quoted value may contain spaces, parentheses, and the keywords themselves — it is read as one token. An `inf`/`-inf` value is accepted as an ordinary bound (`v < inf`); a bare `nan` is **rejected**, because every comparison against a NaN is false and every `/=` against it is true, so such a clause could only ever match nothing or everything — say `is_nan`/`is_not_nan` instead. |
 | **Column names** | May be a dotted struct-leaf path (`main.inner.age > 35`). A column name cannot contain spaces. |
 | **Several `%add` calls** | **AND-combined**: two calls mean `(expr1) and (expr2)`. So a filter written as one clause per call means the conjunction of its clauses; write `or` inside a single rule when you want alternatives. |
 | **Limits** | 32 levels of nesting, 1024 expression terms per filter, 64 bound sets per filter, 8192 characters per rule, and, within one clause, 64 characters per column name and 512 per value — each reported as a clean error rather than a crash. The first three are published constants you can check a rule against beforehand; see [Read-only limits](../operating/settings.html#read-only-limits). |
 
 `between` and wildcard/`like` matching are not supported: the first is shorthand for what the
 grammar already expresses (`x between 1 and 9` is `x >= 1 and x <= 9`), and pattern matching is
-genuinely different work. `in` and `not_in` **are** supported, but only over a set you attach as an
-array — not over a literal list, which really would be shorthand for an `==` chain. That is the
-next section.
+genuinely different work. `in` and `not_in` **are** supported, over a set you attach as an array and
+over a list written out in the rule; a list is not merely shorthand for an `==` chain, because the
+whole set is answered in one pass over the column rather than one pass per member. That is the next
+section.
 
 ### Membership in a set: `in` and `not_in`
 
@@ -90,6 +92,36 @@ The spelling is pandas' `query("ID in @ids")`. `%bind` accepts `integer(int32)`,
 `real(real32)`, `real(real64)`, a `character` array, or a `parquet_string_column`, each with an
 optional `is_valid=` mask marking the elements to leave out of the set.
 
+**A short set can be written out in the rule instead**, as a parenthesised, comma-separated list:
+
+```fortran
+call filt%add("field_id in (3, 5, 9)")
+call filt%add('survey not_in ("test", "commissioning") and z_spec is_finite')
+```
+
+A list means exactly what the same members bound with `%bind` mean, and is answered the same way:
+one pass over the column, one leaf, one row-group screen — not one pass per member, which is what an
+`==` chain would cost. Everything the rest of this section says about a bound set applies to it
+unchanged. Four points are specific to the written-out form:
+
+- **What the elements are is decided by the column, not by the text.** `x in (1, 2, 3)` is an
+  integer list against an integer column and a floating-point one against a `float32`/`float64`
+  column, exactly as the bare literal in `x == 1` is. A member for a `string` column must be
+  double-quoted, and one for a numeric column must not be; either mistake is reported naming the
+  element's position.
+- **A quoted member may contain a comma, a parenthesis or a keyword** — `name in ("a,b", "c)d")` is
+  two members — because a quoted run is read as one token before the list is split.
+- **`inf` and `-inf` are accepted; `nan` is not**, for the reason a bare `nan` literal is not: it
+  could never match. Say `is_nan` instead.
+- **The element grammar is deliberately narrow.** An integer element is an optional sign then
+  digits; a real element is an optional sign, then digits with an optional fraction and an optional
+  `e` exponent, or an infinity. Two spellings a Fortran programmer might reach for are refused:
+  Fortran's own `d` exponent (`1d3`, which a bare literal does not accept either), and a C-style
+  hexadecimal float (`0x1p3`, which a bare literal does accept). Anything the grammar refuses is a
+  clean error naming the element, never a different value. The whole list has to fit the
+  512-character value limit, so a long identifier list belongs in `%bind`, which has no length limit
+  at all.
+
 **What the set is compared against.** An integer set matches any integer column; a real set matches
 a `float32`/`float64` column; a string set matches a `string` column. Anything else is refused
 naming the column, exactly as a mistyped literal is. A `boolean` column is refused because a set of
@@ -116,7 +148,9 @@ the same reason it survives `/=`: IEEE says it equals nothing. A NaN **inside** 
 rejected at `%bind`, because it could never match — the same reason a bare `nan` literal is
 rejected.
 
-**An empty set matches nothing**, so `in` keeps no rows and `not_in` keeps every non-null row.
+**An empty set matches nothing**, so `in` keeps no rows and `not_in` keeps every non-null row. That
+is expressed by binding a zero-length array; an empty list `()` in rule text is refused instead,
+since as a written expression it is almost always a mistake.
 
 **A set clause prunes row groups better than any other clause can.** The membership test is
 evaluated before the file's data columns are read — one row group of the key column at a time, by
@@ -177,23 +211,32 @@ almost the *opposite* of a Null:
 | `x is_not_null` | survives — a NaN is not missing | excluded |
 | `x is_nan` | survives | excluded (unknown) |
 | `x is_not_nan` | excluded | excluded (unknown) |
+| `x is_finite` | excluded — a NaN is not finite | excluded (unknown) |
+| `x is_not_finite` | survives | excluded (unknown) |
 
-`is_nan`/`is_not_nan` say this directly, on a floating-point column:
+Four operators say this directly, on a floating-point column:
 
 ```fortran
-call filt%add("flux is_not_nan")             ! only rows whose flux is a real number
+call filt%add("flux is_not_nan")             ! only rows whose flux is not a NaN
+call filt%add("flux is_finite")              ! ... and not an infinity either
 call filt%add("flux is_nan or flux is_null") ! only the rows with no usable value
 ```
 
-Both are Kleene-honest about nullness — a Null row is *unknown* for either of them, exactly as it
-is for a comparison. So `x is_not_nan` means "`x` is a real number", not "`x` is anything other
-than a NaN": write `x is_not_nan or x is_null` when a missing value should count too. Nullness
-stays governed solely by `is_null`/`is_not_null`.
+`is_finite` is the stricter of the two positives: `x is_not_nan` admits `+inf` and `-inf`, while
+`x is_finite` keeps only the values you can do arithmetic with. It is exactly `x > -inf and x < inf`
+— a NaN satisfies neither comparison, so it is excluded by both spellings — and `is_not_finite`
+is its negation over the non-null rows.
 
-Neither operator adds any expressive power the grammar lacked — under Kleene logic `not (x >= 0 or
+All four are Kleene-honest about nullness — a Null row is *unknown* for every one of them, exactly
+as it is for a comparison. So `x is_not_nan` means "`x` is a real number", not "`x` is anything
+other than a NaN", and `x is_not_finite` means "`x` is a NaN or an infinity", not "`x` is anything
+other than a finite number": write `x is_not_finite or x is_null` when a missing value should count
+too. Nullness stays governed solely by `is_null`/`is_not_null`.
+
+None of the four adds expressive power the grammar lacked — under Kleene logic `not (x >= 0 or
 x < 0)` already meant exactly `x is_nan`, since every non-NaN real satisfies precisely one of the
-two disjuncts — but writing that out is easy to get wrong and hard to read, which is what these
-two are for.
+two disjuncts — but writing that out is easy to get wrong and hard to read, which is what they
+are for.
 
 ### Filtering `date`, `time` and `timestamp` columns
 
@@ -276,15 +319,16 @@ saving:
   the one the screen reads for its type — signed for numbers and temporals, unsigned-byte for
   strings. (These last two arise only from files written by other tools; this library's own writer
   never produces them.);
-- `is_nan`/`is_not_nan`, and a **floating-point** column under `not` or `/=` — Parquet excludes
-  NaN from min/max and records no NaN count, so for a float column the statistics can never prove
-  a comparison is false everywhere (see [NaN is a value, not a Null](#nan-is-a-value-not-a-null));
+- `is_nan`/`is_not_nan`/`is_finite`/`is_not_finite`, and a **floating-point** column under `not` or
+  `/=` — Parquet excludes NaN from min/max and records no NaN count, so for a float column the
+  statistics can never prove a comparison is false everywhere, nor say anything about finiteness
+  (see [NaN is a value, not a Null](#nan-is-a-value-not-a-null));
 - a column whose values are longer than Parquet's statistics size limit (4096 bytes by default),
   for which no bounds are recorded at all.
 
-The two NaN-related entries are about the *bounds* being unusable, not about pruning being switched
-off: a row group in which the filter column has no non-null values at all is still skipped, because
-then every row is unknown for those operators whatever the values would have been.
+Those two entries are about the *bounds* being unusable, not about pruning being switched off: a row
+group in which the filter column has no non-null values at all is still skipped, because then every
+row is unknown for those operators whatever the values would have been.
 
 Two things pruning deliberately does **not** change: `parquet_get_num_row_groups` still reports
 every row group in the file, and a chunked read still visits every one of them (a skipped row

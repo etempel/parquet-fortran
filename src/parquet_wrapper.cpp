@@ -6164,13 +6164,17 @@ extern "C"
 			return true;
 		}
 
-		if (op == "is_nan" || op == "is_not_nan")
+		if (op == "is_nan" || op == "is_not_nan" || op == "is_finite" || op == "is_not_finite")
 		{
-			// Restricted to the three types that can actually hold a NaN. DECIMAL* and UINT64 also
-			// reach the comparison arms below as doubles, but no value of either can ever BE a NaN,
-			// so accepting them would answer a constant (all-false / all-true) for what is almost
-			// certainly a mistyped column name or a misunderstanding -- rejected instead, the same
-			// call this file already makes for an ordering comparison on a boolean column.
+			// The four VALUE-CLASS operators: they ask which IEEE class a value falls into rather
+			// than how it compares against a bound, so they take no value and share one arm.
+			//
+			// Restricted to the three types that can actually hold a NaN or an infinity. DECIMAL*
+			// and UINT64 also reach the comparison arms below as doubles, but no value of either
+			// can ever BE one, so accepting them would answer a constant (all-false / all-true) for
+			// what is almost certainly a mistyped column name or a misunderstanding -- rejected
+			// instead, the same call this file already makes for an ordering comparison on a
+			// boolean column.
 			arrow::Type::type tid = array->type_id();
 			if (tid != arrow::Type::FLOAT && tid != arrow::Type::DOUBLE && tid != arrow::Type::HALF_FLOAT)
 			{
@@ -6178,7 +6182,8 @@ extern "C"
 					"' is " + array->type()->ToString();
 				return false;
 			}
-			bool want_nan = (op == "is_nan");
+			bool nan_test = (op == "is_nan" || op == "is_not_nan");
+			bool want = (op == "is_nan" || op == "is_finite");
 			for (int64_t i = 0; i < n; ++i)
 			{
 				if (array->IsNull(i))
@@ -6186,8 +6191,12 @@ extern "C"
 					out[static_cast<size_t>(i)] = kUnknown;
 					continue;
 				}
-				bool isnan = std::isnan(real_family_value_at(array.get(), i));
-				out[static_cast<size_t>(i)] = kleene_of(want_nan ? isnan : !isnan);
+				double v = real_family_value_at(array.get(), i);
+				// std::isfinite is false for both a NaN and an infinity, which is exactly what
+				// "is_finite" has to mean: it is the sugar for `x > -inf and x < inf`, and a NaN
+				// satisfies neither of those comparisons.
+				bool hit = nan_test ? std::isnan(v) : std::isfinite(v);
+				out[static_cast<size_t>(i)] = kleene_of(want ? hit : !hit);
 			}
 			return true;
 		}
@@ -6539,9 +6548,11 @@ extern "C"
 		int leaf_index = -1;             // Parquet flat-leaf column index, for ColumnChunk()
 		ScreenFamily family = ScreenFamily::kNone;
 		bool is_null_test = false;       // is_null / is_not_null: needs only the null count
-		bool is_nan_test = false;        // is_nan / is_not_nan: needs only the null count too
+		// The four VALUE-CLASS operators (is_nan/is_not_nan/is_finite/is_not_finite) share one
+		// flag and no "which one" discriminator, because the screen's answer is the same for all
+		// four and for the same reason -- see the branch that reads this.
+		bool is_value_class_test = false;
 		bool want_null = false;          // for is_null (true) vs is_not_null (false)
-		bool want_nan = false;           // for is_nan (true) vs is_not_nan (false)
 		bool is_float = false;           // FLOAT/DOUBLE: NaN makes the bounds one-directional
 		std::string op;
 		int64_t ival = 0;
@@ -6656,11 +6667,10 @@ extern "C"
 			leaf.want_null = (op == "is_null");
 			return leaf;
 		}
-		if (op == "is_nan" || op == "is_not_nan")
+		if (op == "is_nan" || op == "is_not_nan" || op == "is_finite" || op == "is_not_finite")
 		{
 			leaf.usable = true;
-			leaf.is_nan_test = true;
-			leaf.want_nan = (op == "is_nan");
+			leaf.is_value_class_test = true;
 			return leaf;
 		}
 
@@ -6823,12 +6833,14 @@ extern "C"
 			res.may_false = leaf.want_null ? (nn > 0) : (nc > 0);
 			return res;
 		}
-		if (leaf.is_nan_test)
+		if (leaf.is_value_class_test)
 		{
 			// Parquet records no NaN count and excludes NaN from min/max, so neither "this chunk
-			// contains a NaN" nor "it contains none" is ever provable. nn > 0 is the only thing
-			// that can be said: a chunk with no non-null values has every row unknown for both
-			// operators, and is prunable for that reason alone.
+			// contains a NaN" nor "it contains none" is ever provable -- and since a NaN is not
+			// finite either, nothing about finiteness is provable from bounds that exclude it.
+			// All four value-class operators therefore get the same answer, for the same reason.
+			// nn > 0 is the only thing that can be said: a chunk with no non-null values has every
+			// row unknown for every one of them, and is prunable for that reason alone.
 			KleenePossible res{nn > 0, nn > 0, nc > 0};
 			return res;
 		}

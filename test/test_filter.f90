@@ -29,7 +29,8 @@
 module test_filter
     use parquet
     use iso_fortran_env, only : int32, int64, real32, real64
-    use ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_is_nan
+    use ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_is_nan, &
+        ieee_positive_inf, ieee_negative_inf
     use testdrive, only : new_unittest, unittest_type, error_type, check
     !
     implicit none
@@ -133,7 +134,31 @@ contains
                 test_remap_leaves_set_name_alone), &
             new_unittest("a copied filter carries its bound sets", test_filter_copy_carries_sets), &
             new_unittest("in: the bounded engine agrees with the unscoped one", &
-                test_in_bounded_matches_unscoped) &
+                test_in_bounded_matches_unscoped), &
+            new_unittest("in: a literal list keeps its members, repeats collapsed", test_literal_list_int), &
+            new_unittest("in: a literal list agrees with the ==-chain, parser for parser", &
+                test_literal_list_equals_chain_oracle), &
+            new_unittest("in: a literal list takes its element family from the column", &
+                test_literal_list_real_from_column), &
+            new_unittest("in: a literal list and the same members bound agree", &
+                test_literal_list_matches_bound_set), &
+            new_unittest("in: list spacing is free, and a list nests inside a group", &
+                test_literal_list_spacing_and_grouping), &
+            new_unittest("not_in: a literal list complements in, and not () agrees", &
+                test_literal_list_not_in), &
+            new_unittest("in: a quoted list member may contain a comma, paren or keyword", &
+                test_literal_list_string), &
+            new_unittest("in: a null row is UNKNOWN under a literal list too", &
+                test_literal_list_null_is_unknown), &
+            new_unittest("in: inf is accepted as a list element and matches", test_literal_list_infinity), &
+            new_unittest("in: a literal-list clause survives remap_column_names", &
+                test_literal_list_survives_remap), &
+            new_unittest("is_finite excludes NaN, both infinities and Null", test_is_finite_basic), &
+            new_unittest("is_finite equals 'x > -inf and x < inf'", test_is_finite_equals_bounds_oracle), &
+            new_unittest("not (x is_finite) does not admit null rows", &
+                test_not_of_is_finite_keeps_nulls_out), &
+            new_unittest("in: a set clause on a float32 column, bound and literal", &
+                test_set_on_float32_column) &
             ]
     end subroutine collect_tests_filter
     !
@@ -2354,5 +2379,398 @@ contains
         if (allocated(error)) return
         call check(error, all(got == [3, 7]), "remap collision: expected rows 3 and 7")
     end subroutine test_remap_leaves_set_name_alone
+    !
+    !> Writes the fixture the four value-class operators are tested against: `x` holds an ordinary
+    !> value, a NaN, a +infinity, a -infinity, a null and another ordinary value, so every class a
+    !> floating-point column can hold appears exactly once and `u` names the row.
+    subroutine write_finite_fixture(file)
+        character(len=*), intent(in) :: file !! fixture path (one per test).
+        type(parquet_writer) :: writer
+        integer(int32) :: u(6) = [1, 2, 3, 4, 5, 6]
+        real(real64) :: x(6)
+        logical :: valid(6) = [.true., .true., .true., .true., .false., .true.]
+
+        x = [1.0_real64, ieee_value(0.0_real64, ieee_quiet_nan), &
+            ieee_value(0.0_real64, ieee_positive_inf), ieee_value(0.0_real64, ieee_negative_inf), &
+            0.0_real64, 2.0_real64]
+        call parquet_open_writer(writer, file)
+        call parquet_write_column(writer, "u", u)
+        call parquet_write_column(writer, "x", x, is_valid=valid)
+        call parquet_close_writer(writer)
+    end subroutine write_finite_fixture
+    !
+    !> The baseline for a literal list: `v in (3, 5, 9)` keeps exactly those rows, and a REPEATED
+    !> element is collapsed rather than aborting -- pf_index_map%build refuses a duplicate key by
+    !> contract, so the literal path deduplicates through %get_or_add exactly as %bind does.
+    subroutine test_literal_list_int(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: got(:)
+        character(len=*), parameter :: file = "test_run/filter_list_int.parquet"
+
+        call write_grid_fixture(file)
+        call filtered_v(file, "v in (3, 5, 9)", got)
+        call check(error, size(got) == 3, "a literal integer list: expected the three named rows")
+        if (allocated(error)) return
+        call check(error, all(got == [3, 5, 9]), "a literal integer list: expected 3, 5, 9")
+        if (allocated(error)) return
+        deallocate(got)
+        call filtered_v(file, "v in (3, 3, 5, 3)", got)
+        call check(error, size(got) == 2, "a literal list with repeats must collapse them, not abort")
+        if (allocated(error)) return
+        call check(error, all(got == [3, 5]), "a literal list with repeats: expected 3 and 5")
+    end subroutine test_literal_list_int
+    !
+    !> The literal list agrees with the `==` chain it is shorthand for -- the oracle that makes the
+    !> one-leaf, one-pass implementation trustworthy, since the chain shares no code with it at all:
+    !> it never reaches pf_index_map, the pre-evaluator, or the boundary's verdict array.
+    !>
+    !> This is also where the two NUMERIC PARSERS are compared. The chain's literals are parsed in
+    !> C++ by strtoll/strtod; the list's elements are parsed in Fortran by parquet_parse_set_int and
+    !> parquet_parse_set_real. Agreement is asserted rather than assumed, on the spellings the list
+    !> grammar admits -- a bare integer, a sign, a decimal point, an exponent.
+    subroutine test_literal_list_equals_chain_oracle(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: from_list(:), from_chain(:)
+        character(len=*), parameter :: file = "test_run/filter_list_oracle.parquet"
+
+        call write_grid_fixture(file)
+        call filtered_v(file, "v in (2, 4, 7)", from_list)
+        call filtered_v(file, "v == 2 or v == 4 or v == 7", from_chain)
+        call check(error, size(from_list) == size(from_chain), &
+            "a literal list and the ==-chain must select the same number of rows")
+        if (allocated(error)) return
+        call check(error, all(from_list == from_chain), &
+            "a literal list must select exactly the rows the ==-chain does")
+        if (allocated(error)) return
+        deallocate(from_list, from_chain)
+        ! An explicitly SIGNED element, which strtoll accepts and a hand-rolled digit scan easily
+        ! does not. (An exponent is not tested here: `1e1` is refused against an integer column by
+        ! BOTH parsers, since strtoll stops at the 'e' -- the float-column oracle covers exponents.)
+        call filtered_v(file, "v in (+3, 8)", from_list)
+        call filtered_v(file, "v == +3 or v == 8", from_chain)
+        call check(error, size(from_list) == size(from_chain), &
+            "a signed list element: the list and the chain must agree on the row count")
+        if (allocated(error)) return
+        call check(error, size(from_list) == 2, "a signed list element: expected rows 3 and 8")
+        if (allocated(error)) return
+        call check(error, all(from_list == from_chain), &
+            "a signed list element: the Fortran and C++ literal parsers disagree")
+    end subroutine test_literal_list_equals_chain_oracle
+    !
+    !> A literal list against a FLOAT column takes its element family from the COLUMN, so an element
+    !> written without a decimal point is read as a real -- exactly as the bare literal in `x == 3`
+    !> is. Getting this from the text instead would make `x in (3)` fail where `x == 3` works.
+    subroutine test_literal_list_real_from_column(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        integer(int32), allocatable :: from_list(:), from_chain(:)
+        real(real64) :: x(6) = [1.0_real64, 2.5_real64, 3.0_real64, 4.25_real64, 5.0_real64, 6.0_real64]
+        integer(int32) :: u(6) = [1, 2, 3, 4, 5, 6]
+        character(len=*), parameter :: file = "test_run/filter_list_real.parquet"
+
+        call parquet_open_writer(writer, file)
+        call parquet_write_column(writer, "u", u)
+        call parquet_write_column(writer, "x", x)
+        call parquet_close_writer(writer)
+
+        ! "3" has no decimal point and the column is float64: it must still be read as 3.0. The
+        ! exponent spelling rides along, since this is the column type on which both parsers accept
+        ! one -- Fortran's `read` and C++'s strtod have to agree on its value, not just its shape.
+        call filtered_u(file, "x in (3, 2.5e0, 4.25)", from_list)
+        call filtered_u(file, "x == 3 or x == 2.5e0 or x == 4.25", from_chain)
+        call check(error, size(from_list) == 3, &
+            "a literal list on a float column: expected the three named values")
+        if (allocated(error)) return
+        call check(error, all(from_list == [2, 3, 4]), &
+            "a literal list on a float column: expected rows 2, 3 and 4")
+        if (allocated(error)) return
+        call check(error, all(from_list == from_chain), &
+            "a literal list on a float column must agree with the ==-chain")
+    end subroutine test_literal_list_real_from_column
+    !
+    !> A literal list and the same members bound with %bind select the same rows. The two spellings
+    !> resolve to one payload in parquet_resolve_set_payload, and this is what pins that: a second
+    !> code path for the literal form would still return a perfectly plausible row set.
+    subroutine test_literal_list_matches_bound_set(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32), allocatable :: from_list(:), from_bind(:)
+        integer(int64) :: nrows
+        character(len=*), parameter :: file = "test_run/filter_list_vs_bind.parquet"
+
+        call write_grid_fixture(file)
+        call filtered_v(file, "v in (2, 6, 10)", from_list)
+
+        call filt%bind("s", [2_int32, 6_int32, 10_int32])
+        call filt%add("v in @s")
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        allocate(from_bind(nrows))
+        if (nrows > 0) call parquet_read_column(reader, "v", from_bind)
+        call parquet_close_reader(reader)
+
+        call check(error, size(from_list) == size(from_bind), &
+            "a literal list and a bound set with the same members must keep the same rows")
+        if (allocated(error)) return
+        call check(error, all(from_list == from_bind), &
+            "a literal list and a bound set disagree on which rows survive")
+    end subroutine test_literal_list_matches_bound_set
+    !
+    !> Spacing inside a list is free, and the list may sit inside a larger expression alongside
+    !> ordinary parentheses -- the one place a '(' is part of a clause rather than a grouping
+    !> operator, so the two readings have to coexist in one rule.
+    subroutine test_literal_list_spacing_and_grouping(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: tight(:), loose(:), grouped(:)
+        character(len=*), parameter :: file = "test_run/filter_list_spacing.parquet"
+
+        call write_grid_fixture(file)
+        call filtered_v(file, "v in (1,2,3)", tight)
+        call filtered_v(file, "v in ( 1 ,  2 , 3 )", loose)
+        call check(error, size(tight) == 3 .and. size(loose) == 3, &
+            "spacing inside a list must not change what it matches")
+        if (allocated(error)) return
+        call check(error, all(tight == loose), "a tightly and a loosely spaced list must agree")
+        if (allocated(error)) return
+        ! A grouping paren before the list, and one after it: both readings in one rule.
+        call filtered_v(file, "(w > 8 or v in (5, 6)) and v /= 1", grouped)
+        call check(error, size(grouped) == 3, &
+            "a list inside a parenthesised group: expected rows 2, 5 and 6")
+        if (allocated(error)) return
+        call check(error, all(grouped == [2, 5, 6]), &
+            "a list inside a parenthesised group selected the wrong rows")
+    end subroutine test_literal_list_spacing_and_grouping
+    !
+    !> `not_in` written as a list complements `in`, and an enclosing `not` agrees with it -- the
+    !> same two properties the bound-set form has, asserted again because the literal form reaches
+    !> the negation through its own resolution path.
+    subroutine test_literal_list_not_in(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: kept(:), dropped(:), negated(:)
+        integer :: i
+        character(len=*), parameter :: file = "test_run/filter_list_not_in.parquet"
+
+        call write_grid_fixture(file)
+        call filtered_v(file, "v in (2, 4, 6)", kept)
+        call filtered_v(file, "v not_in (2, 4, 6)", dropped)
+        call check(error, size(kept) + size(dropped) == 10, &
+            "in and not_in over a null-free column must partition every row")
+        if (allocated(error)) return
+        do i = 1, size(dropped)
+            call check(error, all(kept /= dropped(i)), &
+                "not_in kept a row that in also kept -- the two must be complements here")
+            if (allocated(error)) return
+        end do
+        call filtered_v(file, "not (v in (2, 4, 6))", negated)
+        call check(error, size(negated) == size(dropped), &
+            "not (v in (...)) must equal v not_in (...) on a null-free column")
+        if (allocated(error)) return
+        call check(error, all(negated == dropped), "not (v in (...)) selected different rows to not_in")
+    end subroutine test_literal_list_not_in
+    !
+    !> A quoted element is one token however it is spelled, so a member may contain a comma, a
+    !> parenthesis or a keyword -- which is what makes the quotes load-bearing rather than
+    !> decoration, since the split scans TOKENS rather than characters.
+    subroutine test_literal_list_string(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=8) :: names(5) = ["alpha   ", "a,b     ", "c)d     ", "and     ", "epsilon "]
+        character(len=16), allocatable :: got(:)
+        integer(int64) :: nrows
+        character(len=*), parameter :: file = "test_run/filter_list_string.parquet"
+
+        call parquet_open_writer(writer, file)
+        call parquet_write_column(writer, "name", names)
+        call parquet_close_writer(writer)
+
+        call filt%add('name in ("a,b", "c)d", "and")')
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        allocate(got(nrows))
+        if (nrows > 0) call parquet_read_column(reader, "name", got)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 3, &
+            "a quoted list element may contain a comma, a parenthesis or a keyword")
+        if (allocated(error)) return
+        call check(error, trim(got(1)) == "a,b" .and. trim(got(2)) == "c)d" .and. trim(got(3)) == "and", &
+            "a quoted list: expected the three awkwardly-spelled members")
+    end subroutine test_literal_list_string
+    !
+    !> A NULL row is UNKNOWN under a literal list exactly as under a bound set, so it is admitted by
+    !> neither `in` nor `not_in` nor an enclosing `not` -- `is_null` stays the only way in.
+    subroutine test_literal_list_null_is_unknown(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: in_rows(:), not_rows(:), neg_rows(:), null_rows(:)
+        character(len=*), parameter :: file = "test_run/filter_list_nulls.parquet"
+
+        call write_null_fixture(file)
+        call filtered_u(file, "v in (1, 5)", in_rows)
+        call filtered_u(file, "v not_in (1, 5)", not_rows)
+        call filtered_u(file, "not (v in (1, 5))", neg_rows)
+        call filtered_u(file, "v is_null", null_rows)
+        call check(error, size(null_rows) > 0, &
+            "the null fixture must contain at least one null row, or this test proves nothing")
+        if (allocated(error)) return
+        call check(error, size(in_rows) + size(not_rows) + size(null_rows) == 6, &
+            "in, not_in and is_null must partition the rows: a null row belongs to is_null alone")
+        if (allocated(error)) return
+        call check(error, size(neg_rows) == size(not_rows), &
+            "not (v in (...)) must not admit the null rows not_in leaves out")
+    end subroutine test_literal_list_null_is_unknown
+    !
+    !> `inf` is accepted as a list element, as it is as a bare literal -- and it matches the
+    !> infinity in the column, which is the only way to tell it apart from being silently dropped.
+    subroutine test_literal_list_infinity(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: got(:)
+        character(len=*), parameter :: file = "test_run/filter_list_inf.parquet"
+
+        call write_finite_fixture(file)
+        call filtered_u(file, "x in (inf, -inf)", got)
+        call check(error, size(got) == 2, "a list containing inf and -inf: expected the two infinities")
+        if (allocated(error)) return
+        call check(error, all(got == [3, 4]), "a list containing inf and -inf: expected rows 3 and 4")
+    end subroutine test_literal_list_infinity
+    !
+    !> A literal list survives %remap_column_names: the rewrite renames the CLAUSE's column and
+    !> leaves the list alone, even when a member is spelled exactly like the column being renamed.
+    subroutine test_literal_list_survives_remap(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=16), allocatable :: got(:)
+        type(parquet_writer) :: writer
+        character(len=8) :: names(4) = ["v       ", "w       ", "x       ", "y       "]
+        integer(int64) :: nrows
+        character(len=*), parameter :: file = "test_run/filter_list_remap.parquet"
+
+        call parquet_open_writer(writer, file)
+        call parquet_write_column(writer, "name", names)
+        call parquet_close_writer(writer)
+
+        ! The rule names the column in the caller's own vocabulary, and one member happens to be
+        ! spelled exactly like the column being renamed -- a quoted value is never a column name.
+        call filt%add('label in ("v", "x")')
+        call filt%remap_column_names(["label"], ["name "])
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        allocate(got(nrows))
+        if (nrows > 0) call parquet_read_column(reader, "name", got)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 2, "a renamed literal-list clause: expected 2 surviving rows")
+        if (allocated(error)) return
+        call check(error, trim(got(1)) == "v" .and. trim(got(2)) == "x", &
+            "remap rewrote a quoted list member as if it were a column name")
+    end subroutine test_literal_list_survives_remap
+    !
+    !> `is_finite` keeps the ordinary values and excludes a NaN, both infinities and a Null;
+    !> `is_not_finite` keeps the NaN and the infinities and excludes the Null. The two are
+    !> complements over the non-null rows, and neither admits a Null -- the same Kleene honesty
+    !> `is_nan` has, and the reason `x is_not_finite` does not mean "x is anything but a number".
+    subroutine test_is_finite_basic(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: fin(:), notfin(:), nulls(:)
+        character(len=*), parameter :: file = "test_run/filter_is_finite.parquet"
+
+        call write_finite_fixture(file)
+        call filtered_u(file, "x is_finite", fin)
+        call check(error, size(fin) == 2, "is_finite: expected only the two ordinary values")
+        if (allocated(error)) return
+        call check(error, all(fin == [1, 6]), &
+            "is_finite: expected rows 1 and 6 -- a NaN, an infinity and a Null are all excluded")
+        if (allocated(error)) return
+        call filtered_u(file, "x is_not_finite", notfin)
+        call check(error, size(notfin) == 3, "is_not_finite: expected the NaN and the two infinities")
+        if (allocated(error)) return
+        call check(error, all(notfin == [2, 3, 4]), "is_not_finite: expected rows 2, 3 and 4")
+        if (allocated(error)) return
+        call filtered_u(file, "x is_null", nulls)
+        call check(error, size(fin) + size(notfin) + size(nulls) == 6, &
+            "is_finite, is_not_finite and is_null must partition every row exactly once")
+    end subroutine test_is_finite_basic
+    !
+    !> `x is_finite` equals `x > -inf and x < inf`, the two-comparison expression it is sugar for --
+    !> an INDEPENDENT oracle, since the bound form reaches the comparison arms of eval_filter_clause
+    !> while is_finite has its own. A NaN satisfies neither comparison, which is exactly why
+    !> std::isfinite (false for a NaN) is the right primitive and not merely the convenient one.
+    subroutine test_is_finite_equals_bounds_oracle(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: sugar(:), bounds(:)
+        character(len=*), parameter :: file = "test_run/filter_is_finite_oracle.parquet"
+
+        call write_finite_fixture(file)
+        call filtered_u(file, "x is_finite", sugar)
+        call filtered_u(file, "x > -inf and x < inf", bounds)
+        call check(error, size(sugar) == size(bounds), &
+            "is_finite must select as many rows as 'x > -inf and x < inf'")
+        if (allocated(error)) return
+        call check(error, all(sugar == bounds), &
+            "is_finite must select exactly the rows 'x > -inf and x < inf' does")
+    end subroutine test_is_finite_equals_bounds_oracle
+    !
+    !> An enclosing `not` negates `is_finite` without admitting a Null row -- the property that
+    !> separates a Kleene-honest operator from one that answers false for a missing value, and the
+    !> one a mutation making the null arm kFalse would otherwise slip past.
+    subroutine test_not_of_is_finite_keeps_nulls_out(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: negated(:), notfin(:)
+        character(len=*), parameter :: file = "test_run/filter_not_is_finite.parquet"
+
+        call write_finite_fixture(file)
+        call filtered_u(file, "not (x is_finite)", negated)
+        call filtered_u(file, "x is_not_finite", notfin)
+        call check(error, size(negated) == 3, &
+            "not (x is_finite) must keep the NaN and the infinities and NOT the Null row")
+        if (allocated(error)) return
+        call check(error, all(negated == notfin), &
+            "not (x is_finite) and x is_not_finite must select the same rows")
+    end subroutine test_not_of_is_finite_keeps_nulls_out
+    !
+    !> A set clause on a FLOAT32 column, through both spellings. The column is read as `real64` for
+    !> the lookup, so the widening has to be exact for a value the narrow type can hold -- 2.5 and
+    !> -4.0 are, 0.1 is not, which is the same limitation `x == 0.1` has on such a column and why
+    !> the fixture uses values that are exactly representable in both.
+    !>
+    !> Neither spelling was covered on this column type: %bind accepts a real set against float32
+    !> and nothing exercised it.
+    subroutine test_set_on_float32_column(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32), allocatable :: from_list(:), from_bind(:)
+        real(real32) :: y(6) = [1.0_real32, 2.5_real32, -4.0_real32, 8.0_real32, 2.5_real32, 0.0_real32]
+        integer(int32) :: u(6) = [1, 2, 3, 4, 5, 6]
+        integer(int64) :: nrows
+        character(len=*), parameter :: file = "test_run/filter_set_float32.parquet"
+
+        call parquet_open_writer(writer, file)
+        call parquet_write_column(writer, "u", u)
+        call parquet_write_column(writer, "y", y)
+        call parquet_close_writer(writer)
+
+        call filtered_u(file, "y in (2.5, -4)", from_list)
+        call check(error, size(from_list) == 3, &
+            "a literal list on a float32 column: expected the two 2.5 rows and the -4.0 row")
+        if (allocated(error)) return
+        call check(error, all(from_list == [2, 3, 5]), &
+            "a literal list on a float32 column: expected rows 2, 3 and 5")
+        if (allocated(error)) return
+
+        call filt%add_in("y", [2.5_real64, -4.0_real64])
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        allocate(from_bind(nrows))
+        if (nrows > 0) call parquet_read_column(reader, "u", from_bind)
+        call parquet_close_reader(reader)
+        call check(error, size(from_bind) == size(from_list), &
+            "a bound set and a literal list on a float32 column must keep the same rows")
+        if (allocated(error)) return
+        call check(error, all(from_bind == from_list), &
+            "a bound set and a literal list on a float32 column disagree")
+    end subroutine test_set_on_float32_column
 
 end module test_filter

@@ -74,13 +74,15 @@ contains
         ! statement, not to the subroutine, so adding entries to a part that is already near
         ! the cap is what actually breaks the build. Only nagfor enforces it (gfortran, ifx and
         ! flang all accept more), so a violation compiles clean everywhere else and is found
-        ! only by a nagfor run; p7 reached 258 that way and had to be split.
+        ! only by a nagfor run. Two parts have reached 258 that way and had to be split.
         ! WHEN A PART IS FULL, ADD A NEW ONE rather than growing an existing one: declare pN,
-        ! open it after the previous part's `]`, and add it to the concatenation below.
-        ! check_testsuite_continuation_lines (tools/check_source_conventions.py) fails the lint
-        ! stage before nagfor ever sees it.
+        ! open it after the previous part's `]`, and add it to the concatenation below. Note the
+        ! trap in doing that: every part's last element ends with a trailing `&` continuing onto
+        ! the `]` line, so close the new part by removing the COMMA, not the `&`.
+        ! check_statement_continuation_lines (tools/check_source_conventions.py) fails the lint
+        ! stage before nagfor ever sees it -- run it after adding entries here.
         type(unittest_type), allocatable :: p1(:), p2(:), p3(:), p4(:), p5(:), p6(:), p7(:), &
-                                            p8(:), p9(:), p10(:), p11(:), p12(:), p13(:)
+                                            p8(:), p9(:), p10(:), p11(:), p12(:), p13(:), p14(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -549,7 +551,44 @@ contains
             new_unittest("filter: a set clause on a vector column aborts", &
                 test_filter_set_vector_column_aborts), &
             new_unittest("filter: a well-formed set clause opens cleanly (control)", &
-                test_filter_set_control_succeeds), &
+                test_filter_set_control_succeeds) &
+            ]
+        p14 = [ &
+            new_unittest("filter: an empty literal list aborts", test_filter_list_empty_aborts), &
+            new_unittest("filter: a quoted list element on a numeric column aborts", &
+                test_filter_list_quoted_on_numeric_aborts), &
+            new_unittest("filter: a bare list element on a string column aborts", &
+                test_filter_list_unquoted_on_string_aborts), &
+            new_unittest("filter: a non-numeric list element aborts", test_filter_list_bad_number_aborts), &
+            new_unittest("filter: a fractional list element on an integer column aborts", &
+                test_filter_list_non_integer_aborts), &
+            new_unittest("filter: a NaN inside a literal list aborts", test_filter_list_nan_member_aborts), &
+            new_unittest("filter: a trailing comma in a literal list aborts", &
+                test_filter_list_trailing_comma_aborts), &
+            new_unittest("filter: a nested parenthesis in a literal list aborts", &
+                test_filter_list_nested_paren_aborts), &
+            new_unittest("filter: an unclosed literal list aborts", test_filter_list_unclosed_aborts), &
+            new_unittest("filter: an unterminated quoted list element aborts", &
+                test_filter_list_unclosed_quote_aborts), &
+            new_unittest("filter: a set clause on a boolean column aborts", &
+                test_filter_list_on_bool_column_aborts), &
+            new_unittest("filter: a set clause on a date column aborts naming the type", &
+                test_filter_set_temporal_column_aborts), &
+            new_unittest("filter: is_finite on an integer column aborts", &
+                test_is_finite_on_int_column_aborts), &
+            new_unittest("filter: a value after is_finite aborts", test_is_finite_takes_no_value_aborts), &
+            new_unittest("filter: print_stat shows a literal list exactly as written", &
+                test_filter_list_expr_text_verbatim), &
+            new_unittest("filter: a bare '.' as a list element aborts", &
+                test_filter_list_bare_dot_aborts), &
+            new_unittest("filter: a Fortran 'd' exponent in a list element aborts", &
+                test_filter_list_fortran_exponent_aborts), &
+            new_unittest("filter: two numbers in one integer list element aborts", &
+                test_filter_list_two_numbers_aborts), &
+            new_unittest("filter: two numbers in one real list element aborts", &
+                test_filter_list_two_reals_aborts), &
+            new_unittest("filter: a well-formed literal list and is_finite open cleanly", &
+                test_filter_list_control_succeeds), &
             new_unittest("sortkey: remap_column_names with mismatched from/to sizes aborts", &
                 test_sortkey_remap_size_mismatch_aborts), &
             new_unittest("sortkey: remap_column_names to an over-long column name aborts", &
@@ -2065,7 +2104,7 @@ contains
             new_unittest("a bounded soft qc violation warns and returns every row", &
                 test_bounded_qc_soft_warns) &
             ]
-        testsuite = [p1, p2, p13, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12]
+        testsuite = [p1, p2, p13, p14, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12]
     end subroutine collect_tests_parquet_errors
 
 
@@ -8341,7 +8380,7 @@ contains
 
         call check_scenario_exit_status_and_stderr(error, "filter_set_missing_at", expect_abort=.true., &
             failure_message="'in' taking a literal was expected to abort", &
-            required_stderr="takes a bound set named with a leading '@'")
+            required_stderr="takes either a bound set named with a leading '@'")
     end subroutine test_filter_set_missing_at_aborts
 
     subroutine test_filter_set_no_value_aborts(error)
@@ -8349,7 +8388,7 @@ contains
 
         call check_scenario_exit_status_and_stderr(error, "filter_set_no_value", expect_abort=.true., &
             failure_message="'in' with no set name was expected to abort", &
-            required_stderr="is missing a set name after")
+            required_stderr="is missing a set after")
     end subroutine test_filter_set_no_value_aborts
 
     subroutine test_filter_set_wrong_family_aborts(error)
@@ -8442,6 +8481,213 @@ contains
         call check_scenario_exit_status(error, "filter_set_control", expect_abort=.false., &
             failure_message="a well-formed set clause was expected to open cleanly")
     end subroutine test_filter_set_control_succeeds
+
+    subroutine test_filter_list_empty_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_list_empty", expect_abort=.true., &
+            failure_message="an empty literal list was expected to abort", &
+            required_stderr="has an empty list")
+    end subroutine test_filter_list_empty_aborts
+
+    subroutine test_filter_list_quoted_on_numeric_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_list_quoted_on_numeric", &
+            expect_abort=.true., &
+            failure_message="a quoted list element on an integer column was expected to abort", &
+            required_stderr="is quoted, but that column")
+    end subroutine test_filter_list_quoted_on_numeric_aborts
+
+    subroutine test_filter_list_unquoted_on_string_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_list_unquoted_on_string", &
+            expect_abort=.true., &
+            failure_message="a bare list element on a string column was expected to abort", &
+            required_stderr="is not quoted, but that column")
+    end subroutine test_filter_list_unquoted_on_string_aborts
+
+    subroutine test_filter_list_bad_number_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_list_bad_number", expect_abort=.true., &
+            failure_message="a non-numeric list element was expected to abort", &
+            required_stderr="which is not a whole number")
+    end subroutine test_filter_list_bad_number_aborts
+
+    subroutine test_filter_list_non_integer_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_list_non_integer", expect_abort=.true., &
+            failure_message="a fractional element on an integer column was expected to abort", &
+            required_stderr="element 2 of the list")
+    end subroutine test_filter_list_non_integer_aborts
+
+    subroutine test_filter_list_nan_member_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_list_nan_member", expect_abort=.true., &
+            failure_message="a NaN inside a literal list was expected to abort", &
+            required_stderr="say 'is_nan' instead")
+    end subroutine test_filter_list_nan_member_aborts
+
+    subroutine test_filter_list_trailing_comma_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_list_trailing_comma", &
+            expect_abort=.true., &
+            failure_message="a trailing comma in a literal list was expected to abort", &
+            required_stderr="is empty (a stray or trailing comma?)")
+    end subroutine test_filter_list_trailing_comma_aborts
+
+    subroutine test_filter_list_nested_paren_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_list_nested_paren", expect_abort=.true., &
+            failure_message="a nested parenthesis in a literal list was expected to abort", &
+            required_stderr="may not contain a nested")
+    end subroutine test_filter_list_nested_paren_aborts
+
+    subroutine test_filter_list_unclosed_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_list_unclosed", expect_abort=.true., &
+            failure_message="an unclosed literal list was expected to abort", &
+            required_stderr="is missing its closing ')'")
+    end subroutine test_filter_list_unclosed_aborts
+
+    subroutine test_filter_list_unclosed_quote_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_list_unclosed_quote", &
+            expect_abort=.true., &
+            failure_message="an unterminated quoted list element was expected to abort", &
+            required_stderr="is missing its closing quote")
+    end subroutine test_filter_list_unclosed_quote_aborts
+
+    subroutine test_filter_list_on_bool_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_list_on_bool_column", &
+            expect_abort=.true., &
+            failure_message="a set clause on a boolean column was expected to abort", &
+            required_stderr="cannot be compared against that column")
+    end subroutine test_filter_list_on_bool_column_aborts
+
+    !> The message must come from the SET rules, naming the column's type -- not from the temporal
+    !> literal conversion, which would report a missing ISO-8601 literal and say nothing about the
+    !> set. That ordering is what this asserts, as much as the refusal itself.
+    subroutine test_filter_set_temporal_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_set_temporal_column", &
+            expect_abort=.true., &
+            failure_message="a set clause on a date column was expected to abort", &
+            required_stderr="read as 'date'")
+    end subroutine test_filter_set_temporal_column_aborts
+
+    subroutine test_is_finite_on_int_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "is_finite_on_int_column", expect_abort=.true., &
+            failure_message="is_finite on an integer column was expected to abort", &
+            required_stderr="only supported for floating-point columns")
+    end subroutine test_is_finite_on_int_column_aborts
+
+    !> The message asserted here is the one produced only when is_finite is registered as valueless
+    !> in the EXPRESSION parser as well as in the clause tokenizer. Registered in the tokenizer
+    !> alone, the parser would swallow the 3 as this clause's value and the abort would read "takes
+    !> no value"; registered in neither, it would read "unknown operator". So a token after
+    !> is_finite aborts whatever happens, and only this wording says it aborted for the right
+    !> reason -- the same shape "x is_nan 3" has.
+    subroutine test_is_finite_takes_no_value_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "is_finite_takes_no_value", expect_abort=.true., &
+            failure_message="a token after is_finite was expected to abort", &
+            required_stderr="unexpected '3' (a missing and/or?)")
+    end subroutine test_is_finite_takes_no_value_aborts
+
+    !> The caller's own list text must reach print_stat's expression line unchanged, spacing and
+    !> all. Reassembling the list from its tokens instead of lifting it verbatim out of the rule
+    !> would select exactly the same rows and print `( 1,3 , 4)` as something else -- a difference
+    !> with no other observable in the whole library, which is why this is asserted here rather
+    !> than left to the row-set tests.
+    subroutine test_filter_list_expr_text_verbatim(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: exitstat, cmdstat
+        character(len=:), allocatable :: out_file, err_file
+        logical :: verbatim, read_happened
+
+        call run_error_scenario("filter_list_expr_text", exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat == 0, "a well-formed literal list was expected to open cleanly")
+        if (allocated(error)) return
+
+        ! The read really happened -- otherwise the absence of a wrong expression line proves nothing.
+        call scenario_capture_contains(out_file, err_file, &
+            "literal list expr_text scenario read rows = 3", read_happened)
+        call check(error, read_happened, "the scenario must have read the three matching rows")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, "id in ( 1,3 , 4)", verbatim)
+        call check(error, verbatim, &
+            "print_stat must show the literal list exactly as the caller wrote it, spacing included")
+    end subroutine test_filter_list_expr_text_verbatim
+
+    !> gfortran and nagfor reject "." through `read`'s own iostat; flang accepts it as 0.0 with
+    !> iostat 0 (measured), so the mantissa-digit check is what makes this abort on every compiler
+    !> rather than silently meaning 0.0 on one of them.
+    subroutine test_filter_list_bare_dot_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_list_bare_dot", expect_abort=.true., &
+            failure_message="a bare '.' as a list element was expected to abort", &
+            required_stderr="which is not a number")
+    end subroutine test_filter_list_bare_dot_aborts
+
+    !> A narrowing, deliberately: strtod refuses `x == 1d3` for a bare literal, so accepting it in a
+    !> list would make the list the more permissive parser -- feature_risks.md Risk-195. Fortran's
+    !> own `read` accepts it, so only the shape check refuses it.
+    subroutine test_filter_list_fortran_exponent_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_list_fortran_exponent", &
+            expect_abort=.true., &
+            failure_message="a Fortran 'd' exponent in a list element was expected to abort", &
+            required_stderr="which is not a number")
+    end subroutine test_filter_list_fortran_exponent_aborts
+
+    !> The list-directed `read` hazard: it accepts "5 6" with iostat 0 and yields 5, so without the
+    !> hand-rolled shape check `id in (1 2)` would silently mean `id in (1)`. Found by mutation --
+    !> removing the shape check survived the whole filter suite, because no in-process test can see
+    !> a wrong answer that is still a valid row set.
+    subroutine test_filter_list_two_numbers_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_list_two_numbers", expect_abort=.true., &
+            failure_message="two numbers in one integer list element were expected to abort", &
+            required_stderr="which is not a whole number")
+    end subroutine test_filter_list_two_numbers_aborts
+
+    subroutine test_filter_list_two_reals_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_list_two_reals", expect_abort=.true., &
+            failure_message="two numbers in one real list element were expected to abort", &
+            required_stderr="which is not a number")
+    end subroutine test_filter_list_two_reals_aborts
+
+    !> The NEGATIVE CONTROL for the eighteen refusals above. Without it, a literal-list parser or an
+    !> is_finite guard that refused every input would pass all of them.
+    subroutine test_filter_list_control_succeeds(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "filter_list_control", expect_abort=.false., &
+            failure_message="a well-formed literal list and is_finite clause were expected to open cleanly")
+    end subroutine test_filter_list_control_succeeds
 
     subroutine test_filter_rule_too_long_aborts(error)
         type(error_type), allocatable, intent(out) :: error

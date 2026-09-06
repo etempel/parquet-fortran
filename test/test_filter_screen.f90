@@ -34,7 +34,7 @@ module test_filter_screen
     use parquet
     use iso_fortran_env, only : int32, int64, real32, real64
     use iso_c_binding, only : c_long_long
-    use ieee_arithmetic, only : ieee_value, ieee_quiet_nan
+    use ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_positive_inf
     use testdrive, only : new_unittest, unittest_type, error_type, check
     !
     implicit none
@@ -127,7 +127,14 @@ contains
             new_unittest("a set clause prunes a file written without statistics", &
                 test_set_clause_prunes_without_statistics), &
             new_unittest("a set clause and an ordinary leaf prune together", &
-                test_set_clause_combines_with_ordinary_leaf) &
+                test_set_clause_combines_with_ordinary_leaf), &
+            new_unittest("a literal list prunes every row group it cannot match", &
+                test_literal_list_prunes), &
+            new_unittest("a literal list prunes a file written without statistics", &
+                test_literal_list_prunes_without_statistics), &
+            new_unittest("is_finite / is_not_finite never prune on bounds", test_is_finite_declines), &
+            new_unittest("is_finite / is_not_finite prune a row group whose column is entirely null", &
+                test_is_finite_prunes_all_null_row_group) &
             ]
     end subroutine collect_tests_filter_screen
     !
@@ -1701,4 +1708,145 @@ contains
             "a set AND an ordinary leaf must prune a row group either one rules out")
     end subroutine test_set_clause_combines_with_ordinary_leaf
 
+    !
+    !> A LITERAL list prunes exactly as the bound set of the same members does, and reaches the
+    !> screen through the ordinary text path -- so the whole harness these tests are built on works
+    !> on it unchanged, which is itself the point: a literal list is a clause, not a second kind of
+    !> filter.
+    subroutine test_literal_list_prunes(error)
+        type(error_type), allocatable, intent(out) :: error
+        logical :: agree
+        integer(int64) :: pruned
+        integer :: nrows
+        character(len=*), parameter :: file = "test_run/screen_list_one_group.parquet"
+
+        call write_screen_fixture(file, 40, 10)   ! 4 row groups: ids 1-10, 11-20, 21-30, 31-40
+        call compare_screened(file, "id in (13, 17)", "id", agree, pruned, nrows)
+        call check(error, agree, "a literal list: screened and unscreened results must be identical")
+        if (allocated(error)) return
+        call check(error, nrows == 2, "a literal list: expected the two named rows")
+        if (allocated(error)) return
+        call check(error, pruned == 3_int64, &
+            "a literal list hitting only row group 2 must prune the other three")
+        if (allocated(error)) return
+
+        ! NEGATIVE CONTROL: a list with a member in every row group must prune nothing, or the
+        ! assertion above would pass against a screen that prunes unconditionally.
+        call compare_screened(file, "id in (2, 12, 22, 32)", "id", agree, pruned, nrows)
+        call check(error, agree, "a spanning literal list: the two arms must agree")
+        if (allocated(error)) return
+        call check(error, nrows == 4, "a spanning literal list: expected one row from each row group")
+        if (allocated(error)) return
+        call check(error, pruned == 0_int64, &
+            "a literal list with a member in every row group must prune nothing")
+    end subroutine test_literal_list_prunes
+    !
+    !> A literal list prunes a file written with NO STATISTICS AT ALL, which no ordinary leaf can
+    !> do -- the distinguishing property of a pre-evaluated leaf, asserted for the literal spelling
+    !> as well as the bound one because the two resolve to one payload and this is what would show
+    !> if they ever stopped doing so. On this same fixture test_no_stats_declines asserts that an
+    !> ordinary `c > 250.0` prunes nothing at all.
+    subroutine test_literal_list_prunes_without_statistics(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int64) :: pruned, nrows, n_groups
+        character(len=*), parameter :: file = "test/fixtures/no_stats.parquet"
+
+        call parquet_set_statistics_prescreen(.true.)
+        call filt%add("c in (-1.0, -2.0)")
+        call parquet_open_reader(reader, file, filter=filt)
+        pruned = parquet_debug_get_row_groups_pruned()
+        call parquet_get_nrows(reader, nrows)
+        call parquet_get_num_row_groups(reader, n_groups)
+        call parquet_close_reader(reader)
+
+        call check(error, nrows == 0_int64, &
+            "no statistics: a literal list of absent values must keep no row")
+        if (allocated(error)) return
+        call check(error, pruned == n_groups, &
+            "no statistics: a literal list must still prune every row group -- its screen answer " // &
+            "comes from its own verdicts, not from a footer the file does not carry")
+    end subroutine test_literal_list_prunes_without_statistics
+    !
+    !> is_finite/is_not_finite can never prune on bounds, for the same reason is_nan cannot: Parquet
+    !> excludes a NaN from min/max and records no count of them, and a NaN is not finite -- so a
+    !> chunk whose bounds are both finite may still hold one, and nothing about finiteness is
+    !> provable from the footer.
+    subroutine test_is_finite_declines(error)
+        type(error_type), allocatable, intent(out) :: error
+        logical :: agree
+        integer(int64) :: pruned
+        integer :: nrows
+        character(len=*), parameter :: file = "test_run/screen_is_finite.parquet"
+
+        call write_float_fixture(file, .true.)
+        call compare_screened(file, "x is_finite", "u", agree, pruned, nrows)
+        call check(error, agree, "is_finite: pruned and unpruned reads must be identical")
+        if (allocated(error)) return
+        call check(error, nrows == 99, "is_finite: expected the 99 rows that are not the NaN")
+        if (allocated(error)) return
+        call check(error, pruned == 0_int64, &
+            "is_finite: must prune nothing -- a chunk with finite bounds may still hold a NaN")
+        if (allocated(error)) return
+        call compare_screened(file, "x is_not_finite", "u", agree, pruned, nrows)
+        call check(error, agree, "is_not_finite: pruned and unpruned reads must be identical")
+        if (allocated(error)) return
+        call check(error, nrows == 1, "is_not_finite: expected the one NaN row")
+        if (allocated(error)) return
+        call check(error, pruned == 0_int64, "is_not_finite: must prune nothing either")
+    end subroutine test_is_finite_declines
+    !
+    !> The one thing the value-class screen CAN prove: a row group whose column is entirely null has
+    !> every row unknown under all four operators, so it is prunable. Asserted for is_finite as well
+    !> as is_nan because the two now share one branch -- and with the null-free negative control,
+    !> without which a screen that pruned unconditionally would pass.
+    subroutine test_is_finite_prunes_all_null_row_group(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        logical :: agree
+        integer(int64) :: pruned
+        integer :: nrows, i
+        real(real64) :: x(100)
+        integer(int32) :: u(100)
+        logical :: valid(100)
+        character(len=*), parameter :: file = "test_run/screen_is_finite_all_null.parquet"
+        character(len=*), parameter :: control = "test_run/screen_is_finite_control.parquet"
+
+        ! Row group 3 (rows 21..30) is entirely null; row 45 (row group 5) is the one infinity.
+        do i = 1, 100
+            x(i) = real(i, real64)
+            u(i) = i
+            valid(i) = .not. (i >= 21 .and. i <= 30)
+        end do
+        x(45) = ieee_value(0.0_real64, ieee_positive_inf)
+        call parquet_open_writer(writer, file, chunk_size=10)
+        call parquet_write_column(writer, "x", x, is_valid=valid)
+        call parquet_write_column(writer, "u", u)
+        call parquet_close_writer(writer)
+
+        call compare_screened(file, "x is_not_finite", "u", agree, pruned, nrows)
+        call check(error, agree, "is_not_finite all-null: pruned and unpruned reads must be identical")
+        if (allocated(error)) return
+        call check(error, nrows == 1, "is_not_finite all-null: expected the one infinity")
+        if (allocated(error)) return
+        call check(error, pruned == 1_int64, &
+            "is_not_finite all-null: expected the all-null row group pruned")
+        if (allocated(error)) return
+        call compare_screened(file, "x is_finite", "u", agree, pruned, nrows)
+        call check(error, agree, "is_finite all-null: pruned and unpruned reads must be identical")
+        if (allocated(error)) return
+        call check(error, nrows == 89, "is_finite all-null: 100 rows less 10 null less 1 infinity")
+        if (allocated(error)) return
+        call check(error, pruned == 1_int64, "is_finite all-null: expected the all-null row group pruned")
+        if (allocated(error)) return
+
+        ! NEGATIVE CONTROL: the same expression over a fixture with no nulls must prune NOTHING.
+        call write_float_fixture(control, .true.)
+        call compare_screened(control, "x is_finite", "u", agree, pruned, nrows)
+        call check(error, agree, "is_finite control: pruned and unpruned reads must be identical")
+        if (allocated(error)) return
+        call check(error, pruned == 0_int64, &
+            "is_finite control: a null-free fixture must prune nothing")
+    end subroutine test_is_finite_prunes_all_null_row_group
 end module test_filter_screen

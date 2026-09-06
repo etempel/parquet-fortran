@@ -79,6 +79,9 @@ something a reader is expected to have.
 | [Risk-192](#risk-192--a-bound-sets-keys-are-deduplicated-copied-and-keyed-with--00-normalised) | A bound set's keys are deduplicated, copied, and keyed with -0.0 normalised | 4 — covered |
 | [Risk-193](#risk-193--a-nan-never-matches-a-bound-set-and-a-null-under-a-set-clause-is-unknown-not-false) | A NaN never matches a bound set; a null is UNKNOWN not FALSE | 4 — covered |
 | [Risk-194](#risk-194--a-pre-evaluated-leafs-column-must-not-be-read-again-and-its-shape-must-be-checked-first) | A pre-evaluated leaf's column must not be read again | 4 — covered |
+| [Risk-195](#risk-195--two-literal-parsers-must-agree-and-only-one-oracle-test-compares-them) | Two literal parsers must agree on every spelling both accept | 4 — covered |
+| [Risk-196](#risk-196--a-literal-list-takes-its-element-family-from-the-column-and-there-is-one-rule-for-that) | A literal list takes its element family from the COLUMN | 4 — covered |
+| [Risk-197](#risk-197--the-four-value-class-operators-share-one-screen-answer-with-no-discriminator-left) | The four value-class operators share ONE screen answer | 4 — covered |
 | [Risk-1](#risk-1--the-release-policy-regresses-silently) | The release policy regresses silently | 4 — covered |
 | [Risk-2](#risk-2--the-schema-less-write-rests-on-three-properties-that-look-incidental) | The schema-less write rests on three properties that look incidental | 4 — covered |
 | [Risk-3](#risk-3--the-screen-and-the-evaluator-can-drift-apart) | The screen and the evaluator can drift apart | 4 — covered |
@@ -1276,6 +1279,84 @@ Two ordering properties of the set clause, both invisible when the answer happen
 the message text and not merely the abort. The read half has no test: nothing in the suite asserts
 memory, and `g_debug_force_whole_column_read_error` fires on the whole-column path generally rather
 than per leaf. Left as a rule with its reasoning at the call site.
+
+### Risk-195 — Two literal parsers must agree, and only one oracle test compares them
+
+A bare filter literal (`x == 1`) is parsed in **C++** by `strtoll`/`strtod`; a literal LIST element
+(`x in (1, 2)`) is parsed in **Fortran** by `parquet_parse_set_int`/`parquet_parse_set_real`
+(`src/parquet_read.f90`). The two must agree on every spelling both accept, or `x in (v)` and
+`x == v` select different rows -- a wrong answer with nothing at all to report it, since both
+spellings parse, both run, and both return a perfectly plausible row set.
+
+The Fortran grammar is deliberately a strict **subset**: an optional sign then digits for an
+integer, exactly what `strtoll(.., 10)` accepts; for a real, an optional sign, digits with an
+optional fraction and an optional `e` exponent, or `inf`/`infinity`. `strtod` additionally accepts a
+C99 hexadecimal float (`0x1p3`), which the list refuses. Narrower is the safe direction -- a
+spelling the list refuses is a clean parse error naming the element, never a different value -- so
+**a future widening is the dangerous edit**, and it must extend the oracle test in the same change.
+Fortran's own `d` exponent (`1d3`) is refused for exactly this reason: accepting it would make the
+list the *more* permissive of the two.
+
+**A list-directed `read` is not the strictness, and that was measured rather than assumed.** The
+shape of every element is checked by hand before `read` is allowed near it, exactly as CLAUDE.md
+requires — and the reason is compiler divergence, not tidiness: gfortran 15.2 and nagfor 7.2 both
+reject a bare `"."` with a nonzero `iostat`, while **flang 22.1.8 accepts it as 0.0 with `iostat`
+0**. Without the mantissa-digit check the element `.` would therefore mean 0.0 on one compiler in
+the fleet and abort on the other two. Fortran's own `d` exponent is refused by the shape check for
+the different reason above; `read` would accept it.
+
+What no test can reach is the last bit: two correctly-rounded decimal-to-binary64 conversions in
+different runtimes agree on every value anyone would write, and nothing here proves it for every
+value. Exact float equality against a decimal literal is fragile on its own terms, which is what
+keeps this bounded.
+
+**Test.** `filter_list_two_numbers`, `filter_list_two_reals`, `filter_list_fortran_exponent` and
+`filter_list_bare_dot` (`test/error_scenarios.f90`) pin the four strictness rules, the first of them
+added because removing the integer shape check survived the whole filter suite — an in-process test
+cannot see a wrong answer that is still a valid row set.
+`test_literal_list_equals_chain_oracle` (integer column: plain, signed) and
+`test_literal_list_real_from_column` (float column: no decimal point, an exponent, a fraction), both
+in `test/test_filter.f90`. Each reads the same fixture twice, once through the list and once through
+the `==` chain, and asserts the row sets are identical -- so the assertion is about the two parsers,
+not about either one's own idea of correct.
+
+### Risk-196 — A literal list takes its element family from the COLUMN, and there is one rule for that
+
+`x in (1, 2, 3)` is an integer list against an integer column and a floating-point one against a
+`float32`/`float64` column, exactly as the bare literal in `x == 1` is. Reading the family from the
+TEXT instead -- the obvious implementation -- would make `x in (1, 2)` fail on a column where
+`x == 1` works, and, worse, would let `x in (1)` and `x in (1.0)` mean different things on the same
+column.
+
+That rule and the rule deciding which columns a BOUND set may be compared against are **the same
+rule**, and `parquet_set_family_for_column` (`src/parquet_read.f90`) is its single definition: a
+bound set is checked against what it returns, and a literal list takes its family FROM it. Two
+copies would let `x in @s` and `x in (...)` accept different columns, and the difference would show
+up as one of them refusing a column the other filters happily.
+
+**Test.** `test_literal_list_real_from_column` pins the integer-looking element on a float column
+against the `==` chain; `test_literal_list_matches_bound_set` pins that the two spellings select the
+same rows; `filter_list_on_bool_column` and `filter_set_temporal_column`
+(`test/error_scenarios.f90`) pin the refused column types from the literal and the bound side
+respectively.
+
+### Risk-197 — The four value-class operators share ONE screen answer, with no discriminator left
+
+`is_nan`, `is_not_nan`, `is_finite` and `is_not_finite` all resolve to `ScreenLeaf.is_value_class_test`
+(`src/parquet_wrapper.cpp`) and all get `{may_true = nn > 0, may_false = nn > 0, may_unknown = nc > 0}`
+-- decline on the values, prune only a row group whose column is entirely null. That is sound for
+all four for one reason: Parquet excludes a NaN from min/max and records no count of them, and a NaN
+is not finite, so nothing about either question is provable from the bounds.
+
+The field carries **no "which operator" discriminator** -- `want_nan` was removed with the rename,
+because nothing read it. So a future refinement that makes one of the four smarter will silently
+apply to the other three as well, and pruning a row group that holds matching rows is the silent
+wrong answer this register exists for. Re-add a discriminator in the same change, or the refinement
+is not scoped to the operator it was reasoned about.
+
+**Test.** `test_is_finite_declines` (never prunes on bounds) and
+`test_is_finite_prunes_all_null_row_group` (prunes exactly the all-null row group, with a null-free
+negative control), beside the `is_nan` pair they mirror, all in `test/test_filter_screen.f90`.
 
 ### Risk-184 — The non-detaching join is a computed condition, and BOTH halves of it are load-bearing
 

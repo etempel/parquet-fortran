@@ -3659,7 +3659,9 @@ warning output needs its own triage, and both are covered in
   **The limit is PER STATEMENT, not per procedure, and that is what makes it easy to trip.**
   `collect_tests_parquet_errors` (`test/test_errors.f90`) already builds its `unittest_type` array
   in parts `p1 … pN` precisely because one constructor would blow the cap — and a *part* still
-  reached **258** and broke the build. **When a part fills up, add a new one rather than growing an
+  reached **258** and broke the build. That has now happened **twice**, both times to whichever part
+  a feature's error scenarios happened to land in, so it is the normal consequence of adding a dozen
+  scenarios rather than a one-off. **When a part fills up, add a new one rather than growing an
   existing one**: declare `pN`, open it after the previous part's `]`, and add it to the
   concatenation. Two things about that file's shape are load-bearing and are recorded in its own
   comment: a single constructor is impossible, and the self-referential `testsuite = [testsuite, …]`
@@ -3672,8 +3674,12 @@ warning output needs its own triage, and both are covered in
 
   `check_statement_continuation_lines` (`tools/check_source_conventions.py`) scans `src/`, `test/`,
   `app/` and `bench/` by shape and fails the lint stage before nagfor ever sees it. It matches any
-  statement, so a long constructor added anywhere is covered without editing the check. As of
-  2026-08-27 the largest surviving part is `p4` at **247** — 8 below the cap, so this will recur.
+  statement, so a long constructor added anywhere is covered without editing the check. **Do not
+  write down which part is closest to the cap** — that figure has gone stale once already, and the
+  parts move whenever one is split; re-derive it instead, since several sit within a few lines of
+  255 and this will recur. **Run the check after adding entries, not only at the end of the
+  change**: it caught nothing on a run made before the last three scenarios were added, and the
+  violation then surfaced as a nagfor build failure several minutes into a full suite run.
 
 - **An INTERMEDIATE submodule must not reference a name it reaches by HOST ASSOCIATION from the
   module above -- nagfor then cannot compile ANY of its descendants.** `src/parquet_write.f90` is

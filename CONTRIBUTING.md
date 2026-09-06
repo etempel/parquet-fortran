@@ -485,10 +485,7 @@ Added`/`### Changed`/`### Fixed` grouping, matching the existing `[1.0.0]` secti
 accumulated since the last release (see `CLAUDE.md`'s changelog guidance), retitle that section
 rather than starting a new one, and add its `[X.Y.Z]:` link reference at the foot of the file.
 4. **A git tag** matching the version (e.g. `v1.0.1`), on the commit that bumped `VERSION.txt`.
-5. **`README.md`'s status line** (`**Status: 2.0 — stable.**`, near the top) — only needs touching
-on a **major** version bump (it deliberately names the series, not the patch level, specifically so
-routine `2.0.x` releases don't need this step at all).
-6. **Push the tag, and mirror to GitHub** — see [Mirroring to GitHub](#mirroring-to-github). The
+5. **Push the tag, and mirror to GitHub** — see [Mirroring to GitHub](#mirroring-to-github). The
 GitHub repository is this project's distribution route; it is not published to the fpm registry
 (see [Why not the fpm registry?](#why-not-the-fpm-registry) below).
 

@@ -42,7 +42,7 @@
 !> `parquet_core` and `parquet_settings` hold the implementations, and this
 !> module exists so that neither of those names has to appear in user code.
 !> `parquet_core` remains internal and may change in any release; `parquet_io`
-!> is covered by the library's semantic-versioning promise. One consequence of
+!> is covered by the library's stability promise. One consequence of
 !> the facade shape is that FORD does not list the re-exported names as
 !> belonging to this module, so its generated page is nearly empty -- the names
 !> are in the site-wide procedure and type listings instead, exactly as

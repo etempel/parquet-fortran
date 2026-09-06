@@ -194,7 +194,7 @@ end program narrow_import
 
 Swap `parquet_argsort` for any other row of the table and the shape is the same.
 
-## What the semantic-versioning promise covers
+## What the stability promise covers
 
 Every module in the table above is public API and is covered by the library's versioning promise. A
 module advertised as an entry point makes its own surface a promise separate from `use parquet`, and

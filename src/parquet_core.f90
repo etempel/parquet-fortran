@@ -10,7 +10,7 @@
 !> **This is an internal implementation module -- do not `use parquet_core`
 !> directly.** Everything public here is re-exported by the `parquet` facade
 !> module (parquet.f90), which is the one and only supported entry point and
-!> the surface the library's semantic-versioning promise covers. `parquet_core`
+!> the surface the library's stability promise covers. `parquet_core`
 !> has to stay accessible because the sibling modules (parquet_tables,
 !> ...) use it, but its name and contents may change in any release.
 module parquet_core

@@ -2201,7 +2201,7 @@ def check_facade_inventory_matches_its_use_lines():
 def check_get_version_has_one_home():
     """`parquet_get_version` must be `public ::` in exactly one module.
 
-    doc/pages/operating/choosing-a-module.md, README.md and src/parquet.f90's own header all say
+    doc/pages/operating/choosing-a-module.md and src/parquet.f90's own header both say
     parquet_version is the ONLY route to it apart from `use parquet` -- and nothing asserted the
     "only" half. test_module_surface_version proves the module provides it and
     test_facade_covers_every_layer proves the facade re-exports it; a stray `public ::` added to
@@ -2219,10 +2219,10 @@ def check_get_version_has_one_home():
         return []
     if not homes:
         return ["src/: no module declares `public :: parquet_get_version`. Either it was renamed "
-                "-- update this check and the three documents that name it -- or the facade is the "
+                "-- update this check and the two documents that name it -- or the facade is the "
                 "only thing still exporting it, which the guide says it is not."]
     return ["src/: `parquet_get_version` is public from %s. It belongs to parquet_version alone: "
-            "doc/pages/operating/choosing-a-module.md, README.md and src/parquet.f90's header all "
+            "doc/pages/operating/choosing-a-module.md and src/parquet.f90's header both "
             "promise that, and a tier re-exporting it grows that tier's compile footprint for a "
             "compile-time constant none of its callers read. Use a second `use parquet_version` "
             "line in the consumer instead." % ", ".join(homes)]
@@ -3091,114 +3091,6 @@ def check_landing_page_names_every_entry_module():
     return problems
 
 
-def check_readme_states_the_current_version():
-    """README.md's status line must name the version in VERSION.txt.
-
-    README opens with "**Status: <version> -- stable.**", which is the first fact a reader takes
-    from the page. It said 2.0 while VERSION.txt, src/parquet_version.f90 and CHANGELOG.md's
-    newest published section all said 2.2.0 -- because the release commit that bumped those three
-    files did not touch README, and nothing compared them. The drift is invisible: every test
-    passes, every other check passes, and the page reads perfectly well.
-
-    VERSION.txt is the source of truth because fpm.toml points `version` at it, so it is the one
-    file a release must change.
-
-    **The status line ONLY.** README also carries a `tag = "vX.Y.Z"` pin in its recommended
-    fpm.toml snippet, and that pin deliberately does NOT track VERSION.txt: it names the newest
-    git TAG, and a release can bump the version without pushing a tag (v2.2.0 shipped that way --
-    `git tag --list` returns v1.0.0 and v2.0.0). Checking the pin against VERSION.txt would demand
-    a tag that does not exist and send a reader to a resolution failure, which is worse than an
-    old pin. If tagging ever becomes part of the release procedure, widening this check to the pin
-    is the obvious second clause -- until then it is out of scope by design, not by omission.
-    """
-    ver_file = REPO_ROOT / "VERSION.txt"
-    doc = REPO_ROOT / "README.md"
-    if not ver_file.is_file():
-        return ["VERSION.txt: missing -- this check needs updating"]
-    if not doc.is_file():
-        return ["README.md: missing -- this check needs updating"]
-    version = ver_file.read_text().strip()
-    if not version:
-        return ["VERSION.txt: parsed empty -- this check needs updating"]
-    # The version is the first whitespace-delimited token after "**Status:". Anchoring on the
-    # dash that follows it instead is what a first attempt did, and `.+?` then ran past the em
-    # dash to the hyphen inside a later `#api-stability` link -- so the token, not the separator.
-    m = re.search(r"^\*\*Status:\s*(\S+)\s", doc.read_text(), re.M)
-    if m is None:
-        return ["README.md: no line starting \"**Status:\" was found -- this check locates the "
-                "version claim by that opening and cannot find it; re-anchor it deliberately"]
-    stated = m.group(1).strip()
-    if stated != version:
-        return ["README.md: the status line says %r but VERSION.txt says %r -- the front page's "
-                "first fact is the version a reader believes they are getting, and a release that "
-                "bumps VERSION.txt without touching README leaves it stale silently" %
-                (stated, version)]
-    return []
-
-
-def check_readme_promise_names_every_entry_module():
-    """README.md's API-stability promise must name every advertised entry module.
-
-    The sibling of `check_landing_page_names_every_entry_module`, one page up. README's "API
-    stability" bullet enumerates the modules the semantic-versioning promise covers "in its own
-    right", and points the reader at its own entry-module table for the list -- so the sentence is
-    DESCRIBING the authority (`doc/pages/operating/choosing-a-module.md`'s table, measured by
-    `tools/check_module_footprints.sh`) rather than defining it, and had drifted from it.
-
-    It named 16 of the 19 entry modules: `parquet_struct`, `parquet_map` and `parquet_stats` were
-    missing while having rows in README's own table 130 lines below. A stale enumeration is cheap
-    almost everywhere in this repository; here it is not, because this paragraph is the one a
-    downstream project reads before pinning a version, and omitting a module tells that reader the
-    module carries no promise.
-
-    ENTRY_MODULES is read from the shell script rather than re-listed here, so this cannot drift
-    from what it checks against, and an empty parse FAILS rather than passes.
-
-    **One direction only, deliberately**, exactly as the landing-page check: the sentence
-    legitimately names `parquet_maml_base`, which `choosing-a-module.md` describes as "importable
-    and promised but deliberately absent from the table". A both-directions rule would fail on that
-    deliberate entry, and a check that fails on purpose gets switched off.
-    """
-    doc = REPO_ROOT / "README.md"
-    tool = REPO_ROOT / "tools" / "check_module_footprints.sh"
-    if not doc.is_file():
-        return ["README.md: missing -- this check needs updating"]
-    m = re.search(r'ENTRY_MODULES="(.*?)"', tool.read_text(), re.S)
-    if m is None:
-        return ["tools/check_module_footprints.sh: could not find ENTRY_MODULES -- this check "
-                "needs updating"]
-    modules = [w for w in m.group(1).replace("\\\n", " ").split() if w and w != "parquet"]
-    if not modules:
-        return ["tools/check_module_footprints.sh: ENTRY_MODULES parsed empty -- this check needs "
-                "updating"]
-    text = doc.read_text()
-    # The promise sentence only, and its opening phrase is REQUIRED. Searching the whole README
-    # would pass on a module named anywhere -- in the table, in a feature bullet -- which is the
-    # silent-widening failure the landing-page check was fixed for; see CLAUDE.md, "A static check
-    # that enumerates names goes stale silently".
-    opener = "The promise also covers each advertised entry module"
-    start = text.find(opener)
-    if start < 0:
-        return ["README.md: the API-stability promise no longer contains the phrase %r -- this "
-                "check cannot find the sentence that enumerates the promised entry modules and "
-                "would otherwise start accepting a module named anywhere on the page; re-anchor it "
-                "deliberately" % opener]
-    end = text.find("since a module offered as an entry point", start)
-    if end < 0:
-        return ["README.md: the API-stability promise's module list no longer ends at \"since a "
-                "module offered as an entry point\" -- re-anchor this check deliberately"]
-    sentence = text[start:end]
-    problems = []
-    for mod in modules:
-        if "`%s`" % mod not in sentence:
-            problems.append(
-                "README.md: `%s` is an advertised entry module (it is in "
-                "tools/check_module_footprints.sh's ENTRY_MODULES, in README's own entry-module "
-                "table and in doc/pages/operating/choosing-a-module.md's) but the API-stability "
-                "promise does not name it -- which tells a reader deciding whether to depend on "
-                "it that it carries no versioning promise" % mod)
-    return problems
-
 def check_page_titles_match_their_list_entries():
     """A page's title, its flat-list entry and its group-index bullet must line up.
 
@@ -3316,27 +3208,26 @@ def _module_table_rows(path):
 
 
 def check_module_tables_match_the_measured_footprints():
-    """README.md's and choosing-a-module.md's Files columns must equal the measured footprints.
+    """choosing-a-module.md's Files column must equal the measured footprints.
 
-    Both pages carry the same entry-module table, and its Files column is a MEASURED quantity:
+    The page's entry-module table has a Files column that is a MEASURED quantity:
     `tools/check_module_footprints.sh` builds a throwaway consumer per module and diffs the result
-    against `tools/module_footprints.txt`. That script never reads either page (`grep -c README` on
-    it returns 0), and until this check existed nothing else did either -- so the number a reader
-    uses to choose an import was maintained by hand against a file the build already measures. (The
+    against `tools/module_footprints.txt`. That script never reads the page, and until this check
+    existed nothing else did either -- so the number a reader uses to choose an import was
+    maintained by hand against a file the build already measures. (The
     row count is deliberately not written down here: the check derives the rows itself, and a count
     in a docstring beside a table that grows is the very hazard the paragraph below is about. This
     one said "twelve-row" while both tables carried twenty.)
 
     It had already gone wrong. A review of `choosing-a-module.md` found **3 of the 11 rows then
     present** wrong -- `parquet_io` 43 -> 44, `parquet_tables` 64 -> 62, `parquet` 65 -> 66 -- and
-    fixed them by hand; README was not even in that review's plan and was caught only because it
-    carries the same table. The counts move whenever a `use` line is added anywhere in the library,
-    which is the change least likely to prompt anyone to open README. (Cite the page and the
-    decision, never a row number in a git-ignored campaign document -- this said "Row 22a", and by
-    the time anyone read it that campaign was over and a later one's row 22 was a different page.)
-
-    Both tables are checked against the measurement INDEPENDENTLY rather than against each other, so
-    a one-sided edit cannot pass by making the two agree on a wrong number.
+    fixed them by hand. README carried a second copy of the same table at the time and was not in
+    that review's plan at all; it was caught only because the copy existed, and the copy has since
+    been removed as duplication. The counts move whenever a `use` line is added anywhere in the
+    library, which is the change least likely to prompt anyone to open the page. (Cite the page and
+    the decision, never a row number in a git-ignored campaign document -- this said "Row 22a", and
+    by the time anyone read it that campaign was over and a later one's row 22 was a different
+    page.)
 
     The guide page's opening PROSE count is checked too, and it is the reason this check grew: the
     page said `use parquet` "compiles **66** of this library's Fortran files" while its own table
@@ -3349,8 +3240,10 @@ def check_module_tables_match_the_measured_footprints():
     measured = _footprint_counts()
     if not measured:
         return ["tools/module_footprints.txt: parsed no sections -- this check needs updating"]
+    # One page carries the table today. Kept as a mapping so a second copy, should one ever be
+    # wanted again, is checked against the MEASUREMENT rather than against the first copy -- two
+    # tables agreeing on a wrong number is exactly how the three rows above went unnoticed.
     tables = {
-        "README.md": REPO_ROOT / "README.md",
         "doc/pages/operating/choosing-a-module.md":
             REPO_ROOT / "doc" / "pages" / "operating" / "choosing-a-module.md",
     }
@@ -5488,8 +5381,6 @@ CHECKS = (
     ("every intent(inout) temporal setter assigns all components", check_temporal_setters_assign_all),
     ("doc/pages index files agree with the page tree", check_doc_page_index_consistency),
     ("the landing page names every entry module", check_landing_page_names_every_entry_module),
-    ("README states the current version", check_readme_states_the_current_version),
-    ("README's stability promise names every entry module", check_readme_promise_names_every_entry_module),
     ("page titles match their list entries", check_page_titles_match_their_list_entries),
     ("the entry-module tables match the measured footprints",
      check_module_tables_match_the_measured_footprints),

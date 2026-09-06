@@ -616,8 +616,12 @@ contains
     !!
     !! It does mean a later `%clear_null` on such a row exposes 0 rather than whatever happened to
     !! be there. That is exactly what "the value behind it is unspecified until written" allows.
+    !!
+    !! `col` is a TARGET because `%data_ptr` associates its pointer with this very dummy, and
+    !! F2018 15.5.2.4 leaves such a pointer UNDEFINED on return when the actual argument has no
+    !! TARGET attribute -- the class nagfor's `-C=dangling` exists to catch.
     subroutine cast_zero_null_rows(col)
-        type(parquet_column), intent(inout) :: col !! the column whose null rows are zeroed.
+        type(parquet_column), intent(inout), target :: col !! the column whose null rows are zeroed.
         logical, allocatable :: rowvalid(:)
         integer(int32), pointer :: p_i32(:), p_i32v(:,:)
         integer(int64), pointer :: p_i64(:), p_i64v(:,:)
@@ -956,8 +960,11 @@ contains
     !!
     !! Peak memory is the old array plus the new one: an in-place conversion still has to build
     !! the result before it can release the source.
+    !!
+    !! `col` is a TARGET for the reason `cast_zero_null_rows` above gives: `%data_ptr`
+    !! associates its pointer with this very dummy.
     subroutine cast_apply(col, to_kind)
-        type(parquet_column), intent(inout) :: col !! the column to convert.
+        type(parquet_column), intent(inout), target :: col !! the column to convert.
         integer, intent(in) :: to_kind             !! the target PK_* kind.
         integer(int32), pointer :: p_i32(:), p_i32v(:,:)
         integer(int64), pointer :: p_i64(:), p_i64v(:,:)

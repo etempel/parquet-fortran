@@ -81,6 +81,23 @@ WIDEN = {
     "f64v": [("PK_FLOAT32_VEC", "f32v")],
 }
 
+# %fillna's value kinds: one generated specific per kind a caller can write a fill value in,
+# for each of the two name-list forms. Which COLUMN kinds each value is accepted for is not
+# encoded here -- that rule lives in one place, `fill_value_for_kind` in
+# src/parquet_tables_fill.f90, so eighteen entry points cannot come to disagree about it.
+FILL_VALUES = [
+    ("i32", "integer(int32)", "int32"),
+    ("i64", "integer(int64)", "int64"),
+    ("f32", "real(real32)", "real32"),
+    ("f64", "real(real64)", "real64"),
+    ("bool", "logical", "logical"),
+    ("chr", "character(len=*)", "character"),
+    ("date", "type(parquet_date)", "parquet_date"),
+    ("time", "type(parquet_time)", "parquet_time"),
+    ("ts", "type(parquet_timestamp)", "parquet_timestamp"),
+]
+FILL_VALUE_TAGS = [f[0] for f in FILL_VALUES]
+
 FTYPE = {
     "i32": "int32", "i64": "int64", "f32": "float32", "f64": "float64",
     "bool": "boolean", "str": "string", "date": "date", "time": "time", "ts": "timestamp",
@@ -990,6 +1007,49 @@ def gen_table_type():
         procedure :: rename_column => table_rename_column !! Change the name a column is looked up by.
         procedure :: copy_column => table_copy_column     !! Add a copy of a column, optionally of another kind.
         procedure :: cast => table_cast                   !! Convert a column to another kind, in place.
+        ! --- mutation: missing data (values only -- none of these changes the row set) ---
+        procedure, private :: table_fillna_i32 !! %fillna specific, name array, int32 value.
+        procedure, private :: table_fillna_i64 !! %fillna specific, name array, int64 value.
+        procedure, private :: table_fillna_f32 !! %fillna specific, name array, real32 value.
+        procedure, private :: table_fillna_f64 !! %fillna specific, name array, real64 value.
+        procedure, private :: table_fillna_bool !! %fillna specific, name array, logical value.
+        procedure, private :: table_fillna_chr !! %fillna specific, name array, character value.
+        procedure, private :: table_fillna_date !! %fillna specific, name array, parquet_date value.
+        procedure, private :: table_fillna_time !! %fillna specific, name array, parquet_time value.
+        procedure, private :: table_fillna_ts !! %fillna specific, name array, parquet_timestamp value.
+        procedure, private :: table_fillna_string_i32 !! %fillna specific, name string, int32 value.
+        procedure, private :: table_fillna_string_i64 !! %fillna specific, name string, int64 value.
+        procedure, private :: table_fillna_string_f32 !! %fillna specific, name string, real32 value.
+        procedure, private :: table_fillna_string_f64 !! %fillna specific, name string, real64 value.
+        procedure, private :: table_fillna_string_bool !! %fillna specific, name string, logical value.
+        procedure, private :: table_fillna_string_chr !! %fillna specific, name string, character value.
+        procedure, private :: table_fillna_string_date !! %fillna specific, name string, parquet_date value.
+        procedure, private :: table_fillna_string_time !! %fillna specific, name string, parquet_time value.
+        procedure, private :: table_fillna_string_ts !! %fillna specific, name string, parquet_timestamp value.
+        !> Writes one value into every null of the named columns and clears the null with it.
+        !! In place: nothing is reallocated, nothing detaches, no %col pointer dies.
+        generic :: fillna => """ + wrap_list(
+        [f"table_fillna_{t}" for t in FILL_VALUE_TAGS]
+        + [f"table_fillna_string_{t}" for t in FILL_VALUE_TAGS], 12,
+        first_prefix=len("        generic :: fillna => ")) + """
+        procedure, private :: table_ffill !! %ffill specific, name array, no limit.
+        procedure, private :: table_ffill_limit_i32 !! %ffill specific, name array, int32 limit.
+        procedure, private :: table_ffill_limit_i64 !! %ffill specific, name array, int64 limit.
+        procedure, private :: table_ffill_string !! %ffill specific, name string, no limit.
+        procedure, private :: table_ffill_string_limit_i32 !! %ffill specific, name string, int32 limit.
+        procedure, private :: table_ffill_string_limit_i64 !! %ffill specific, name string, int64 limit.
+        !> Carries the previous non-null value into the nulls that follow it. In place.
+        generic :: ffill => table_ffill, table_ffill_limit_i32, table_ffill_limit_i64, &
+            table_ffill_string, table_ffill_string_limit_i32, table_ffill_string_limit_i64
+        procedure, private :: table_bfill !! %bfill specific, name array, no limit.
+        procedure, private :: table_bfill_limit_i32 !! %bfill specific, name array, int32 limit.
+        procedure, private :: table_bfill_limit_i64 !! %bfill specific, name array, int64 limit.
+        procedure, private :: table_bfill_string !! %bfill specific, name string, no limit.
+        procedure, private :: table_bfill_string_limit_i32 !! %bfill specific, name string, int32 limit.
+        procedure, private :: table_bfill_string_limit_i64 !! %bfill specific, name string, int64 limit.
+        !> Carries the next non-null value back into the nulls that precede it. In place.
+        generic :: bfill => table_bfill, table_bfill_limit_i32, table_bfill_limit_i64, &
+            table_bfill_string, table_bfill_string_limit_i32, table_bfill_string_limit_i64
         ! --- reads that answer a filter expression without changing anything ---
         procedure, private :: table_row_mask_expr     !! %row_mask specific, expression text.
         procedure, private :: table_row_mask_filter   !! %row_mask specific, parquet_filter object.
@@ -1001,6 +1061,11 @@ def gen_table_type():
         procedure, private :: table_filter_rows_filter !! %filter_rows specific, parquet_filter object.
         !> Keeps only the rows a mask, or a filter expression, selects. Detaching.
         generic :: filter_rows => table_filter_rows, table_filter_rows_expr, table_filter_rows_filter
+        procedure, private :: table_dropna_all    !! %dropna specific, every resident column.
+        procedure, private :: table_dropna        !! %dropna specific, array of column names.
+        procedure, private :: table_dropna_string !! %dropna specific, separated name string.
+        !> Drops the rows that are null in the named columns. Detaching, when it drops one.
+        generic :: dropna => table_dropna_all, table_dropna, table_dropna_string
         procedure, private :: table_sort_by           !! %sort_by specific, array of key names.
         procedure, private :: table_sort_by_string    !! %sort_by specific, separated key string.
         !> Reorders rows by one or more key columns. Detaching.
@@ -3405,6 +3470,72 @@ def gen_spec_interfaces():
         end subroutine table_cast
     end interface""")
     w("    !")
+    w("""    ! ---- Missing data: values only, never the row set (parquet_tables_fill) ----
+    interface""")
+    for tag, decl, word in FILL_VALUES:
+        for names_decl, names_doc, suffix in (
+                ("character(len=*), intent(in) :: names(:)", "the columns to fill.", ""),
+                ("character(len=*), intent(in) :: names",
+                 "the columns to fill, comma/space separated.", "_string")):
+            w(f"""        !> Writes `value` into every null of the named columns, and clears the null with it.
+        !!
+        !! The verb `%set` cannot express: `%set` replaces a whole column and `%clear_null` takes
+        !! one row at a time, so filling a sentinel into a sparse column by hand writes the value
+        !! and leaves the null flag standing -- the row then reads back as the sentinel AND as
+        !! Null, and is written to a file as Null. This writes the value and clears the flag
+        !! together, on all three of the storage classes a null lives in.
+        !!
+        !! `value` is a {word}, and it is accepted for a column whose values it can be written
+        !! into without changing it: an integer widens into a wider integer or into a real
+        !! column, a real is refused for an integer column naming that column, and the logical,
+        !! character and three temporal values each fill only their own family. Every named
+        !! column is checked before any is written, so a list with one bad name or one
+        !! incompatible column fills nothing.
+        !!
+        !! On a *_VEC column every null ELEMENT takes the value, not the row as a whole. A
+        !! container column is refused: there is no meaning to filling a missing list with a
+        !! scalar. A column with no nulls is left exactly as it was.
+        !!
+        !! **Values are written in place**, so nothing is reallocated, the table does not detach,
+        !! and an outstanding `%col` pointer stays valid and sees the filled values. A named
+        !! column that is not resident is READ first, by the same lazy touch `%get` performs.
+        module subroutine table_fillna{suffix}_{tag}(self, names, value)
+            class(parquet_table), intent(inout) :: self !! the table.
+            {names_decl} !! {names_doc}
+            {decl}, intent(in) :: value !! the value every null takes.
+        end subroutine table_fillna{suffix}_{tag}""")
+    for d, word, other in (("f", "previous", "A leading run of nulls has nothing before it and stays null"),
+                           ("b", "next", "A trailing run of nulls has nothing after it and stays null")):
+        for names_decl, names_doc, nsuffix in (
+                ("character(len=*), intent(in) :: names(:)", "the columns to fill.", ""),
+                ("character(len=*), intent(in) :: names",
+                 "the columns to fill, comma/space separated.", "_string")):
+            for lsuffix, ldecl in (("", None), ("_limit_i32", "integer(int32)"),
+                                   ("_limit_i64", "integer(int64)")):
+                limit_arg = "" if ldecl is None else ", limit"
+                limit_decl = "" if ldecl is None else (
+                    "\n            %s, intent(in) :: limit !! at most this many consecutive nulls "
+                    "may take one value." % ldecl)
+                w(f"""        !> Carries each column's {word} non-null value into the nulls {'that follow' if d == 'f' else 'that precede'} it.
+        !!
+        !! A scan per column that honours the validity: a null takes the value of the
+        !! {word} non-null row, and its own null is cleared with it. {other}.
+        !! On a *_VEC column each ELEMENT position is its own series, so element 3 of row `i`
+        !! looks only at element 3 of the rows around it.
+        !!
+        !! `limit` caps how many CONSECUTIVE nulls one value may fill: in a run of five nulls
+        !! with `limit=2`, {'the first two are filled and the other three stay null' if d == 'f' else 'the last two are filled and the other three stay null'}.
+        !! Absent, the run is filled however long it is. It must be at least 1.
+        !!
+        !! Every kind is fillable, string and temporal included -- unlike `%fillna` there is no
+        !! value to convert, since the value comes from the column itself. A container column is
+        !! refused. In place, like `%fillna`: no reallocation, no detach, no dead pointer.
+        module subroutine table_{d}fill{nsuffix}{lsuffix}(self, names{limit_arg})
+            class(parquet_table), intent(inout) :: self !! the table.
+            {names_decl} !! {names_doc}{limit_decl}
+        end subroutine table_{d}fill{nsuffix}{lsuffix}""")
+    w("""    end interface""")
+    w("    !")
     w("""    ! ---- Row-structural mutation -- detaches whenever it changes the row set (parquet_tables_rowmutate) ----
     interface
         !> Keeps only the rows whose `keep` entry is .true., dropping the rest from EVERY column.
@@ -3468,6 +3599,68 @@ def gen_spec_interfaces():
             type(parquet_filter), intent(in) :: filter !! the filter whose rules select the rows.
             logical, intent(out) :: keep(:)            !! one entry per row; .true. for a selected row.
         end subroutine table_row_mask_filter
+        !> Drops every row that is null in the columns named -- `%dropna` over a name array.
+        !!
+        !! `how="any"` (the default) drops a row that is null in ANY named column; `how="all"`
+        !! drops it only when EVERY named column is null there. A named column that is not
+        !! resident is READ, by the same lazy touch `%get` performs.
+        !!
+        !! `min_valid` is pandas' `thresh` under a name that says what it counts: a row is kept
+        !! when at least that many of the named columns are non-null there. It replaces `how`
+        !! rather than refining it, so passing both is refused.
+        !!
+        !! On a *_VEC column a row counts as null when ANY of its elements is; on a container
+        !! column, when the row itself is. **`how` and `min_valid` are best passed by keyword**:
+        !! a bare string in first position is a NAME LIST everywhere in this API, so
+        !! `t%dropna("all")` drops rows that are null in the column called `all`.
+        !!
+        !! Row-structural, so it DETACHES the table -- but only if it actually drops a row, since
+        !! it goes through the same mask path `%filter_rows` does and an all-`.true.` mask changes
+        !! nothing. The reader-side spelling of the common case, which does not detach because it
+        !! never reads the dropped rows at all, is `filter="x is_not_null"` at
+        !! `parquet_open_reader`.
+        module subroutine table_dropna(self, names, min_valid, how)
+            class(parquet_table), intent(inout) :: self   !! the table.
+            character(len=*), intent(in) :: names(:)      !! the columns whose nulls drop a row.
+            !> keep a row with at least this many non-null named columns. A count of COLUMNS, so
+            !! it is bounded by `%ncols()` and needs no int64 form.
+            integer, intent(in), optional :: min_valid
+            character(len=*), intent(in), optional :: how !! "any" (default) or "all".
+        end subroutine table_dropna
+        !> `%dropna` over a comma/space separated name string. See the array form above.
+        module subroutine table_dropna_string(self, names, min_valid, how)
+            class(parquet_table), intent(inout) :: self   !! the table.
+            character(len=*), intent(in) :: names         !! the columns, comma/space separated.
+            integer, intent(in), optional :: min_valid    !! keep a row with this many non-null columns.
+            character(len=*), intent(in), optional :: how !! "any" (default) or "all".
+        end subroutine table_dropna_string
+        !> `%dropna` over every RESIDENT column -- the form that names nothing.
+        !!
+        !! "Resident" and not "every column", deliberately and in line with `%join`: on a lazy
+        !! table "every column" would have to read the whole file merely to decide which rows to
+        !! drop, which is not what a caller writing `t%dropna()` is asking for. Naming a column is
+        !! the explicit way to read one. A table nothing has read yet therefore drops no row --
+        !! `%prefetch` or `%materialize_all` first, or name the columns.
+        !!
+        !! `min_valid` is pandas' `thresh` under a name that says what it counts: a row is kept
+        !! when at least that many of the named columns are non-null there. It replaces `how`
+        !! rather than refining it, so passing both is refused.
+        !!
+        !! On a *_VEC column a row counts as null when ANY of its elements is; on a container
+        !! column, when the row itself is. **`how` and `min_valid` are best passed by keyword**:
+        !! a bare string in first position is a NAME LIST everywhere in this API, so
+        !! `t%dropna("all")` drops rows that are null in the column called `all`.
+        !!
+        !! Row-structural, so it DETACHES the table -- but only if it actually drops a row, since
+        !! it goes through the same mask path `%filter_rows` does and an all-`.true.` mask changes
+        !! nothing. The reader-side spelling of the common case, which does not detach because it
+        !! never reads the dropped rows at all, is `filter="x is_not_null"` at
+        !! `parquet_open_reader`.
+        module subroutine table_dropna_all(self, min_valid, how)
+            class(parquet_table), intent(inout) :: self   !! the table.
+            integer, intent(in), optional :: min_valid    !! keep a row with this many non-null columns.
+            character(len=*), intent(in), optional :: how !! "any" (default) or "all".
+        end subroutine table_dropna_all
         !> Reorders every column's rows by one or more key columns, in memory.
         !!
         !! Runs the library's own C++ sort engine -- the same one a read-time `sort_by=` uses, so

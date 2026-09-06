@@ -45,6 +45,53 @@ The value's kind must match the column's exactly, as it does for `%set`, and wri
 
 ## Null values, and changing them
 
+### Filling in what is missing
+
+```fortran
+call t%fillna(names, value)      ! every null in those columns takes `value`
+call t%ffill(names, [limit])     ! ... or the previous non-null row's value
+call t%bfill(names, [limit])     ! ... or the next one's
+```
+
+Optional arguments are shown in square brackets here and everywhere below; they are not part of
+the call syntax.
+
+A null is two things at once: a value nobody wrote, and a flag saying so. **Filling one means
+writing the value *and* clearing the flag**, and doing only the first leaves a row that reads back
+as your sentinel and as Null at the same time — and is written to a Parquet file as Null, sentinel
+and all. That is why these three verbs exist rather than a loop of `%set_element`: `%clear_null`
+takes one row at a time and cannot be given a mask, so there was no bulk way to say "this column
+has no missing values any more".
+
+`%fillna` takes one value for a list of columns, and converts it per column: an integer widens into
+a wider integer column or into a real one, and a real is **refused** for an integer column, naming
+that column so a mixed list is debuggable. The logical, character and three temporal values each
+fill their own family and nothing else. On a vector column every null **element** takes the value.
+A [container column](table.html#container-columns-in-a-table) is refused — there is no meaning to
+replacing a missing list with a scalar.
+
+```fortran
+call t%fillna("flux_g, flux_r, flux_i", -999.0_real64)   ! a name list, one sentinel
+call t%fillna(["survey", "note"], "")                    ! strings get an empty one
+print *, t%has_nulls("flux_g")                           ! .false.
+```
+
+`%ffill` and `%bfill` carry a neighbouring row's value instead, which needs no conversion and works
+for every kind including string and temporal. A **leading** run of nulls has nothing before it and
+stays null under `%ffill`; a **trailing** run stays null under `%bfill`. `limit` caps how many
+consecutive nulls one value may fill, so in a run of five with `limit=2` three of them survive.
+On a vector column each element position is its own series.
+
+**None of the three changes the row set**, so none detaches the table and none invalidates a
+pointer taken with `%col` — the values are written where they already were, and a pointer taken
+before the call sees them afterwards. A column with no nulls is left exactly as it was. A named
+column that is not resident is read first, the same lazy touch `%get` performs.
+
+Every named column is checked before any is written, so a call that names one incompatible column
+fills nothing rather than stopping half way.
+
+### Setting and clearing nulls by hand
+
 `%is_null`, `%set_null` and `%clear_null` each work a **row** at a time or a single **element** at
 a time, depending on whether you name an element:
 
@@ -128,7 +175,8 @@ individual procedure:
 |---|---|---|
 | **cell** — `%set_element`, `%set_null`, `%clear_null` | changes values in place | no |
 | **column** — `%add_column`, `%drop_column`, `%rename_column`, `%copy_column`, `%cast` | changes which columns exist, or a column's kind | no |
-| **row** — `%filter_rows`, `%sort_by`, `%top_n`, `%delete_rows`, `%truncate`, `%append`, `%append_null_rows` | changes which rows exist | **yes, when it changes one** |
+| **cell** — `%fillna`, `%ffill`, `%bfill` | writes over the nulls of whole columns, in place | no |
+| **row** — `%filter_rows`, `%sort_by`, `%top_n`, `%delete_rows`, `%truncate`, `%append`, `%append_null_rows`, `%dropna` | changes which rows exist | **yes, when it changes one** |
 | **read** — `%row_mask` | reports which rows a rule selects, changing nothing | no |
 | **row** — `%join` | matches another table's rows against this one's and brings its columns over | **yes, unless every row survives once and in place** |
 
@@ -195,17 +243,19 @@ passed:
 | `%truncate(n)` | `n >= %nrows()` |
 | `%filter_rows(keep)` | every entry of `keep` is `.true.` |
 | `%delete_rows(indices)` | `indices` is empty |
+| `%dropna([names], [min_valid], [how])` | no row falls short in the named columns |
 | `%append(other)` | `other` has no rows (it is still checked for compatibility first) |
 | `%append_null_rows(n)` | `n == 0` |
 | `%sort_by(keys)` | the rows were already in that order |
 | [`%join(other, on)`](table-join.html) | every row of this table matched exactly once, and in place |
 
-The last two are the odd ones out: whether a sort moves anything, and whether a join leaves every
-row where it was, depend on the **data** rather than on the call — so `%sort_by` on an
-already-ordered column leaves the table attached and the same call after an edit may not, and a
-join that kept its file yesterday may detach today on a wider `other`. Treat "did it detach?" as
-something to ask (`%is_detached()`) rather than predict, and never rely on staying attached across
-a mutation you expect to be a no-op.
+`%dropna`, `%sort_by` and `%join` are the odd ones out: whether a drop finds anything to drop,
+whether a sort moves anything, and whether a join leaves every row where it was all depend on the
+**data** rather than on the call — so `%sort_by` on an already-ordered column leaves the table
+attached and the same call after an edit may not, and a join that kept its file yesterday may
+detach today on a wider `other`. Treat "did it detach?" as something to ask (`%is_detached()`)
+rather than predict, and never rely on staying attached across a mutation you expect to be a
+no-op.
 
 ### Removing rows
 
@@ -256,6 +306,40 @@ call filt%bind("wanted", target_ids)
 call filt%add("field_id in @wanted")
 call t%filter_rows(filt)
 ```
+
+### Removing the rows that are missing something
+
+`%dropna` is the row-set half of the fill family: it drops the rows that are null in the columns
+you name.
+
+```fortran
+call t%dropna(["flux", "err"])              ! drop a row null in EITHER (the default, "any")
+call t%dropna("flux, err", how="all")       ! ... only when null in BOTH
+call t%dropna("g, r, i, z", min_valid=3)    ! ... keep a row with at least three values
+call t%dropna()                             ! every RESIDENT column
+```
+
+`how="any"` is the default. `min_valid` is pandas' `thresh` under a name that says what it counts,
+and it **replaces** `how` rather than refining it, so passing both is refused; it must lie between
+0 and the number of columns named, since a threshold no row could meet would empty the table and is
+a mistake rather than a request. On a vector column a row counts as null when any of its elements
+is; on a container column, when the row itself is. Naming a column READS it, the same lazy touch
+`%get` performs.
+
+**Pass `how` and `min_valid` by keyword.** A bare string in first position is a name list
+everywhere in this API, so `t%dropna("all")` drops the rows that are null in the column called
+`all` — which is what it says, and not what someone reaching for `how="all"` meant.
+
+**With no names it looks at the RESIDENT columns**, not at every column. On a lazy table "every
+column" would mean reading the whole file merely to decide which rows to drop, which is not what
+`t%dropna()` asks for; naming a column is the explicit way to read one. A table nothing has read
+yet therefore drops nothing — call `%prefetch` or `%materialize_all` first, or name the columns.
+That is the same rule [`%join`](table-join.html) follows.
+
+`%dropna` is row-structural, so it [detaches](#what-detaching-means) — but only when it actually
+drops a row, since it goes through the same path `%filter_rows` does. **If the rows you want gone
+were never worth reading**, say so at the reader instead: `parquet_open_reader(..., filter="flux
+is_not_null")` never reads them at all, and the table stays attached.
 
 ### Asking which rows a rule selects, without removing any
 

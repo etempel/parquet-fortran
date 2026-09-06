@@ -85,6 +85,9 @@ something a reader is expected to have.
 | [Risk-198](#risk-198--two-filter-engines-answer-one-grammar-and-only-an-ab-can-see-them-disagree) | Two filter engines answer one grammar, and only an A/B can see them disagree | 4 — covered |
 | [Risk-199](#risk-199--a-string-leaf-compared-with-fortrans-own-operators-blank-pads-and-the-reader-does-not) | A string leaf compared with Fortran's own operators blank-pads | 4 — covered |
 | [Risk-200](#risk-200--the-kind-to-token-map-is-an-inverse-of-one-in-another-module) | The kind-to-token map is an inverse of one in another module | 4 — covered |
+| [Risk-201](#risk-201--a-fill-must-clear-the-null-on-all-three-storage-classes-and-only-one-of-them-complains) | A fill must clear the null on all three storage classes | 4 — covered |
+| [Risk-202](#risk-202--a-temporal-columns-cached-null-answer-goes-stale-when-values-are-written-through-a-pointer) | A temporal column's cached null answer goes stale behind a raw pointer | 4 — covered |
+| [Risk-203](#risk-203--dropnas-default-is-a-union-and-one-named-column-cannot-tell-it-from-the-intersection) | %dropna's default is a UNION, and one named column cannot tell | 4 — covered |
 | [Risk-1](#risk-1--the-release-policy-regresses-silently) | The release policy regresses silently | 4 — covered |
 | [Risk-2](#risk-2--the-schema-less-write-rests-on-three-properties-that-look-incidental) | The schema-less write rests on three properties that look incidental | 4 — covered |
 | [Risk-3](#risk-3--the-screen-and-the-evaluator-can-drift-apart) | The screen and the evaluator can drift apart | 4 — covered |
@@ -1247,6 +1250,86 @@ widest -- the direction inverts and a new column family starts being filtered as
 **Test.** The A/B sweep in `test/test_table_verbs.f90` covers all nine element types, so a kind
 missing from the map fails immediately; `scenario_row_mask_vector_column` and
 `scenario_row_mask_is_nan_on_int` pin the two refusals the map itself produces.
+
+### Risk-201 — A fill must clear the null on all three storage classes, and only one of them complains
+
+`%fillna`, `%ffill` and `%bfill` (`src/parquet_tables_fill.f90`) each have to write a value **and**
+retire the null that was there. Where the null lives differs by kind, and the three cases fail in
+three different ways:
+
+- **A bitmap kind** (every numeric and logical kind, scalar and vector) keeps the flag in a packed
+  `integer(int64)` map beside the values. Writing the value through `parquet_column_data_ptr` and
+  stopping there leaves the flag set, and the row then reads back as the sentinel through `%get`
+  AND as Null through `%is_null` -- and is written to a Parquet file as Null, sentinel and all.
+  **Nothing about the value is wrong**, which is what makes this the silent one; it is also exactly
+  the workaround these verbs were added to replace.
+- **A string kind** clears its own flag inside `parquet_string_column%set`, so the value write is
+  the whole operation. Routing it through the bitmap class's clearing pass instead is worse than
+  redundant: `parquet_column_clear_null` on a string column writes `""`, over the value just
+  written.
+- **A temporal kind** carries the null INSIDE the element, and `parquet_column_clear_null` refuses
+  one outright ("a temporal element becomes valid by writing a value to it"). A rule written for
+  the bitmap class therefore aborts here rather than answering wrongly -- loud, and the one mercy
+  in the set.
+
+**What a future change must keep.** The per-kind dispatch, and specifically that the string and
+temporal arms `return` before `clear_nulls_where`. A new column kind must be filed into one of the
+three classes deliberately; falling into the bitmap arm by default is only safe for a kind that
+actually has a bitmap.
+
+**Test.** `test_fillna_clears_the_flag` asserts `%has_nulls` and the `is_valid=` mask rather than
+only the values; `test_fillna_string` fills with a NON-EMPTY sentinel, because filling with `""`
+would agree with the clearing pass that writes `""`; `test_fillna_temporal` and `test_ffill_temporal`
+cover the third class; and `test_fillna_writes_non_nullable` follows the flag the whole way through
+a file with `parquet_get_column_nullable`, with an unfilled control that must come back nullable.
+All four were confirmed by mutation.
+
+### Risk-202 — A temporal column's cached null answer goes stale when values are written through a pointer
+
+A temporal `parquet_column` memoises "does this hold a null" in `nulls_cached`/`nulls_dirty`, and
+the ONLY thing that marks the cache clean is `rescan_temporal_nulls`, reached from
+`%compact_validity` and from the mutating `%any_null()`. The typed setters (`parquet_column_set_at`)
+set `nulls_dirty`; a write through `parquet_column_data_ptr` does not, because a raw pointer has no
+way to tell the column anything.
+
+The fill verbs write temporal values through that pointer, deliberately -- it is one pass instead of
+a per-element dispatch -- and each therefore calls `%compact_validity()` afterwards, whose temporal
+arm rescans unconditionally.
+
+**Why the failure is intermittent, which is the trap.** If the cache happens to be *dirty* when the
+fill runs, every later query rescans and answers correctly, so dropping the refresh looks harmless.
+It is only when something has cleaned the cache first -- a `%compact_validity`, an `%any_null()` --
+that a stale `.true.` survives the fill and `%has_nulls` reports nulls in a column that has none.
+Downstream, that is a column written **nullable** when it should not be.
+
+**What a future change must keep.** Any bulk write to a temporal column through `data_ptr` refreshes
+the cache afterwards. Reaching for the typed setters instead is also correct and is what the string
+arm does.
+
+**Test.** `test_fillna_temporal` and `test_ffill_temporal` (`test/test_table_fill.f90`) call
+`t%compact_validity("d")` **before** the fill for exactly this reason -- to ARM the trap. Without
+that line both tests pass against a fill that never refreshes the cache, which is how this was
+found: the mutation survived until the tests were changed.
+
+### Risk-203 — %dropna's default is a UNION, and one named column cannot tell it from the intersection
+
+`%dropna`'s `how="any"` (the default) drops a row null in ANY named column; `how="all"` drops it
+only when EVERY named column is null there. Both are implemented as one threshold on the count of
+non-null named columns -- `need = size(slots)` for "any", `need = 1` for "all" -- so the difference
+between them is one assignment.
+
+**With ONE named column the two policies are identical**, and so are every threshold between them:
+`size(slots) == 1`. A suite whose `%dropna` tests all name a single column therefore cannot
+distinguish the default from its opposite, and neither can a suite whose two named columns are null
+in the SAME rows. Both shapes are the natural ones to write.
+
+**What a future change must keep.** A test that names at least two columns whose nulls do **not**
+coincide, for each policy. That is the only fixture on which "any", "all" and `min_valid` give three
+different answers.
+
+**Test.** `test_dropna_any_is_a_union` (`test/test_table_fill.f90`), added after a mutation that
+swapped the default to `how="all"`'s threshold survived the whole suite. `test_dropna_all` and
+`test_dropna_min_valid` use non-coinciding fixtures for the same reason.
 
 ### Risk-190 — A pre-evaluated leaf's screen flags must come from its own verdict segment
 

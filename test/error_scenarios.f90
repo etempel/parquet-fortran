@@ -620,6 +620,42 @@ program error_scenarios
         call scenario_table_filter_rows_shared()
     case ("row_mask_control")
         call scenario_row_mask_control()
+    case ("fillna_real_into_integer")
+        call scenario_fillna_real_into_integer()
+    case ("fillna_logical_into_numeric")
+        call scenario_fillna_logical_into_numeric()
+    case ("fillna_string_into_numeric")
+        call scenario_fillna_string_into_numeric()
+    case ("fillna_integer_into_string")
+        call scenario_fillna_integer_into_string()
+    case ("fillna_int32_range")
+        call scenario_fillna_int32_range()
+    case ("fillna_container_column")
+        call scenario_fillna_container_column()
+    case ("fillna_unsupported_column")
+        call scenario_fillna_unsupported_column()
+    case ("fillna_unknown_column")
+        call scenario_fillna_unknown_column()
+    case ("ffill_limit_zero")
+        call scenario_ffill_limit_zero()
+    case ("ffill_limit_negative")
+        call scenario_ffill_limit_negative()
+    case ("ffill_container_column")
+        call scenario_ffill_container_column()
+    case ("dropna_how_and_min_valid")
+        call scenario_dropna_how_and_min_valid()
+    case ("dropna_bad_how")
+        call scenario_dropna_bad_how()
+    case ("dropna_min_valid_range")
+        call scenario_dropna_min_valid_range()
+    case ("dropna_min_valid_negative")
+        call scenario_dropna_min_valid_negative()
+    case ("dropna_bad_how_nothing_resident")
+        call scenario_dropna_bad_how_nothing_resident()
+    case ("fillna_shared")
+        call scenario_fillna_shared()
+    case ("fill_control")
+        call scenario_fill_control()
     case ("sortkey_remap_size_mismatch")
         call scenario_sortkey_remap_size_mismatch()
     case ("sortkey_remap_name_too_long")
@@ -8083,6 +8119,284 @@ contains
         call t%filter_rows("id > 1")
         print '(a,i0,a,i0)', "%row_mask kept ", count(keep), " and %filter_rows left ", t%nrows()
     end subroutine scenario_row_mask_control
+
+    ! ---- The missing-data family (%fillna / %ffill / %bfill / %dropna) -------------------------
+    !
+    ! Every fixture below is written by write_fill_fixture, one file per scenario name because the
+    ! runner dispatches these concurrently.
+
+    !> Two columns with nulls in the same rows, one int32 and one float64, plus a null-free one.
+    subroutine write_fill_fixture(file)
+        character(len=*), intent(in) :: file !! this scenario's own fixture path.
+        type(parquet_writer) :: writer
+        integer(int32) :: v(4) = [1, 0, 3, 0]
+        real(real64) :: x(4) = [1.0_real64, 0.0_real64, 3.0_real64, 0.0_real64]
+        integer(int32) :: u(4) = [1, 2, 3, 4]
+        logical :: valid(4) = [.true., .false., .true., .false.]
+
+        call parquet_open_writer(writer, file)
+        call parquet_write_column(writer, "v", v, is_valid=valid)
+        call parquet_write_column(writer, "x", x, is_valid=valid)
+        call parquet_write_column(writer, "u", u)
+        call parquet_close_writer(writer)
+    end subroutine write_fill_fixture
+
+    !> A real sentinel reaching an integer column is a mistake worth naming, and the message has
+    !! to name the COLUMN: the whole point of %fillna taking a name list is that one call fills
+    !! columns of several kinds, so "a real value cannot fill an int32 column" without a name
+    !! would leave the caller to find which of forty-four it was.
+    subroutine scenario_fillna_real_into_integer()
+        type(parquet_table) :: t
+        character(len=*), parameter :: file = "test_run/fillna_real_into_integer.parquet"
+
+        call write_fill_fixture(file)
+        call parquet_open_table(t, file)
+        call t%fillna("v", -999.9_real64)   ! a real value, an int32 column -> aborts
+        print '(a,i0)', "unexpectedly filled an integer column with a real, nrows=", t%nrows()
+    end subroutine scenario_fillna_real_into_integer
+
+    !> A logical fills only a logical column. Its own family and nothing else.
+    subroutine scenario_fillna_logical_into_numeric()
+        type(parquet_table) :: t
+        character(len=*), parameter :: file = "test_run/fillna_logical_into_numeric.parquet"
+
+        call write_fill_fixture(file)
+        call parquet_open_table(t, file)
+        call t%fillna("v", .true.)   ! -> aborts
+        print '(a,i0)', "unexpectedly filled a numeric column with a logical, nrows=", t%nrows()
+    end subroutine scenario_fillna_logical_into_numeric
+
+    !> ... and a character fills only a string column.
+    subroutine scenario_fillna_string_into_numeric()
+        type(parquet_table) :: t
+        character(len=*), parameter :: file = "test_run/fillna_string_into_numeric.parquet"
+
+        call write_fill_fixture(file)
+        call parquet_open_table(t, file)
+        call t%fillna("x", "-999")   ! -> aborts
+        print '(a,i0)', "unexpectedly filled a real column with a string, nrows=", t%nrows()
+    end subroutine scenario_fillna_string_into_numeric
+
+    !> The other direction of the same rule: a number does not fill a string column either, so
+    !! there is no implicit formatting on the way in.
+    subroutine scenario_fillna_integer_into_string()
+        type(parquet_writer) :: writer
+        type(parquet_table) :: t
+        character(len=*), parameter :: file = "test_run/fillna_integer_into_string.parquet"
+        character(len=4) :: s(2) = ["ab  ", "    "]
+        logical :: valid(2) = [.true., .false.]
+
+        call parquet_open_writer(writer, file)
+        call parquet_write_column(writer, "s", s, is_valid=valid)
+        call parquet_close_writer(writer)
+        call parquet_open_table(t, file)
+        call t%fillna("s", 0_int32)   ! -> aborts
+        print '(a,i0)', "unexpectedly filled a string column with an integer, nrows=", t%nrows()
+    end subroutine scenario_fillna_integer_into_string
+
+    !> The one check that is about the VALUE rather than the families. An int64 that does not fit
+    !! an int32 column would wrap silently, which is a quiet wrong answer of exactly the kind the
+    !! rest of this library refuses to produce -- and the families alone cannot catch it, since an
+    !! integer value IS accepted for an integer column.
+    subroutine scenario_fillna_int32_range()
+        type(parquet_table) :: t
+        character(len=*), parameter :: file = "test_run/fillna_int32_range.parquet"
+
+        call write_fill_fixture(file)
+        call parquet_open_table(t, file)
+        call t%fillna("v", 3000000000_int64)   ! -> aborts
+        print '(a,i0)', "unexpectedly filled an int32 column out of range, nrows=", t%nrows()
+    end subroutine scenario_fillna_int32_range
+
+    !> There is no meaning to replacing a missing LIST with a scalar: filling it with -999 would
+    !! have to invent a length as well as a value.
+    subroutine scenario_fillna_container_column()
+        type(parquet_table) :: t
+
+        call parquet_open_table(t, "test/fixtures/list_widths.parquet", list_columns="container")
+        call t%materialize_all()
+        call t%fillna("ragged", -999_int32)   ! -> aborts
+        print '(a,i0)', "unexpectedly filled a container column, nrows=", t%nrows()
+    end subroutine scenario_fillna_container_column
+
+    !> A column whose file type this library cannot read has no values to fill, so the message has
+    !! to say that rather than report a kind mismatch against PK_NONE.
+    subroutine scenario_fillna_unsupported_column()
+        type(parquet_table) :: t
+
+        call parquet_open_table(t, "test/fixtures/map_payloads.parquet")
+        call t%fillna("m_intkey", 0_int32)   ! -> aborts
+        print '(a,i0)', "unexpectedly filled an unsupported column, ncols=", t%ncols()
+    end subroutine scenario_fillna_unsupported_column
+
+    !> A misspelt name in the list aborts naming it, rather than filling the columns that do exist
+    !! and saying nothing about the one that does not.
+    subroutine scenario_fillna_unknown_column()
+        type(parquet_table) :: t
+        character(len=*), parameter :: file = "test_run/fillna_unknown_column.parquet"
+
+        call write_fill_fixture(file)
+        call parquet_open_table(t, file)
+        call t%fillna("v, nope", 0_int32)   ! -> aborts
+        print '(a,i0)', "unexpectedly filled an unknown column, nrows=", t%nrows()
+    end subroutine scenario_fillna_unknown_column
+
+    !> `limit=0` fills nothing, which is a call that cannot have been meant: leaving the argument
+    !! out is how a caller asks for no cap, so zero is a mistake rather than a degenerate request.
+    subroutine scenario_ffill_limit_zero()
+        type(parquet_table) :: t
+        character(len=*), parameter :: file = "test_run/ffill_limit_zero.parquet"
+
+        call write_fill_fixture(file)
+        call parquet_open_table(t, file)
+        call t%ffill("v", 0)   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted limit=0, nrows=", t%nrows()
+    end subroutine scenario_ffill_limit_zero
+
+    !> A negative limit likewise. -1 is the INTERNAL spelling of "no cap" and must not be reachable
+    !! from a caller, or `limit=-1` would silently mean the opposite of what it says.
+    subroutine scenario_ffill_limit_negative()
+        type(parquet_table) :: t
+        character(len=*), parameter :: file = "test_run/ffill_limit_negative.parquet"
+
+        call write_fill_fixture(file)
+        call parquet_open_table(t, file)
+        call t%bfill("v", -1_int64)   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted a negative limit, nrows=", t%nrows()
+    end subroutine scenario_ffill_limit_negative
+
+    !> A container row cannot be carried from its neighbour either -- unlike %fillna there is no
+    !! value to convert, but there is still no defined copy of one list row onto another here.
+    subroutine scenario_ffill_container_column()
+        type(parquet_table) :: t
+
+        call parquet_open_table(t, "test/fixtures/list_widths.parquet", list_columns="container")
+        call t%materialize_all()
+        call t%ffill("ragged")   ! -> aborts
+        print '(a,i0)', "unexpectedly forward-filled a container column, nrows=", t%nrows()
+    end subroutine scenario_ffill_container_column
+
+    !> min_valid REPLACES how rather than refining it, so a call carrying both has two answers and
+    !! the library must not pick one. pandas refuses the same combination.
+    subroutine scenario_dropna_how_and_min_valid()
+        type(parquet_table) :: t
+        character(len=*), parameter :: file = "test_run/dropna_how_and_min_valid.parquet"
+
+        call write_fill_fixture(file)
+        call parquet_open_table(t, file)
+        call t%materialize_all()
+        call t%dropna("v, x", min_valid=1, how="all")   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted how= and min_valid= together, nrows=", t%nrows()
+    end subroutine scenario_dropna_how_and_min_valid
+
+    !> An unrecognised `how` token has to name what was expected: a silent fall-back to "any"
+    !! would make a typo drop far more rows than the caller asked for.
+    subroutine scenario_dropna_bad_how()
+        type(parquet_table) :: t
+        character(len=*), parameter :: file = "test_run/dropna_bad_how.parquet"
+
+        call write_fill_fixture(file)
+        call parquet_open_table(t, file)
+        call t%materialize_all()
+        call t%dropna("v, x", how="either")   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted a bad how token, nrows=", t%nrows()
+    end subroutine scenario_dropna_bad_how
+
+    !> A threshold above the number of columns named can never be met, so it empties the table --
+    !! which is a mistake rather than a request, and is refused naming both numbers.
+    subroutine scenario_dropna_min_valid_range()
+        type(parquet_table) :: t
+        character(len=*), parameter :: file = "test_run/dropna_min_valid_range.parquet"
+
+        call write_fill_fixture(file)
+        call parquet_open_table(t, file)
+        call t%materialize_all()
+        call t%dropna("v, x", min_valid=3)   ! only two columns named -> aborts
+        print '(a,i0)', "unexpectedly accepted an out-of-range min_valid, nrows=", t%nrows()
+    end subroutine scenario_dropna_min_valid_range
+
+    !> A negative threshold is nonsense at any column count, so it is checked before the column
+    !! count is even known -- which is what stops the range check from being the only guard.
+    subroutine scenario_dropna_min_valid_negative()
+        type(parquet_table) :: t
+        character(len=*), parameter :: file = "test_run/dropna_min_valid_negative.parquet"
+
+        call write_fill_fixture(file)
+        call parquet_open_table(t, file)
+        call t%materialize_all()
+        call t%dropna("v, x", min_valid=-1)   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted a negative min_valid, nrows=", t%nrows()
+    end subroutine scenario_dropna_min_valid_negative
+
+    !> The same typo as `dropna_bad_how`, but on a table where NOTHING is resident -- so there is
+    !! no work for %dropna to do and an argument check placed after the "nothing to look at" early
+    !! return would silently accept it. A guard that fires on some tables and not others is worse
+    !! than no guard, because the first run that misses it teaches the caller the token is fine.
+    subroutine scenario_dropna_bad_how_nothing_resident()
+        type(parquet_table) :: t
+        character(len=*), parameter :: file = "test_run/dropna_bad_how_nothing_resident.parquet"
+
+        call write_fill_fixture(file)
+        call parquet_open_table(t, file)
+        call t%dropna(how="either")   ! no resident column, but still a bad token -> aborts
+        print '(a,i0)', "unexpectedly accepted a bad how token on a lazy table, nrows=", t%nrows()
+    end subroutine scenario_dropna_bad_how_nothing_resident
+
+    !> %fillna drops a column's null bitmap when the last null goes, which is a change to the
+    !! column's STORAGE and not merely to its values -- a concurrent %is_null would read through
+    !! it. Refused on a shared table for the same reason %compact_validity is.
+    !!
+    !! In the concurrency bucket, for the reason that bucket exists: without a real -fopenmp build
+    !! there is no region to be inside, so the fill simply succeeds and the scenario exits 0.
+    subroutine scenario_fillna_shared()
+        type(parquet_table) :: t
+        character(len=*), parameter :: file = "test_run/fillna_shared.parquet"
+
+        call write_fill_fixture(file)
+        call parquet_open_table(t, file)
+        call t%materialize_all()
+        !$omp parallel num_threads(2) default(shared)
+        !$omp single
+        call t%fillna("v", 0_int32)   ! storage change to a shared table -> aborts
+        !$omp end single
+        !$omp end parallel
+        print '(a,i0)', "unexpectedly filled a shared table in a region, nrows=", t%nrows()
+    end subroutine scenario_fillna_shared
+
+    !> The negative control for every fill scenario above: the same fixture, filled through each
+    !> of the three storage classes, scanned in both directions with and without a limit, and
+    !> dropped by both policies. Without it a guard that refused everything would pass all
+    !> fourteen.
+    subroutine scenario_fill_control()
+        type(parquet_writer) :: writer
+        type(parquet_table) :: t
+        character(len=*), parameter :: file = "test_run/fill_control.parquet"
+        character(len=4) :: s(4) = ["ab  ", "    ", "cd  ", "    "]
+        type(parquet_date) :: d(4)
+        logical :: valid(4) = [.true., .false., .true., .false.]
+        integer(int32) :: v(4) = [1, 0, 3, 0]
+        real(real64) :: x(4) = [1.0_real64, 0.0_real64, 3.0_real64, 0.0_real64]
+
+        call d(1)%set(2020, 1, 1)
+        call d(3)%set(2020, 3, 3)
+        call parquet_open_writer(writer, file)
+        call parquet_write_column(writer, "v", v, is_valid=valid)
+        call parquet_write_column(writer, "x", x, is_valid=valid)
+        call parquet_write_column(writer, "s", s, is_valid=valid)
+        call parquet_write_column(writer, "d", d)
+        call parquet_close_writer(writer)
+
+        call parquet_open_table(t, file)
+        call t%materialize_all()
+        call t%fillna("v", -9_int32)        ! bitmap class, exact kind
+        call t%fillna("x", -9_int32)        ! bitmap class, widened
+        call t%fillna("s", "")              ! string class
+        call t%ffill("d")                   ! temporal class, carried forward
+        call t%bfill("d", 1)                ! ... and back, with a cap
+        call t%dropna("v, x", how="all")
+        call t%dropna(["v"], min_valid=1)
+        print '(a,i0,a,l1)', "every fill path ran, nrows=", t%nrows(), " nulls in v: ", t%has_nulls("v")
+    end subroutine scenario_fill_control
 
     subroutine scenario_filter_set_control()
         type(parquet_writer) :: writer

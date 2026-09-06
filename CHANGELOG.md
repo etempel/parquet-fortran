@@ -32,6 +32,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   selects the same rows a read-time `filter=` would, including the null, NaN, string-ordering and
   temporal-unit rules; a column the rule names is read if it is not resident yet. See
   [Removing rows by a filter expression](doc/pages/tables/table-mutate.md#removing-rows-by-a-filter-expression).
+- **The missing-data verbs: `%fillna`, `%ffill`, `%bfill` and `%dropna`.** `t%fillna(names, value)`
+  writes one value into every null of the named columns **and clears the null flag with it**, which
+  a loop of `%set_element` could not do — `%clear_null` takes one row at a time, so filling a
+  sentinel by hand left every filled row reading back as both the sentinel and Null, and written to
+  a file as Null. The value is converted per column (an integer widens into a wider integer or a
+  real column; a real is refused for an integer column, naming it), all three of the storage classes
+  a null lives in are handled, and on a vector column every null element takes the value.
+  `%ffill`/`%bfill` carry the previous or next non-null value instead, with `limit=` capping the run
+  one value may fill. `%dropna([names], [min_valid], [how])` drops the rows that are null in the
+  named columns, or in every resident column when none is named. See
+  [Filling in what is missing](doc/pages/tables/table-mutate.md#filling-in-what-is-missing).
 
 ## [v2.3.0] - 2026-09-06
 

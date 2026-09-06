@@ -82,7 +82,8 @@ contains
         ! check_statement_continuation_lines (tools/check_source_conventions.py) fails the lint
         ! stage before nagfor ever sees it -- run it after adding entries here.
         type(unittest_type), allocatable :: p1(:), p2(:), p3(:), p4(:), p5(:), p6(:), p7(:), &
-                                            p8(:), p9(:), p10(:), p11(:), p12(:), p13(:), p14(:)
+                                            p8(:), p9(:), p10(:), p11(:), p12(:), p13(:), p14(:), &
+                                            p15(:)
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
@@ -653,6 +654,38 @@ contains
                 test_row_mask_temporal_precision_aborts), &
             new_unittest("row_mask/filter_rows: a well-formed multi-clause rule applies cleanly", &
                 test_row_mask_control_succeeds) &
+            ]
+        p15 = [ &
+            new_unittest("fillna: a real value for an integer column aborts, naming the column", &
+                test_fillna_real_into_integer_aborts), &
+            new_unittest("fillna: a logical value for a numeric column aborts", &
+                test_fillna_logical_into_numeric_aborts), &
+            new_unittest("fillna: a character value for a numeric column aborts", &
+                test_fillna_string_into_numeric_aborts), &
+            new_unittest("fillna: an integer value for a string column aborts", &
+                test_fillna_integer_into_string_aborts), &
+            new_unittest("fillna: an int64 value that no int32 column can hold aborts", &
+                test_fillna_int32_range_aborts), &
+            new_unittest("fillna: a container column aborts", test_fillna_container_column_aborts), &
+            new_unittest("fillna: a column whose type was never read aborts", &
+                test_fillna_unsupported_column_aborts), &
+            new_unittest("fillna: an unknown name in the list aborts naming it", &
+                test_fillna_unknown_column_aborts), &
+            new_unittest("ffill: limit=0 aborts", test_ffill_limit_zero_aborts), &
+            new_unittest("bfill: a negative limit aborts", test_ffill_limit_negative_aborts), &
+            new_unittest("ffill: a container column aborts", test_ffill_container_column_aborts), &
+            new_unittest("dropna: how= and min_valid= together abort", &
+                test_dropna_how_and_min_valid_aborts), &
+            new_unittest("dropna: an unrecognised how token aborts, naming what was expected", &
+                test_dropna_bad_how_aborts), &
+            new_unittest("dropna: min_valid above the number of columns named aborts", &
+                test_dropna_min_valid_range_aborts), &
+            new_unittest("dropna: a negative min_valid aborts", &
+                test_dropna_min_valid_negative_aborts), &
+            new_unittest("dropna: a bad how token aborts even with nothing resident", &
+                test_dropna_bad_how_nothing_resident_aborts), &
+            new_unittest("fillna/ffill/bfill/dropna: every well-formed call runs cleanly", &
+                test_fill_control_succeeds) &
             ]
         p3 = [ &
             new_unittest("an environment value longer than the buffer aborts", &
@@ -2132,7 +2165,7 @@ contains
             new_unittest("a bounded soft qc violation warns and returns every row", &
                 test_bounded_qc_soft_warns) &
             ]
-        testsuite = [p1, p2, p13, p14, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12]
+        testsuite = [p1, p2, p13, p14, p15, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12]
     end subroutine collect_tests_parquet_errors
 
 
@@ -8843,6 +8876,155 @@ contains
             failure_message="a well-formed multi-clause rule was expected to apply cleanly through " // &
                 "both %row_mask and %filter_rows")
     end subroutine test_row_mask_control_succeeds
+
+    ! ---- The missing-data family --------------------------------------------------------------
+    !
+    ! Each asserts a DISTINCTIVE fragment of the message rather than only the exit status: these
+    ! guards are close relatives, and a copy that raised the family message for the range check
+    ! (or the other way round) would still abort and would still pass an exit-status-only test.
+
+    subroutine test_fillna_real_into_integer_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "fillna_real_into_integer", expect_abort=.true., &
+            failure_message="a real fill value for an integer column was expected to abort", &
+            required_stderr="a real value cannot fill a PK_INT32 column")
+    end subroutine test_fillna_real_into_integer_aborts
+
+    subroutine test_fillna_logical_into_numeric_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "fillna_logical_into_numeric", expect_abort=.true., &
+            failure_message="a logical fill value for a numeric column was expected to abort", &
+            required_stderr="a logical value cannot fill a PK_INT32 column")
+    end subroutine test_fillna_logical_into_numeric_aborts
+
+    subroutine test_fillna_string_into_numeric_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "fillna_string_into_numeric", expect_abort=.true., &
+            failure_message="a character fill value for a real column was expected to abort", &
+            required_stderr="a character value cannot fill a PK_FLOAT64 column")
+    end subroutine test_fillna_string_into_numeric_aborts
+
+    subroutine test_fillna_integer_into_string_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "fillna_integer_into_string", expect_abort=.true., &
+            failure_message="an integer fill value for a string column was expected to abort", &
+            required_stderr="an integer value cannot fill a PK_STRING column")
+    end subroutine test_fillna_integer_into_string_aborts
+
+    !> The value check rather than the family check -- an integer value IS accepted for an integer
+    !> column, so only the range test can refuse this one.
+    subroutine test_fillna_int32_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "fillna_int32_range", expect_abort=.true., &
+            failure_message="an out-of-range int64 fill value was expected to abort", &
+            required_stderr="does not fit an int32 column")
+    end subroutine test_fillna_int32_range_aborts
+
+    subroutine test_fillna_container_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "fillna_container_column", expect_abort=.true., &
+            failure_message="filling a container column was expected to abort", &
+            required_stderr="there is no meaning to replacing a missing list with one")
+    end subroutine test_fillna_container_column_aborts
+
+    subroutine test_fillna_unsupported_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "fillna_unsupported_column", expect_abort=.true., &
+            failure_message="filling a column of an unsupported type was expected to abort", &
+            required_stderr="so its values were never read")
+    end subroutine test_fillna_unsupported_column_aborts
+
+    subroutine test_fillna_unknown_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "fillna_unknown_column", expect_abort=.true., &
+            failure_message="an unknown column name in a fillna list was expected to abort", &
+            required_stderr="nope")
+    end subroutine test_fillna_unknown_column_aborts
+
+    subroutine test_ffill_limit_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "ffill_limit_zero", expect_abort=.true., &
+            failure_message="ffill with limit=0 was expected to abort", &
+            required_stderr="limit must be at least 1")
+    end subroutine test_ffill_limit_zero_aborts
+
+    subroutine test_ffill_limit_negative_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "ffill_limit_negative", expect_abort=.true., &
+            failure_message="bfill with a negative limit was expected to abort", &
+            required_stderr="limit must be at least 1")
+    end subroutine test_ffill_limit_negative_aborts
+
+    subroutine test_ffill_container_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "ffill_container_column", expect_abort=.true., &
+            failure_message="forward-filling a container column was expected to abort", &
+            required_stderr="cannot be filled from its neighbouring rows")
+    end subroutine test_ffill_container_column_aborts
+
+    subroutine test_dropna_how_and_min_valid_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "dropna_how_and_min_valid", expect_abort=.true., &
+            failure_message="how= and min_valid= together were expected to abort", &
+            required_stderr="pass how= or min_valid=, not both")
+    end subroutine test_dropna_how_and_min_valid_aborts
+
+    subroutine test_dropna_bad_how_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "dropna_bad_how", expect_abort=.true., &
+            failure_message="an unrecognised how token was expected to abort", &
+            required_stderr="how must be ""any"" or ""all""")
+    end subroutine test_dropna_bad_how_aborts
+
+    subroutine test_dropna_min_valid_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "dropna_min_valid_range", expect_abort=.true., &
+            failure_message="a min_valid above the number of columns named was expected to abort", &
+            required_stderr="min_valid is out of range")
+    end subroutine test_dropna_min_valid_range_aborts
+
+    subroutine test_dropna_min_valid_negative_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "dropna_min_valid_negative", expect_abort=.true., &
+            failure_message="a negative min_valid was expected to abort", &
+            required_stderr="min_valid must not be negative")
+    end subroutine test_dropna_min_valid_negative_aborts
+
+    !> The guard is only worth having if it fires on a table with nothing to drop as well.
+    subroutine test_dropna_bad_how_nothing_resident_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "dropna_bad_how_nothing_resident", &
+            expect_abort=.true., &
+            failure_message="a bad how token was expected to abort even with no resident column", &
+            required_stderr="how must be ""any"" or ""all""")
+    end subroutine test_dropna_bad_how_nothing_resident_aborts
+
+    !> The NEGATIVE CONTROL for the fourteen refusals above: one fixture carrying all three
+    !> storage classes, filled through %fillna in two kinds, scanned by %ffill and %bfill with and
+    !> without a limit, and dropped by both policies. Without it, a compatibility rule that
+    !> refused every value would pass all fourteen.
+    subroutine test_fill_control_succeeds(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "fill_control", expect_abort=.false., &
+            failure_message="every well-formed fill and drop was expected to run cleanly")
+    end subroutine test_fill_control_succeeds
 
     subroutine test_filter_rule_too_long_aborts(error)
         type(error_type), allocatable, intent(out) :: error

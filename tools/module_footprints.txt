@@ -355,6 +355,7 @@ parquet_tables_clone.f90
 parquet_tables_col.f90
 parquet_tables_colaccess.f90
 parquet_tables_container.f90
+parquet_tables_fill.f90
 parquet_tables_filter.f90
 parquet_tables_join.f90
 parquet_tables_lifecycle.f90
@@ -461,6 +462,7 @@ parquet_tables_clone.f90
 parquet_tables_col.f90
 parquet_tables_colaccess.f90
 parquet_tables_container.f90
+parquet_tables_fill.f90
 parquet_tables_filter.f90
 parquet_tables_join.f90
 parquet_tables_lifecycle.f90

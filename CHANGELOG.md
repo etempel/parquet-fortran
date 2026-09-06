@@ -2,105 +2,56 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [v2.3.0] - 2026-09-06
 
 ### Added
 
-- **`parquet_index`**: an Arrow-free entry module for fast key-to-index lookup. `pf_index_map`
-  maps a single integer key, or an N-component tuple of them, to an index value, with three storage
-  backends behind one API — an array indexed by the key, an open-addressing hash table, and sorted
-  keys plus a binary search — chosen automatically from the keys unless `method=` names one.
-  `%build` fills it in bulk, `%init` plus `%set`/`%get_or_add` fill it as you go, and `%get_many`
-  is the bulk lookup for a hot loop; `%remove`, `%keys`, `%probe_stats` and `%memory_bytes`
-  complete the surface. Stored values are integers >= 1 and a lookup answers 0 for an absent key.
-  `pf_index_pool` hands out and recycles unique index values with reuse always preceding growth,
-  and `%compact` gives back grown storage and then hands out the smallest free index first. Every
-  mutation of either type is serialized internally, so one shared map or pool may be mutated from
-  several threads at once, while map lookups are lock-free. A new `index_threads` setting
-  (`PARQUET_FORTRAN_INDEX_THREADS`) caps what a build's internally threaded key scan and scatter
-  may open.
+- **`parquet_index`**: an Arrow-free entry module for fast key-to-index lookup. `pf_index_map` maps
+  a single integer key, or a tuple of them, to an index value over three storage backends chosen
+  automatically from the keys; `pf_index_pool` hands out and recycles unique index values. Both are
+  safe to mutate from several threads at once, and map lookups are lock-free. Adds an
+  `index_threads` setting (`PARQUET_FORTRAN_INDEX_THREADS`). See
+  [Key-to-index lookup](doc/pages/utilities/index-maps.md).
 - **`parquet_toml`**: an Arrow-free entry module for reading and writing TOML configuration files,
-  built on [toml-f](https://github.com/toml-f/toml-f) — which becomes this library's first Fortran
-  package dependency, so every consumer now fetches it. `pf_toml_load`/`pf_toml_loads` parse a file
-  or a string, `pf_toml_section` opens `[name]` and `[[name]]` entries at any nesting depth, and one
-  `pf_toml_get` generic reads scalars and caller-sized arrays of `integer(int32/int64)`,
-  `real(real32/real64)`, `logical` and `character`, with `pf_toml_get_alloc` for a list the file
-  sizes, `pf_toml_get_strings` for a string list that keeps each element's own length, and
-  `pf_toml_get_level` for a `PF_LEVEL_*` value read by name. One rule covers every getter: the bare
-  call requires its key, `pf_toml_get` opts out with `default =`, and `pf_toml_get_opt`,
-  `pf_toml_get_alloc_opt` and `pf_toml_get_strings_opt` opt out by keeping whatever the variable
-  already holds. A wrong-typed value aborts with the offending source line quoted instead of leaving
-  the variable undefined, and a default is applied without writing it into the parsed document —
-  which is what lets `pf_toml_check` and `pf_toml_check_all` report every key and every section the
-  program never read, from a list accumulated automatically rather than one written down.
-  `pf_toml_require`, `pf_toml_retire`, `pf_toml_mark`, `pf_toml_mark_section`, `pf_toml_report` and
-  raw-object escape hatches round out the read side; `pf_toml_new`, `pf_toml_new_section`,
-  `pf_toml_append_section`, `pf_toml_set`, `pf_toml_update` and `pf_toml_delete` build a document,
-  `pf_toml_save` writes the effective configuration back out and `pf_toml_dump` writes the document
-  as parsed. Every public procedure is safe to call from inside an OpenMP parallel region. See
+  built on [toml-f](https://github.com/toml-f/toml-f) — this library's first Fortran package
+  dependency, so every consumer now fetches it. Checked types that quote the offending source line
+  instead of leaving your variable undefined, defaults applied without writing them into the parsed
+  document, whole-array and string-list reads, and a report of every key and section the program
+  never read. Safe to call from inside an OpenMP parallel region. See
   [Configuration files](doc/pages/utilities/configuration-files.md).
-- **`pf_lower_bound`, `pf_upper_bound` and `pf_equal_range` accept an ARRAY of targets.** The array
-  is extracted and order-checked once and every target is answered against that one key, so *m*
-  targets cost `O(n + m log n)` where *m* separate calls cost `O(m*n)`. Results are one entry per
-  target; a result array of the wrong length is an error and zero targets returns nothing.
-- **Matching and joining.** `parquet_table%join(other, on [, other_on] [, how] [, columns] [,
-  other_suffix] [, require] [, order] [, max_rows] [, matched] [, pairs] [, other_pairs] [,
-  threads])` matches another table's rows against this one's on one or more key columns and brings
-  that table's columns over, mutating this table in place and detaching it unless every one of its
-  rows survives exactly once and in place — the m:1 left join, which keeps its file, its unread
-  columns and its `%generation()`; `how=` is `"inner"`, `"left"`, `"right"`, `"outer"`, `"semi"` or
-  `"anti"`; the two one-sided forms null-fill whichever table had no counterpart, and
-  `"semi"`/`"anti"` select rows of this table and carry nothing, so `columns=` is refused with them.
-  The key column appears once when both sides name it the same -- taking `other`'s value on a row
-  this table had no counterpart for -- and only an incoming name that clashes is suffixed
-  (`other_suffix=`, default `"_2"`). `columns=` absent carries the columns of `other` that are
-  already resident, and naming one reads it; a container column cannot be carried, nor held on this
-  side of a `"right"`/`"outer"` join, and a table cannot be joined to itself. `require=` asserts the
-  cardinality (`"m:m"`, `"1:1"`, `"1:m"`, `"m:1"`, read left-side-first) and `max_rows=` the output
-  size, both before anything is allocated; `matched=` reports which rows of this table found a
-  counterpart, and `pairs=`/`other_pairs=` hand back the match itself as one row index per side per
-  output row (0 where there is no counterpart), both over the rows this table had on entry. Rows
-  come out in this table's order, and within each, its matches in the other table's order, or in key
-  order under `order="key"`. At the array level `pf_match`, `pf_match_all` and `pf_in` answer the
-  same question over plain arrays, for all eleven element types including `parquet_column`: one
-  matching index per element and 0 where there is none, every match as an offsets/matches CSR pair,
-  and elementwise membership, with neither array needing to be sorted. Throughout, a key must be of
-  exactly the same kind on both sides — nothing is promoted — a null matches nothing including
-  another null, and a NaN is a value and does match. See [Joining two
-  tables](doc/pages/tables/table-join.md).
-- **`parquet_open_table(..., bounded=.true.)` reads a filtered file larger than memory.** The
-  filter is evaluated one row group at a time and every column is assembled from per-row-group
-  chunks, so the peak is one row group's worth of one column rather than one whole column. Opt-in,
-  and never faster on a file that fits; `sort=` is refused with it, and the row mask itself still
-  scales with the file's row count. Accepted and inert on the slice forms, which read this way already.
-  See [Opening a table](doc/pages/tables/table-open.md#reading-a-file-larger-than-memory-bounded).
+- **Matching and joining.** `parquet_table%join` matches another table's rows against this one's on
+  one or more key columns and brings that table's columns over, mutating this table in place and
+  detaching it unless every row survives exactly once and in place; `how=` covers inner, left,
+  right, outer, semi and anti. At the array level `pf_match`, `pf_match_all` and `pf_in` answer the
+  same question over plain arrays for all eleven element types, with neither array needing to be
+  sorted. A key must be of exactly the same kind on both sides, a null matches nothing including
+  another null, and a NaN is a value. See [Joining two tables](doc/pages/tables/table-join.md).
+- **`parquet_open_table(..., bounded=.true.)` reads a filtered file larger than memory**: the filter
+  is evaluated one row group at a time and every column assembled from per-row-group chunks, so the
+  peak is one row group of one column rather than one whole column. Opt-in, never faster on a file
+  that fits, and refused with `sort=`. See
+  [Opening a table](doc/pages/tables/table-open.md#reading-a-file-larger-than-memory-bounded).
+- **`pf_lower_bound`, `pf_upper_bound` and `pf_equal_range` accept an array of targets**, answered
+  against one extraction of the key, so *m* targets cost `O(n + m log n)` where *m* separate calls
+  cost `O(m*n)`.
 
 ### Changed
 
-- `parquet_get_metadata` now aborts when the reader has not been opened, as every other procedure
-  taking a `parquet_reader` already did. With `default=` present it previously returned that default
-  instead, so a use-before-open was indistinguishable from a key that is genuinely absent.
+- `parquet_get_metadata` aborts when the reader has not been opened, as every other procedure taking
+  a `parquet_reader` already did. With `default=` present it previously returned that default, so a
+  use-before-open was indistinguishable from a key that is genuinely absent.
 
 ### Fixed
 
-- A table type generated by `tools/generate_user_table_code.py` now forwards `list_columns=` to
-  `parquet_open_table`, which its `%init`/`%init_slice` wrappers had always promised to do.
-- `parquet_table%append(other)` refuses to append a table to itself instead of performing the copy
-  through two aliased references to one column.
-- `pf_argsort` over a `pf_sort_keys` built from an EMPTY array now returns a zero-length
-  permutation and a single sentinel `group_offsets` entry, as the array forms always did. It
-  previously reported one row, giving back a one-element permutation naming a row that does not
-  exist and claiming one group over no rows. `character` keys were unaffected.
-- `threads=` is now honoured by the grouped sort path, which backs `pf_argsort(..., group_offsets=)`,
+- `pf_argsort` over a `pf_sort_keys` built from an empty array returns a zero-length permutation and
+  a single sentinel `group_offsets` entry, as the array forms always did. It previously reported one
+  row, naming a row that does not exist and claiming one group over no rows. `character` keys were
+  unaffected.
+- `threads=` is honoured by the grouped sort path, which backs `pf_argsort(..., group_offsets=)`,
   `pf_unique_count`, `pf_unique` and `pf_rank`. It was previously accepted and ignored there, so
   those operations always sorted serially; results are unchanged at every thread count.
-- Calling any procedure that takes a `parquet_writer` before opening it now names that procedure in
-  the abort message. Every one of them reported `parquet_write_column` regardless of what was
-  called, so `parquet_new_row_group`, `parquet_finish_row_group` and `parquet_get_chunk_size` named
-  a procedure the caller had not written.
 - Many other minor fixes and improvements.
 
 ## [v2.2.0] - 2026-09-03

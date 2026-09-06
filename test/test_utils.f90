@@ -608,6 +608,16 @@ contains
         call pf_from_str("12.", x, ok)
         call check(error, ok .and. x == 12.0_real64, "a trailing point reads")
         if (allocated(error)) return
+        ! "0." is not just another trailing-point case: it is what nagfor's own (g0) renders
+        ! 0.0_real64 as, so %format_column emits it and %parse_column must read it back. Both
+        ! forms were refused by nagfor at -O2 and above until significand_ok stopped forming an
+        ! empty `s(dot+1:)` -- see that function's comment. Only a release build could see it.
+        call pf_from_str("0.", x, ok)
+        call check(error, ok .and. x == 0.0_real64, "a trailing point on zero reads, as (g0) writes it")
+        if (allocated(error)) return
+        call pf_from_str(".", x, ok)
+        call check(error, .not. ok, "a bare point is not a number")
+        if (allocated(error)) return
         call pf_from_str(".5", x, ok)
         call check(error, ok .and. x == 0.5_real64, "a leading point reads")
         if (allocated(error)) return

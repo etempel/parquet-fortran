@@ -639,24 +639,42 @@ contains
 
     !> `.true.` when `s` is `digits`, `digits.`, `digits.digits` or `.digits` -- the significand of
     !! a real literal, with its sign and exponent already removed.
+    !!
+    !! **The head and the tail are each tested only when they are NON-EMPTY, and the tail is taken
+    !! with an explicit upper bound.** That shape is load-bearing under nagfor and must not be
+    !! tidied back into the obvious `if (dot == 1) … else if (dot == len(s)) … else …` chain.
+    !!
+    !! nagfor 7.2 gets `LEN` of a substring whose lower bound is an EXPRESSION wrong -- for a
+    !! `character(len=4)` and `d = 2`, `len(s(d+1:))` answers 4 where 2 is correct and
+    !! `len(s(d+3:))` answers 6 where 0 is -- and at `-O2` and above the wrong length becomes a
+    !! range assumption the optimiser folds a later comparison against. The previous version formed
+    !! `s(dot + 1:)`, which is empty for `"12."`, and then asked `dot == len(s)`; nagfor answered
+    !! `.false.` to that comparison while printing both operands as 2, took the `else` arm, and
+    !! refused every trailing-point literal. `"0."` is exactly what nagfor's own `(g0)` renders
+    !! `0.0_real64` as, so a `%format_column` / `%parse_column` round trip refused its own output.
+    !!
+    !! Silent in the worst way, too: under `invalid="null"` a perfectly good row would have been
+    !! marked missing rather than aborting. gfortran, and nagfor at `-O0`, are unaffected -- which
+    !! is why only `fpm test --profile release` under nagfor could see it.
     pure logical function significand_ok(s) result(res)
         character(len=*), intent(in) :: s !! the significand span.
-        integer :: dot
+        integer :: dot, n
 
         res = .false.
+        n = len(s)
         dot = index(s, ".")
         if (dot == 0) then
             res = all_digits(s)
             return
         end if
-        if (index(s(dot + 1:), ".") > 0) return   ! a second point: "1.2.3"
-        if (dot == 1) then
-            res = all_digits(s(2:))               ! ".5"
-        else if (dot == len(s)) then
-            res = all_digits(s(1:dot - 1))        ! "12."
-        else
-            res = all_digits(s(1:dot - 1)) .and. all_digits(s(dot + 1:))
+        if (dot > 1) then
+            if (.not. all_digits(s(1:dot - 1))) return   ! "12." and "1.5"
         end if
+        if (dot < n) then
+            if (index(s(dot + 1:n), ".") > 0) return     ! a second point: "1.2.3"
+            if (.not. all_digits(s(dot + 1:n))) return   ! ".5" and "1.5"
+        end if
+        res = dot > 1 .or. dot < n                       ! "." alone is not a significand
     end function significand_ok
 
     !> Reads one `integer(int32)`. See the `pf_from_str` interface for the full contract.

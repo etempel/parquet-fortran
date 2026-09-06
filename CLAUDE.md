@@ -3650,6 +3650,39 @@ warning output needs its own triage, and both are covered in
   progress line does not (see
   [Tests run concurrently](#tests-run-concurrently-never-share-a-fixture-file-path-between-two-tests)).
 
+- **`LEN` of a substring whose LOWER BOUND is an EXPRESSION is wrong, and at `-O2` the wrong length
+  becomes a range assumption that folds an unrelated comparison.** Measured on nagfor 7.2 with a
+  `character(len=4)` and `d = 2`:
+
+  | expression | correct | nagfor |
+  |---|---|---|
+  | `len(s(d+1:))` | 2 | **4** |
+  | `len(s(d+3:))` | 0 | **6** |
+  | `len(s(5:))` (literal bound) | 0 | 0 |
+  | `len(s(1:k))`, `len(s(k:16))`, `len(s(k:k))` | — | all correct |
+
+  So the trigger is an **expression** rather than a bare variable or a literal, and it is present at
+  `-O0` — but the substring itself is fine when USED: passed to a `character(len=*)` dummy the
+  callee's `len` is correct, and `index` over it answers correctly. What breaks is `LEN` applied to
+  the designator, and — the expensive half — what the optimiser then infers from it.
+
+  **The shipped instance.** `significand_ok` (`src/parquet_utils.f90`) formed `s(dot + 1:)`, which is
+  empty for `"12."`, and two lines later asked `dot == len(s)`. At `-O2`+ nagfor answered `.false.`
+  to that comparison **while printing both operands as 2**, took the `else` arm, and refused every
+  trailing-point real literal. That matters because `"0."` is what nagfor's own `(g0)` renders
+  `0.0_real64` as, so `%format_column` emitted text `%parse_column` then refused — and under
+  `invalid="null"` a good row would have been marked missing rather than aborting, which is silent
+  data loss. gfortran is unaffected, and so is nagfor at `-O0`, so **only a release build could see
+  it**; the assertion that catches it (`pf_from_str("12.", …)`) had been in `test/test_utils.f90`
+  since the parser shipped.
+
+  **The rule: never form a possibly-EMPTY substring with an expression lower bound in a procedure
+  that also compares against `len()`.** Test each span only when it is non-empty and give it an
+  explicit upper bound — `if (dot < n) then; … s(dot + 1:n) …` — which is what that function now
+  does and why its shape must not be tidied back into an `if/else if (dot == len(s))/else` chain.
+  One grep finds the shape: `grep -rnE "\([a-zA-Z_][a-zA-Z0-9_]* *[+-] *[0-9a-zA-Z_]+ *:\)" src/*.f90`,
+  and every other hit in `src/` is an array section or a substring passed straight to a dummy.
+
 - **A statement may carry at most 255 CONTINUATION LINES, and nagfor is the only compiler that
   enforces it.** F2008 C1003 caps a statement at 255 continuation lines; gfortran, ifx and flang all
   accept more without a word, so a violation compiles clean everywhere else, passes CI, and breaks

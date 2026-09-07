@@ -382,7 +382,7 @@ contains
     !> Refuses a container column on THIS side of a `right`/`outer` join.
     !!
     !! Those two are the only `how` values that emit a row with no counterpart *here*, so they
-    !! are the only ones that have to null-fill this table's own columns -- and `%set_validity`
+    !! are the only ones that have to null-fill this table's own columns -- and the gather's mask
     !! has no arm for a container kind, whose null state is the container's own business rather
     !! than a bitmap's. The mirror of the refusal `join_plan_payload` raises for an incoming
     !! container, and stated the same way: by KIND and SIDE, never by whether this particular
@@ -703,8 +703,8 @@ contains
         integer(int64), allocatable, intent(out) :: idx(:)      !! per output row: a row, never 0.
         !> per output row: .false. where it has no counterpart. LEFT UNALLOCATED when every output
         !! row matched -- an unallocated allocatable actual makes an optional dummy absent (F2018
-        !! 15.5.2.12), so an inner join skips the whole %set_validity pass with no branch at the
-        !! call site. `allocated(valid)` is part of this procedure's contract, and on the LEFT side
+        !! 15.5.2.12), so an inner join skips the gather's mask with no branch at the call site.
+        !! `allocated(valid)` is part of this procedure's contract, and on the LEFT side
         !! it is also what tells `join_apply` whether a merged key needs rebuilding at all.
         logical, allocatable, intent(out) :: valid(:)
         integer(int64) :: o
@@ -840,14 +840,12 @@ contains
     end subroutine join_apply
     !
     !> This table's own columns, gathered by `lidx` and null-filled where the row had no left
-    !! counterpart. Two shipped bindings, in that order, and the second only under
-    !! `how="right"`/`"outer"`.
-    !!
-    !! **The null fill is deliberately SERIAL where the gather is threaded**, which is not an
-    !! oversight: `%gather` rebuilds a whole column's storage and `%set_validity` writes one bit
-    !! per row into a bitmap, so the two are orders of magnitude apart and only the first is worth
-    !! `table_colwork`'s plumbing. `%set_validity` only ever ADDS nulls, which is what leaves this
-    !! table's own nulls exactly where the gather put them.
+    !! counterpart, in the one pass `table_colwork`'s gather makes: `lvalid` rides beside `lidx`
+    !! into `%gather(rows, valid=)`, so the mask is folded into each column's rebuild rather than
+    !! applied in a second pass afterwards (until stage 4 of `feature_join.md` it was a serial
+    !! `%set_validity` per column after the threaded gather). It only ever ADDS nulls, which is
+    !! what leaves this table's own nulls exactly where the gather put them (`feature_risks.md`
+    !! Risk-182). The mask exists only under `how="right"`/`"outer"` with an unmatched right row.
     subroutine join_rewrite_left(self, lslots, lidx, lvalid, n_out, nl)
         class(parquet_table), intent(inout) :: self   !! the left table.
         integer, intent(in) :: lslots(:)              !! its rewritable slots.
@@ -870,11 +868,9 @@ contains
             end if
             return
         end if
-        call table_colwork(self%cache, PCW_GATHER, lslots, rows=lidx)
-        if (.not. allocated(lvalid)) return
-        do j = 1, size(lslots)
-            call self%cache%cols(lslots(j))%values%set_validity(lvalid)
-        end do
+        ! An unallocated `lvalid` reaches `valid=` as an absent argument (F2018 15.5.2.12), which
+        ! is how a join with no unmatched row here skips the mask without a branch.
+        call table_colwork(self%cache, PCW_GATHER, lslots, rows=lidx, valid=lvalid)
     end subroutine join_rewrite_left
     !
     !> One merged key column per `on`/`other_on` pair naming the same column on both sides, taking

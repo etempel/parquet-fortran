@@ -220,7 +220,7 @@ module parquet_tables
     ! interface in this spec and an indirect call inside the region. One branch per column.
     integer, parameter :: PCW_REINDEX_TRUSTED = 1 !! %reindex_trusted(rows) -- the sort's replay.
     integer, parameter :: PCW_DELETE_MASK = 2     !! %delete_by_mask(keep) -- filter/delete/truncate.
-    integer, parameter :: PCW_GATHER = 3          !! %gather(rows) -- %top_n's selection.
+    integer, parameter :: PCW_GATHER = 3          !! %gather(rows, valid=) -- %top_n's selection, the join's own side.
     private :: PCW_REINDEX_TRUSTED, PCW_DELETE_MASK, PCW_GATHER
     !
     ! ---- Column residency (D14/RF20) ----
@@ -4174,19 +4174,30 @@ module parquet_tables
         !! doing and serially otherwise. The single entry point for the whole parallel-mutation
         !! path: the caller never sees the gate and there is no second copy of the serial loop.
         !!
-        !! `op` selects the operation (`PCW_*`), and the two optional arrays carry its argument:
+        !! `op` selects the operation (`PCW_*`), and the optional arrays carry its argument:
         !! `rows` for `PCW_REINDEX_TRUSTED` (a permutation) and `PCW_GATHER` (a selection), `keep`
-        !! for `PCW_DELETE_MASK`. Exactly one is expected per op.
+        !! for `PCW_DELETE_MASK`. Exactly one of those two is expected per op. `valid` may ride
+        !! beside `rows` for `PCW_GATHER` only: one entry per DESTINATION row, `.false.` marking
+        !! every element of that row null on top of whatever the gathered row carried -- the join's
+        !! own-side null fill, folded into the gather rather than applied in a second pass.
+        !!
+        !! **Where the team goes is decided here, per mutation** (`colwork_plan`): across the
+        !! columns, one per thread, or -- for a gather with fewer columns than threads -- inside
+        !! each column in turn, its rows across the whole team. Either way the caller sees one loop.
         !!
         !! **Every column in `slots` is rewritten, and nothing else is touched** -- no counter, no
         !! flag, no cache-level field. The `generation` bump and the detach stay with the caller,
         !! after this returns, exactly as they were around the serial loop.
-        module subroutine table_colwork(cache, op, slots, rows, keep)
+        module subroutine table_colwork(cache, op, slots, rows, keep, valid)
             type(parquet_table_cache), intent(inout) :: cache      !! the column store.
             integer, intent(in) :: op                              !! which operation; a PCW_* constant.
             integer, intent(in) :: slots(:)                        !! slots to rewrite, from table_mutable_slots.
             integer(int64), intent(in), optional :: rows(:)        !! permutation or selection, per `op`.
             logical, intent(in), optional :: keep(:)               !! per-row keep mask, per `op`.
+            !> per destination row of a `PCW_GATHER`: .false. nulls it (add-only). An unallocated
+            !! allocatable actual arrives absent (F2018 15.5.2.12), which is how a caller with no
+            !! unmatched row skips the mask without branching.
+            logical, intent(in), optional :: valid(:)
         end subroutine table_colwork
         !> Deep-copies `slots` from one column store into another, on several threads when that is
         !! worth doing and serially otherwise. `%clone`'s counterpart to `table_colwork`.
@@ -4208,17 +4219,22 @@ module parquet_tables
         !! rewrite, and `table_colwork_clone`'s sibling: two stores again, and again a separate
         !! entry point rather than another `PCW_*` op for the reason given there.
         !!
-        !! Three shipped bindings, in this order, and no new per-kind primitive at all: a
-        !! `deep_copy` into the destination slot, a `%gather` naming the source row for each
-        !! output row, and -- only where something is unmatched -- a `%set_validity` marking those
-        !! rows null. `%set_validity` never CLEARS a null, so the source column's own nulls
-        !! survive the gather untouched and no read-back of the mask is needed.
+        !! One binding per column: `%gather_from`, which builds the destination from the source's
+        !! rows `idx` names in a single pass -- kind, width, unit and values, the source's own
+        !! nulls carried with their rows, and every row `valid` marks `.false.` null on top of
+        !! them. That mask only ever ADDS nulls, so the source column's own nulls survive
+        !! untouched and no read-back of the mask is needed (`feature_risks.md` Risk-182).
         !!
         !! `idx` therefore names a real source row for EVERY output row, unmatched ones included
         !! (they are given row 1, whose values the mask then declares null and which nothing may
         !! read). The one case that cannot express is a source column with no rows at all, where
         !! there is no row 1 to name: those columns are built by appending `size(idx)` null rows
-        !! to the empty copy instead.
+        !! to an empty copy instead.
+        !!
+        !! The team is spent as `table_colwork` spends it (`colwork_plan`): across the carried
+        !! columns when there are at least as many as threads, else inside each column in turn --
+        !! and gated on the OUTPUT rows as well as the source's, since a lookup join's output is
+        !! orders of magnitude larger than the table it carries columns from.
         !!
         !! The destination slots must already exist -- `table_new_slot` reallocates the slot
         !! array, which cannot happen while threads hold descriptors into it.
@@ -4231,7 +4247,7 @@ module parquet_tables
             !> per output row: .false. where that row has no counterpart and must become null.
             !! Pass an UNALLOCATED array when nothing is unmatched -- an unallocated allocatable
             !! actual makes an optional dummy absent (F2018 15.5.2.12), which is how an inner join
-            !! skips the whole `%set_validity` pass without the caller branching.
+            !! skips the mask without the caller branching.
             logical, intent(in), optional :: valid(:)
         end subroutine table_colwork_join
         !> Resolves a `width_pending` column's kind and width, then clears the flag. A no-op for

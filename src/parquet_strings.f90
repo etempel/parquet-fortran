@@ -233,6 +233,11 @@ module parquet_strings
         procedure, private :: gather_i32               !! int32 specific of gather.
         procedure, private :: gather_i64               !! int64 specific of gather.
         generic :: gather => gather_i32, gather_i64    !! Keep the listed elements, in the listed order.
+        procedure, private :: gather_from_i32          !! int32 specific of gather_from.
+        procedure, private :: gather_from_i64          !! int64 specific of gather_from.
+        !> Build this column from another's listed elements in one pass, with an optional null
+        !! mask -- clone + gather + set_validity as one operation.
+        generic :: gather_from => gather_from_i32, gather_from_i64
         procedure, private :: append_nulls_i32         !! int32 specific of append_nulls.
         procedure, private :: append_nulls_i64         !! int64 specific of append_nulls.
         generic :: append_nulls => append_nulls_i32, append_nulls_i64 !! Append n null elements in bulk.
@@ -373,6 +378,7 @@ module parquet_strings
     public :: parquet_string_column_reindex
     public :: parquet_string_column_reindex_trusted
     public :: parquet_string_column_gather
+    public :: parquet_string_column_gather_from
     public :: parquet_string_column_append_nulls
     public :: parquet_string_column_move_from
     public :: parquet_string_column_raw_buffers
@@ -427,6 +433,11 @@ module parquet_strings
         module procedure parquet_string_column_gather_i32
         module procedure parquet_string_column_gather_i64
     end interface parquet_string_column_gather
+    !> Typed form of `%gather_from`, generic over an int32 or int64 index argument.
+    interface parquet_string_column_gather_from
+        module procedure parquet_string_column_gather_from_i32
+        module procedure parquet_string_column_gather_from_i64
+    end interface parquet_string_column_gather_from
     !> Typed form of `%append_nulls`, generic over an int32 or int64 index/count argument.
     interface parquet_string_column_append_nulls
         module procedure parquet_string_column_append_nulls_i32
@@ -515,9 +526,16 @@ contains
     !! `bulk_threads` asserts against its own copy, which drifts the moment the rule changes and
     !! then agrees with itself forever. This is the observation `feature_string_parallel.md` section
     !! 9 item 5 asks for -- the subject a knob's observed-effect test measures.
-    integer function parquet_debug_string_bulk_threads(col) result(n)
+    integer function parquet_debug_string_bulk_threads(col, threads) result(n)
         type(parquet_string_column), intent(in) :: col !! the column an operation would walk.
-        n = bulk_threads(col%nrows, col%nchars)
+        !> an explicit request, as `%gather_from(..., threads=)` takes; absent asks the automatic
+        !! rule. The explicit answer is `bulk_threads_explicit`'s for a selection the size of `col`.
+        integer, intent(in), optional :: threads
+        if (present(threads)) then
+            n = bulk_threads_explicit(threads, col%nrows, col%nchars)
+        else
+            n = bulk_threads(col%nrows, col%nchars)
+        end if
     end function parquet_debug_string_bulk_threads
     !
     !> Exposes `thread_row_ranges` for testing. **Test-only**; no library code calls it.
@@ -569,6 +587,27 @@ contains
         if (n < STRING_MIN_THREADS) n = 1
         if (n < 1) n = 1
     end function bulk_threads
+    !
+    !> Threads a bulk operation over `payload` bytes should use when the caller NAMED a count: the
+    !! count itself, bounded as an explicit `parquet_set_string_threads` is (`parquet_string_threads`'
+    !! second rule: the affinity mask), by the validity-byte rule and the break-even `bulk_threads`
+    !! applies, and by the payload floor -- but NOT stood down inside a parallel region. A caller
+    !! that names a count has decided where the team goes: `parquet_table`'s per-column rewrite
+    !! hands its whole team to one column at a time (`%gather_from(..., threads=)`), and an
+    !! explicit `threads=` on a sort is honoured the same way.
+    integer function bulk_threads_explicit(threads, nrows, payload) result(n)
+        integer, intent(in) :: threads        !! the count asked for.
+        integer(int64), intent(in) :: nrows   !! rows the operation will walk.
+        integer(int64), intent(in) :: payload !! bytes the operation will move.
+        n = 1
+        if (nrows <= 0_int64) return
+        if (payload < string_floor_bytes()) return
+        n = max(threads, 1)
+        if (n > 1) n = parquet_clamp_to_affinity(n, "string operations")
+        if (int(n, int64) > (nrows + 7_int64)/8_int64) n = int((nrows + 7_int64)/8_int64)
+        if (n < STRING_MIN_THREADS) n = 1
+        if (n < 1) n = 1
+    end function bulk_threads_explicit
     !
     !> Splits rows `1..n` into `nt` contiguous ranges whose boundaries fall on **validity BYTE**
     !! boundaries -- every `lo` is `1 mod 8` and every `hi` is `0 mod 8` except the last.
@@ -2958,21 +2997,18 @@ contains
     !! element count on every call, which is exactly the cost this primitive exists to avoid; a caller
     !! that needs distinctness (parquet_table%top_n does) checks it once for itself.
     !!
-    !! Rebuilds into fresh buffers rather than compacting in place, because a reordering write cursor
-    !! can overtake its own read cursor -- which is why `delete_by_mask`, whose output order is the
-    !! input order, may compact in place and this may not. Two further differences from
-    !! `reindex_apply`, both consequences of the length being free to change: the payload is sized to
-    !! the SELECTED characters rather than to `nchars`, and `n_null` is recounted rather than carried
-    !! over.
+    !! **The rebuild is `gather_from`'s** (`gather_build` below), run from this column into a fresh
+    !! one that `move_from` then hands back in O(1): one implementation of the two shapes -- the
+    !! single-cursor serial twin and the four-phase threaded form -- for both entry points. Fresh
+    !! buffers rather than an in-place compaction were always the rule here, because a reordering
+    !! write cursor can overtake its own read cursor (which is why `delete_by_mask`, whose output
+    !! order is its input order, may compact in place and this may not), so the hand-over costs
+    !! nothing the old form did not already pay.
     subroutine parquet_string_column_gather_i64(self, idx)
         type(parquet_string_column), intent(inout) :: self !! the column.
         integer(int64), intent(in) :: idx(:)                !! 1-based source index per destination element.
-        integer(int64) :: n, m, k, a, elen, want, nn, est
-        integer(int64), allocatable :: new_off(:)
-        character(len=1), allocatable :: new_data(:)
-        logical, allocatable :: sel_null(:)
-        integer(int64), allocatable :: lo(:), hi(:)
-        integer :: nt, tix
+        type(parquet_string_column) :: fresh
+        integer(int64) :: n, m, k
         n = self%nrows
         m = size(idx, kind=int64)
         ! Serial deliberately: which index is out of range must not depend on which thread noticed.
@@ -2981,94 +3017,8 @@ contains
                 error stop EP//"gather: index out of range"
             end if
         end do
-        ! The work measure has to be ESTIMATED, because the exact selected payload is only known
-        ! after phase 1, which is itself one of the phases being split. Mean element length times
-        ! the selection size is exact for a uniform column and cannot be far wrong for any column,
-        ! and it is only ever used to answer "is this worth splitting" -- never as a size.
-        est = 0_int64
-        if (n > 0_int64) est = (self%nchars/n)*m
-        nt = bulk_threads(m, est)
-        ! The serial twin is the original single-cursor shape, kept for the same reason
-        ! `reindex_apply_serial` is -- and here it was MEASURED rather than assumed, after the
-        ! phased form was written without one: 0.0140 s against 0.0094 s on 4 M elements, i.e. a
-        ! 1.5x penalty handed to every caller below the floor or already inside a parallel region.
-        ! The phased form pays a whole extra pass over `new_off` (write in phase 1, read in phase 2,
-        ! read again in phase 3) that the single cursor never touches, and that is not recovered
-        ! until there are threads to spread the payload copy across.
-        if (nt <= 1) then
-            call gather_apply_serial(self, idx)
-            return
-        end if
-        call thread_row_ranges(m, nt, lo, hi)
-        allocate(new_off(m + 1_int64))
-        new_off(1) = 0_int64
-        if (self%has_nulls) allocate(sel_null(max(m, 1_int64)))
-        ! Four phases, on the same prefix-sum plan `reindex_apply` documents. This shape is what the
-        ! serial version runs too -- there is no serial twin here, because it also removes a pass:
-        ! the old code walked `idx` four times (range, nulls, sizing, fill) and this walks it three,
-        ! with the length and null reads fused into one scattered visit per element.
-        !
-        ! Phase 1: each selected element's LENGTH into its own slot, and its null flag. Both have to
-        ! be read before any buffer is replaced. Writes are to disjoint slots of fresh arrays, so any
-        ! split would be safe here; the byte-aligned one is reused because it is already computed.
-        !$omp parallel do default(shared) private(tix, k) schedule(static) num_threads(nt) if (nt > 1)
-        do tix = 1, nt
-            do k = lo(tix), hi(tix)
-                new_off(k+1_int64) = self%offsets(idx(k)+1_int64) - self%offsets(idx(k))
-                if (self%has_nulls) sel_null(k) = .not. bit_valid(self, idx(k))
-            end do
-        end do
-        !$omp end parallel do
-        ! Phase 2: the scan. Serial deliberately, as in `reindex_apply`. It also *is* the sizing
-        ! pass: the payload is sized to the SELECTED characters rather than to `nchars`, and after
-        ! this `new_off(m+1)` is that total.
-        do k = 1_int64, m
-            new_off(k+1_int64) = new_off(k+1_int64) + new_off(k)
-        end do
-        want = new_off(m+1_int64)
-        allocate(new_data(max(want, 1_int64)))
-        ! Phase 3: the payload copy -- disjoint destinations by construction, since phase 2 made the
-        ! offsets sequential. Rebuilding into fresh buffers rather than compacting in place is not a
-        ! threading concession: a reordering write cursor can overtake its own read cursor, which is
-        ! why `delete_by_mask`, whose output order is its input order, may compact in place and this
-        ! may not.
-        !$omp parallel do default(shared) private(tix, k, a, elen) schedule(static) num_threads(nt) if (nt > 1)
-        do tix = 1, nt
-            do k = lo(tix), hi(tix)
-                elen = new_off(k+1_int64) - new_off(k)
-                if (elen > 0_int64) then
-                    a = self%offsets(idx(k)) + 1_int64
-                    new_data(new_off(k)+1_int64:new_off(k)+elen) = self%data(a:a+elen-1_int64)
-                end if
-            end do
-        end do
-        !$omp end parallel do
-        call move_alloc(new_off, self%offsets)
-        call move_alloc(new_data, self%data)
-        self%nrows = m
-        self%nchars = want
-        ! Phase 4: validity. The null COUNT can change here -- an element may be dropped, or taken
-        ! twice -- so it is recounted, where a permutation lets reindex_apply carry it over. **This
-        ! is the phase the byte-aligned ranges exist for**: two threads meeting inside one validity
-        ! byte would lose each other's writes and leave a column that still validates.
-        if (self%has_nulls) then
-            call ensure_validity_cap(self, m)
-            nn = 0_int64
-            !$omp parallel do default(shared) private(tix, k) reduction(+:nn) &
-            !$omp     schedule(static) num_threads(nt) if (nt > 1)
-            do tix = 1, nt
-                do k = lo(tix), hi(tix)
-                    if (sel_null(k)) then
-                        call set_bit_null(self, k)
-                        nn = nn + 1_int64
-                    else
-                        call set_bit_valid(self, k)
-                    end if
-                end do
-            end do
-            !$omp end parallel do
-            self%n_null = nn
-        end if
+        call gather_build(fresh, self, idx)
+        call parquet_string_column_move_from(self, fresh)
     end subroutine parquet_string_column_gather_i64
     !
     !> Binding form of `parquet_string_column_gather_i64`; forwards to it,
@@ -3079,63 +3029,255 @@ contains
         call parquet_string_column_gather_i64(self, idx)
     end subroutine gather_i64
     !
-    !> `gather`'s original single-cursor rebuild, kept for the serial case. See `gather_i64` for why
-    !! both shapes exist and for the measurement that put this one back.
+    !> int32 specific of gather_from; see the int64 form below.
+    subroutine parquet_string_column_gather_from_i32(self, src, idx, valid, threads)
+        type(parquet_string_column), intent(inout) :: self !! the destination; cleared first.
+        type(parquet_string_column), intent(in) :: src     !! the source column, never written.
+        integer(int32), intent(in) :: idx(:)                !! 1-based source element per destination element.
+        logical, intent(in), optional :: valid(:)           !! per destination element; .false. nulls it.
+        integer, intent(in), optional :: threads            !! explicit team; absent resolves as every bulk operation does.
+        call parquet_string_column_gather_from_i64(self, src, int(idx, int64), valid=valid, threads=threads)
+    end subroutine parquet_string_column_gather_from_i32
+    !
+    !> Binding form of `parquet_string_column_gather_from_i32`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
+    subroutine gather_from_i32(self, src, idx, valid, threads)
+        class(parquet_string_column), intent(inout) :: self !! the destination; cleared first.
+        type(parquet_string_column), intent(in) :: src      !! the source column, never written.
+        integer(int32), intent(in) :: idx(:)                !! 1-based source element per destination element.
+        logical, intent(in), optional :: valid(:)           !! per destination element; .false. nulls it.
+        integer, intent(in), optional :: threads            !! explicit team; absent resolves as every bulk operation does.
+        call parquet_string_column_gather_from_i32(self, src, idx, valid=valid, threads=threads)
+    end subroutine gather_from_i32
+    !
+    !> int64 specific of gather_from: builds this column from the elements of `src` that `idx` lists,
+    !! in the order it lists them, in ONE pass -- `clone` + `gather` + `set_validity` as one
+    !! operation. Element `k` of the result is `src`'s element `idx(k)`, with `src`'s own nulls
+    !! carried across, and -- when `valid` is present -- element `k` null as well wherever
+    !! `valid(k)` is `.false.`: a masked element takes a ZERO-WIDTH slot rather than a copy of bytes
+    !! nothing may read, and the source is never touched. The destination is cleared first and its
+    !! payload is sized to the selected characters exactly.
     !!
-    !! Assumes `idx` has already been range-checked. The two shapes must produce byte-identical
-    !! columns; `test_string_parallel` holds them to that.
-    subroutine gather_apply_serial(self, idx)
-        type(parquet_string_column), intent(inout) :: self !! the column.
-        integer(int64), intent(in) :: idx(:)                !! 1-based source index per destination element.
+    !! `idx` is a gather on `gather`'s terms (any element, any order, repeats allowed, any length,
+    !! only the range checked) and `valid` must have exactly `size(idx)` entries. The mask only ever
+    !! ADDS nulls -- `parquet_column%gather_from` rests on that, one tier up (`feature_risks.md`
+    !! Risk-182) -- and the null COUNT is recounted, since a selection may drop or repeat a null.
+    !!
+    !! **Threads.** Absent `threads`, the team is what every bulk operation here resolves to
+    !! (`bulk_threads`: the cap, the payload floor, serial inside a parallel region). An explicit
+    !! `threads` is honoured on the terms `bulk_threads_explicit` gives: bounded by the affinity
+    !! mask, the validity-byte rule, the break-even and the payload floor, but not stood down inside
+    !! a parallel region -- it exists so that `parquet_table`'s per-column rewrite, which has already
+    !! decided to spend its team inside one column, can hand that team down. The serial
+    !! single-cursor twin is kept for the measured reason `gather`'s always was: the phased form is
+    !! 1.5x slower on one thread.
+    subroutine parquet_string_column_gather_from_i64(self, src, idx, valid, threads)
+        type(parquet_string_column), intent(inout) :: self !! the destination; cleared first.
+        type(parquet_string_column), intent(in) :: src     !! the source column, never written.
+        integer(int64), intent(in) :: idx(:)                !! 1-based source element per destination element.
+        logical, intent(in), optional :: valid(:)           !! per destination element; .false. nulls it.
+        integer, intent(in), optional :: threads            !! explicit team; absent resolves as every bulk operation does.
+        integer(int64) :: n, m, k
+        character(len=32) :: tg, tw
+        n = src%nrows
+        m = size(idx, kind=int64)
+        if (present(valid)) then
+            if (size(valid, kind=int64) /= m) then
+                write(tg, "(I0)") size(valid, kind=int64)
+                write(tw, "(I0)") m
+                error stop EP//"gather_from: mask has "//trim(tg)//" entries but the index list names "// &
+                    trim(tw)//" elements"
+            end if
+        end if
+        ! Serial deliberately: which index is out of range must not depend on which thread noticed.
+        do k = 1_int64, m
+            if (idx(k) < 1_int64 .or. idx(k) > n) then
+                error stop EP//"gather_from: index out of range"
+            end if
+        end do
+        call gather_build(self, src, idx, valid, threads)
+    end subroutine parquet_string_column_gather_from_i64
+    !
+    !> Binding form of `parquet_string_column_gather_from_i64`; forwards to it,
+    !! keeping the implementation at the `type` end (feature_ifx.md).
+    subroutine gather_from_i64(self, src, idx, valid, threads)
+        class(parquet_string_column), intent(inout) :: self !! the destination; cleared first.
+        type(parquet_string_column), intent(in) :: src      !! the source column, never written.
+        integer(int64), intent(in) :: idx(:)                !! 1-based source element per destination element.
+        logical, intent(in), optional :: valid(:)           !! per destination element; .false. nulls it.
+        integer, intent(in), optional :: threads            !! explicit team; absent resolves as every bulk operation does.
+        call parquet_string_column_gather_from_i64(self, src, idx, valid=valid, threads=threads)
+    end subroutine gather_from_i64
+    !
+    !> The one gather rebuild: `dst` becomes `src`'s elements `idx` lists, nulls carried, the mask's
+    !! nulls added, on the team `threads` (explicit) or `bulk_threads` (automatic) resolves. Every
+    !! index is in range and the mask, if present, has `size(idx)` entries -- the callers check.
+    !!
+    !! Four phases on the prefix-sum plan `reindex_apply` documents, and where the mask is read is
+    !! the whole of its cost: phase 1 writes a masked element's length as 0 and its null flag as
+    !! set, and nothing later has to know the mask exists. Phase 1: each selected element's LENGTH
+    !! into its own slot, and its null flag -- disjoint slots of fresh arrays, any split safe. Phase
+    !! 2: the scan, serial, which also sizes the payload to the SELECTED characters. Phase 3: the
+    !! payload copy, disjoint destinations by construction. Phase 4: the validity bits, on the
+    !! byte-aligned ranges (`thread_row_ranges`) that keep two threads out of one byte.
+    subroutine gather_build(dst, src, idx, valid, threads)
+        type(parquet_string_column), intent(inout) :: dst !! the destination; cleared first.
+        type(parquet_string_column), intent(in) :: src    !! the source.
+        integer(int64), intent(in) :: idx(:)               !! source element per destination element, in range.
+        logical, intent(in), optional :: valid(:)          !! per destination element, when present.
+        integer, intent(in), optional :: threads           !! explicit team, when present.
+        integer(int64) :: n, m, k, a, elen, want, nn, est
+        integer(int64), allocatable :: lo(:), hi(:)
+        logical, allocatable :: sel_null(:)
+        logical :: masked, nulls
+        integer :: nt, tix
+        n = src%nrows
+        m = size(idx, kind=int64)
+        call parquet_string_column_clear(dst)
+        ! An all-true mask is no mask: it must cost no validity bytes and no per-element test.
+        masked = .false.
+        if (present(valid)) masked = .not. all(valid)
+        nulls = src%has_nulls .or. masked
+        ! The work measure has to be ESTIMATED, because the exact selected payload is only known
+        ! after phase 1, which is itself one of the phases being split. Mean element length times
+        ! the selection size is exact for a uniform column and cannot be far wrong for any column,
+        ! and it is only ever used to answer "is this worth splitting" -- never as a size.
+        est = 0_int64
+        if (n > 0_int64) est = (src%nchars/n)*m
+        if (present(threads)) then
+            nt = bulk_threads_explicit(threads, m, est)
+        else
+            nt = bulk_threads(m, est)
+        end if
+        if (nt <= 1) then
+            call gather_serial(dst, src, idx, valid, masked, nulls)
+            return
+        end if
+        call thread_row_ranges(m, nt, lo, hi)
+        allocate(dst%offsets(m + 1_int64))
+        dst%offsets(1) = 0_int64
+        if (nulls) allocate(sel_null(max(m, 1_int64)))
+        !$omp parallel do default(shared) private(tix, k) schedule(static) num_threads(nt) if (nt > 1)
+        do tix = 1, nt
+            do k = lo(tix), hi(tix)
+                if (masked) then
+                    if (.not. valid(k)) then
+                        dst%offsets(k+1_int64) = 0_int64
+                        sel_null(k) = .true.
+                        cycle
+                    end if
+                end if
+                dst%offsets(k+1_int64) = src%offsets(idx(k)+1_int64) - src%offsets(idx(k))
+                if (nulls) sel_null(k) = .not. bit_valid(src, idx(k))
+            end do
+        end do
+        !$omp end parallel do
+        do k = 1_int64, m
+            dst%offsets(k+1_int64) = dst%offsets(k+1_int64) + dst%offsets(k)
+        end do
+        want = dst%offsets(m+1_int64)
+        allocate(dst%data(max(want, 1_int64)))
+        !$omp parallel do default(shared) private(tix, k, a, elen) schedule(static) num_threads(nt) if (nt > 1)
+        do tix = 1, nt
+            do k = lo(tix), hi(tix)
+                elen = dst%offsets(k+1_int64) - dst%offsets(k)
+                if (elen > 0_int64) then
+                    a = src%offsets(idx(k)) + 1_int64
+                    dst%data(dst%offsets(k)+1_int64:dst%offsets(k)+elen) = src%data(a:a+elen-1_int64)
+                end if
+            end do
+        end do
+        !$omp end parallel do
+        dst%nrows = m
+        dst%nchars = want
+        if (nulls) then
+            ! Fresh bytes start all-valid (ensure_validity_cap), so only the nulls are written --
+            ! each range its own bytes, which is what the byte-aligned split is for.
+            dst%has_nulls = .true.
+            call ensure_validity_cap(dst, m)
+            nn = 0_int64
+            !$omp parallel do default(shared) private(tix, k) reduction(+:nn) &
+            !$omp     schedule(static) num_threads(nt) if (nt > 1)
+            do tix = 1, nt
+                do k = lo(tix), hi(tix)
+                    if (sel_null(k)) then
+                        call set_bit_null(dst, k)
+                        nn = nn + 1_int64
+                    end if
+                end do
+            end do
+            !$omp end parallel do
+            dst%n_null = nn
+        end if
+    end subroutine gather_build
+    !
+    !> `gather_build`'s single-cursor serial twin, kept for the measured reason `gather`'s always
+    !! was: the phased form pays a whole extra pass over the offsets that the single cursor never
+    !! touches, and is 1.5x slower on one thread (0.0140 s against 0.0094 s on 4 M elements). The
+    !! two shapes must produce byte-identical columns; `test_string_parallel` holds them to that.
+    subroutine gather_serial(dst, src, idx, valid, masked, nulls)
+        type(parquet_string_column), intent(inout) :: dst !! the destination, already cleared.
+        type(parquet_string_column), intent(in) :: src    !! the source.
+        integer(int64), intent(in) :: idx(:)               !! source element per destination element, in range.
+        logical, intent(in), optional :: valid(:)          !! the mask; read only when `masked`.
+        logical, intent(in) :: masked                      !! `valid` is present and holds a .false.
+        logical, intent(in) :: nulls                       !! the result carries a validity bitmap.
         integer(int64) :: m, k, a, b, elen, pos, want, nn
-        integer(int64), allocatable :: new_off(:)
-        character(len=1), allocatable :: new_data(:)
         logical, allocatable :: sel_null(:)
         m = size(idx, kind=int64)
         ! Both preparation passes are O(m), not O(size()): the selected elements' null flags have to
-        ! be read before any buffer is replaced, and the payload is sized to what is selected.
-        if (self%has_nulls) then
+        ! be read before any buffer is written, and the payload is sized to what is selected.
+        if (nulls) then
             allocate(sel_null(max(m, 1_int64)))
             do k = 1_int64, m
-                sel_null(k) = .not. bit_valid(self, idx(k))
+                sel_null(k) = .not. bit_valid(src, idx(k))
             end do
         end if
         want = 0_int64
         do k = 1_int64, m
-            call elem_bounds(self, idx(k), a, b)
+            if (masked) then
+                if (.not. valid(k)) then
+                    sel_null(k) = .true.
+                    cycle
+                end if
+            end if
+            call elem_bounds(src, idx(k), a, b)
             want = want + (b - a + 1_int64)
         end do
-        allocate(new_off(m + 1_int64))
-        new_off(1) = 0_int64
-        allocate(new_data(max(want, 1_int64)))
+        allocate(dst%offsets(m + 1_int64))
+        dst%offsets(1) = 0_int64
+        allocate(dst%data(max(want, 1_int64)))
         pos = 0_int64
         do k = 1_int64, m
-            call elem_bounds(self, idx(k), a, b)
+            if (masked) then
+                if (.not. valid(k)) then
+                    dst%offsets(k+1_int64) = pos
+                    cycle
+                end if
+            end if
+            call elem_bounds(src, idx(k), a, b)
             elen = b - a + 1_int64
-            if (elen > 0_int64) new_data(pos+1_int64:pos+elen) = self%data(a:b)
+            if (elen > 0_int64) dst%data(pos+1_int64:pos+elen) = src%data(a:b)
             pos = pos + elen
-            new_off(k+1_int64) = pos
+            dst%offsets(k+1_int64) = pos
         end do
-        call move_alloc(new_off, self%offsets)
-        call move_alloc(new_data, self%data)
-        self%nrows = m
-        self%nchars = pos
+        dst%nrows = m
+        dst%nchars = pos
         ! The null COUNT can change here -- an element may be dropped, or taken twice -- so it is
         ! recounted, where a permutation lets reindex_apply carry it over unchanged.
-        if (self%has_nulls) then
-            call ensure_validity_cap(self, m)
+        if (nulls) then
+            dst%has_nulls = .true.
+            call ensure_validity_cap(dst, m)
             nn = 0_int64
             do k = 1_int64, m
                 if (sel_null(k)) then
-                    call set_bit_null(self, k)
+                    call set_bit_null(dst, k)
                     nn = nn + 1_int64
-                else
-                    call set_bit_valid(self, k)
                 end if
             end do
-            self%n_null = nn
+            dst%n_null = nn
         end if
-    end subroutine gather_apply_serial
+    end subroutine gather_serial
     !
     !> int32 specific of append_nulls; see the append_nulls generic.
     subroutine parquet_string_column_append_nulls_i32(self, n)

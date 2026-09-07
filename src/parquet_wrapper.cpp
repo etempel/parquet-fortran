@@ -4553,6 +4553,44 @@ extern "C"
 		return g_debug_colwork_min_columns;
 	}
 
+	// Test-only: the LEVEL the last row-structural mutation spent its team at, beside the count
+	// above -- 0 serial, 1 across columns (one column per thread), 2 within a column (one column
+	// at a time, its rows across the team). Written from Fortran with the count
+	// (parquet_debug_note_table_threads, src/parquet_tables_parallel.f90), for the same reasons.
+	// A test asserting the count alone cannot tell the two levels apart, and the rule choosing
+	// between them (colwork_plan) is what test/test_table_parallel.f90 pins.
+	static int64_t g_debug_table_level_used = 0;
+
+	void parquet_debug_set_table_level_used(int64_t n)
+	{
+		g_debug_table_level_used = n;
+	}
+
+	int64_t parquet_debug_get_table_level_used(void)
+	{
+		return g_debug_table_level_used;
+	}
+
+	// Test-only selector for that level: 0 automatic (colwork_plan's rule), 1 across columns,
+	// 2 within each column. Read from Fortran once per mutation through a local bind(C)
+	// interface, as the join-engine selector below is; an operation with no within-column level
+	// (a reindex, a delete) ignores a request for one, and no request opens a team the gate
+	// declined. Not a setting: no user program reads it, parquet_print_settings never prints it,
+	// parquet_reset_settings never resets it. It exists for bench/benchmark_join.f90's
+	// --mode=payload, which times the two levels side by side, and for the rule's negative
+	// controls. std::atomic for the reason the join-engine pair gives.
+	static std::atomic<int64_t> g_debug_colwork_level{0};
+
+	void parquet_debug_set_colwork_level(int64_t mode)
+	{
+		g_debug_colwork_level = (mode >= 0 && mode <= 2) ? mode : 0;
+	}
+
+	int64_t parquet_debug_get_colwork_level(void)
+	{
+		return g_debug_colwork_level;
+	}
+
 	// Test-only selector and observable for the ENGINE parquet_table%join builds its pair list with
 	// (src/parquet_tables_join.f90 dispatches; src/parquet_tables_join_hash.f90 is the second
 	// engine). The mode is read from Fortran once per join through a local bind(C) interface, and

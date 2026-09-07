@@ -302,6 +302,7 @@ contains
             .or. name == "filter_screen" .or. name == "sorting" .or. name == "sorting_cpp" &
             .or. name == "sort" .or. name == "settings" &
             .or. name == "table_parallel" .or. name == "string_parallel" .or. name == "diagnostics" &
+            .or. name == "columns_parallel" &
             .or. name == "random_omp" .or. name == "random_perm" .or. name == "module_surface" &
             .or. name == "spatial" .or. name == "logging" .or. name == "logging_env" &
             .or. name == "toml_serial" .or. name == "index_omp" .or. name == "index_strings" &

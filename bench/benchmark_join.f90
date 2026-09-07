@@ -17,7 +17,10 @@
 !! * `size`    -- a symmetric inner join at four sizes, to see how the whole operation scales.
 !! * `how`     -- all six `how` values on one fixture, per OUTPUT row, since they emit different
 !!                numbers of them.
-!! * `payload` -- an inner join carrying 1, 2, 4 and 8 columns. The SLOPE is the per-column
+!! * `payload` -- an inner join carrying 1, 2, 4 and 8 columns, each width under the library's own
+!!                choice of where the rewrite's team goes and then with each LEVEL forced through
+!!                the test-only hook (across the columns, one per thread; within each column in
+!!                turn, its rows across the team). The SLOPE is the per-column
 !!                rewrite cost, which is what a fused copy-gather-nullfill would attack; the
 !!                intercept is everything else.
 !! * `nullfill` -- THE MODE THAT HOLDS A COMPLEXITY CLASS: a left join null-filling two 16-byte
@@ -554,20 +557,23 @@ contains
         write (output_unit, "(a)") ""
     end subroutine mode_how
 
-    !> An inner join carrying 1, 2, 4 and 8 columns: the slope is the per-column rewrite cost.
+    !> An inner join carrying 1, 2, 4 and 8 columns: the slope is the per-column rewrite cost, and
+    !! each width is timed three times -- the library's own level, then across the columns, then
+    !! within each column -- which is the A/B feature_join.md's stage 4 fixed the rule from. Every
+    !! row is tagged with the level and team the rewrite actually used, read back after the join.
     subroutine mode_payload()
         type(parquet_table) :: a, b
         integer(int64), allocatable :: lk(:), rk(:)
         real(real64) :: best, first
         integer(int64) :: n_out
-        integer :: w, c, nc
+        integer :: w, c, nc, lv
         character(len=256) :: cols, more
         character(len=64) :: label
-        character(len=:), allocatable :: used
+        character(len=:), allocatable :: used, where
 
         write (output_unit, "(a)") "## payload -- an inner join carrying W columns, per OUTPUT row"
         write (output_unit, "(a,i0,a)") "   (", nsym, " rows each side; the SLOPE in W is the " // &
-            "per-column rewrite cost)"
+            "per-column rewrite cost; auto, then each level forced)"
         write (output_unit, "(a)") ""
         call fill_keys(20260906_int64, nsym, nsym, lk)
         call fill_keys(20260907_int64, nsym, nsym, rk)
@@ -586,23 +592,87 @@ contains
                 write (more, "(a,i0)") ",v", c
                 cols = trim(cols) // trim(more)
             end do
-            call time_join(a, b, "id", "inner", columns=trim(cols), best=best, n_out=n_out, &
-                ncols_out=nc, used=used)
-            ! The result's column count is this mode's negative control: without it a `columns=`
-            ! that silently carried one column would give four identical figures and a confident
-            ! "the rewrite is free" verdict. It must read w + 2 (this table's key and payload).
-            write (label, "(a,i0,a,i0,a,a,a)") "%join(inner) ", w, " col(s) -> ", nc, " cols  [", &
-                used, "]"
-            call report(trim(label), best, n_out)
-            if (w == 1) first = best
+            do lv = 0, 2
+                call apply_level(lv)
+                call time_join(a, b, "id", "inner", columns=trim(cols), best=best, n_out=n_out, &
+                    ncols_out=nc, used=used)
+                call level_used(where)
+                ! The result's column count is this mode's negative control: without it a
+                ! `columns=` that silently carried one column would give four identical figures
+                ! and a confident "the rewrite is free" verdict. It must read w + 2 (this table's
+                ! key and payload).
+                write (label, "(a,i0,a,i0,a,a,a,a,a,a)") "W=", w, " -> ", nc, " cols [", used, ", ", &
+                    trim(level_name(lv)), where, "]"
+                call report(trim(label), best, n_out)
+                if (lv == 0 .and. w == 1) first = best
+            end do
             w = w * 2
         end do
+        call apply_level(0)
         if (first > 0.0_real64) then
-            write (output_unit, "(a,f8.3)") "   cost of the last doubling, relative to W=1: ", &
+            write (output_unit, "(a,f8.3)") "   cost of the last doubling, relative to W=1 (auto rows): ", &
                 best / first
         end if
         write (output_unit, "(a)") ""
     end subroutine mode_payload
+
+    !> Forces the level a gather's team goes to, through the test-only hook: 0 automatic, 1 across
+    !! the columns, 2 within each column.
+    subroutine apply_level(mode)
+        use iso_c_binding, only : c_int64_t
+        integer, intent(in) :: mode !! 0, 1 or 2.
+        interface
+            subroutine set_colwork_level(m) bind(C, name="parquet_debug_set_colwork_level")
+                import :: c_int64_t
+                integer(c_int64_t), value :: m !! 0 automatic, 1 across columns, 2 within a column.
+            end subroutine set_colwork_level
+        end interface
+
+        call set_colwork_level(int(mode, c_int64_t))
+    end subroutine apply_level
+
+    !> The label of a forced level, for the row tag: "auto " for the library's own choice.
+    function level_name(mode) result(name)
+        integer, intent(in) :: mode !! 0, 1 or 2.
+        character(len=7) :: name    !! "auto:", "across:" or "within:".
+
+        select case (mode)
+        case (1)
+            name = "across:"
+        case (2)
+            name = "within:"
+        case default
+            name = "auto:"
+        end select
+    end function level_name
+
+    !> The level and team the last rewrite actually used, read back: "serial", "across xN" or
+    !! "within xN", so a forced level the plan could not honour (across on one column) shows.
+    subroutine level_used(text)
+        use iso_c_binding, only : c_int64_t
+        character(len=:), allocatable, intent(out) :: text !! the tag.
+        interface
+            function get_level() result(res) bind(C, name="parquet_debug_get_table_level_used")
+                import :: c_int64_t
+                integer(c_int64_t) :: res !! 0 serial, 1 across columns, 2 within a column.
+            end function get_level
+            function get_threads() result(res) bind(C, name="parquet_debug_get_table_threads_used")
+                import :: c_int64_t
+                integer(c_int64_t) :: res !! the team's size.
+            end function get_threads
+        end interface
+        character(len=24) :: buf
+
+        select case (get_level())
+        case (1_c_int64_t)
+            write (buf, "(a,i0)") "across x", get_threads()
+        case (2_c_int64_t)
+            write (buf, "(a,i0)") "within x", get_threads()
+        case default
+            buf = "serial"
+        end select
+        text = trim(buf)
+    end subroutine level_used
 
     !> Best-of-`rounds` time for one fill verb on one column, each round on a fresh clone.
     subroutine time_fill(base, name, verb, is_string, best)

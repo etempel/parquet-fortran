@@ -38,6 +38,7 @@ contains
             new_unittest("delete_by_mask compacts in one pass", test_delete_by_mask), &
             new_unittest("set_validity nulls by mask in one pass and only adds", test_set_validity_bulk), &
             new_unittest("set_where writes a value by mask in one pass", test_set_where_bulk), &
+            new_unittest("gather_from builds from another column with a mask, in one pass", test_gather_from), &
             new_unittest("append_nulls appends n null elements", test_append_nulls), &
             new_unittest("find (exact, trimmed, reverse, absent)", test_find), &
             new_unittest("equals/contains/startswith/endswith", test_compare_ops), &
@@ -2574,6 +2575,84 @@ contains
         end if
         call check(error, same, "the typed form of "//what//" must leave the same column as the binding")
     end subroutine check_columns_agree
+    !
+    !> `gather_from` is `clone` + `gather` + `set_null` per masked element as ONE rebuild, so that
+    !! composition on a clone is the oracle. The index repeats an element and skips the source's
+    !! own null; the mask nulls two selected elements, which must come back as ZERO-WIDTH slots
+    !! (the payload holds the kept bytes only); the source must come back byte-identical; a
+    !! populated destination is cleared first; the int32 form agrees; an all-true mask equals the
+    !! plain gather in every buffer; an empty list gives an empty column.
+    subroutine test_gather_from(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: src, dst, oracle, keep
+        integer(int64), allocatable :: off_a(:), off_b(:)
+        character(len=1), allocatable :: dat_a(:), dat_b(:)
+        integer(int64), parameter :: IDX(5) = [4_int64, 1_int64, 4_int64, 6_int64, 2_int64]
+        logical, parameter :: MASK(5) = [.true., .false., .true., .true., .false.]
+        character(len=:), allocatable :: s
+        integer(int64) :: k
+        !
+        call src%append_string("a")
+        call src%append_string("bb")
+        call src%append_null()
+        call src%append_string("dddd")
+        call src%append_string("")
+        call src%append_string("ffffff")
+        keep = src%clone()
+        oracle = src%clone()
+        call oracle%gather(IDX)
+        do k = 1_int64, 5_int64
+            if (.not. MASK(k)) call oracle%set_null(k)
+        end do
+        call dst%gather_from(src, IDX, valid=MASK)
+        call check(error, dst%validate(), "gather_from must leave the column's invariants intact")
+        if (allocated(error)) return
+        call check_columns_agree(error, dst, oracle, "gather_from against clone + gather + set_null")
+        if (allocated(error)) return
+        call check(error, dst%null_count() == 2_int64, "the two masked elements are the result's nulls")
+        if (allocated(error)) return
+        call check(error, dst%length(2_int64) == 0_int64 .and. dst%length(5_int64) == 0_int64, &
+            "a masked element must take a zero-width slot")
+        if (allocated(error)) return
+        call check(error, dst%character_size() == 14_int64, &
+            "the payload must hold the kept bytes only: 'dddd', 'dddd' and 'ffffff'")
+        if (allocated(error)) return
+        call dst%get(3_int64, s)
+        call check(error, s == "dddd", "a repeated element must arrive intact at each position naming it")
+        if (allocated(error)) return
+        call check_columns_agree(error, src, keep, "the source after gather_from")
+        if (allocated(error)) return
+        !
+        ! A populated destination is cleared first, and the int32 index form agrees.
+        call dst%gather_from(src, [6_int64])
+        call dst%get(1_int64, s)
+        call check(error, dst%size() == 1_int64 .and. s == "ffffff" .and. dst%null_count() == 0_int64, &
+            "a populated destination must be cleared before the rebuild")
+        if (allocated(error)) return
+        call dst%gather_from(src, [4_int32, 1_int32])
+        call dst%get(2_int64, s)
+        call check(error, dst%size() == 2_int64 .and. s == "a", "the int32 index form must gather the same elements")
+        if (allocated(error)) return
+        !
+        ! An all-true mask is no mask: offsets, payload and nulls identical to the plain gather.
+        oracle = src%clone()
+        call oracle%gather(IDX)
+        call dst%gather_from(src, IDX, valid=[.true., .true., .true., .true., .true.])
+        allocate(off_a(oracle%size() + 1_int64), dat_a(max(oracle%character_size(), 1_int64)))
+        allocate(off_b(dst%size() + 1_int64), dat_b(max(dst%character_size(), 1_int64)))
+        call oracle%copy_buffers(off_a, dat_a)
+        call dst%copy_buffers(off_b, dat_b)
+        call check(error, size(off_a) == size(off_b) .and. size(dat_a) == size(dat_b), &
+            "an all-true mask must give the plain gather's buffer sizes")
+        if (allocated(error)) return
+        call check(error, all(off_a == off_b) .and. all(dat_a == dat_b) .and. &
+            dst%null_count() == oracle%null_count(), &
+            "an all-true mask must give the plain gather's offsets, payload and nulls")
+        if (allocated(error)) return
+        !
+        call dst%gather_from(src, [integer(int64) ::])
+        call check(error, dst%size() == 0_int64 .and. dst%validate(), "an empty list must give an empty column")
+    end subroutine test_gather_from
     !
 
 end module test_parquet_string

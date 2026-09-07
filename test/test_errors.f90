@@ -2429,7 +2429,17 @@ contains
             new_unittest("join: max_rows= on the string key form, int32, aborts on the hash engine", &
                 test_join_max_rows_str_i32_hash_aborts), &
             new_unittest("join: max_rows= on the string key form, int64, aborts on the hash engine", &
-                test_join_max_rows_str_i64_hash_aborts) &
+                test_join_max_rows_str_i64_hash_aborts), &
+            new_unittest("column gather_from with an out-of-range source row aborts", &
+                test_column_gather_from_out_of_range_aborts), &
+            new_unittest("column gather_from with a mask of the wrong length aborts", &
+                test_column_gather_from_mask_length_mismatch_aborts), &
+            new_unittest("column gather_from from a container column aborts", &
+                test_column_gather_from_container_source_aborts), &
+            new_unittest("string column gather_from with an out-of-range index aborts", &
+                test_string_column_gather_from_out_of_range_aborts), &
+            new_unittest("string column gather_from with a short mask aborts", &
+                test_string_column_gather_from_length_mismatch_aborts) &
             ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p17]
     end subroutine collect_tests_parquet_errors
@@ -6240,6 +6250,47 @@ contains
             required_stderr="join: the output would have more rows than a 64-bit count can hold " // &
                 "(9223372036854775806 so far, plus 2)")
     end subroutine test_join_pair_count_overflow_aborts
+
+    subroutine test_column_gather_from_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "column_gather_from_out_of_range", &
+            expect_abort=.true., &
+            failure_message="gather_from of a row outside the source was expected to abort", &
+            required_stderr="gather_from: row index 9 is outside the source column's 1..3 rows")
+    end subroutine test_column_gather_from_out_of_range_aborts
+
+    subroutine test_column_gather_from_mask_length_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "column_gather_from_mask_length_mismatch", &
+            expect_abort=.true., &
+            failure_message="gather_from with a mask of the source's length was expected to abort", &
+            required_stderr="gather_from: mask has 3 entries but the index list names 2 rows")
+    end subroutine test_column_gather_from_mask_length_mismatch_aborts
+
+    subroutine test_column_gather_from_container_source_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "column_gather_from_container_source", &
+            expect_abort=.true., &
+            failure_message="gather_from from a container column was expected to abort", &
+            required_stderr="gather_from: a container column is gathered in place with %gather, " // &
+                "not from another column")
+    end subroutine test_column_gather_from_container_source_aborts
+
+    subroutine test_string_column_gather_from_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "string_column_gather_from_out_of_range", &
+            expect_abort=.true., &
+            failure_message="string gather_from of an element outside the source was expected to abort", &
+            required_stderr="parquet_strings: gather_from: index out of range")
+    end subroutine test_string_column_gather_from_out_of_range_aborts
+
+    subroutine test_string_column_gather_from_length_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "string_column_gather_from_length_mismatch", &
+            expect_abort=.true., &
+            failure_message="string gather_from with a short mask was expected to abort", &
+            required_stderr="parquet_strings: gather_from: mask has 1 entries but the index list names 2 elements")
+    end subroutine test_string_column_gather_from_length_mismatch_aborts
 
     subroutine test_string_column_append_nulls_negative_aborts(error)
         type(error_type), allocatable, intent(out) :: error

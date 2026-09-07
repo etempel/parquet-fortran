@@ -168,7 +168,8 @@ module parquet
     private :: parquet_string_column_reserve, parquet_string_column_get, parquet_string_column_copy_to
     private :: parquet_string_column_is_null, parquet_string_column_append_from, parquet_string_column_set
     private :: parquet_string_column_set_null, parquet_string_column_reindex, parquet_string_column_reindex_trusted
-    private :: parquet_string_column_gather, parquet_string_column_append_nulls
+    private :: parquet_string_column_gather, parquet_string_column_gather_from
+    private :: parquet_string_column_append_nulls
     private :: parquet_string_column_raw_buffers
     ! parquet_list's own two internal accessors, hidden for the same reason again: they are how
     ! the LIST write path reaches a list column's offsets and payload without a per-row allocation,

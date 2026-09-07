@@ -317,6 +317,127 @@ contains
         self%cap = n
     end procedure gather_storage
     !
+    module procedure gather_storage_from
+        integer(int64) :: k, e
+        if (hi < lo) return
+        select case (src%kind)
+        case (PK_INT32)
+            do k = lo, hi
+                self%i32(k) = src%i32(idx(k))
+            end do
+        case (PK_INT64)
+            do k = lo, hi
+                self%i64(k) = src%i64(idx(k))
+            end do
+        case (PK_FLOAT32)
+            do k = lo, hi
+                self%f32(k) = src%f32(idx(k))
+            end do
+        case (PK_FLOAT64)
+            do k = lo, hi
+                self%f64(k) = src%f64(idx(k))
+            end do
+        case (PK_LOGICAL)
+            do k = lo, hi
+                self%bool(k) = src%bool(idx(k))
+            end do
+        case (PK_DATE)
+            do k = lo, hi
+                self%dt(k) = src%dt(idx(k))
+            end do
+            if (present(valid)) then
+                do k = lo, hi
+                    if (.not. valid(k)) call self%dt(k)%set_null()
+                end do
+            end if
+        case (PK_TIME)
+            do k = lo, hi
+                self%tm(k) = src%tm(idx(k))
+            end do
+            if (present(valid)) then
+                do k = lo, hi
+                    if (.not. valid(k)) call self%tm(k)%set_null()
+                end do
+            end if
+        case (PK_TIMESTAMP)
+            do k = lo, hi
+                self%ts(k) = src%ts(idx(k))
+            end do
+            if (present(valid)) then
+                do k = lo, hi
+                    if (.not. valid(k)) call self%ts(k)%set_null()
+                end do
+            end if
+        case (PK_INT32_VEC)
+            do k = lo, hi
+                self%i32v(:, k) = src%i32v(:, idx(k))
+            end do
+        case (PK_INT64_VEC)
+            do k = lo, hi
+                self%i64v(:, k) = src%i64v(:, idx(k))
+            end do
+        case (PK_FLOAT32_VEC)
+            do k = lo, hi
+                self%f32v(:, k) = src%f32v(:, idx(k))
+            end do
+        case (PK_FLOAT64_VEC)
+            do k = lo, hi
+                self%f64v(:, k) = src%f64v(:, idx(k))
+            end do
+        case (PK_LOGICAL_VEC)
+            do k = lo, hi
+                self%boolv(:, k) = src%boolv(:, idx(k))
+            end do
+        case (PK_DATE_VEC)
+            do k = lo, hi
+                self%dtv(:, k) = src%dtv(:, idx(k))
+            end do
+            if (present(valid)) then
+                do k = lo, hi
+                    if (valid(k)) cycle
+                    do e = 1_int64, int(self%width, int64)
+                        call self%dtv(e, k)%set_null()
+                    end do
+                end do
+            end if
+        case (PK_TIME_VEC)
+            do k = lo, hi
+                self%tmv(:, k) = src%tmv(:, idx(k))
+            end do
+            if (present(valid)) then
+                do k = lo, hi
+                    if (valid(k)) cycle
+                    do e = 1_int64, int(self%width, int64)
+                        call self%tmv(e, k)%set_null()
+                    end do
+                end do
+            end if
+        case (PK_TIMESTAMP_VEC)
+            do k = lo, hi
+                self%tsv(:, k) = src%tsv(:, idx(k))
+            end do
+            if (present(valid)) then
+                do k = lo, hi
+                    if (valid(k)) cycle
+                    do e = 1_int64, int(self%width, int64)
+                        call self%tsv(e, k)%set_null()
+                    end do
+                end do
+            end if
+        case (PK_STRING, PK_STRING_VEC)
+            ! The string store is rebuilt whole by its own gather_from (gather_build hands it the
+            ! element list); kept so this select stays exhaustive over every kind, like its
+            ! siblings above.
+            error stop EP//"gather_storage_from: the string kinds are gathered by their store" ! GCOVR_EXCL_LINE
+        case (PK_LIST, PK_MAP, PK_STRUCT)
+            ! Refused by gather_from before anything is sized: only the container knows how a row
+            ! is laid out, and it rebuilds itself in place through %gather.
+            error stop EP//"gather_storage_from: a container column is gathered in place" ! GCOVR_EXCL_LINE
+        case default
+            error stop EP//"gather_storage_from: column has no active storage" ! GCOVR_EXCL_LINE
+        end select
+    end procedure gather_storage_from
+    !
     module procedure ensure_capacity
 #ifdef UNDEFINED_CHECK
         use ieee_arithmetic, only : ieee_value, ieee_quiet_nan

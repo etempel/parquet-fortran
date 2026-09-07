@@ -477,22 +477,26 @@ contains
     !
     !> int32 form of `gather`; converts and delegates.
     module procedure gather_i32
-        call self%gather_i64(int(idx, int64))
+        call self%gather_i64(int(idx, int64), valid=valid, threads=threads)
     end procedure gather_i32
     !
     !> Keeps the rows `idx` lists, in the order it lists them, changing the row count to match.
     !!
-    !! Everything this needs already existed for `reindex` and `delete_by_mask`: `gather_storage`
-    !! and `gather_validity` are both written against an index list of arbitrary length (that is how
-    !! `delete_by_mask` uses them), and `expand_row_perm` turns a row-level list into the
-    !! element-level one the string store takes without caring about its length either. So the only
-    !! genuinely new thing here is the range check and setting `nrows`.
+    !! Since stage 4 of `feature_join.md` this is `gather_build` -- the one implementation of the
+    !! copy, the bitmap rebuild and the row split that `gather_from` also runs -- applied to the
+    !! column's own rows into a fresh column, which `move_from` then hands back over the original
+    !! in O(1). What stays here is what differs between the two entry points: the range check,
+    !! whose message names this binding, and the container kinds, which rebuild themselves in
+    !! place and cannot be copied from outside -- nor null-filled by a mask, since their row
+    !! nullness lives inside the container, which is why `parquet_table%join` refuses the two
+    !! `how=` values that could ask for it before anything reaches here (`feature_risks.md`
+    !! Risk-188: a container column is carried across a join by exactly this route).
     !!
     !! **Repeats are permitted** -- see the interface's doc-comment for why the duplicate scan is
     !! deliberately absent rather than merely omitted.
     module procedure gather_i64
+        type(parquet_column) :: fresh
         integer(int64) :: m, k
-        integer(int64), allocatable :: elem_idx(:)
         character(len=32) :: got, want
         m = size(idx, kind=int64)
         do k = 1_int64, m
@@ -503,20 +507,297 @@ contains
                     trim(want)//" rows"
             end if
         end do
-        if (is_string_kind(self%kind)) then
-            call expand_row_perm(idx, int(self%width, int64), elem_idx)
+        call check_gather_mask(valid, m, "gather")
+        if (parquet_kind_is_container(self%kind)) then
+            if (present(valid)) then
+                ! Not reachable through the table layer (see the doc-comment above); kept because
+                ! a mask silently ignored would leave a container whose scalar siblings were
+                ! null-filled and it was not -- a misaligned table with every row count right.
+                if (.not. all(valid)) then ! GCOVR_EXCL_START
+                    error stop EP//"gather: a container column cannot be null-filled by a mask"
+                end if ! GCOVR_EXCL_STOP
+            end if
+            call self%container%gather_rows(idx)
+            self%nrows = m
+            self%cap = m
+            return
+        end if
+        call gather_build(fresh, self, idx, valid, threads)
+        call self%move_from(fresh)
+    end procedure gather_i64
+    !
+    !> int32 form of `gather_from`; converts and delegates.
+    module procedure gather_from_i32
+        call self%gather_from_i64(src, int(idx, int64), valid=valid, threads=threads)
+    end procedure gather_from_i32
+    !
+    !> Builds this column from the rows of `src` that `idx` lists -- see the interface for the
+    !! contract. The checks live here, in the order that leaves the destination untouched by a
+    !! refusal; the work is `gather_build`'s, which `gather` shares.
+    module procedure gather_from_i64
+        integer(int64) :: m, k
+        character(len=32) :: got, want
+        m = size(idx, kind=int64)
+        if (parquet_kind_is_container(src%kind)) then
+            error stop EP//"gather_from: a container column is gathered in place with %gather, "// &
+                "not from another column"
+        end if
+        call check_gather_mask(valid, m, "gather_from")
+        ! Serial deliberately: which index is out of range must not depend on which thread noticed.
+        do k = 1_int64, m
+            if (idx(k) < 1_int64 .or. idx(k) > src%nrows) then
+                write(got, "(I0)") idx(k)
+                write(want, "(I0)") src%nrows
+                error stop EP//"gather_from: row index "//trim(got)//" is outside the source "// &
+                    "column's 1.."//trim(want)//" rows"
+            end if
+        end do
+        call gather_build(self, src, idx, valid, threads)
+    end procedure gather_from_i64
+    !
+    !> Aborts unless `valid`, when present, has one entry per destination row.
+    subroutine check_gather_mask(valid, m, proc)
+        logical, intent(in), optional :: valid(:) !! the mask, or absent.
+        integer(int64), intent(in) :: m           !! destination rows, i.e. the index list's length.
+        character(len=*), intent(in) :: proc      !! calling binding, for the message.
+        character(len=32) :: got, want
+        if (.not. present(valid)) return
+        if (size(valid, kind=int64) == m) return
+        write(got, "(I0)") size(valid, kind=int64)
+        write(want, "(I0)") m
+        error stop EP//proc//": mask has "//trim(got)//" entries but the index list names "// &
+            trim(want)//" rows"
+    end subroutine check_gather_mask
+    !
+    !> The one gather: `dst` becomes `src`'s rows `idx` lists, with `src`'s nulls carried and the
+    !! mask's nulls added, on one thread or on `threads`. Every check has been made by the caller,
+    !! and `src` is not a container kind. `dst` is cleared first, so it may be a fresh column or a
+    !! column being reused; it must be a different object from `src`.
+    !!
+    !! **The string kinds go to their store whole**: `parquet_string_column_gather_from` is the
+    !! same one-pass rebuild at the element level (a `PK_STRING_VEC` row is `width` consecutive
+    !! elements, expanded by `expand_row_perm`/`expand_row_mask` exactly as `gather` always did),
+    !! and it threads by its own rule. Every other kind is copied here, one range of destination
+    !! rows per thread, and its validity bitmap is written a whole word at a time from the
+    !! source's bits at `idx` OR-ed with the mask -- so the add-only rule holds by construction
+    !! (`feature_risks.md` Risk-182).
+    !!
+    !! **Two threads never write one bitmap word.** `gather_ranges` cuts the rows so that every
+    !! range boundary is a multiple of `BITS_PER_BLOCK / gcd(width, BITS_PER_BLOCK)` rows -- the
+    !! period after which `(row-1)*width` is again a multiple of the word size -- so each range
+    !! owns whole words and the last range owns the ragged tail alone. That is the reasoning
+    !! `paste_row_group_safely` (`src/parquet_tables_read.f90`) applies to a row-group boundary it
+    !! cannot move, done the cheaper way round here, where the boundary is free to choose
+    !! (`feature_risks.md` Risk-64: disjoint rows are not disjoint bits).
+    subroutine gather_build(dst, src, idx, valid, threads)
+        type(parquet_column), intent(inout) :: dst  !! the destination; cleared first.
+        type(parquet_column), intent(in) :: src     !! the source, never written.
+        integer(int64), intent(in) :: idx(:)        !! 1-based source row per destination row, range-checked.
+        logical, intent(in), optional :: valid(:)   !! per destination row, `size(idx)` entries when present.
+        integer, intent(in), optional :: threads    !! team to split the rows across; absent or 1 is serial.
+        integer(int64) :: m, w
+        integer(int64), allocatable :: elem_idx(:), lo(:), hi(:)
+        logical, allocatable :: elem_valid(:)
+        logical :: masked, bitmap
+        integer :: nt, tix
+        !
+        m = size(idx, kind=int64)
+        w = int(src%width, int64)
+        call dst%clear()
+        if (src%kind == PK_NONE) return
+        ! Computed once, serially: an all-true mask changes nothing and must cost no bitmap -- the
+        ! common case for a join whose every row matched (`set_validity` returns early on the same
+        ! test).
+        masked = .false.
+        if (present(valid)) masked = .not. all(valid)
+        if (is_string_kind(src%kind)) then
+            call init_like(dst, src, 0_int64)
+            call expand_row_perm(idx, w, elem_idx)
             ! Sliced, not passed whole: expand_row_perm allocates max(m*width, 1) -- the padded
             ! shape delete_by_mask also uses -- so for an EMPTY selection it hands back one
-            ! uninitialized entry. reindex never sees that (a zero-row column returns before the
-            ! call), but a gather legitimately can: %top_n(keys, 0) empties a table that has rows.
-            call parquet_string_column_gather(self%str, elem_idx(1:m*int(self%width, int64)))
-        else
-            call gather_storage(self, idx)
+            ! uninitialized entry, and %top_n(keys, 0) legitimately empties a table that has rows.
+            if (masked) then
+                call expand_row_mask(valid, w, elem_valid)
+                call parquet_string_column_gather_from(dst%str, src%str, elem_idx(1:m*w), &
+                    valid=elem_valid(1:m*w), threads=threads)
+            else
+                call parquet_string_column_gather_from(dst%str, src%str, elem_idx(1:m*w), threads=threads)
+            end if
+            dst%nrows = m
+            dst%cap = m
+            return
         end if
-        call gather_validity(self, idx)
-        self%nrows = m
-        if (is_temporal_kind(self%kind)) self%nulls_dirty = .true.
-    end procedure gather_i64
+        ! `init` at the final row count IS the exact-fit allocation: the capacity starts at zero,
+        ! so the one growth it performs allocates exactly `m` rows (`ensure_capacity`).
+        call init_like(dst, src, m)
+        nt = 1
+        if (present(threads)) nt = gather_team(m, w, threads)
+        call gather_ranges(m, w, nt, lo, hi)
+        ! A bitmap only when there is something to put in it: the source's own map (a null-free
+        ! source has none, R2) or a mask that nulls at least one row. The temporal kinds carry the
+        ! null inside the element and take the mask in gather_storage_from instead.
+        bitmap = .not. is_temporal_kind(src%kind) .and. &
+            ((src%has_nulls .and. allocated(src%validity)) .or. masked)
+        if (bitmap) then
+            allocate(dst%validity(max(blocks_for(m*w), 1_int64)))
+            dst%validity = 0_int64
+            dst%has_nulls = .true.
+        end if
+        ! Each range writes its own rows of the storage and its own whole words of the bitmap;
+        ! `src`, `idx` and `valid` are only read.
+        !$omp parallel do default(shared) private(tix) schedule(static) num_threads(nt) if (nt > 1)
+        do tix = 1, nt
+            call gather_storage_from(dst, src, idx, lo(tix), hi(tix), valid)
+            if (bitmap) call gather_bits_from(dst, src, idx, valid, masked, lo(tix), hi(tix))
+        end do
+        !$omp end parallel do
+        if (is_temporal_kind(src%kind)) dst%nulls_dirty = .true.
+    end subroutine gather_build
+    !
+    !> The team a gather of `m` rows, `w` wide, opens when asked for `threads`: the request
+    !! clamped like every other thread count this library resolves -- an explicit one included, as
+    !! the sort engine's is (api-conventions.md); a count arriving from `table_colwork` is already
+    !! clamped, so that is a no-op there -- and lowered by `gather_ranges` to what the rows can
+    !! occupy in whole validity words. The one rule, which `parquet_debug_column_gather_threads`
+    !! reports for the tests.
+    integer function gather_team(m, w, threads) result(nt)
+        use parquet_settings_base, only : parquet_clamp_to_affinity
+        integer(int64), intent(in) :: m  !! destination rows.
+        integer(int64), intent(in) :: w  !! elements per row.
+        integer, intent(in) :: threads   !! the count asked for.
+        integer(int64), allocatable :: lo(:), hi(:)
+        nt = 1
+        if (threads > 1) nt = parquet_clamp_to_affinity(threads, "column gathering")
+        call gather_ranges(m, w, nt, lo, hi)
+    end function gather_team
+    !
+    module procedure parquet_debug_column_gather_threads
+        n = gather_team(nrows, int(max(width, 1_int32), int64), threads)
+    end procedure parquet_debug_column_gather_threads
+    !
+    !> `dst%init` with `src`'s kind, width and unit, at `nrows` rows.
+    subroutine init_like(dst, src, nrows)
+        type(parquet_column), intent(inout) :: dst !! the column to initialise.
+        type(parquet_column), intent(in) :: src    !! whose kind, width and unit to take.
+        integer(int64), intent(in) :: nrows        !! rows to allocate.
+        if (allocated(src%unit)) then
+            call dst%init(src%kind, nrows, src%width, src%unit)
+        else
+            call dst%init(src%kind, nrows, src%width)
+        end if
+    end subroutine init_like
+    !
+    !> Cuts destination rows `1 .. m` into `nt` contiguous ranges whose boundaries fall on
+    !! validity-WORD boundaries, lowering `nt` when there are not enough whole words to go round.
+    !!
+    !! With `w` elements per row, `(row-1)*w` is a multiple of `BITS_PER_BLOCK` every
+    !! `BITS_PER_BLOCK/gcd(w, BITS_PER_BLOCK)` rows, and that is the period every boundary is a
+    !! multiple of -- so each range owns whole words of the bitmap and the last one owns the tail.
+    !! The whole periods are dealt out as evenly as integer division allows, the remainder one
+    !! extra to the first ranges, exactly as `parquet_strings`' `thread_row_ranges` deals out its
+    !! validity bytes. A range is never empty: `nt` is lowered to the number of whole periods
+    !! first, and to 1 when there is not even one.
+    subroutine gather_ranges(m, w, nt, lo, hi)
+        integer(int64), intent(in) :: m                   !! destination rows.
+        integer(int64), intent(in) :: w                   !! elements per row.
+        integer, intent(inout) :: nt                      !! ranges wanted, in; ranges cut, out.
+        integer(int64), allocatable, intent(out) :: lo(:) !! first row of each range.
+        integer(int64), allocatable, intent(out) :: hi(:) !! last row of each range.
+        integer(int64) :: period, nper, per, extra, cur, take
+        integer :: k
+        period = BITS_PER_BLOCK/gcd_int64(w, BITS_PER_BLOCK)
+        nper = m/period
+        if (nt > 1 .and. int(nt, int64) > nper) nt = int(max(nper, 1_int64))
+        if (nt < 1) nt = 1
+        allocate(lo(nt), hi(nt))
+        if (nt == 1) then
+            lo(1) = 1_int64
+            hi(1) = m
+            return
+        end if
+        per = nper/int(nt, int64)
+        extra = mod(nper, int(nt, int64))
+        cur = 1_int64
+        do k = 1, nt
+            take = per
+            if (int(k, int64) <= extra) take = take + 1_int64
+            lo(k) = cur
+            hi(k) = cur + take*period - 1_int64
+            cur = hi(k) + 1_int64
+        end do
+        ! The last range runs to m, whole periods or not: the rows past the last whole period are
+        ! its own, and the partial word they end in is touched by no other range.
+        hi(nt) = m
+    end subroutine gather_ranges
+    !
+    !> Greatest common divisor, for `gather_ranges`' period. Both arguments positive.
+    pure function gcd_int64(a, b) result(g)
+        integer(int64), intent(in) :: a !! first value.
+        integer(int64), intent(in) :: b !! second value.
+        integer(int64) :: g             !! their greatest common divisor.
+        integer(int64) :: x, y, t
+        x = a
+        y = b
+        do while (y /= 0_int64)
+            t = mod(x, y)
+            x = y
+            y = t
+        end do
+        g = x
+    end function gcd_int64
+    !
+    !> Writes the validity words of destination rows `lo .. hi`: bit `e` of row `k` is set (null)
+    !! when the source's bit for element `e` of row `idx(k)` is set, or when the mask marks row
+    !! `k` `.false.`. Every word the range touches is built whole in a register and stored once,
+    !! by plain assignment -- the destination map was zeroed at allocation and no other range
+    !! writes these words (`gather_ranges`). The same walk as `gather_validity`, over a range.
+    subroutine gather_bits_from(dst, src, idx, valid, masked, lo, hi)
+        type(parquet_column), intent(inout) :: dst !! the destination, its bitmap allocated.
+        type(parquet_column), intent(in) :: src    !! the source.
+        integer(int64), intent(in) :: idx(:)       !! source row per destination row.
+        logical, intent(in), optional :: valid(:)  !! the mask; read only when `masked`.
+        logical, intent(in) :: masked              !! `valid` is present and holds a .false.
+        integer(int64), intent(in) :: lo           !! first destination row of the range.
+        integer(int64), intent(in) :: hi           !! last destination row of the range.
+        integer(int64) :: w, first, last, blk, base, nb, b, k, row, e, word
+        logical :: src_map
+        if (hi < lo) return
+        w = int(dst%width, int64)
+        src_map = src%has_nulls .and. allocated(src%validity)
+        first = ((lo - 1_int64)*w)/BITS_PER_BLOCK + 1_int64
+        last = (hi*w - 1_int64)/BITS_PER_BLOCK + 1_int64
+        do blk = first, last
+            word = 0_int64
+            base = (blk - 1_int64)*BITS_PER_BLOCK          ! 0-based element index of this word's bit 0
+            nb = min(BITS_PER_BLOCK, hi*w - base)           ! bits of this word inside the range
+            if (w == 1_int64) then
+                ! The common case, and worth its own loop: the element index IS the row index, so
+                ! the row/element split below -- two integer divisions per element -- disappears.
+                do b = 0_int64, nb - 1_int64
+                    row = base + b + 1_int64
+                    if (src_map) then
+                        if (bit_test(src%validity, idx(row))) word = ibset(word, int(b))
+                    end if
+                    if (masked) then
+                        if (.not. valid(row)) word = ibset(word, int(b))
+                    end if
+                end do
+            else
+                do b = 0_int64, nb - 1_int64
+                    k = base + b
+                    row = k/w + 1_int64
+                    e = k - (row - 1_int64)*w + 1_int64
+                    if (src_map) then
+                        if (bit_test(src%validity, (idx(row) - 1_int64)*w + e)) word = ibset(word, int(b))
+                    end if
+                    if (masked) then
+                        if (.not. valid(row)) word = ibset(word, int(b))
+                    end if
+                end do
+            end if
+            dst%validity(blk) = word
+        end do
+    end subroutine gather_bits_from
     !
     !> The full length/range/duplicate check `reindex` runs before touching any storage, so that a
     !! bad permutation aborts with the column still intact rather than half rebuilt.

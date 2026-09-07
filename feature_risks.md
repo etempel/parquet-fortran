@@ -103,6 +103,7 @@ something a reader is expected to have.
 | [Risk-216](#risk-216--the-joins-hash-engine-puts-the-null-keyed-right-rows-back-by-subtraction-and-a-union-over-groups-loses-them-silently) | The join's hash engine puts the null-keyed right rows back by SUBTRACTION, and a union over groups loses them silently | 4 — covered |
 | [Risk-217](#risk-217--two-join-engines-assert-require-and-count-the-output-and-only-the-suite-run-under-both-can-see-them-disagree) | Two join engines assert `require=` and count the output, and only the suite run under both can see them disagree | 4 — covered |
 | [Risk-218](#risk-218--the-joins-engine-choice-reads-the-key-kinds-and-order-alone-and-a-data-dependent-choice-would-hide-behind-the-floor) | The join's engine choice reads the key kinds and `order=` alone, and a data-dependent choice would hide behind the floor | 4 — covered |
+| [Risk-219](#risk-219--a-gathers-team-goes-across-the-columns-or-inside-one-and-a-plan-that-always-picks-one-level-answers-every-test-right) | A gather's team goes ACROSS the columns or INSIDE one, and a plan that always picks one level answers every test right | 4 — covered |
 | [Risk-1](#risk-1--the-release-policy-regresses-silently) | The release policy regresses silently | 4 — covered |
 | [Risk-2](#risk-2--the-schema-less-write-rests-on-three-properties-that-look-incidental) | The schema-less write rests on three properties that look incidental | 4 — covered |
 | [Risk-3](#risk-3--the-screen-and-the-evaluator-can-drift-apart) | The screen and the evaluator can drift apart | 4 — covered |
@@ -1675,28 +1676,37 @@ file's first three. Eight mutations, all caught.
 
 ### Risk-182 — `%set_validity`'s add-only behaviour is what a join's null-fill rests on
 
-The join builds each incoming column with three shipped bindings and nothing else: `deep_copy`,
-`%gather` naming a source row for every output row, and `%set_validity` marking the rows that had no
-counterpart. **That last call is correct only because `%set_validity` never CLEARS a null** -- both
-specifics return early on an all-true mask, the bitmap arm ORs its word in rather than assigning it,
-and the temporal and string arms call `set_null` only where the mask is `.false.`. So the mask handed
-in may describe the unmatched rows and nothing else, and the source column's own validity never has
-to be read back.
+The join builds each incoming column with one shipped binding, `%gather_from(src, idx, valid=)`,
+whose mask marks the output rows that had no counterpart; its own-side rewrite hands the same mask
+to `%gather(rows, valid=)`. **Both are correct only because the mask never CLEARS a null**: the
+bitmap is built a word at a time from the source's bits at `idx` OR-ed with the mask
+(`gather_bits_from`, `src/parquet_columns_structural.f90`), the temporal arms call `set_null` only
+where the mask is `.false.`, and the string store gives a masked element a zero-width null slot and
+copies every other element's null flag as it was. So the mask handed in may describe the unmatched
+rows and nothing else, and the source column's own validity never has to be read back. The rule
+has two homes now: `%set_validity`, the original one, whose specifics return early on an all-true
+mask and OR their words in rather than assigning them; and the gather's mask, written to hold the
+same contract by construction. Until stage 4 of `feature_join.md` the join was `deep_copy` +
+`%gather` + `%set_validity`, and it was the third call this entry described.
 
-**Turn that `ior` into an assignment and the join silently loses every null the right table already
-held**, in the rows it DID match -- a full table of the right size, with values where the file said
-there were none. `parquet_columns_validity.f90` carries the comment; the join is now a second caller
-that depends on it, one module away, which is exactly the coupling a later "optimisation" cannot see.
+**Turn that OR into an assignment -- in either home -- and the join silently loses every null the
+right table already held**, in the rows it DID match: a full table of the right size, with values
+where the file said there were none. `parquet_columns_validity.f90` and `gather_bits_from` carry
+the comment; the join depends on it one module away, which is exactly the coupling a later
+"optimisation" cannot see.
 
-**Rule:** `%set_validity` adds nulls and never removes one. A caller that needs the opposite needs
-`%clear_null`, not a changed `%set_validity`. And the join must not be "simplified" into reading the
-source mask back and writing a combined one, which would work today and would stop working the
-moment the add-only rule was relaxed.
+**Rule:** `%set_validity` adds nulls and never removes one, and so does the `valid=` mask of
+`%gather` and `%gather_from`. A caller that needs the opposite needs `%clear_null`, not a changed
+mask. And the join must not be "simplified" into reading the source mask back and writing a
+combined one, which would work today and would stop working the moment the add-only rule was
+relaxed.
 
 **Test:** `test_join_carries_source_nulls` (`test/test_table_join.f90`), which nulls a right-hand
 row that TWO left rows match, then requires both a surviving source null and an unmatched-row null
 in the same result -- the second being the negative control, without which a join that nulled
-everything would pass.
+everything would pass; and `test_gather_from_every_kind` (`test/test_columns.f90`), which holds
+`%gather_from` to `deep_copy` + `%gather` + `%set_validity` on every kind, with a source null under
+a `.true.` entry.
 
 Every entry here has a test behind it. What keeps it in the document is the second half: a rule for
 whoever edits the area next. Read the entry for the area you are about to touch before you touch
@@ -2347,6 +2357,16 @@ built for it the arm ships untested, and a mutation to it is invisible to every 
   future parallel `materialize_slice` — which pastes row-group pieces the same way and is serial
   today only because it was left that way. It must go through `paste_row_group_safely` or repeat its
   reasoning.
+- **`%gather_from`'s threaded bitmap fill repeats the reasoning the other way round**
+  (`gather_build`/`gather_ranges`/`gather_bits_from`, `src/parquet_columns_structural.f90`): it
+  chooses its own range boundaries, on multiples of `BITS_PER_BLOCK / gcd(width, BITS_PER_BLOCK)`
+  rows, so every thread owns whole words and writes them by plain assignment, and no `critical` is
+  needed. Keep it that way. A split on arbitrary row counts would bring this entry's lost update
+  back — deterministically, since each thread stores a whole word holding only its own bits — and
+  a well-meant "simplification" to per-bit `bit_set` under `atomic` would be correct and several
+  times slower. `test_gather_from_threaded_equals_serial` (`test/test_columns_parallel.f90`) holds
+  the threaded fill to the serial one on every kind at widths 1 and 2, nulls on both sides of
+  every word boundary.
 
 ### Risk-1 — The release policy regresses silently
 
@@ -8411,3 +8431,40 @@ feature_join.md).
 `threads=64`, on a fixture of distinct keys and on one where every key is one value, on five rows
 and on five thousand, under `how="anti"` with `require="m:1"` — and the sort engine for
 `order="key"` on the same fixture; and by `test_join_engine_hook_switches`' automatic arm.
+
+### Risk-219 — A gather's team goes ACROSS the columns or INSIDE one, and a plan that always picks one level answers every test right
+
+`colwork_plan` (`src/parquet_tables_parallel.f90`) spends a gather's team — `%top_n`, a `%join`'s
+rewrite of its own rows and the carry of every incoming column — at one of two levels: across the
+columns, one per thread, when there are at least as many columns as threads; otherwise inside each
+column in turn, its rows across the whole team (`parquet_column%gather`/`%gather_from` with
+`threads=`). A sort's replay and a filter's compaction have only the first level. The rows that come
+out are the same at every level and every team size, so **nothing in a result can tell the levels
+apart**: a plan that always chose across leaves a join carrying one column serial on a 64-thread
+machine (the shape stage 4 of `feature_join.md` removed); a plan that always chose within rewrites a
+hundred-column table one column at a time, paying a fork per column; a plan that opened one level
+inside the other measures as the outer level alone, because this library enables no nested
+parallelism and an inner team collapses to one thread on every runtime it is built with. Every
+equality test in the suite passes against all three.
+
+**The only observables are the two records the plan writes on every mutation, serial included**:
+the team's size (`parquet_debug_get_table_threads_used`) and the level it went to
+(`parquet_debug_get_table_level_used`: 0 serial, 1 across, 2 within). A count alone cannot tell
+across-on-two-columns from within-on-two-threads, which is why the second record exists.
+
+**Rule:** the level is chosen from the resolved team and the column count alone, the two levels are
+never combined, `colwork_min_columns` gates the across level only (a one-column gather must still
+thread within), and the work floor is measured on the larger of the columns' own rows and the rows
+the mutation will produce — a lookup join's output is orders of magnitude larger than the table it
+carries columns from, and measuring the source alone kept a 10M-row rewrite under the floor. The
+test-only hook `parquet_debug_set_colwork_level` may pick a level the operation has and may never
+open a team the gate declined.
+
+**Covered by** `a gather's team goes inside the column when the columns are fewer than the threads`
+(`test/test_table_parallel.f90`, `test_colwork_level_rule`), which fixes the team at two through
+`parquet_set_table_threads` so the arms hold on any two-processor machine: five columns go across
+and one column goes within, on the join's own side and on the carry; the hook forced across on one
+column stays serial and forced within on a sort stays across; the serial cap writes level 0; and
+every threaded table is compared with a serially capped one. `bench/benchmark_join.sh
+--mode=payload` prints the two levels side by side per column count, tagged with the level and
+team that actually ran, which is how the rule was fixed and how a change to it is re-measured.

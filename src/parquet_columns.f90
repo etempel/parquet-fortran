@@ -47,7 +47,7 @@ module parquet_columns
         parquet_string_column_append_column, parquet_string_column_append_from, parquet_string_column_append_nulls, &
         parquet_string_column_append_values, parquet_string_column_capacity, &
         parquet_string_column_character_capacity, parquet_string_column_character_size, &
-        parquet_string_column_copy_to, parquet_string_column_delete_by_mask, parquet_string_column_gather, &
+        parquet_string_column_copy_to, parquet_string_column_delete_by_mask, parquet_string_column_gather_from, &
         parquet_string_column_get, parquet_string_column_has_validity, parquet_string_column_is_null, &
         parquet_string_column_move_from, &
         parquet_string_column_null_count, parquet_string_column_reindex, parquet_string_column_reindex_trusted, &
@@ -109,6 +109,12 @@ module parquet_columns
     ! null cache and so cannot be called from a shared column -- see its own interface below.
     ! `src/parquet.f90` privatises this too; a user calls `%any_null()`.
     public :: parquet_column_any_null
+    !
+    ! Test-only, and public for the reason `parquet_debug_string_bulk_threads` is (parquet_strings):
+    ! this tier is Arrow-free by contract, so the C++ hook every other `parquet_debug_*` observable
+    ! uses is not available, and a test that re-derived the rule would assert against its own copy.
+    ! No library code calls it. See its interface under "Lifecycle, queries and unit".
+    public :: parquet_debug_column_gather_threads
     !
     !> Error-message prefix for every `error stop` raised by this module.
     character(len=*), parameter :: EP = "parquet_columns: "
@@ -440,6 +446,12 @@ module parquet_columns
         !> Keeps the listed rows, in the listed order. Unlike `reindex` the list may be any length,
         !! and unlike `delete_by_mask` it may reorder -- see the interface below.
         generic :: gather => gather_i32, gather_i64
+        procedure, private :: gather_from_i32          !! int32 specific of gather_from.
+        procedure, private :: gather_from_i64          !! int64 specific of gather_from.
+        !> Builds this column from the listed rows of ANOTHER, in one pass: `deep_copy` + `gather`
+        !! + `set_validity` as one operation, with the source untouched, an optional null mask
+        !! folded in and an optional team -- see the interface below.
+        generic :: gather_from => gather_from_i32, gather_from_i64
         ! --- string-kind storage access (PK_STRING / PK_STRING_VEC) ---
         procedure :: string_column                     !! Pointer to the embedded string store.
         ! --- container-kind storage access (PK_LIST / PK_MAP / PK_STRUCT) ---
@@ -815,9 +827,11 @@ module parquet_columns
             integer(int64), intent(in) :: perm(:)        !! 1-based permutation of 1..nrows, unchecked.
         end subroutine reindex_trusted
         !> int32 form of `gather` -- see the int64 form below, which does the work.
-        module subroutine gather_i32(self, idx)
+        module subroutine gather_i32(self, idx, valid, threads)
             class(parquet_column), intent(inout) :: self !! the column.
             integer(int32), intent(in) :: idx(:)         !! 1-based source row per destination row.
+            logical, intent(in), optional :: valid(:)    !! per destination row; .false. nulls it (add-only).
+            integer, intent(in), optional :: threads     !! team to split the rows across; absent or 1 is serial.
         end subroutine gather_i32
         !> Keeps the rows `idx` lists, in the order it lists them: row `k` of the result is the row
         !! that was at `idx(k)`, and the column ends up `size(idx)` rows long.
@@ -834,11 +848,79 @@ module parquet_columns
         !! sized by the row count on every call, which is the very cost this exists to avoid, and a
         !! caller that needs distinctness can check it once for itself.
         !!
-        !! Validity travels with the rows it belongs to, per element for a vector column.
-        module subroutine gather_i64(self, idx)
+        !! Validity travels with the rows it belongs to, per element for a vector column. `valid`,
+        !! when present, has one entry per DESTINATION row and marks every element of a `.false.`
+        !! row null on top of whatever the source row carried -- `set_validity`'s add-only rule,
+        !! applied in the same pass rather than afterwards. `threads` above 1 splits the rows
+        !! across a team. Both are `gather_from`'s, which does the work: since stage 4 of
+        !! `feature_join.md` this is a `gather_from` of the column's own rows into a fresh column,
+        !! handed back over the original in O(1). A container column keeps its own route (the
+        !! container rebuilds itself) and takes no mask.
+        module subroutine gather_i64(self, idx, valid, threads)
             class(parquet_column), intent(inout) :: self !! the column.
             integer(int64), intent(in) :: idx(:)         !! 1-based source row per destination row.
+            logical, intent(in), optional :: valid(:)    !! per destination row; .false. nulls it (add-only).
+            integer, intent(in), optional :: threads     !! team to split the rows across; absent or 1 is serial.
         end subroutine gather_i64
+        !> int32 form of `gather_from` -- see the int64 form below, which does the work.
+        module subroutine gather_from_i32(self, src, idx, valid, threads)
+            class(parquet_column), intent(inout) :: self !! the destination; cleared first.
+            type(parquet_column), intent(in) :: src      !! the source column, never written.
+            integer(int32), intent(in) :: idx(:)         !! 1-based source row per destination row.
+            logical, intent(in), optional :: valid(:)    !! per destination row; .false. nulls it (add-only).
+            integer, intent(in), optional :: threads     !! team to split the rows across; absent or 1 is serial.
+        end subroutine gather_from_i32
+        !> Builds this column from the rows of `src` that `idx` lists, in the order it lists them,
+        !! in ONE pass: row `k` of the result is `src`'s row `idx(k)`, with `src`'s kind, width and
+        !! unit, `src`'s own nulls carried with their rows, and -- when `valid` is present -- every
+        !! element of a row whose entry is `.false.` null as well. The destination is cleared first
+        !! and allocated exact-fit at `size(idx)` rows; `src` is never written, and must be a
+        !! different column from `self` (a column's own rows are gathered with `gather`).
+        !!
+        !! **This is `deep_copy` + `gather` + `set_validity` as one operation**, and it exists for
+        !! `parquet_table%join`, which carries every incoming column this way: the three-call form
+        !! copies the whole source and then rebuilds the copy, holding two transient copies where
+        !! this holds one, and walks the rows three times where this walks them once. Everything
+        !! the three calls promise holds here by construction. In particular the mask only ever
+        !! ADDS nulls: a `.true.` entry leaves the row exactly as the source had it, so a mask may
+        !! describe the unmatched rows alone and the source's own nulls survive untouched -- the
+        !! add-only rule of `feature_risks.md` Risk-182, of which this is the second home.
+        !!
+        !! **`idx` is a gather, not a permutation**, on `gather`'s terms: any row of `src`, in any
+        !! order, a row named more than once, a list shorter or longer than the source; only the
+        !! range is checked. `valid` must have exactly `size(idx)` entries. A container column
+        !! cannot be a source -- it is gathered in place with `gather`, which is how a join carries
+        !! one (`feature_risks.md` Risk-188) -- and a source with no rows is gathered only by an
+        !! empty list, since there is no row for `idx` to name.
+        !!
+        !! **`threads` above 1 splits the destination rows across a team.** Each thread copies its
+        !! own range of rows and writes its own whole words of the validity bitmap: the ranges are
+        !! cut on bitmap-word boundaries, so no two threads ever touch one word and no ragged end
+        !! needs serialising (`feature_risks.md` Risk-64's rule, met by construction). The count is
+        !! taken as given -- bounded by the affinity mask and by the row count -- and there is no
+        !! automatic answer here, because whether to spend a team inside one column or across
+        !! several is a decision for the caller that can see the other columns (`table_colwork`,
+        !! `src/parquet_tables_parallel.f90`). Absent, or 1, the copy is serial. A string column
+        !! hands the count to its own store, whose payload floor and break-even still apply.
+        module subroutine gather_from_i64(self, src, idx, valid, threads)
+            class(parquet_column), intent(inout) :: self !! the destination; cleared first.
+            type(parquet_column), intent(in) :: src      !! the source column, never written.
+            integer(int64), intent(in) :: idx(:)         !! 1-based source row per destination row.
+            logical, intent(in), optional :: valid(:)    !! per destination row; .false. nulls it (add-only).
+            integer, intent(in), optional :: threads     !! team to split the rows across; absent or 1 is serial.
+        end subroutine gather_from_i64
+        !> The team `gather`/`gather_from` would actually open for `nrows` destination rows of a
+        !! column `width` elements wide when asked for `threads`: the request clamped to the
+        !! affinity mask and lowered to the number of whole validity-word periods the rows hold,
+        !! the one rule the gather itself applies. **Test-only**, and public for the reason
+        !! `parquet_debug_string_bulk_threads` is: this tier reaches no C++ hook, and a test that
+        !! re-derived the rule would assert against its own copy. No library code calls it.
+        module function parquet_debug_column_gather_threads(nrows, width, threads) result(n)
+            integer(int64), intent(in) :: nrows !! destination rows.
+            integer(int32), intent(in) :: width !! elements per row.
+            integer, intent(in) :: threads      !! the count asked for.
+            integer :: n                        !! the team that would open; 1 for serial.
+        end function parquet_debug_column_gather_threads
     end interface
     !
     ! ---- Validity, kind-dispatched (parquet_columns_validity) ----
@@ -2696,6 +2778,21 @@ module parquet_columns
             class(parquet_column), intent(inout) :: self !! the column.
             integer(int64), intent(in) :: idx(:)         !! source row index per destination row.
         end subroutine gather_storage
+        !> Copies one range of a gather between two columns, values only: for every `k` in
+        !! `lo .. hi`, row `k` of `self` becomes row `idx(k)` of `src`. `self` already holds `src`'s
+        !! kind and width and at least `hi` rows (`gather_from` sizes it), and is a different
+        !! column from `src`. Serves `gather_from`, which cuts `1 .. size(idx)` into one such range
+        !! per thread. The temporal kinds take the row mask here as well, because their null state
+        !! lives inside the element being copied; every other kind's mask goes to the bitmap. Never
+        !! called for the string kinds (their store rebuilds itself whole) or a container kind.
+        module subroutine gather_storage_from(self, src, idx, lo, hi, valid)
+            class(parquet_column), intent(inout) :: self !! the destination column.
+            type(parquet_column), intent(in) :: src      !! the source column (unchanged).
+            integer(int64), intent(in) :: idx(:)         !! source row index per destination row.
+            integer(int64), intent(in) :: lo             !! first destination row of this range.
+            integer(int64), intent(in) :: hi             !! last destination row; < lo copies nothing.
+            logical, intent(in), optional :: valid(:)    !! per destination row; the temporal kinds null a .false. row.
+        end subroutine gather_storage_from
         !> Ensures the active storage is allocated for at least `need_rows` rows, preserving the
         !! rows already stored. A no-op when `cap` is already sufficient.
         !!

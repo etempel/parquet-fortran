@@ -51,12 +51,14 @@ submodule (parquet_tables) parquet_tables_parallel
     !! overridable for tuning through a test-only hook; see `colwork_gate_limits`.
     integer(int64), parameter :: colwork_min_elements = 131072_int64
     !
-    !> Fewer mutable columns than this and the loop runs serially.
+    !> Fewer mutable columns than this and the loop over columns runs serially.
     !!
     !! Two is the smallest number that can use a second thread at all, so this is a statement that
     !! the loop threads whenever threading is possible, not a tuned choice. Named rather than written
-    !! as a literal in `colwork_threads` so that it can carry this note and be swept alongside
-    !! `colwork_min_elements`.
+    !! as a literal in `colwork_plan` so that it can carry this note and be swept alongside
+    !! `colwork_min_elements`. **It gates the ACROSS-columns level only**: a gather with fewer
+    !! columns than this still spends the team inside each column (`colwork_plan`'s second level),
+    !! which is the whole reason that level exists.
     integer, parameter :: colwork_min_columns = 2
     !
 contains
@@ -224,16 +226,24 @@ contains
     end procedure table_mutable_slots
     !
     module procedure table_colwork
-        integer :: j, nt
+        integer :: j, nt, inner
         !
-        nt = colwork_threads(cache, slots)
+        ! A gather may spend the team inside one column; the other two operations rewrite a column
+        ! serially and have only the level across columns. Its destination row count is the
+        ! selection's length, which is what the work floor has to see (a %top_n keeps a handful of
+        ! rows out of millions; the join's own side may emit many more rows than it had).
+        if (op == PCW_GATHER .and. present(rows)) then
+            call colwork_plan(cache, .true., slots, nt, inner, nout=size(rows, kind=int64))
+        else
+            call colwork_plan(cache, .false., slots, nt, inner)
+        end if
         ! Noted on BOTH paths, serial included, so a test can tell "ran on one thread" from "the
         ! gate declined and the counter was never written". A gate that always declines otherwise
         ! passes every correctness test written for this feature.
-        call parquet_debug_note_table_threads(int(nt, int64))
+        call parquet_debug_note_table_threads(nt, inner)
         if (nt <= 1) then
             do j = 1, size(slots)
-                call colwork_one(cache, op, slots(j), rows, keep)
+                call colwork_one(cache, op, slots(j), rows, keep, valid, inner)
             end do
             return
         end if
@@ -264,19 +274,21 @@ contains
         ! parquet_column's own procedures already do.
         !$omp parallel do default(shared) private(j) schedule(dynamic) num_threads(nt)
         do j = 1, size(slots)
-            call colwork_one(cache, op, slots(j), rows, keep)
+            call colwork_one(cache, op, slots(j), rows, keep, valid, 1)
         end do
         !$omp end parallel do
     end procedure table_colwork
     !
     !> Applies one `PCW_*` operation to one column. The whole body of both loops above, so the two
     !! paths cannot drift.
-    subroutine colwork_one(cache, op, idx, rows, keep)
+    subroutine colwork_one(cache, op, idx, rows, keep, valid, threads)
         type(parquet_table_cache), intent(inout) :: cache !! the column store.
         integer, intent(in) :: op                         !! which operation; a PCW_* constant.
         integer, intent(in) :: idx                        !! slot to rewrite.
         integer(int64), intent(in), optional :: rows(:)   !! permutation or selection, per `op`.
         logical, intent(in), optional :: keep(:)          !! per-row keep mask, per `op`.
+        logical, intent(in), optional :: valid(:)         !! per destination row of a gather; .false. nulls it.
+        integer, intent(in) :: threads                    !! threads a gather may split its rows across; 1 serial.
         !
         select case (op)
         case (PCW_REINDEX_TRUSTED)
@@ -288,7 +300,11 @@ contains
         case (PCW_DELETE_MASK)
             call cache%cols(idx)%values%delete_by_mask(keep)
         case (PCW_GATHER)
-            call cache%cols(idx)%values%gather(rows)
+            ! The mask and the team ride with the gather: `valid` nulls the destination rows the
+            ! caller marks (the join's own side under how="right"/"outer") on top of whatever the
+            ! gathered row carried, and `threads` above 1 is colwork_plan's within-column level --
+            ! always 1 when this loop is itself running across columns.
+            call cache%cols(idx)%values%gather(rows, valid=valid, threads=threads)
         case default
             ! Not reachable: `op` comes from a PCW_* constant at each of the three call sites, all
             ! in parquet_tables_rowmutate.f90, never from user input. Kept because a new op added
@@ -311,7 +327,7 @@ contains
         nt = colwork_threads(src, slots)
         ! The same counter table_colwork writes, on both paths, for the same reason -- a clone is a
         ! per-column table operation under the same gate, so a test observes it the same way.
-        call parquet_debug_note_table_threads(int(nt, int64))
+        call parquet_debug_note_table_threads(nt, 1)
         if (nt <= 1) then
             do j = 1, size(slots)
                 call src%cols(slots(j))%values%deep_copy(dst%cols(slots(j))%values)
@@ -335,17 +351,19 @@ contains
     end procedure table_colwork_clone
     !
     module procedure table_colwork_join
-        integer :: j, nt
+        integer :: j, nt, inner
         !
-        ! Gated on the SOURCE, exactly as the clone is and for the same reason: the destination
-        ! slots have just been created and hold nothing, while the work per column is one full
-        ! copy of a source column followed by a gather over it.
-        nt = colwork_threads(src, sslots)
+        ! Gated on the SOURCE's columns and the OUTPUT's rows: the destination slots have just been
+        ! created and hold nothing, while the work per column is one gather of size(idx) rows out
+        ! of a source column -- and for a lookup join the output is orders of magnitude larger
+        ! than the table it carries from, so measuring the source alone kept a 10M-row rewrite
+        ! under the floor and serial.
+        call colwork_plan(src, .true., sslots, nt, inner, nout=size(idx, kind=int64))
         ! Noted on both paths, serial included -- see table_colwork's own note.
-        call parquet_debug_note_table_threads(int(nt, int64))
+        call parquet_debug_note_table_threads(nt, inner)
         if (nt <= 1) then
             do j = 1, size(sslots)
-                call join_one_column(src, dst, sslots(j), dslots(j), idx, valid)
+                call join_one_column(src, dst, sslots(j), dslots(j), idx, valid, inner)
             end do
             return
         end if
@@ -355,63 +373,132 @@ contains
         ! different table from the destination -- a self-join is refused before anything reaches
         ! here -- so the two stores are distinct objects and not merely distinct slots.
         !
-        ! `schedule(dynamic)` for the reason both siblings use it: a PK_STRING column's copy and
-        ! gather rebuild a whole packed payload where a float64 column's are two memcpys.
+        ! `schedule(dynamic)` for the reason both siblings use it: a PK_STRING column's gather
+        ! rebuilds a whole packed payload where a float64 column's is one scattered copy.
         !$omp parallel do default(shared) private(j) schedule(dynamic) num_threads(nt)
         do j = 1, size(sslots)
-            call join_one_column(src, dst, sslots(j), dslots(j), idx, valid)
+            call join_one_column(src, dst, sslots(j), dslots(j), idx, valid, 1)
         end do
         !$omp end parallel do
     end procedure table_colwork_join
     !
     !> Carries ONE column across: the whole body of both loops above, so the two cannot drift.
     !!
-    !! **The three lines are shipped bindings and the order matters.** `deep_copy` gives the
-    !! destination its own storage, kind, width, unit and the source's own nulls; `%gather` then
-    !! selects one source row per output row; `%set_validity` marks the output rows that had no
-    !! counterpart. That last call only ever ADDS nulls -- it never clears one -- which is what
-    !! lets the mask describe the unmatched rows alone and leaves the nulls the source column
-    !! already had exactly where the gather put them.
-    subroutine join_one_column(src, dst, sslot, dslot, idx, valid)
+    !! **One call.** `%gather_from` builds the destination from the source's rows `idx` names in
+    !! a single pass -- kind, width, unit and values, the source's own nulls carried with their
+    !! rows, and every row `valid` marks `.false.` null on top of them. That mask only ever ADDS
+    !! nulls, which is what lets it describe the unmatched rows alone and leaves the nulls the
+    !! source column already had exactly where the gather put them (`feature_risks.md` Risk-182).
+    !! Until stage 4 of `feature_join.md` this was three calls -- `deep_copy`, `%gather`,
+    !! `%set_validity` -- which copied the whole source before rebuilding the copy, held two
+    !! transient copies where this holds one, and walked the rows three times.
+    subroutine join_one_column(src, dst, sslot, dslot, idx, valid, threads)
         type(parquet_table_cache), intent(in) :: src      !! the source column store.
         type(parquet_table_cache), intent(inout) :: dst   !! the destination column store.
         integer, intent(in) :: sslot                      !! source slot.
         integer, intent(in) :: dslot                      !! destination slot.
         integer(int64), intent(in) :: idx(:)              !! per output row: source row, never 0.
         logical, intent(in), optional :: valid(:)         !! per output row: .false. to null it.
+        integer, intent(in) :: threads                    !! threads the gather may split its rows across; 1 serial.
         !
-        call src%cols(sslot)%values%deep_copy(dst%cols(dslot)%values)
         ! A source column with no rows has no row 1 for `idx` to have named, so it cannot be
         ! gathered at all -- every output row is unmatched by construction. Appending null rows to
-        ! the empty copy gives the same result and keeps the kind, width and unit `deep_copy` just
-        ! carried across. Reachable whenever a zero-row right table is joined with how="left".
+        ! an empty copy gives the same result and keeps the kind, width and unit `deep_copy`
+        ! carries across. Reachable whenever a zero-row right table is joined with how="left".
         if (src%cols(sslot)%values%length() < 1_int64) then
+            call src%cols(sslot)%values%deep_copy(dst%cols(dslot)%values)
             call dst%cols(dslot)%values%append_nulls(size(idx, kind=int64))
             return
         end if
-        call dst%cols(dslot)%values%gather(idx)
-        if (present(valid)) call dst%cols(dslot)%values%set_validity(valid)
+        call dst%cols(dslot)%values%gather_from(src%cols(sslot)%values, idx, valid=valid, threads=threads)
     end subroutine join_one_column
     !
-    !> How many threads this mutation may use: 1 (serial) or more.
+    !> The plan for one mutation: how many columns it rewrites at once (`outer`) and how many
+    !! threads each of those gives its column (`inner`). At most one of the two is above 1.
+    !!
+    !! **Two levels, one team.** A reindex and a delete rewrite a column serially, so their only
+    !! level is across columns: `outer` is `colwork_avail`'s team bounded by the column count and
+    !! gated by `colwork_min_columns`, exactly the rule this decision always applied. A GATHER can
+    !! divide one column's rows across a team (`parquet_column%gather`/`%gather_from`), and for a
+    !! gather the level is chosen per table from the same resolved team: **across the columns when
+    !! there are at least as many columns as threads, else inside each column with the whole team,
+    !! the columns one after another.** The second level is what makes a join that carries one or
+    !! two columns use the machine at all -- bounding the team by the column count left a lookup
+    !! join's single carried column rewritten serially whatever the thread count.
+    !!
+    !! **The two levels are never combined.** This library enables no nested parallelism, so a
+    !! team opened inside a team collapses to one thread, silently, and a "hybrid" would measure
+    !! exactly as the outer level alone. `bench/benchmark_join.sh --mode=payload` times the two
+    !! levels side by side per column count; feature_join.md's stage 4 records the measurement
+    !! that fixed the rule.
+    !!
+    !! The test-only hook `parquet_debug_set_colwork_level` (`src/parquet_wrapper.cpp`) forces one
+    !! level -- 1 across, 2 within -- for that benchmark and for the negative controls in
+    !! `test/test_table_parallel.f90`. It can only pick a level the operation has, so it never
+    !! threads a reindex within a column, and it never opens a team the gate declined.
+    subroutine colwork_plan(cache, splits, slots, outer, inner, nout)
+        type(parquet_table_cache), intent(in) :: cache !! the column store whose columns are measured.
+        logical, intent(in) :: splits                  !! the operation can divide one column's rows across a team.
+        integer, intent(in) :: slots(:)                !! slots the mutation will rewrite.
+        integer, intent(out) :: outer                  !! columns rewritten at once; 1 for one at a time.
+        integer, intent(out) :: inner                  !! threads inside each column; 1 for serial.
+        integer(int64), intent(in), optional :: nout   !! destination rows, where they differ from the columns' own.
+        integer :: avail, mode, min_columns
+        integer(int64) :: min_elements
+        !
+        outer = 1
+        inner = 1
+        avail = colwork_avail(cache, slots, nout)
+        if (avail <= 1) return
+        call colwork_gate_limits(min_elements, min_columns)
+        mode = 1
+        if (splits) then
+            mode = colwork_level_mode()
+            if (mode == 0) then
+                mode = 2
+                if (size(slots) >= avail .and. size(slots) >= min_columns) mode = 1
+            end if
+        end if
+        if (mode == 1) then
+            if (size(slots) < min_columns) return
+            outer = min(avail, size(slots))
+        else
+            inner = avail
+        end if
+    end subroutine colwork_plan
+    !
+    !> How many columns a mutation that rewrites each column serially may rewrite at once: the
+    !! plan for an operation with no within-column level. `table_colwork_clone` uses it.
+    integer function colwork_threads(cache, slots) result(n)
+        type(parquet_table_cache), intent(in) :: cache !! the column store.
+        integer, intent(in) :: slots(:)                !! slots the mutation will rewrite.
+        integer :: inner
+        !
+        call colwork_plan(cache, .false., slots, n, inner)
+    end function colwork_threads
+    !
+    !> The team this mutation may open at all, before `colwork_plan` decides where: 1 (serial) or
+    !! more.
     !!
     !! **Deliberately conservative, and it picks a DEFAULT rather than refusing anything** -- the
     !! same shape as `parallel_prefetch_ok` (src/parquet_tables_read.f90) and `pf_sort_threads`
-    !! (src/parquet_sorting_keys.f90), for the same reasons. Four things make it answer 1:
+    !! (src/parquet_sorting_keys.f90), for the same reasons. Three things make it answer 1:
     !!
-    !!   * **Fewer mutable columns than `colwork_min_columns`.** The parallelism is bounded by the
-    !!     column count, so a one-column table can use nothing and a thread team would be pure
-    !!     overhead. This is the opposite bound from `%prefetch`'s, which is bounded by I/O.
     !!   * **Already inside a parallel region.** Nested regions are the caller's business; without
     !!     this, T threads would each ask for T more, and T*T oversubscription is slower than not
     !!     threading at all. `omp_get_max_threads()` reads an ICV, not the current team size, so
     !!     inside an 8-thread region it still answers 8.
-    !!   * **Too little work.** See `colwork_min_elements`.
+    !!   * **Too little work.** See `colwork_min_elements`; measured on the larger of the columns'
+    !!     own rows and `nout`, the rows the mutation will produce.
     !!   * **`parquet_set_table_threads(1)`**, which is how a caller -- and every equality test in
     !!     the suite -- forces the serial path through the public API rather than a debug hook.
     !!
-    !! The cap only ever reduces: the answer is never more than OpenMP offers and never more than
-    !! there are columns, so `T` transient column copies are at most one extra copy of the table.
+    !! (The fourth reason this decision used to have -- fewer columns than `colwork_min_columns` --
+    !! now belongs to the across-columns level alone, in `colwork_plan`.)
+    !!
+    !! The cap only ever reduces: the answer is never more than OpenMP offers, and the plan never
+    !! rewrites more columns at once than there are, so `T` transient column copies are at most one
+    !! extra copy of the table -- and one extra copy of one column when the team goes inside it.
     !!
     !! **No ownership guard is needed here, but the reason differs between the two callers and both
     !! halves have to hold.** Every *mutation* caller has already run `table_check_not_shared`, so
@@ -419,15 +506,17 @@ contains
     !! `%prefetch`'s are. **`table_colwork_clone` does NOT run that guard** -- `%clone` checks only
     !! that the table is open -- and is safe for a different reason: it only ever READS the source
     !! (`deep_copy` takes `self` intent(in)) and writes a destination the caller has just created
-    !! and nobody else can reach. Do not "unify" these into one sentence: a future caller that
-    !! mutated a possibly-shared source would satisfy the second argument while breaking the first.
-    integer function colwork_threads(cache, slots) result(n)
+    !! and nobody else can reach. The join's carry is the clone's case. Do not "unify" these into
+    !! one sentence: a future caller that mutated a possibly-shared source would satisfy the second
+    !! argument while breaking the first.
+    integer function colwork_avail(cache, slots, nout) result(n)
         use parquet_settings, only : parquet_get_table_threads, parquet_clamp_to_affinity
 #ifdef _OPENMP
         use omp_lib, only : omp_get_max_threads, omp_in_parallel
 #endif
         type(parquet_table_cache), intent(in) :: cache !! the column store.
         integer, intent(in) :: slots(:)                !! slots the mutation will rewrite.
+        integer(int64), intent(in), optional :: nout   !! destination rows, where they differ from the columns' own.
         integer :: cap, min_columns
         integer(int64) :: min_elements
         !
@@ -436,12 +525,10 @@ contains
         ! Cheapest exit first: this one costs nothing and needs neither limit.
         if (omp_in_parallel()) return
         call colwork_gate_limits(min_elements, min_columns)
-        if (size(slots) < min_columns) return
-        if (largest_column_elements(cache, slots) < min_elements) return
+        if (largest_column_elements(cache, slots, nout) < min_elements) return
         n = omp_get_max_threads()
         cap = parquet_get_table_threads()
         if (cap > 0 .and. cap < n) n = cap
-        if (n > size(slots)) n = size(slots)
         if (n < 1) n = 1
         ! **Clamped to the affinity mask, like every other thread count this library resolves.**
         ! `omp_get_max_threads()` answers what the environment asked for; a process bound by
@@ -459,7 +546,24 @@ contains
         ! message names what this rewrite actually asked for rather than the environment's ICV.
         n = parquet_clamp_to_affinity(n, "table rewriting")
 #endif
-    end function colwork_threads
+    end function colwork_avail
+    !
+    !> The level the test-only hook asks for: 0 automatic, 1 across columns, 2 within each column.
+    !! Read once per mutation through a local `bind(C)` interface, as `join_engine_mode`
+    !! (`src/parquet_tables_join.f90`) reads its selector.
+    integer function colwork_level_mode() result(mode)
+        use iso_c_binding, only : c_int64_t
+        interface
+            !> The selector's value: 0 automatic, 1 across columns, 2 within a column.
+            function get_level() result(res) bind(C, name="parquet_debug_get_colwork_level")
+                import :: c_int64_t
+                integer(c_int64_t) :: res
+            end function get_level
+        end interface
+        !
+        mode = int(get_level())
+        if (mode < 0 .or. mode > 2) mode = 0
+    end function colwork_level_mode
     !
     !> The two gate limits actually in force: the test-only override where one is set, otherwise the
     !> real constant.
@@ -503,41 +607,62 @@ contains
     !! The largest rather than the total, because the floor asks "is one column's worth of work
     !! big enough to be worth a thread", and every column of a table has the same row count -- so
     !! this reduces to the row count times the widest column.
-    integer(int64) function largest_column_elements(cache, slots) result(biggest)
+    integer(int64) function largest_column_elements(cache, slots, nout) result(biggest)
         type(parquet_table_cache), intent(in) :: cache !! the column store.
         integer, intent(in) :: slots(:)                !! slots the mutation will rewrite.
+        integer(int64), intent(in), optional :: nout   !! destination rows, where they differ from the columns' own.
         integer :: j
-        integer(int64) :: here
+        integer(int64) :: here, rows
         !
         biggest = 0_int64
         do j = 1, size(slots)
-            here = cache%cols(slots(j))%values%length() * &
-                int(max(cache%cols(slots(j))%values%colwidth(), 1), int64)
+            ! The larger of what the column holds and what the mutation will produce: a gather
+            ! reads the one and writes the other, and either can be the big one.
+            rows = cache%cols(slots(j))%values%length()
+            if (present(nout)) rows = max(rows, nout)
+            here = rows*int(max(cache%cols(slots(j))%values%colwidth(), 1), int64)
             if (here > biggest) biggest = here
         end do
     end function largest_column_elements
     !
-    !> Records, for the test suite only, how many threads the last row-structural mutation used.
+    !> Records, for the test suite only, the team the last row-structural mutation used and the
+    !! level it spent it at: the count is `max(outer, inner)` -- the size of the one team that
+    !! opened -- and the level is 0 serial, 1 across columns, 2 within a column.
     !!
-    !! Pushed to a C++ global for the reason CLAUDE.md gives ("A Fortran-side debug hook has to be
-    !! PUBLIC, so prefer a C++ one"): the number is a local of `table_colwork`, and a Fortran hook
-    !! for it would have to be a public procedure in this module, visible to every `use parquet`.
-    !! The same shape as `parquet_debug_note_prefetch_threads` (src/parquet_tables_read.f90).
+    !! Pushed to two C++ globals for the reason CLAUDE.md gives ("A Fortran-side debug hook has to
+    !! be PUBLIC, so prefer a C++ one"): the numbers are locals of `table_colwork`, and a Fortran
+    !! hook for them would have to be a public procedure in this module, visible to every
+    !! `use parquet`. The same shape as `parquet_debug_note_prefetch_threads`
+    !! (src/parquet_tables_read.f90).
     !!
     !! Called once per mutation, on a path about to rewrite every column of a table, so the cost is
     !! unmeasurable. **That ratio is the rule**: a debug hook may sit on a coarse operation like
     !! this one, never on a per-row or per-element path.
-    subroutine parquet_debug_note_table_threads(n)
+    subroutine parquet_debug_note_table_threads(outer, inner)
         use iso_c_binding, only : c_int64_t
-        integer(int64), intent(in) :: n !! threads the mutation resolved to; 1 when it ran serially.
+        integer, intent(in) :: outer !! columns rewritten at once; 1 for one at a time.
+        integer, intent(in) :: inner !! threads inside each column; 1 for serial.
         interface
+            !> Records the team's size.
             subroutine set_used(k) bind(C, name="parquet_debug_set_table_threads_used")
                 import :: c_int64_t
                 integer(c_int64_t), value :: k
             end subroutine set_used
+            !> Records the level: 0 serial, 1 across columns, 2 within a column.
+            subroutine set_level(k) bind(C, name="parquet_debug_set_table_level_used")
+                import :: c_int64_t
+                integer(c_int64_t), value :: k
+            end subroutine set_level
         end interface
         !
-        call set_used(int(n, c_int64_t))
+        call set_used(int(max(outer, inner), c_int64_t))
+        if (outer > 1) then
+            call set_level(1_c_int64_t)
+        else if (inner > 1) then
+            call set_level(2_c_int64_t)
+        else
+            call set_level(0_c_int64_t)
+        end if
     end subroutine parquet_debug_note_table_threads
     !
     module procedure table_check_not_shared

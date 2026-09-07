@@ -66,6 +66,8 @@ contains
                 test_build_from_threaded_equals_serial), &
             new_unittest("threaded gather equals the serial gather", &
                 test_gather_threaded_equals_serial), &
+            new_unittest("threaded gather_from equals the serial gather_from, mask included", &
+                test_gather_from_threaded_equals_serial), &
             new_unittest("threaded trim_all/strip_all equal the serial ones", &
                 test_compact_threaded_equals_serial), &
             new_unittest("threaded delete_by_mask equals the serial delete_by_mask", &
@@ -560,6 +562,64 @@ contains
         call check(error, ever_threaded, "negative control: at least one gather arm must have threaded " // &
             "(if every test in this suite fires at once, THREADS_FOR_TEST is below STRING_MIN_THREADS)")
     end subroutine test_gather_threaded_equals_serial
+    !
+    !> **`gather_from` with an EXPLICIT team**, the route `parquet_table`'s per-column rewrite takes
+    !! when it spends its team inside one column: `threads=` is honoured on the terms
+    !! `bulk_threads_explicit` gives rather than resolved from the setting, so this A/B forces the
+    !! count rather than the cap. The mask nulls every fifth destination element -- the part the
+    !! plain `gather` A/B above cannot see, since phase 1 is where the mask is read -- and the
+    !! negative control asks the store's own rule (`parquet_debug_string_bulk_threads` with the
+    !! explicit count) whether the threaded arm really opens a team.
+    subroutine test_gather_from_threaded_equals_serial(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: src, ser, par
+        integer(int64), allocatable :: idx(:)
+        logical, allocatable :: mask(:)
+        integer(int64) :: n, k, m, stride
+        logical :: ever_threaded
+        integer :: saved_threads
+        !
+        ever_threaded = .false.
+        if (threading_unavailable(error)) return
+        saved_threads = borrow_threads()
+        do stride = 0_int64, 3_int64, 3_int64
+            do n = 1021_int64, 1022_int64
+                call build(src, n, stride)
+                m = n + n/3_int64
+                allocate(idx(m), mask(m))
+                do k = 1_int64, m
+                    idx(k) = 1_int64 + mod(k*7_int64, n)
+                    mask(k) = mod(k, 5_int64) /= 0_int64
+                end do
+                !
+                call parquet_debug_set_string_min_bytes(0_int64)
+                call ser%gather_from(src, idx, valid=mask, threads=1)
+                !
+                call parquet_debug_set_string_min_bytes(TINY_FLOOR)
+                if (parquet_debug_string_bulk_threads(src, THREADS_FOR_TEST) > 1) ever_threaded = .true.
+                call par%gather_from(src, idx, valid=mask, threads=THREADS_FOR_TEST)
+                call parquet_debug_set_string_min_bytes(0_int64)
+                !
+                call check(error, ser%size() == par%size(), "both gather_from arms must produce the same row count")
+                if (allocated(error)) return
+                call check(error, ser%null_count() == par%null_count(), &
+                    "both gather_from arms must RECOUNT the same number of nulls")
+                if (allocated(error)) return
+                call check(error, same_column(ser, par), &
+                    "threaded gather_from must equal the serial gather_from in every element and null")
+                if (allocated(error)) return
+                call check(error, par%is_null(5_int64) .and. par%length(5_int64) == 0_int64, &
+                    "a masked element must be null with a zero-width slot on the threaded arm")
+                if (allocated(error)) return
+                call check(error, par%validate(), "the threaded gather_from satisfies the class invariants")
+                if (allocated(error)) return
+                deallocate(idx, mask)
+            end do
+        end do
+        call return_threads(saved_threads)
+        call check(error, ever_threaded, "negative control: at least one gather_from arm must have threaded " // &
+            "(if every test in this suite fires at once, THREADS_FOR_TEST is below STRING_MIN_THREADS)")
+    end subroutine test_gather_from_threaded_equals_serial
     !
     !> **`build_from`'s threaded fill is a genuinely different shape from its serial one**, so this
     !! is an A/B in the same sense as the reindex tests: one loop against three phases plus a scan.

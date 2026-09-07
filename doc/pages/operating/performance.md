@@ -183,7 +183,8 @@ OMP_PLACES=sockets avoids it.
 ```
 
 The first word names whichever subsystem noticed — `sorting`, `table prefetching`,
-`table rewriting`, `string operations`, `random draws`, `spatial`, `healpix` or `index`. There is
+`table rewriting`, `column gathering`, `string operations`, `random draws`, `spatial`, `healpix` or
+`index`. There is
 one line per process, not one per subsystem: they all have the same cause and the same fix.
 
 The warning fires only when the clamp actually reduced the thread count, so a job deliberately

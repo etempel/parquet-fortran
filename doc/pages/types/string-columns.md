@@ -401,6 +401,7 @@ call col%gather(idx)            ! keep the listed elements, in the listed order;
 call col%append_nulls(n)        ! append n null elements, growing capacity once
 call col%set_validity(valid)    ! null every element whose mask entry is .false.
 call col%set_where(mask, value) ! write one value into every element whose mask entry is .true.
+call dst%gather_from(src, idx, valid) ! build dst from src's listed elements; a .false. mask entry nulls one
 ```
 
 **Prefer these to a loop.** `delete_by_mask` is the bulk counterpart of `erase`: deleting `m`
@@ -416,6 +417,16 @@ too, and a null one becomes valid — and stores the value verbatim, blanks incl
 exactly one mask entry per element, and an all-true mask for `set_validity` or an all-false one for
 `set_where` returns without touching a buffer.
 
+`gather_from` is `gather` from *another* column, in one rebuild: `dst` is cleared and rebuilt from
+`src`'s listed elements — `clone` + `gather` + `set_validity` as one operation, holding one copy
+where the three hold two — and `src` is never written. The optional `valid` mask has one entry per
+listed element and only ever adds nulls, exactly as `set_validity`'s does; a masked element takes a
+zero-width slot rather than a copy of bytes nothing may read. An optional `threads=` names the team
+the rebuild may split the rows across, honoured on the terms an explicit `parquet_set_string_threads`
+is (the affinity mask, the payload floor and the break-even of
+[Threading inside one column](#threading-inside-one-column)) rather than resolved from the cap —
+the route `parquet_table` takes when it spends its team inside one column.
+
 `reindex` validates `perm` completely before touching a buffer — length, range and no duplicates —
 so a bad permutation aborts with the column unchanged. `gather` checks only the range, deliberately:
 refusing repeats would need a seen-set sized by the column on every call, which is the cost this
@@ -423,9 +434,10 @@ primitive exists to avoid. So `idx` may name an element more than once, and the 
 shorter than, as long as, or longer than the column it replaces. `append_nulls(0)` is a no-op; a
 negative count aborts.
 
-**All three of `reindex`, `delete_by_mask` and `gather` invalidate every outstanding handle** —
-see [Handle lifetime rules](#handle-lifetime-rules). `set_validity` and `set_where` do not: every
-index stays where it is, so a handle survives them as it survives `set`. All five are threaded on a
+**All three of `reindex`, `delete_by_mask` and `gather` invalidate every outstanding handle**, and
+so does `gather_from` for handles into `dst` (those into `src` survive, since `src` is not written)
+— see [Handle lifetime rules](#handle-lifetime-rules). `set_validity` and `set_where` do not: every
+index stays where it is, so a handle survives them as it survives `set`. All six are threaded on a
 large enough column, along with `build_from`, `strip_all`/`trim_all`, `to_character` and
 `statistics` — see [Threading inside one column](#threading-inside-one-column).
 

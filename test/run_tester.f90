@@ -22,6 +22,7 @@ program run_tester
     use testdrive, only : new_testsuite, testsuite_type
     use test_runner_support, only : run_tester_args, run_tester_main
     use test_columns, only : collect_tests_parquet_columns
+    use test_columns_parallel, only : collect_tests_columns_parallel
     use test_list, only : collect_tests_parquet_list
     use test_map, only : collect_tests_parquet_map
     use test_struct, only : collect_tests_parquet_struct
@@ -45,7 +46,8 @@ program run_tester
         new_testsuite("map", collect_tests_parquet_map), &
         new_testsuite("struct", collect_tests_parquet_struct), &
         new_testsuite("temporal", collect_tests_parquet_temporal), &
-        new_testsuite("string_parallel", collect_tests_string_parallel) &
+        new_testsuite("string_parallel", collect_tests_string_parallel), &
+        new_testsuite("columns_parallel", collect_tests_columns_parallel) &
         ]
     !
     call run_tester_main(testsuites, suite_name, test_name)

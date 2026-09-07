@@ -2290,6 +2290,16 @@ program error_scenarios
         call scenario_column_gather_out_of_range()
     case ("string_column_gather_out_of_range")
         call scenario_string_column_gather_out_of_range()
+    case ("column_gather_from_out_of_range")
+        call scenario_column_gather_from_out_of_range()
+    case ("column_gather_from_mask_length_mismatch")
+        call scenario_column_gather_from_mask_length_mismatch()
+    case ("column_gather_from_container_source")
+        call scenario_column_gather_from_container_source()
+    case ("string_column_gather_from_out_of_range")
+        call scenario_string_column_gather_from_out_of_range()
+    case ("string_column_gather_from_length_mismatch")
+        call scenario_string_column_gather_from_length_mismatch()
     case ("table_append_self")
         call scenario_table_append_self()
     case ("table_append_unknown_column")
@@ -18345,6 +18355,75 @@ contains
         call c%gather([1_int64, 9_int64])   ! -> aborts
         print '(a,i0)', "unexpectedly gathered a row outside the column, n=", c%length()
     end subroutine scenario_column_gather_out_of_range
+
+    !> `%gather_from` refuses a source row outside the SOURCE, as `%gather` refuses one outside
+    !! the column, and names the source's row count -- the destination has none yet. The in-range
+    !! call first is the control: it must be accepted, or the abort below would say nothing about
+    !! the range.
+    subroutine scenario_column_gather_from_out_of_range()
+        type(parquet_column) :: c, d
+        call c%init(PK_INT32, 3_int64)
+        call c%set_all([1_int32, 2_int32, 3_int32])
+        call d%gather_from(c, [3_int64, 1_int64])
+        print '(a,i0)', "control: an in-range gather_from was accepted, n=", d%length()
+        call d%gather_from(c, [1_int64, 9_int64])   ! -> aborts
+        print '(a,i0)', "unexpectedly gathered a row outside the source, n=", d%length()
+    end subroutine scenario_column_gather_from_out_of_range
+
+    !> `%gather_from`'s mask has one entry per DESTINATION row -- the index list's length, not the
+    !! source's row count, which is the mistake a caller thinking of `%set_validity` would make.
+    subroutine scenario_column_gather_from_mask_length_mismatch()
+        type(parquet_column) :: c, d
+        call c%init(PK_INT32, 3_int64)
+        call c%set_all([1_int32, 2_int32, 3_int32])
+        call d%gather_from(c, [1_int64, 2_int64], valid=[.true., .false.])
+        print '(a,i0)', "control: a matching gather_from mask was accepted, n=", d%length()
+        call d%gather_from(c, [1_int64, 2_int64], valid=[.true., .false., .true.])   ! -> aborts
+        print '(a,i0)', "unexpectedly accepted a mask of the source's length, n=", d%length()
+    end subroutine scenario_column_gather_from_mask_length_mismatch
+
+    !> A container column is gathered in place with `%gather`, which is how a join carries one
+    !! (feature_risks.md Risk-188); `%gather_from` refuses it as a source rather than copying a
+    !! layout only the container knows. The in-place gather first is the control.
+    subroutine scenario_column_gather_from_container_source()
+        type(parquet_column) :: c, d
+        type(parquet_list_column), allocatable :: lc
+        class(parquet_container_column), allocatable :: cc
+        allocate(lc)
+        call lc%init(PK_INT32)
+        call lc%append_row([4_int32, 5_int32])
+        call lc%append_row([6_int32])
+        call move_alloc(lc, cc)
+        call c%adopt_container(cc)
+        call c%gather([2_int64, 1_int64])
+        print '(a,i0)', "control: the container column gathers in place, rows=", c%length()
+        call d%gather_from(c, [1_int64])   ! -> aborts
+        print '(a,i0)', "unexpectedly gathered from a container column, n=", d%length()
+    end subroutine scenario_column_gather_from_container_source
+
+    !> The string store's `gather_from` carries its own range check, as its `gather` does; the
+    !! in-range call first is the control.
+    subroutine scenario_string_column_gather_from_out_of_range()
+        type(parquet_string_column) :: col, dst
+        call col%append_string("a")
+        call col%append_string("bc")
+        call dst%gather_from(col, [2_int64, 1_int64])
+        print '(a,i0)', "control: an in-range gather_from was accepted, n=", dst%size()
+        call dst%gather_from(col, [2_int64, 5_int64])   ! -> aborts
+        print '(a,i0)', "unexpectedly gathered an element outside the source, n=", dst%size()
+    end subroutine scenario_string_column_gather_from_out_of_range
+
+    !> The string store's `gather_from` mask has one entry per selected element; the matching mask
+    !! first is the control.
+    subroutine scenario_string_column_gather_from_length_mismatch()
+        type(parquet_string_column) :: col, dst
+        call col%append_string("a")
+        call col%append_string("bc")
+        call dst%gather_from(col, [2_int64, 1_int64], valid=[.true., .false.])
+        print '(a,i0)', "control: a matching gather_from mask was accepted, nulls=", dst%null_count()
+        call dst%gather_from(col, [2_int64, 1_int64], valid=[.true.])   ! 1 entry for 2 elements -> aborts
+        print '(a,i0)', "unexpectedly accepted a short gather_from mask, n=", dst%size()
+    end subroutine scenario_string_column_gather_from_length_mismatch
 
     !> The string store's own gather is reachable directly, so it carries its own range check
     !! rather than relying on parquet_column's.

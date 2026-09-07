@@ -85,6 +85,24 @@ module test_table_parallel
             import :: c_int64_t
             integer(c_int64_t), value :: n !! new minimum, or 0 to restore.
         end subroutine parquet_debug_set_colwork_min_columns
+        !> The level the last mutation spent its team at: 0 serial, 1 across columns, 2 within one.
+        function parquet_debug_get_table_level_used() result(res) &
+            bind(C, name="parquet_debug_get_table_level_used")
+            import :: c_int64_t
+            integer(c_int64_t) :: res !! the level of the last mutation.
+        end function parquet_debug_get_table_level_used
+        !> Clears the level record, so a test observes its own mutation rather than an earlier one.
+        subroutine parquet_debug_set_table_level_used(n) &
+            bind(C, name="parquet_debug_set_table_level_used")
+            import :: c_int64_t
+            integer(c_int64_t), value :: n !! new record value; tests use a value no mutation writes.
+        end subroutine parquet_debug_set_table_level_used
+        !> Forces the level a gather spends its team at: 0 automatic, 1 across columns, 2 within.
+        subroutine parquet_debug_set_colwork_level(mode) &
+            bind(C, name="parquet_debug_set_colwork_level")
+            import :: c_int64_t
+            integer(c_int64_t), value :: mode !! 0, 1 or 2.
+        end subroutine parquet_debug_set_colwork_level
         !> Threads the last internally-parallel PREFETCH was given; 0 when it ran serially.
         function parquet_debug_get_prefetch_threads_used() result(res) &
             bind(C, name="parquet_debug_get_prefetch_threads_used")
@@ -176,6 +194,8 @@ contains
                 test_has_nulls_survives_concurrent_null), &
             new_unittest("a join's threads= reaches the sort and not the column rewrite", &
                 test_join_thread_split), &
+            new_unittest("a gather's team goes inside the column when the columns are fewer than the threads", &
+                test_colwork_level_rule), &
             new_unittest("bounded= reads correctly through both parallel paths", &
                 test_bounded_parallel_paths) &
             ]
@@ -355,7 +375,7 @@ contains
         call check_rows_consistent(error, par, "clone")
         if (allocated(error)) return
         ! The source must be untouched: the worker reads it and writes only the destination, which
-        ! is what makes cloning a shared table safe to thread at all (colwork_threads' own note).
+        ! is what makes cloning a shared table safe to thread at all (colwork_avail's own note).
         call check_rows_consistent(error, src, "clone (source)")
     end subroutine test_clone_parallel_equals_serial
     !
@@ -1275,7 +1295,7 @@ contains
     !> what the override is for; the first and third are what stop a hook that does nothing (or one
     !> that never restores) from passing.
     !>
-    !> **Each limit is raised on its own, never both at once.** `colwork_threads` returns 1 if *any*
+    !> **Each limit is raised on its own, never both at once.** `colwork_plan` answers serial if *any*
     !> gate closes, so overriding both together would pass identically against an implementation that
     !> read only one of them — which is exactly the defect two separate overrides could introduce.
     !>
@@ -2041,7 +2061,7 @@ contains
     !! (`suite_is_safe_to_parallelize`), so nothing else writes the records in between.
     !!
     !! The join is made to DETACH so the column work is a real gather over all five columns rather
-    !! than a no-op, which is what clears `colwork_threads`' floor (the Risk-49 trap).
+    !! than a no-op, which is what clears `colwork_avail`'s floor (the Risk-49 trap).
     subroutine test_join_thread_split(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_table) :: a, b, c, d, e
@@ -2058,7 +2078,7 @@ contains
 #else
         nt = min(4, omp_get_num_procs())
         if (nt < 2) then
-            call skip_test(error, "needs at least two processors: colwork_threads clamps to " // &
+            call skip_test(error, "needs at least two processors: colwork_avail clamps to " // &
                 "omp_get_num_procs(), so every arm would resolve to 1")
             return
         end if
@@ -2189,6 +2209,229 @@ contains
             "and this is the mirror of arm 3")
 #endif
     end subroutine test_join_thread_split
+    !
+    !> **Where a gather's team goes is a rule, and this pins it in both directions.** `colwork_plan`
+    !! (`src/parquet_tables_parallel.f90`) spends a gather's team ACROSS the columns when there are
+    !! at least as many columns as threads, and otherwise INSIDE each column in turn, its rows
+    !! across the whole team. The second level is what lets a join carrying one column use the
+    !! machine at all; the first is the shape every other mutation has always had. Nothing in a
+    !! result can tell the two apart -- the rows come out the same at every team size -- so the
+    !! only observables are the two records the plan writes on every mutation: the team's size and
+    !! the level it went to. A plan that always chose one level, or none, passes every equality
+    !! test in this suite and fails here.
+    !!
+    !! The team is fixed at two through `parquet_set_table_threads(2)` so the arms hold on any
+    !! machine with two processors: five columns are at least two (across), one column is not
+    !! (within). The work floor is lowered for the one-column tables, whose 20001 rows sit under
+    !! it. The forcing hook (`parquet_debug_set_colwork_level`) is then shown to pick only a level
+    !! the operation has -- across on one column has no second column to give a thread to and
+    !! stays serial; within on a sort's replay does not exist and stays across -- and the serial
+    !! cap is shown to write the level record too, so no arm can read a record an earlier one
+    !! left. The last arm is the CARRY side: a non-detaching join carrying one column takes the
+    !! same rule through `table_colwork_join`. Every threaded table is compared with a serially
+    !! capped one, since a level that gathered the wrong rows would otherwise be the fast wrong
+    !! answer this whole file exists to exclude.
+    subroutine test_colwork_level_rule(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b, c, r, s, ser
+        integer(int32) :: k(NROW), rk(NROW + 1), n(NROW)
+        integer :: used, level, i
+        !
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: colwork_plan resolves inside #ifdef _OPENMP, so every arm " // &
+            "below would read a serial plan and the rule would hold for the wrong reason")
+        return
+#else
+        if (omp_get_num_procs() < 2 .or. omp_get_max_threads() < 2) then
+            call skip_test(error, "needs two processors and OMP_NUM_THREADS >= 2: the team is capped at " // &
+                "two, and a team of one has no level to choose")
+            return
+        end if
+        call fill_key(k)
+        rk(1:NROW) = k
+        rk(NROW + 1) = k(1)
+        call build_key_table(b, rk)
+        do i = 1, NROW
+            n(i) = i
+        end do
+        !
+        ! ---- Arm 1: five columns on a team of two -- the columns can occupy the team: ACROSS.
+        call build_fixture(a)
+        call parquet_set_table_threads(2)
+        call reset_level_records()
+        call a%join(b, "k", how="left")
+        used = int(parquet_debug_get_table_threads_used())
+        level = int(parquet_debug_get_table_level_used())
+        call parquet_set_table_threads(1)
+        call build_fixture(ser)
+        call ser%join(b, "k", how="left")
+        call parquet_reset_settings()
+        call check(error, level == 1 .and. used == 2, &
+            "five columns on a team of two must be rewritten ACROSS the columns, two at a time")
+        if (allocated(error)) return
+        call check_tables_identical(error, a, ser, "join rewritten across columns")
+        if (allocated(error)) return
+        !
+        ! ---- Arm 2: one column on a team of two -- it cannot occupy the team: WITHIN.
+        call parquet_debug_set_colwork_min_elements(1000_c_int64_t)
+        call build_key_table(c, k)
+        call parquet_set_table_threads(2)
+        call reset_level_records()
+        call c%join(b, "k", how="left")
+        used = int(parquet_debug_get_table_threads_used())
+        level = int(parquet_debug_get_table_level_used())
+        call parquet_set_table_threads(1)
+        call build_key_table(ser, k)
+        call ser%join(b, "k", how="left")
+        call parquet_reset_settings()
+        call check(error, level == 2 .and. used == 2, &
+            "one column on a team of two must be gathered WITHIN the column, its rows across both threads")
+        if (allocated(error)) return
+        call check_key_tables_identical(error, c, ser, "join rewritten within the column", with_p=.false.)
+        if (allocated(error)) return
+        !
+        ! ---- Arm 3: the hook forces across on the one-column table. There is no second column to
+        ! give a thread to, so the plan is serial: the hook chooses a level, it never opens a team
+        ! the gate declined.
+        call build_key_table(c, k)
+        call parquet_debug_set_colwork_level(1_c_int64_t)
+        call parquet_set_table_threads(2)
+        call reset_level_records()
+        call c%join(b, "k", how="left")
+        used = int(parquet_debug_get_table_threads_used())
+        level = int(parquet_debug_get_table_level_used())
+        call parquet_debug_set_colwork_level(0_c_int64_t)
+        call parquet_reset_settings()
+        call check(error, level == 0 .and. used == 1, &
+            "forcing the across level on a one-column table must leave the rewrite serial")
+        if (allocated(error)) return
+        !
+        ! ---- Arm 4: the hook forces within on the five-column table: the team goes inside each
+        ! column in turn, and the rows still come out right.
+        call build_fixture(a)
+        call parquet_debug_set_colwork_level(2_c_int64_t)
+        call parquet_set_table_threads(2)
+        call reset_level_records()
+        call a%join(b, "k", how="left")
+        used = int(parquet_debug_get_table_threads_used())
+        level = int(parquet_debug_get_table_level_used())
+        call parquet_debug_set_colwork_level(0_c_int64_t)
+        call parquet_set_table_threads(1)
+        call build_fixture(ser)
+        call ser%join(b, "k", how="left")
+        call parquet_reset_settings()
+        call check(error, level == 2 .and. used == 2, &
+            "forcing the within level on a five-column table must spend the team inside each column")
+        if (allocated(error)) return
+        call check_tables_identical(error, a, ser, "join forced within the column")
+        if (allocated(error)) return
+        !
+        ! ---- Arm 5: a sort's replay has no within-column level, so forced within it stays across.
+        call build_fixture(s)
+        call parquet_debug_set_colwork_level(2_c_int64_t)
+        call parquet_set_table_threads(2)
+        call reset_level_records()
+        call s%sort_by(["k"])
+        used = int(parquet_debug_get_table_threads_used())
+        level = int(parquet_debug_get_table_level_used())
+        call parquet_debug_set_colwork_level(0_c_int64_t)
+        call parquet_reset_settings()
+        call check(error, level == 1 .and. used == 2, &
+            "a sort's replay has no within-column level, so the hook must leave it across columns")
+        if (allocated(error)) return
+        !
+        ! ---- Arm 6: the serial cap writes the level record too, or an earlier arm's record could
+        ! stand in for a later one.
+        call build_fixture(a)
+        call parquet_set_table_threads(1)
+        call reset_level_records()
+        call a%join(b, "k", how="left")
+        used = int(parquet_debug_get_table_threads_used())
+        level = int(parquet_debug_get_table_level_used())
+        call parquet_reset_settings()
+        call check(error, level == 0 .and. used == 1, "a serial rewrite must record level 0 and a team of 1")
+        if (allocated(error)) return
+        !
+        ! ---- Arm 7: the CARRY side. `r` holds every key of `k` once, in order, so the join keeps
+        ! this table's rows in place and the only mutation is the carry of `r`'s one payload
+        ! column through table_colwork_join -- one column on a team of two: WITHIN.
+        call parquet_new_table(r)
+        call r%add_column("k", k)
+        call r%add_column("p", n)
+        call build_key_table(c, k)
+        call parquet_set_table_threads(2)
+        call reset_level_records()
+        call c%join(r, "k", how="left")
+        used = int(parquet_debug_get_table_threads_used())
+        level = int(parquet_debug_get_table_level_used())
+        call parquet_set_table_threads(1)
+        call build_key_table(ser, k)
+        call ser%join(r, "k", how="left")
+        call parquet_reset_settings()
+        call parquet_debug_set_colwork_min_elements(0_c_int64_t)
+        call check(error, level == 2 .and. used == 2, &
+            "a join carrying one column on a team of two must gather it within the column")
+        if (allocated(error)) return
+        call check_key_tables_identical(error, c, ser, "join carrying one column within the column", with_p=.true.)
+        if (allocated(error)) return
+        !
+        ! ---- Arm 8: the work floor sees the OUTPUT rows. The right table has 100 rows, far under a
+        ! floor of 5000 elements, and the join produces NROW rows, far over it -- a floor measured
+        ! on the source alone would keep this rewrite serial, which is exactly what kept a
+        ! lookup join's 10M-row carry serial before stage 4 of feature_join.md.
+        call parquet_new_table(r)
+        call r%add_column("k", k(1:100))
+        call r%add_column("p", n(1:100))
+        call build_key_table(c, k)
+        call parquet_debug_set_colwork_min_elements(5000_c_int64_t)
+        call parquet_set_table_threads(2)
+        call reset_level_records()
+        call c%join(r, "k", how="left")
+        used = int(parquet_debug_get_table_threads_used())
+        level = int(parquet_debug_get_table_level_used())
+        call parquet_set_table_threads(1)
+        call build_key_table(ser, k)
+        call ser%join(r, "k", how="left")
+        call parquet_reset_settings()
+        call parquet_debug_set_colwork_min_elements(0_c_int64_t)
+        call check(error, level == 2 .and. used == 2, &
+            "the work floor must be measured on the rows the carry PRODUCES, not on the 100-row source")
+        if (allocated(error)) return
+        call check_key_tables_identical(error, c, ser, "join carrying one column from a small source", with_p=.true.)
+#endif
+    end subroutine test_colwork_level_rule
+    !
+    !> `check_tables_identical` for the one-column tables of `test_colwork_level_rule`: the key
+    !! column, and with `with_p` the carried `p` column too, values and nulls.
+    subroutine check_key_tables_identical(error, got, want, what, with_p)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(parquet_table), intent(inout) :: got           !! the table rewritten on a team.
+        type(parquet_table), intent(inout) :: want          !! the reference, rewritten serially.
+        character(len=*), intent(in) :: what                !! operation name, for the messages.
+        logical, intent(in) :: with_p                       !! whether both tables carry a `p` column.
+        integer(int32), allocatable :: gk(:), wk(:), gp(:), wp(:)
+        logical, allocatable :: gm(:), wm(:)
+        !
+        call check(error, got%nrows() == want%nrows(), &
+            "%" // what // " must leave the same row count on both paths")
+        if (allocated(error)) return
+        call got%get("k", gk)
+        call want%get("k", wk)
+        call check(error, all(gk == wk), "%" // what // ": the key column must match the serial result")
+        if (allocated(error)) return
+        if (.not. with_p) return
+        call got%get("p", gp, is_valid=gm)
+        call want%get("p", wp, is_valid=wm)
+        call check(error, all(gp == wp) .and. all(gm .eqv. wm), &
+            "%" // what // ": the carried column must match the serial result, nulls included")
+    end subroutine check_key_tables_identical
+    !
+    !> Clears both records to values no mutation writes (-1), so an arm that never reached the
+    !! plan reads as neither serial nor threaded rather than as whichever the previous arm left.
+    subroutine reset_level_records()
+        call parquet_debug_set_table_threads_used(-1_c_int64_t)
+        call parquet_debug_set_table_level_used(-1_c_int64_t)
+    end subroutine reset_level_records
     !
     !> A one-column int32 table, for the join thread test's right-hand side.
     subroutine build_key_table(t, keys)

@@ -113,10 +113,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   that repeats. The index checks the table's `%generation()` on every query and refuses once the rows
   have changed. See
   [Looking a value up](doc/pages/tables/table-mutate.md#looking-a-value-up-build_index).
-- **`parquet_string_column%set_validity` and `%set_where`**: null every element a mask marks, or
-  write one value into every element it marks, in one rebuild of the column instead of one
-  payload shift per element. See
+- **`parquet_string_column%set_validity`, `%set_where` and `%gather_from`**: null every element a
+  mask marks, or write one value into every element it marks, in one rebuild of the column instead
+  of one payload shift per element; and build a column from another column's listed elements in
+  one rebuild, with an optional mask that nulls the listed elements it marks and an optional
+  `threads=`. See
   [Bulk row-set operations](doc/pages/types/string-columns.md#bulk-row-set-operations).
+- **`parquet_column%gather_from(src, idx, [valid], [threads])`** builds a column from another
+  column's listed rows in one pass — the source's kind, width, unit and nulls carried, a mask's
+  nulls added — on a team when `threads=` asks for one; `%gather` takes the same `valid=` and
+  `threads=`.
 
 ### Changed
 
@@ -125,8 +131,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `pf_index_multimap` over the other table's keys and probes it once per row, in place of sorting
   both key columns; `order="key"`, a logical key and a string key beside another key still take
   the sort engine. The rows that come out, and their order, are unchanged. `threads=` now sizes
-  whichever engine builds the match, under `parquet_set_index_threads` for the hash engine. See
-  [How the match is built](doc/pages/tables/table-join.md#how-the-match-is-built).
+  whichever engine builds the match, under `parquet_set_index_threads` for the hash engine. Each
+  column the join carries is built in one pass from the other table's rows, holding one transient
+  copy of it rather than two, and the rewrite of either side divides one column's rows across the
+  team when the columns are fewer than the threads, under `parquet_set_table_threads` as before. See
+  [How the match is built](doc/pages/tables/table-join.md#how-the-match-is-built) and
+  [Threads for mutating a table](doc/pages/operating/settings.md#threads-for-mutating-a-table).
 - **`pf_index_map%get_many` threads.** A bulk lookup now cuts its keys into one chunk per thread,
   by the rule a build follows (automatic, capped by `index_threads`, serial inside a parallel
   region), and takes `threads=` to say otherwise; it is no longer `pure`. See

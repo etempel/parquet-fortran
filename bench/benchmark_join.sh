@@ -37,7 +37,10 @@
 #                    a clone as well -- keep ROUNDS small on the larger sizes.
 #   THREADS=0       Forwarded to %join and to the bare pf_argsort arm. 0 means "ask the library",
 #                    which is what a real caller gets.
-#   NCOLS=8         Largest payload width --mode=payload sweeps to (it visits 1, 2, 4, 8).
+#   NCOLS=8         Largest payload width --mode=payload sweeps to (it visits 1, 2, 4, 8). Each
+#                    width is timed under the library's own choice of where the rewrite's team
+#                    goes and then with each level forced (across the columns; within each
+#                    column), every row tagged with the level and team that actually ran.
 #   NULLFILL_ROWS=100000,200000,400000,800000
 #                   Left row counts --mode=nullfill sweeps, comma-separated. Each doubling should
 #                   about double the time; a quadrupling is the quadratic string null-fill that

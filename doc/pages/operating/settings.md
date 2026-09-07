@@ -224,23 +224,31 @@ one processor makes the prefetch serial by the same route.
 ## Threads for mutating a table
 
 `parquet_set_table_threads(n)` caps the threads a table's row-structural mutation uses to rewrite
-its columns concurrently — `%sort_by`, `%filter_rows`, `%top_n`, and `%delete_rows` and `%truncate`,
-which go through the same loop. Every column is rewritten independently of every other, so the work
-divides cleanly; the parallelism is bounded by the **column count**, which means a wide table gains
-a great deal and a two-column table almost nothing.
+its columns — `%sort_by`, `%filter_rows`, `%top_n`, `%join`'s rewrite of both sides, and
+`%delete_rows` and `%truncate`, which go through the same loop. Every column is rewritten
+independently of every other, so the work divides cleanly across the columns, one per thread. A
+**gather** — `%top_n`, and a `%join`'s rewrite of its own rows and of every column it carries in —
+can also divide one column's rows across the team, and does so whenever there are fewer columns
+than threads: the columns are then rewritten one after another, each on the whole team. So a wide
+table gains on either level, and a join carrying a single column no longer rewrites it serially. A
+sort's replay and a filter's compaction divide across columns only, so for them a two-column table
+gains almost nothing.
 
 Like the other two it is a cap rather than a request, read per call, with `0` meaning automatic.
 `1` makes the rewrite serial, which is also what happens on its own inside your own OpenMP parallel
-region, on a table with fewer than two rewritable columns, and on a table too small to be worth a
-thread team.
+region, on a table too small to be worth a thread team, and — for the operations that divide across
+columns only — on a table with fewer than two rewritable columns.
 
 **This is also the memory control, and it is the one thing to know before leaving it automatic.**
-Each thread rewriting a column holds a transient second copy of that column, so `n` threads hold `n`
-copies where a serial rewrite holds one. Since the count never exceeds the column count, those
-copies come to at most one extra copy of the table — so a whole-column rewrite (`%sort_by`) can
-**double the table's peak memory for the duration of the call**. `%filter_rows` and `%top_n` are
-proportionally cheaper, since their new storage is sized by the rows they keep. A program working
-near its memory ceiling caps the threads here, which caps the copies with them.
+A thread rewriting a column holds a transient second copy of that column, so `n` threads rewriting
+`n` columns at once hold `n` copies where a serial rewrite holds one. Since that count never exceeds
+the column count, those copies come to at most one extra copy of the table — so a whole-column
+rewrite (`%sort_by`) can **double the table's peak memory for the duration of the call**.
+`%filter_rows` and `%top_n` are proportionally cheaper, since their new storage is sized by the rows
+they keep, and a gather that divides one column's rows across the team holds one extra column at a
+time whatever the thread count. A column `%join` carries in is built directly from the other
+table's rows — one copy, rather than a copy and a rebuild of it. A program working near its memory
+ceiling caps the threads here, which caps the copies with them.
 
 
 ## Threads inside one string column

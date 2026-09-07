@@ -169,7 +169,11 @@ lookup-table join; `bench/benchmark_join.sh` times a join under each engine side
 `threads=` sizes whichever engine builds the match: the multimap's build and probe, under
 [`parquet_set_index_threads`](../operating/settings.html#threads-for-an-index-build-or-a-bulk-lookup),
 or the sort, under [`parquet_set_sort_threads`](../operating/settings.html#threads-for-sorting).
-The column work that follows still answers to `parquet_set_table_threads`, as above.
+The column work that follows still answers to `parquet_set_table_threads`, as above. That team
+divides across the columns when there are at least as many as threads, and goes inside each column
+in turn otherwise, so a join carrying one column uses it too; each incoming column is built in one
+pass from `other`'s rows, holding one transient copy of it rather than two — see
+[Threads for mutating a table](../operating/settings.html#threads-for-mutating-a-table).
 
 ## What the join carries
 

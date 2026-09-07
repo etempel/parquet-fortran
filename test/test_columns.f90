@@ -28,6 +28,9 @@ module test_columns
     implicit none
     private
     public :: collect_tests_parquet_columns
+    ! Fixture helpers shared with `test_columns_parallel`, whose threaded A/B of `gather_from`
+    ! cannot run inside this suite's own parallel region (a nested team collapses to one thread).
+    public :: EVERY_KIND, FIXW, make_any_fixture, expect_any_row
     !
     !> The sixteen ARRAY kinds, i.e. every `parquet_column` kind for which `parquet_columns_access`
     !! and `parquet_columns_mutate` generate a per-kind `case` arm. The two string kinds are absent
@@ -39,6 +42,9 @@ module test_columns
         PK_DATE_VEC, PK_TIME_VEC, PK_TIMESTAMP_VEC]
     !> Element count per row for every vector-kind fixture the sweeps build.
     integer(int32), parameter :: FIXW = 2_int32
+    !> All eighteen storable kinds: the sixteen array kinds and the two string kinds, which is the
+    !! set `gather_from` is generated for and swept over below.
+    integer, parameter :: EVERY_KIND(18) = [ARRAY_KINDS, PK_STRING, PK_STRING_VEC]
     !
 contains
     !
@@ -140,7 +146,13 @@ contains
             new_unittest("an all-zero bitmap reports no nulls without dropping it", &
                 test_all_zero_bitmap_reports_no_nulls), &
             new_unittest("every validity query agrees with is_null on a container column", &
-                test_container_validity_queries_agree) &
+                test_container_validity_queries_agree), &
+            new_unittest("gather_from builds every kind from another column in one pass", &
+                test_gather_from_every_kind), &
+            new_unittest("gather_from's mask only adds nulls, and an all-true mask costs no bitmap", &
+                test_gather_from_mask_add_only), &
+            new_unittest("gather_from: a zero-row source, an empty list, a reused destination, int32", &
+                test_gather_from_edges) &
             ]
     end subroutine collect_tests_parquet_columns
     !
@@ -3253,6 +3265,20 @@ contains
         k = int(11_int64*i + e)
     end function fixture_code
     !
+    !> The hour a time fixture holds at row `i`: the row index wrapped into 0..23, with
+    !! `fixture_minute` carrying the rest, so a fixture of any row count under 1440 stays unique
+    !! per row and legal for `parquet_time%set` (the row index alone was legal for 23 rows).
+    pure integer(int32) function fixture_hour(i) result(h)
+        integer(int64), intent(in) :: i !! 1-based row index.
+        h = int(mod(i, 24_int64), int32)
+    end function fixture_hour
+    !
+    !> The minute a time fixture holds at row `i`; see `fixture_hour`.
+    pure integer(int32) function fixture_minute(i) result(m)
+        integer(int64), intent(in) :: i !! 1-based row index.
+        m = int(mod(i/24_int64, 60_int64), int32)
+    end function fixture_minute
+    !
     !> Initializes `c` as an empty column of `kind`, supplying `width` for the vector kinds only.
     subroutine init_kind(c, kind, nrows)
         type(parquet_column), intent(inout) :: c !! the column to initialize.
@@ -3295,7 +3321,7 @@ contains
                 call d%set(2000 + fixture_code(i, 1_int64), 1, 1)
                 call c%set_at(i, d)
             case (PK_TIME)
-                call t%set(int(i, int32), 5, 0)
+                call t%set(fixture_hour(i), fixture_minute(i), 0)
                 call c%set_at(i, t)
             case (PK_TIMESTAMP)
                 call s%set(2000 + fixture_code(i, 1_int64), 1, 1, 0, 0, 0)
@@ -3317,8 +3343,8 @@ contains
                 call dv(2)%set(2000 + fixture_code(i, 2_int64), 1, 1)
                 call c%set_at(i, dv)
             case (PK_TIME_VEC)
-                call tv(1)%set(int(i, int32), 5, 0)
-                call tv(2)%set(int(i, int32), 10, 0)
+                call tv(1)%set(fixture_hour(i), fixture_minute(i), 5)
+                call tv(2)%set(fixture_hour(i), fixture_minute(i), 10)
                 call c%set_at(i, tv)
             case (PK_TIMESTAMP_VEC)
                 call sv(1)%set(2000 + fixture_code(i, 1_int64), 1, 1, 0, 0, 0)
@@ -3371,7 +3397,7 @@ contains
             ok = gd == ed
         case (PK_TIME)
             call c%get_at(i, gt)
-            call et%set(int(want, int32), 5, 0)
+            call et%set(fixture_hour(want), fixture_minute(want), 0)
             ok = gt == et
         case (PK_TIMESTAMP)
             call c%get_at(i, gs)
@@ -3401,8 +3427,8 @@ contains
             ok = edv(1) == gd .and. edv(2) == ed
         case (PK_TIME_VEC)
             call c%get_at(i, etv)
-            call gt%set(int(want, int32), 5, 0)
-            call et%set(int(want, int32), 10, 0)
+            call gt%set(fixture_hour(want), fixture_minute(want), 5)
+            call et%set(fixture_hour(want), fixture_minute(want), 10)
             ok = etv(1) == gt .and. etv(2) == et
         case (PK_TIMESTAMP_VEC)
             call c%get_at(i, esv)
@@ -4281,6 +4307,232 @@ contains
     end subroutine test_container_validity_queries_agree
 
     !> A two-row list column with no null rows, for the negative control above.
+
+    !> `gather_from` for every kind, against what it replaces on the same fixture: `deep_copy` +
+    !! `gather` + `set_validity` is the oracle for the nulls, and the fixture's own code
+    !! (`expect_any_row`) the oracle for the values -- independent of `gather`, which now runs the
+    !! same rebuild. The index names one row twice, the source holds a null row and, on a vector
+    !! kind, one null element, and the mask nulls two rows. The source is checked afterwards,
+    !! untouched, and the destination must carry the source's kind, width and exact-fit size.
+    subroutine test_gather_from_every_kind(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: src, dst, orc
+        integer(int64), parameter :: NSRC = 9_int64
+        integer(int64), parameter :: IDX(6) = [9_int64, 3_int64, 1_int64, 3_int64, 7_int64, 5_int64]
+        logical, parameter :: MASK(6) = [.true., .true., .false., .true., .false., .true.]
+        integer :: ki, kind
+        integer(int64) :: k, e, w
+        character(len=:), allocatable :: kn
+        logical :: want_null
+        !
+        do ki = 1, size(EVERY_KIND)
+            kind = EVERY_KIND(ki)
+            call parquet_kind_name(kind, kn)
+            call make_any_fixture(src, kind, NSRC)
+            w = int(src%colwidth(), int64)
+            call src%set_null(3_int64)                                ! a null row, named twice by IDX
+            if (w > 1_int64) call src%set_null(5_int64, 2_int64)     ! one null ELEMENT of row 5
+            !
+            call src%deep_copy(orc)
+            call orc%gather(IDX)
+            call orc%set_validity(MASK)
+            call dst%gather_from(src, IDX, valid=MASK)
+            !
+            call check(error, dst%length() == 6_int64, kn // ": gather_from must give the index list's length")
+            if (allocated(error)) return
+            call check(error, dst%kindof() == kind .and. dst%colwidth() == src%colwidth(), &
+                kn // ": gather_from must carry the source's kind and width")
+            if (allocated(error)) return
+            if (kind /= PK_STRING .and. kind /= PK_STRING_VEC) then
+                call check(error, dst%capacity() == 6_int64, kn // ": gather_from must allocate exact-fit")
+                if (allocated(error)) return
+            end if
+            do k = 1_int64, 6_int64
+                do e = 1_int64, w
+                    want_null = src%is_null(IDX(k), e) .or. .not. MASK(k)
+                    call check(error, dst%is_null(k, e) .eqv. want_null, &
+                        kn // ": every element's null state must be the source's at idx(k) OR the mask's")
+                    if (allocated(error)) return
+                    call check(error, dst%is_null(k, e) .eqv. orc%is_null(k, e), &
+                        kn // ": gather_from must agree with deep_copy + gather + set_validity on every null")
+                    if (allocated(error)) return
+                end do
+                if (dst%is_null(k)) cycle
+                call expect_any_row(dst, kind, k, IDX(k), kn // ": a gathered row must hold the source row idx(k)", &
+                    error)
+                if (allocated(error)) return
+            end do
+            call check(error, src%length() == NSRC .and. src%is_null(3_int64) .and. .not. src%is_null(1_int64), &
+                kn // ": the source must come back untouched")
+            if (allocated(error)) return
+            call expect_any_row(src, kind, 9_int64, 9_int64, kn // ": the source's last row must still hold its value", &
+                error)
+            if (allocated(error)) return
+        end do
+    end subroutine test_gather_from_every_kind
+    !
+    !> The mask's contract, one clause per arm: an all-true mask on a null-free source allocates
+    !! no bitmap; a `.true.` entry never clears a null the source row carried, while its row's
+    !! other elements stay valid; a `.false.` entry nulls EVERY element of its row; a temporal
+    !! kind takes the mask inside the element and its cached null answer sees it; a string kind's
+    !! masked element takes a zero-width slot, so the payload holds only the kept bytes.
+    subroutine test_gather_from_mask_add_only(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: src, dst
+        type(parquet_string_column), pointer :: sp
+        !
+        call make_fixture(src, PK_INT64, 5_int64)
+        call dst%gather_from(src, [2_int64, 4_int64], valid=[.true., .true.])
+        call check(error, dst%validity_bytes() == 0_int64 .and. .not. dst%any_null(), &
+            "an all-true mask on a null-free source must allocate no bitmap")
+        if (allocated(error)) return
+        !
+        call make_fixture(src, PK_FLOAT64_VEC, 5_int64)
+        call src%set_null(2_int64, 1_int64)
+        call dst%gather_from(src, [2_int64, 3_int64], valid=[.true., .false.])
+        call check(error, dst%is_null(1_int64, 1_int64) .and. .not. dst%is_null(1_int64, 2_int64), &
+            "a .true. entry must carry the source's element null and leave its neighbour valid")
+        if (allocated(error)) return
+        call check(error, dst%is_null(2_int64, 1_int64) .and. dst%is_null(2_int64, 2_int64), &
+            "a .false. entry must null every element of its row")
+        if (allocated(error)) return
+        call check(error, .not. src%is_null(3_int64), "the mask must not reach back into the source")
+        if (allocated(error)) return
+        !
+        call make_fixture(src, PK_DATE, 4_int64)
+        call dst%gather_from(src, [1_int64, 2_int64], valid=[.false., .true.])
+        call check(error, dst%is_null(1_int64) .and. .not. dst%is_null(2_int64) .and. dst%any_null(), &
+            "a temporal kind must take the mask inside the element, and its null cache must see it")
+        if (allocated(error)) return
+        call check(error, .not. src%is_null(1_int64), "a temporal source must come back untouched")
+        if (allocated(error)) return
+        !
+        call src%init(PK_STRING, 3_int64)
+        call src%set_all(["abc", "de ", "f  "])
+        call dst%gather_from(src, [1_int64, 2_int64, 3_int64], valid=[.true., .false., .true.])
+        call dst%string_column(sp)
+        call check(error, dst%is_null(2_int64) .and. sp%length(2_int64) == 0_int64, &
+            "a masked string element must be null and take a zero-width slot")
+        if (allocated(error)) return
+        call check(error, sp%character_size() == 4_int64, &
+            "the string payload must hold the kept bytes only: 'abc' and 'f'")
+        if (allocated(error)) return
+        call src%string_column(sp)
+        call check(error, sp%character_size() == 6_int64 .and. sp%null_count() == 0_int64, &
+            "the string source must come back untouched")
+    end subroutine test_gather_from_mask_add_only
+    !
+    !> The edges: a zero-row source with an empty list gives an empty column of the source's kind;
+    !! a populated destination of another kind is cleared first; the int32 index form agrees with
+    !! the int64 one; the unit travels; an empty list from a populated source empties the
+    !! destination, mask or no mask.
+    subroutine test_gather_from_edges(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: src, dst, d2
+        character(len=:), allocatable :: u
+        !
+        call src%init(PK_INT32, 0_int64)
+        call dst%gather_from(src, [integer(int64) ::])
+        call check(error, dst%length() == 0_int64 .and. dst%kindof() == PK_INT32, &
+            "a zero-row source and an empty list must give an empty column of the source's kind")
+        if (allocated(error)) return
+        !
+        call make_fixture(dst, PK_FLOAT32, 7_int64)
+        call make_fixture(src, PK_INT64, 4_int64)
+        call dst%gather_from(src, [4_int64, 1_int64])
+        call check(error, dst%kindof() == PK_INT64 .and. dst%length() == 2_int64, &
+            "a populated destination of another kind must be cleared before the gather")
+        if (allocated(error)) return
+        call expect_fixture_row(dst, PK_INT64, 1_int64, 4_int64, "row 1 of the reused destination is source row 4", &
+            error)
+        if (allocated(error)) return
+        call d2%gather_from(src, [4_int32, 1_int32])
+        call expect_fixture_row(d2, PK_INT64, 2_int64, 1_int64, "the int32 index form must gather the same rows", &
+            error)
+        if (allocated(error)) return
+        !
+        call src%init(PK_FLOAT64, 3_int64, unit="deg")
+        call src%set_all([1.0_real64, 2.0_real64, 3.0_real64])
+        call dst%gather_from(src, [3_int64, 1_int64])
+        call dst%unit_string(u)
+        call check(error, u == "deg", "the unit must travel with the gather")
+        if (allocated(error)) return
+        call dst%gather_from(src, [integer(int64) ::])
+        call check(error, dst%length() == 0_int64 .and. dst%kindof() == PK_FLOAT64, &
+            "an empty list from a populated source must give an empty column of its kind")
+        if (allocated(error)) return
+        call dst%gather_from(src, [integer(int64) ::], valid=[logical ::])
+        call check(error, dst%length() == 0_int64, "an empty list with an empty mask is accepted")
+    end subroutine test_gather_from_edges
+    !
+    !> `make_fixture` for every storable kind: the string kinds are added, each element holding
+    !! `fixture_text` of its row and element, so `expect_any_row` can read the expectation back.
+    subroutine make_any_fixture(c, kind, nrows)
+        type(parquet_column), intent(inout) :: c !! receives the fixture.
+        integer, intent(in) :: kind              !! PK_* kind to build.
+        integer(int64), intent(in) :: nrows      !! rows to write.
+        character(len=12) :: s1, s2
+        integer(int64) :: i
+        !
+        select case (kind)
+        case (PK_STRING)
+            call c%init(kind, nrows)
+            do i = 1_int64, nrows
+                call fixture_text(i, 1_int64, s1)
+                call c%set_at(i, trim(s1))
+            end do
+        case (PK_STRING_VEC)
+            call c%init(kind, nrows, FIXW)
+            do i = 1_int64, nrows
+                call fixture_text(i, 1_int64, s1)
+                call fixture_text(i, 2_int64, s2)
+                call c%set_at(i, [s1, s2])
+            end do
+        case default
+            call make_fixture(c, kind, nrows)
+        end select
+    end subroutine make_any_fixture
+    !
+    !> `expect_fixture_row` for every storable kind; see `make_any_fixture`.
+    subroutine expect_any_row(c, kind, i, want, what, error)
+        type(parquet_column), intent(in) :: c               !! the column to read.
+        integer, intent(in) :: kind                         !! its PK_* kind.
+        integer(int64), intent(in) :: i                     !! row of `c` to read.
+        integer(int64), intent(in) :: want                  !! fixture row it should equal.
+        character(len=*), intent(in) :: what                !! context, for the message.
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        character(len=12) :: s1, s2
+        character(len=:), allocatable :: got
+        logical :: ok
+        !
+        select case (kind)
+        case (PK_STRING)
+            call fixture_text(want, 1_int64, s1)
+            call c%get_at(i, got)
+            ok = got == trim(s1)
+            call check(error, ok, what)
+        case (PK_STRING_VEC)
+            call fixture_text(want, 1_int64, s1)
+            call fixture_text(want, 2_int64, s2)
+            call c%get_elem(i, 1_int64, got)
+            ok = got == trim(s1)
+            call c%get_elem(i, 2_int64, got)
+            ok = ok .and. got == trim(s2)
+            call check(error, ok, what)
+        case default
+            call expect_fixture_row(c, kind, i, want, what, error)
+        end select
+    end subroutine expect_any_row
+    !
+    !> The string a string fixture holds at row `i`, element `e`: `fixture_code` in text, with a
+    !! length that varies with the row so that offsets are not uniform.
+    subroutine fixture_text(i, e, s)
+        integer(int64), intent(in) :: i        !! 1-based row index.
+        integer(int64), intent(in) :: e        !! 1-based element index.
+        character(len=12), intent(out) :: s    !! the text, blank-padded.
+        write(s, "(a,i0)") repeat("s", int(mod(i, 3_int64)) + 1), fixture_code(i, e)
+    end subroutine fixture_text
+    !
     subroutine build_null_free_list(col)
         type(parquet_column), intent(out) :: col !! receives the container column.
         type(parquet_list_column), allocatable :: lc

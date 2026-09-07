@@ -81,7 +81,7 @@ over a column that could not have been a plain array in the first place. Three c
   front — every other form needs a complete array;
 - a column **carrying nulls**, which no `%add_column` form taking a plain numeric or logical array
   can express — none of them has an `is_valid=` argument, so an array always arrives null-free;
-- a column **derived from another** with `%gather`, `%delete_by_mask` or `%reindex`.
+- a column **derived from another** with `%gather`, `%gather_from`, `%delete_by_mask` or `%reindex`.
 
 The second of those is worth stating the other way round, because it is easy to read the list as
 being about vector columns only. **A plain array handed to `%add_column` produces a column with no

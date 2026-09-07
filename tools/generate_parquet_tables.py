@@ -1793,11 +1793,14 @@ def join_interface(name, rank, mkind):
         a("            integer(int64), allocatable, intent(out), optional :: pairs(:) !! see `table_join`.")
         a("            !> per output row: `other`'s row, or 0; see `table_join`.")
         a("            integer(int64), allocatable, intent(out), optional :: other_pairs(:)")
-    a("""            !> team size for the sort that builds the pair list, and for nothing else -- the
+    a("""            !> team size for the ENGINE that builds the match, and for nothing else -- the
             !! column work that follows answers to `parquet_set_table_threads`, as every other
-            !! row-structural mutation does. Absent means the automatic rule (`omp_get_max_threads()`
-            !! capped by `parquet_set_sort_threads` and by the processors available); `threads=1`
-            !! forces that sort serial. It never changes which rows come out, or their order.
+            !! row-structural mutation does. The hash engine (the usual one) opens the team for its
+            !! multimap build and probe, and absent means its automatic rule, capped by
+            !! `parquet_set_index_threads`; the sort engine (`order="key"`, a logical key, a string
+            !! key beside another) opens it for its sort, capped by `parquet_set_sort_threads`.
+            !! `threads=1` forces either serial. It never changes which rows come out, or their
+            !! order, and never which engine runs.
             integer, intent(in), optional :: threads""")
     a("        end subroutine " + name)
     return "\n".join(o)

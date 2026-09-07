@@ -1093,33 +1093,33 @@ program error_scenarios
     case ("join_kind_mismatch")
         call scenario_join_kind_mismatch()
     case ("join_require_m1")
-        call scenario_join_require_m1()
+        call scenario_join_engine_twin("sort", "require_m1")
     case ("join_max_rows")
-        call scenario_join_max_rows()
+        call scenario_join_engine_twin("sort", "max_rows")
     case ("join_max_rows_arr_i32")
-        call scenario_join_max_rows_form(1)
+        call scenario_join_engine_twin("sort", "max_rows_arr_i32")
     case ("join_max_rows_arr_i64")
-        call scenario_join_max_rows_form(2)
+        call scenario_join_engine_twin("sort", "max_rows_arr_i64")
     case ("join_max_rows_str_i32")
-        call scenario_join_max_rows_form(3)
+        call scenario_join_engine_twin("sort", "max_rows_str_i32")
     case ("join_max_rows_str_i64")
-        call scenario_join_max_rows_form(4)
+        call scenario_join_engine_twin("sort", "max_rows_str_i64")
     case ("join_require_1m")
-        call scenario_join_require_1m()
+        call scenario_join_engine_twin("sort", "require_1m")
     case ("join_require_m1_hash")
-        call scenario_join_hash_twin("require_m1")
+        call scenario_join_engine_twin("hash", "require_m1")
     case ("join_require_1m_hash")
-        call scenario_join_hash_twin("require_1m")
+        call scenario_join_engine_twin("hash", "require_1m")
     case ("join_max_rows_hash")
-        call scenario_join_hash_twin("max_rows")
+        call scenario_join_engine_twin("hash", "max_rows")
     case ("join_max_rows_arr_i32_hash")
-        call scenario_join_hash_twin("max_rows_arr_i32")
+        call scenario_join_engine_twin("hash", "max_rows_arr_i32")
     case ("join_max_rows_arr_i64_hash")
-        call scenario_join_hash_twin("max_rows_arr_i64")
+        call scenario_join_engine_twin("hash", "max_rows_arr_i64")
     case ("join_max_rows_str_i32_hash")
-        call scenario_join_hash_twin("max_rows_str_i32")
+        call scenario_join_engine_twin("hash", "max_rows_str_i32")
     case ("join_max_rows_str_i64_hash")
-        call scenario_join_hash_twin("max_rows_str_i64")
+        call scenario_join_engine_twin("hash", "max_rows_str_i64")
     case ("join_pair_count_overflow")
         call scenario_join_pair_count_overflow()
     case ("join_bad_require")
@@ -19704,21 +19704,24 @@ contains
         print '(a,i0)', "unexpectedly accepted a duplicate left key, rows=", a%nrows()
     end subroutine scenario_join_require_1m
 
-    !> The `_hash` twin of a join abort: the same scenario with the HASH engine forced through
-    !! the test-only hook, so the abort is proved on both engines -- the cardinality assertion
-    !! and the `max_rows=` ceiling are re-implemented there clause by clause
-    !! (src/parquet_tables_join_hash.f90), and an abort the sort engine raises says nothing
-    !! about the other.
+    !> A join abort scenario on ONE named engine: the base scenario run with the sort engine or
+    !! the hash engine forced through the test-only hook, so every abort both engines implement
+    !! -- the cardinality assertion and the `max_rows=` ceiling, clause by clause in
+    !! src/parquet_tables_join.f90 and src/parquet_tables_join_hash.f90 -- is proved on both. The
+    !! plain `join_require_m1` and its siblings force the sort engine (the automatic choice is
+    !! the hash engine, so an unforced scenario would never reach the sort engine's abort); the
+    !! `_hash` twins force the hash engine.
     !!
     !! Two controls before the base scenario runs. A join with the hook CLEAR prints the engine
-    !! it ran on (the sort engine), and one with the hook SET prints the hash engine, so the
-    !! wrapper asserts from stdout that the forced engine really was in force when the base
+    !! the automatic rule chose, and one with the hook SET prints the forced engine, so the
+    !! wrapper asserts from stdout that the engine it names really was in force when the base
     !! scenario's abort came -- without that line, a twin whose hook did nothing would pass on
-    !! the sort engine's abort. The hook is reached through a local `bind(C)` interface, as every
+    !! the other engine's abort. The hook is reached through a local `bind(C)` interface, as every
     !! `parquet_debug_*` hook is.
-    subroutine scenario_join_hash_twin(which)
+    subroutine scenario_join_engine_twin(engine, which)
         use iso_c_binding, only : c_int64_t
-        character(len=*), intent(in) :: which !! the base scenario, by the tail of its name.
+        character(len=*), intent(in) :: engine !! "sort" or "hash".
+        character(len=*), intent(in) :: which  !! the base scenario, by the tail of its name.
         interface
             subroutine set_join_engine(mode) bind(C, name="parquet_debug_set_join_engine")
                 import :: c_int64_t
@@ -19732,9 +19735,14 @@ contains
         type(parquet_table) :: a, b
         call join_fixture(a, [10_int64, 20_int64, 30_int64])
         call join_fixture(b, [20_int64, 30_int64])
+        call set_join_engine(0_c_int64_t)
         call a%join(b, ["id"])
         print '(a,i0)', "join engine used with the hook clear=", join_engine_used()
-        call set_join_engine(2_c_int64_t)
+        if (engine == "sort") then
+            call set_join_engine(1_c_int64_t)
+        else
+            call set_join_engine(2_c_int64_t)
+        end if
         call join_fixture(a, [10_int64, 20_int64, 30_int64])
         call a%join(b, ["id"])
         print '(a,i0)', "join engine used with the hook set=", join_engine_used()
@@ -19754,7 +19762,7 @@ contains
         case default
             call scenario_join_max_rows_form(4)
         end select
-    end subroutine scenario_join_hash_twin
+    end subroutine scenario_join_engine_twin
 
     !> An unrecognized `require=` token aborts naming every accepted value, rather than falling
     !! back to no assertion -- which would be the worst available answer, since a caller who

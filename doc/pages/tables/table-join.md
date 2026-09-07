@@ -47,12 +47,12 @@ array of names — the two forms behave identically, and `other_on` takes whiche
 | `matched` | out: one entry per row of **this** table as it was before the join |
 | `pairs` | out: one entry per output row — the row of **this** table it came from, or 0; see [The match itself](#the-match-itself) |
 | `other_pairs` | out: the same for `other`'s rows |
-| `threads` | the team size for the sort that builds the match, and for nothing else; see below |
+| `threads` | the team size for the engine that builds the match, and for nothing else; see below and [How the match is built](#how-the-match-is-built) |
 
 That last row is narrow on purpose, and a join has **two** thread controls that are not
-interchangeable. `threads=` sizes the sort that builds the match, and nothing else. The column work
-a join does — this table's own columns rewritten, `other`'s copied in beside them — belongs to the
-table layer and is capped by
+interchangeable. `threads=` sizes the engine that builds the match, and nothing else. The column
+work a join does — this table's own columns rewritten, `other`'s copied in beside them — belongs to
+the table layer and is capped by
 [`parquet_set_table_threads(n)`](../operating/settings.html#threads-for-mutating-a-table), as every
 other row-structural mutation is.
 
@@ -113,8 +113,10 @@ this table before the join no longer lines up under `"key"`.
 
 **A null key matches nothing** — not a value, and not another null. A row whose key is null is
 simply an unmatched row: dropped by `how="inner"`, kept with null incoming columns by `how="left"`.
-This is SQL's rule and STILTS', and it is the only one that makes sense for a key that means
-"unknown".
+This is SQL's rule, STILTS' and polars', and it is the only one that makes sense for a key that
+means "unknown". pandas is the odd one out: its `merge` matches NA to NA, and in a float key it
+cannot tell a NULL from a NaN — so a pandas join over a table with null keys comes out larger than
+this library's, by pandas' documented choice rather than by any disagreement about the rows.
 
 **A NaN key is an ordinary value and matches every other NaN.** That is worth knowing before it
 surprises you: a column where the missing values were written as NaN rather than as nulls will
@@ -126,8 +128,9 @@ promoted. Nothing is silently widened, because a 64-bit
 catalogue identifier above 2⁵³ does not survive being promoted to a real — cast one side with
 `%cast` first if you really do mean to compare them.
 
-"Equal" here means exactly what it means in `%sort_by` and in a read-time `sort_by=`: the join runs
-the same engine over the same keys, so there is only ever one answer to what equality is.
+"Equal" here means exactly what it means in `%sort_by` and in a read-time `sort_by=`: whichever
+engine builds the match (see [How the match is built](#how-the-match-is-built)) applies the sort
+comparator's equality, so there is only ever one answer to what equality is.
 
 **A join key is a column name and carries no direction.** `on="-id"` or `on="id desc"` is a *sort*
 key, and it is refused with a message saying so — a join is an equality test, and the order the
@@ -140,6 +143,33 @@ A container column cannot be **carried across** a join either, on any `how`, nor
 of a `"right"`/`"outer"` one — see [When a row has no counterpart
 here](#when-a-row-has-no-counterpart-here). Every other column kind, vectors included, is carried
 and filled normally.
+
+## How the match is built
+
+The pair list — which row here meets which row there — is built by one of two engines, and the
+choice is the library's, made from the key kinds and `order=` alone:
+
+- **The hash engine**, for every join whose key columns are integer, real, date, time or timestamp
+  (any number of them), or a single string column, under the default `order="left"`. It builds a
+  [`pf_index_multimap`](../utilities/index-maps.html#a-key-that-repeats-pf_index_multimap) over
+  `other`'s keys and probes it once per row of this table. A real key is matched by the rule above
+  (every NaN one value, `-0.0` equal to `+0.0`), a timestamp by its instant whatever unit either
+  file stored it in, a string by its exact bytes.
+- **The sort engine**, for the rest: `order="key"` (the grouping it asks for *is* the sort's own
+  order, which the hash engine has nothing to offer in place of), a logical key, and a string key
+  beside another key. It sorts the two key columns concatenated and reads the matches off the runs
+  of equal keys — the engine `%sort_by` runs.
+
+The rows that come out, and their order, are identical under both. The engines differ in how fast,
+never in what they answer, and nothing about the data — its values, its row counts — takes part in
+the choice, so the same call runs on the same engine on every input and at every thread count. The
+hash engine is several times faster on every shape that has been measured, most of all on a
+lookup-table join; `bench/benchmark_join.sh` times a join under each engine side by side.
+
+`threads=` sizes whichever engine builds the match: the multimap's build and probe, under
+[`parquet_set_index_threads`](../operating/settings.html#threads-for-an-index-build-or-a-bulk-lookup),
+or the sort, under [`parquet_set_sort_threads`](../operating/settings.html#threads-for-sorting).
+The column work that follows still answers to `parquet_set_table_threads`, as above.
 
 ## What the join carries
 

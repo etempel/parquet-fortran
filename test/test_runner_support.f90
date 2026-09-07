@@ -260,8 +260,8 @@ contains
     !> engine and writes THAT into the observable, so a sibling test running concurrently could
     !> read a decline that was not its own between its join and its assertion; and one test moves
     !> the hook itself to prove it switches. The "table_join" suite, which runs the same tests
-    !> under automatic mode, has neither problem and stays parallel. Pure in-memory work over
-    !> five-row fixtures; serial it costs well under a second.
+    !> with the sort engine forced, has neither problem and stays parallel. Pure in-memory work
+    !> over five-row fixtures; serial it costs well under a second.
     !>
     !> "parquet_string" no longer needs an entry here: it used to, because of a
     !> gfortran/OpenMP runtime bug (not a bug in parquet_strings.f90's own

@@ -394,7 +394,8 @@ value would not fit.
 
 ### Every match at once: `%probe_many`
 
-`%probe_many` is `pf_match_all` on a hash engine, and the join's m:m primitive: `offsets` has one
+`%probe_many` is `pf_match_all` on a hash engine, and the primitive under
+[`parquet_table%join`'s hash engine](../tables/table-join.html#how-the-match-is-built): `offsets` has one
 entry per probe key plus one, `offsets(1) == 1`, and the stored values for probe `i` are
 `matches(offsets(i) : offsets(i+1) - 1)` — an empty range when there are none, ascending by
 position within it. Two threaded passes over the probes: the group and count of each,
@@ -431,9 +432,12 @@ call mm%csr(offsets, rows)           ! the CSR pair itself, copied out
 call mm%clear()                      ! forget every key and release all storage
 ```
 
-`%max_multiplicity() == 1` is the m:1 check a join makes before choosing its path. `%csr` is for
-a caller that walks the ranges itself — a group-by, or a join's build side — or wants every group
-at once; group `g`, the id `%get` answers, holds `rows(offsets(g) : offsets(g+1) - 1)`.
+`%max_multiplicity() == 1` says every stored key is unique. A join's `require="m:1"` asks a
+narrower question — whether a key repeats among the rows that took part in the match — so a
+repeated key nothing probed is not a violation there, and the join reads its probe ranges rather
+than this. `%csr` is for a caller that walks the ranges itself — a group-by, or a join's build
+side — or wants every group at once; group `g`, the id `%get` answers, holds
+`rows(offsets(g) : offsets(g+1) - 1)`.
 
 ## The index pool
 

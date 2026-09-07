@@ -172,7 +172,10 @@ simultaneous.
 `parquet_set_sort_threads(n)` caps how many threads a sort uses when it is not given an explicit
 `threads=`. It covers every sort in the library at once — `pf_sort`/`pf_argsort` and friends, a
 read-time `parquet_open_reader(..., sort_by=)`, and `parquet_table%sort_by` — because all three run
-on one engine and ask one question.
+on one engine and ask one question. A `%join` that builds its match on that engine —
+`order="key"`, a logical key, a string key beside another — sorts under it too; every other join
+answers to `index_threads` below (see
+[How the match is built](../tables/table-join.html#how-the-match-is-built)).
 
 **It also governs the threaded statistics**, which is why there is no `stats_threads` beside it.
 `parquet_stats` resolves its thread count through the same engine rather than carrying a knob of
@@ -386,11 +389,13 @@ for what the bulk forms are and what omitting `threads=` costs you.
 
 `parquet_set_index_threads(n)` caps the threads one `pf_index_map%build`, one `%get_or_add_many`
 or one bulk lookup — `pf_index_map%get_many`, or `pf_index_multimap`'s `%get_first_many`,
-`%get_many` and `%probe_many` — may use, and with them a table's `%build_index` and a `parquet_table_index`'s
-`%find_many`, which are those calls behind a wrapper. Like every other per-area cap it is a cap
-rather than a request,
-read per call, with `0` meaning automatic, `1` forcing serial, and an explicit `threads=` on the
-call itself still winning.
+`%get_many` and `%probe_many` — may use, and with them a table's `%build_index` and a
+`parquet_table_index`'s `%find_many`, which are those calls behind a wrapper, and
+`parquet_table%join`'s hash engine, which is a multimap built over the other table's keys and
+probed with this one's (see
+[How the match is built](../tables/table-join.html#how-the-match-is-built)). Like every other
+per-area cap it is a cap rather than a request, read per call, with `0` meaning automatic, `1`
+forcing serial, and an explicit `threads=` on the call itself still winning.
 
 **It bounds the build's key scan, scatter and hash insert, the bulk lookup's probe, and
 `%get_or_add_many`'s lookup and insert, and nothing else.** A scalar `%get` is a few nanoseconds

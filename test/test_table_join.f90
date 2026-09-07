@@ -27,14 +27,16 @@
 !! columns really carry the rows the pair list named rather than that two joins agree.
 !!
 !! **The suite is run TWICE, under each pair-list engine.** `collect_tests_table_join` registers
-!! it with the test-only engine hook cleared (automatic, which is the sort engine) and
+!! it with the sort engine forced through the test-only engine hook and
 !! `collect_tests_table_join_hash` registers the same tests with the hash engine forced;
 !! `pairs_of` asserts after every join which engine actually ran, against the suite's own
-!! expectation and the one exception (`order="key"` always costs the sort engine), so the second
-!! suite cannot pass vacuously and a shape the hash engine quietly declined would be named. The
-!! hook and the observable are process-global, so `table_join_hash` runs serially
-!! (`suite_is_safe_to_parallelize`): an ineligible join in a concurrently running sibling would
-!! otherwise overwrite the observable between a test's join and its own read of it.
+!! expectation and the one exception (`order="key"` always costs the sort engine), so neither
+!! suite can pass vacuously and a shape the hash engine quietly declined would be named. What the
+!! AUTOMATIC choice is -- the hash engine whenever a call is eligible -- is asserted by two tests
+!! of the hash suite that clear the hook themselves. The hook and the observable are
+!! process-global, so `table_join_hash` runs serially (`suite_is_safe_to_parallelize`): an
+!! ineligible join in a concurrently running sibling would otherwise overwrite the observable
+!! between a test's join and its own read of it.
 !!
 !! Abort paths live in test/error_scenarios.f90 as `join_*` scenarios, since they kill the
 !! process. Two tests here write a fixture, each to its own path -- the suite runs its tests
@@ -69,8 +71,8 @@ module test_table_join
     !! src/parquet_tables_join.f90) and the values the hook takes and reports.
     integer, parameter :: ENGINE_SORT = 1, ENGINE_HASH = 2
     !> The engine every ELIGIBLE join in the running suite is expected to report, set by the
-    !! suite's collector: `table_join` forces nothing (automatic, the sort engine today) and
-    !! `table_join_hash` forces the hash engine. Process-global, like the hook it mirrors.
+    !! suite's collector: `table_join` forces the sort engine and `table_join_hash` the hash
+    !! engine. Process-global, like the hook it mirrors.
     integer, save :: suite_engine = ENGINE_SORT
     !
     !> The engine hook and its observable. Declared locally here rather than in
@@ -91,21 +93,26 @@ module test_table_join
     !
 contains
     !
-    !> Collects this suite's tests under the automatic engine choice, which is the sort engine.
+    !> Collects this suite's tests with the sort engine forced.
+    !!
+    !! Forced rather than left automatic: the automatic choice IS the hash engine for every
+    !! eligible call, so a suite that cleared the hook would run the hash engine twice and the
+    !! sort engine never. The automatic rule itself is asserted in the hash suite
+    !! (`test_join_engine_rule_is_data_independent`, `test_join_engine_hook_switches`).
     subroutine collect_tests_table_join(testsuite)
         type(unittest_type), allocatable, intent(out) :: testsuite(:) !! the tests.
         !
         ! Set HERE, outside test-drive's parallel loop and before any test runs: the hook is
-        ! process-global. This collector also puts automatic mode back after `table_join_hash`,
-        ! which run_tester_cpp registers immediately before this suite for that reason.
-        call parquet_debug_set_join_engine(0_c_int64_t)
+        ! process-global. run_tester_cpp registers `table_join_hash` immediately before this
+        ! suite, so no forced mode leaks past the two of them into a suite that joins.
+        call parquet_debug_set_join_engine(int(ENGINE_SORT, c_int64_t))
         suite_engine = ENGINE_SORT
         call join_tests(testsuite)
     end subroutine collect_tests_table_join
     !
-    !> Collects the same tests with the hash engine forced, plus the one test that proves the
-    !! hook switches engines. The suite runs serially (`suite_is_safe_to_parallelize`); see the
-    !! module header for why.
+    !> Collects the same tests with the hash engine forced, plus the two tests that clear the hook
+    !! themselves: one proving it switches engines, one pinning the automatic rule. The suite runs
+    !! serially (`suite_is_safe_to_parallelize`); see the module header for why.
     subroutine collect_tests_table_join_hash(testsuite)
         type(unittest_type), allocatable, intent(out) :: testsuite(:) !! the tests.
         type(unittest_type), allocatable :: shared(:)
@@ -116,8 +123,10 @@ contains
         ! Concatenated from a separate local rather than appended to itself: the self-referential
         ! `x = [x, ...]` form double-frees under nagfor 7.2 (test/test_errors.f90's own note).
         testsuite = [shared, &
-            new_unittest("the engine hook switches engines, and automatic means the sort engine", &
-                test_join_engine_hook_switches)]
+            new_unittest("the engine hook switches engines, and automatic means the hash engine", &
+                test_join_engine_hook_switches), &
+            new_unittest("the automatic engine choice reads the key kinds and order=, never the data", &
+                test_join_engine_rule_is_data_independent)]
     end subroutine collect_tests_table_join_hash
     !
     !> The tests both suites share, in one list so the two cannot drift apart.
@@ -2266,18 +2275,18 @@ contains
     !  The two engines
     ! ======================================================================================
     !
-    !> The engine hook switches engines, and the automatic mode is the sort engine.
+    !> The engine hook switches engines, and the automatic mode is the hash engine.
     !!
-    !! **Without this the whole `table_join_hash` suite is potentially vacuous** -- the shape of
+    !! **Without this both join suites are potentially vacuous** -- the shape of
     !! `test_fortran_engine_switches` in test/test_sorting_cpp.f90: if the hook were never read,
     !! or the observable never written, both suites would run one engine and every agreement
     !! assertion would pass while testing nothing. Registered in the hash suite only, which runs
     !! serially: it writes the process-global hook mid-test, which a concurrently running sibling
     !! would see between its own join and its engine assertion.
     !!
-    !! The automatic arm pins what mode 0 means TODAY: the sort engine for every call. Stage 3 of
-    !! feature_join.md writes the selection rule into `join_choose_engine`, and this arm is then
-    !! the assertion that changes -- deliberately, rather than a test that fails silently.
+    !! The automatic arm pins the rule `join_choose_engine` applies: the hash engine for every
+    !! eligible call, this one included. A size clause added to the rule would be the change that
+    !! moves this assertion, deliberately, rather than one that fails silently.
     subroutine test_join_engine_hook_switches(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_table) :: a, b, w
@@ -2303,8 +2312,8 @@ contains
         if (allocated(error)) return
         call check(error, got_hash == ENGINE_HASH, "forcing the hash engine must run the hash engine")
         if (allocated(error)) return
-        call check(error, got_auto == ENGINE_SORT, &
-            "automatic mode is the sort engine at this stage (feature_join.md stage 3 changes this arm)")
+        call check(error, got_auto == ENGINE_HASH, &
+            "automatic mode must be the hash engine for an eligible call")
         if (allocated(error)) return
         call check(error, size(il1) == size(il2) .and. size(il1) == size(il3) .and. size(il1) == 8, &
             "the three runs must emit the outer join's eight rows")
@@ -2312,6 +2321,67 @@ contains
         call check(error, all(il1 == il2) .and. all(ir1 == ir2) .and. all(il1 == il3) .and. all(ir1 == ir3), &
             "the two engines must emit the identical pair list")
     end subroutine test_join_engine_hook_switches
+    !
+    !> The automatic engine choice is a function of the key kinds and `order=` alone: the same
+    !! call reports the same engine at `threads=1` and `threads=64`, on a fixture of distinct keys
+    !! and on one where every key is the same value, and on a table of 5 rows and one of 5000 --
+    !! and an ineligible call reports the sort engine on every one of those. feature_risks.md
+    !! Risk-218: a data-dependent choice would make one program's join take different paths on
+    !! different inputs, with correct answers, which is a debugging trap that hides behind the
+    !! floor.
+    subroutine test_join_engine_rule_is_data_independent(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: a, b, w
+        integer(int64), allocatable :: il(:), ir(:), same(:), big(:)
+        integer(int64) :: k
+        integer :: got(6)
+        !
+        call parquet_debug_set_join_engine(0_c_int64_t)
+        call build(a, "id", LKEY)
+        call build(b, "id", RKEY)
+        call a%clone(w)
+        call w%join(b, ["id"], pairs=il, other_pairs=ir, threads=1)
+        got(1) = int(parquet_debug_join_engine_used())
+        call a%clone(w)
+        call w%join(b, ["id"], pairs=il, other_pairs=ir, threads=64)
+        got(2) = int(parquet_debug_join_engine_used())
+        ! Every key one value: the m:m shape a rule reading multiplicity would treat differently.
+        allocate(same(5))
+        same = 7_int64
+        call build(a, "id", same)
+        call build(b, "id", same(1:3))
+        call a%clone(w)
+        call w%join(b, ["id"], pairs=il, other_pairs=ir)
+        got(3) = int(parquet_debug_join_engine_used())
+        ! Five thousand distinct keys against five: the size a rule with a floor would test.
+        allocate(big(5000))
+        do k = 1_int64, 5000_int64
+            big(k) = k
+        end do
+        call build(a, "id", big)
+        call build(b, "id", UKEY)
+        call a%clone(w)
+        call w%join(b, ["id"], pairs=il, other_pairs=ir)
+        got(4) = int(parquet_debug_join_engine_used())
+        call a%clone(w)
+        call w%join(b, ["id"], order="key", pairs=il, other_pairs=ir)
+        got(5) = int(parquet_debug_join_engine_used())
+        call build(b, "id", UKEY)
+        call build(a, "id", LKEY)
+        call a%clone(w)
+        call w%join(b, ["id"], how="anti", require="m:1", threads=1, pairs=il, other_pairs=ir)
+        got(6) = int(parquet_debug_join_engine_used())
+        call restore_suite_engine()
+        call check(error, got(1) == ENGINE_HASH .and. got(2) == ENGINE_HASH, &
+            "the automatic choice must be the hash engine at threads=1 and at threads=64 alike")
+        if (allocated(error)) return
+        call check(error, got(3) == ENGINE_HASH .and. got(4) == ENGINE_HASH, &
+            "and the same on an all-equal key and on a 5000-row table: the rule reads no data")
+        if (allocated(error)) return
+        call check(error, got(5) == ENGINE_SORT, "order=key takes the sort engine under automatic mode")
+        if (allocated(error)) return
+        call check(error, got(6) == ENGINE_HASH, "how= and require= do not change the engine")
+    end subroutine test_join_engine_rule_is_data_independent
     !
     !> `order="key"` always costs the sort engine, under both suites; the same join under the
     !! default order reports the suite's own engine, which is the control that makes the first

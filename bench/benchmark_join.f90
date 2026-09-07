@@ -29,6 +29,16 @@
 !!                column compacts the payload once per element, which is exactly the quadratic
 !!                shape this mode exists to keep out; no unit test can assert it.
 !!
+!! **Every timed join names the ENGINE that built its match**, and `--engine=` chooses it:
+!! `both` (the default for `shape`, `size` and `how`) times each figure under the sort engine and
+!! then under the hash engine, forced through the test-only hook `parquet_debug_set_join_engine`,
+!! and prints the two rows and their ratio; `sort` and `hash` force one; `auto` leaves the choice
+!! to the library's own rule. `payload` and `nullfill` run under `auto` unless one engine is
+!! named. The engine tag on every row is read back from `parquet_debug_join_engine_used` after the
+!! join, never assumed from the flag -- a forced engine the join declines falls back to the sort
+!! engine, and the row then says so. The engine-phase arms of `shape` (the key build, the sort,
+!! the map alternative) are the control the flag cannot touch.
+!!
 !! **The decomposition is measured through the library's own API, not replicated here.** The
 !! `key build` and `sort` arms call `%deep_copy`/`%append` and `pf_argsort` exactly as
 !! `join_build_keys` and `table_join_pairs` do, so they are the engine's own phases rather than a
@@ -57,7 +67,7 @@ program benchmark_join
 
     integer(int64) :: nleft, nright, nsym
     integer :: rounds, threads_req, ncols_max
-    character(len=:), allocatable :: mode
+    character(len=:), allocatable :: mode, engine
     integer(int64), allocatable :: nullfill_rows(:)
     integer(int64) :: checksum
 
@@ -68,6 +78,7 @@ program benchmark_join
     write (output_unit, "(a,i0,a,i0,a,i0)") "# rounds=", rounds, " threads=", threads_req, &
         " ncols_max=", ncols_max
     write (output_unit, "(a,*(i0,:,','))") "# nullfill_rows=", nullfill_rows
+    write (output_unit, "(a,a)") "# engine=", engine
 #ifdef _OPENMP
     write (output_unit, "(a,i0)") "# omp_get_max_threads=", omp_get_max_threads()
 #else
@@ -113,6 +124,7 @@ contains
         threads_req = 0
         ncols_max = 8
         mode = "all"
+        engine = "both"
         nullfill_rows = [100000_int64, 200000_int64, 400000_int64, 800000_int64]
         n = command_argument_count()
         do i = 1, n
@@ -131,6 +143,8 @@ contains
                 read (arg(9:), *) ncols_max
             else if (index(arg, "--mode=") == 1) then
                 mode = trim(arg(8:))
+            else if (index(arg, "--engine=") == 1) then
+                engine = trim(arg(10:))
             else if (index(arg, "--nullfill-rows=") == 1) then
                 call parse_row_list(arg(17:), nullfill_rows)
             end if
@@ -161,6 +175,64 @@ contains
             end if
         end do
     end subroutine parse_row_list
+
+    !> Forces the join's pair-list engine through the test-only hook: `sort`, `hash` or `auto`.
+    !!
+    !! A local `bind(C)` interface, as every `parquet_debug_*` hook is reached, so it stays out of
+    !! `src/parquet_bindings.f90` and of the library's own interface.
+    subroutine apply_engine(name)
+        use iso_c_binding, only : c_int64_t
+        character(len=*), intent(in) :: name !! "auto", "sort" or "hash".
+        interface
+            subroutine set_join_engine(mode) bind(C, name="parquet_debug_set_join_engine")
+                import :: c_int64_t
+                integer(c_int64_t), value :: mode !! 0 automatic, 1 the sort engine, 2 the hash engine.
+            end subroutine set_join_engine
+        end interface
+
+        select case (name)
+        case ("auto")
+            call set_join_engine(0_c_int64_t)
+        case ("sort")
+            call set_join_engine(1_c_int64_t)
+        case ("hash")
+            call set_join_engine(2_c_int64_t)
+        case default
+            write (output_unit, "(a)") "benchmark_join: unknown --engine=" // name
+            stop 2
+        end select
+    end subroutine apply_engine
+
+    !> The engine the last join ran on, as its name, from the hook's observable.
+    subroutine engine_used(name)
+        use iso_c_binding, only : c_int64_t
+        character(len=:), allocatable, intent(out) :: name !! "sort", "hash" or "?".
+        interface
+            function join_engine_used() result(res) bind(C, name="parquet_debug_join_engine_used")
+                import :: c_int64_t
+                integer(c_int64_t) :: res !! 1 the sort engine, 2 the hash engine.
+            end function join_engine_used
+        end interface
+
+        select case (join_engine_used())
+        case (1_c_int64_t)
+            name = "sort"
+        case (2_c_int64_t)
+            name = "hash"
+        case default
+            name = "?"
+        end select
+    end subroutine engine_used
+
+    !> The engines a per-engine mode times, in order: both, or the one `--engine=` named.
+    subroutine engine_list(names)
+        character(len=4), allocatable, intent(out) :: names(:) !! "sort"/"hash"/"auto".
+        if (engine == "both") then
+            names = [character(len=4) :: "sort", "hash"]
+        else
+            names = [character(len=4) :: engine]
+        end if
+    end subroutine engine_list
 
     !> Seconds now, from the best clock available.
     function now() result(t)
@@ -244,7 +316,7 @@ contains
     !! The clone is outside the timer for two reasons and both matter: `%join` mutates, so
     !! without it round 2 would join an already-joined table, and its allocation is not part of
     !! what a caller pays for a join.
-    subroutine time_join(base, other, on, how, columns, require, best, n_out, ncols_out)
+    subroutine time_join(base, other, on, how, columns, require, best, n_out, ncols_out, eng, used)
         type(parquet_table), intent(in) :: base   !! the left table, never mutated.
         type(parquet_table), intent(in) :: other  !! the right table.
         character(len=*), intent(in) :: on        !! the key, as a separated string.
@@ -254,10 +326,19 @@ contains
         real(real64), intent(out) :: best         !! best elapsed seconds.
         integer(int64), intent(out) :: n_out      !! rows the join produced.
         integer, intent(out), optional :: ncols_out !! columns it produced; the payload control.
+        character(len=*), intent(in), optional :: eng !! engine to force; absent = `--engine=`'s, or auto.
+        character(len=:), allocatable, intent(out), optional :: used !! the engine that ran, read back.
         type(parquet_table) :: w
         real(real64) :: t0, t1
         integer :: r
 
+        if (present(eng)) then
+            call apply_engine(eng)
+        else if (engine == "both") then
+            call apply_engine("auto")
+        else
+            call apply_engine(engine)
+        end if
         best = huge(1.0_real64)
         n_out = 0_int64
         do r = 1, rounds
@@ -275,7 +356,41 @@ contains
             if (present(ncols_out)) ncols_out = w%ncols()
             checksum = checksum + n_out
         end do
+        if (present(used)) call engine_used(used)
     end subroutine time_join
+
+    !> One figure under every engine `--engine=` asks for: a row per engine, tagged with the
+    !! engine that actually ran, and the hash-over-sort ratio when both were timed.
+    subroutine time_join_engines(base, other, on, how, label, columns, require, best_sort, best_hash, n_out)
+        type(parquet_table), intent(in) :: base   !! the left table, never mutated.
+        type(parquet_table), intent(in) :: other  !! the right table.
+        character(len=*), intent(in) :: on        !! the key, as a separated string.
+        character(len=*), intent(in) :: how       !! join kind.
+        character(len=*), intent(in) :: label     !! the row's label.
+        character(len=*), intent(in), optional :: columns !! payload list; absent carries all.
+        character(len=*), intent(in), optional :: require !! cardinality assertion.
+        real(real64), intent(out) :: best_sort    !! best seconds on the sort engine; 0 if not timed.
+        real(real64), intent(out) :: best_hash    !! best seconds on the hash engine; 0 if not timed.
+        integer(int64), intent(out) :: n_out      !! rows the join produced.
+        character(len=4), allocatable :: names(:)
+        character(len=:), allocatable :: used
+        real(real64) :: best
+        integer :: e
+
+        best_sort = 0.0_real64
+        best_hash = 0.0_real64
+        call engine_list(names)
+        do e = 1, size(names)
+            call time_join(base, other, on, how, columns=columns, require=require, best=best, &
+                n_out=n_out, eng=trim(names(e)), used=used)
+            call report(label // "  [" // used // " engine]", best, n_out)
+            if (used == "sort") best_sort = best
+            if (used == "hash") best_hash = best
+        end do
+        if (best_sort > 0.0_real64 .and. best_hash > 0.0_real64) then
+            write (output_unit, "(a,f8.3)") "   hash / sort: ", best_hash / best_sort
+        end if
+    end subroutine time_join_engines
 
     !> The WAVES shape: a large catalogue against a small unique-keyed lookup table.
     subroutine mode_shape()
@@ -285,6 +400,7 @@ contains
         type(pf_index_map) :: map
         integer(int64), allocatable :: lk(:), rk(:), perm(:), go(:), hits(:)
         real(real64) :: t0, t1, best_join, best_key, best_sort, best_hash, best_nopay
+        real(real64) :: join_sort, join_hash, nopay_sort, nopay_hash
         integer(int64) :: n_out, i
         integer :: r
 
@@ -303,15 +419,21 @@ contains
         call build_left(a, lk)
         call build_right(b, rk, 1)
 
-        call time_join(a, b, "id", "left", require="m:1", best=best_join, n_out=n_out)
-        call report("%join(left, require=m:1)", best_join, nleft)
+        call time_join_engines(a, b, "id", "left", "%join(left, require=m:1)", require="m:1", &
+            best_sort=join_sort, best_hash=join_hash, n_out=n_out)
 
         ! The same join against a right table holding nothing but the key, so no payload column
         ! is gathered at all. The difference is the whole column rewrite -- the phase a fused
         ! copy-gather-nullfill would attack -- measured without a debug hook.
         call build_right(bkey, rk, 0)
-        call time_join(a, bkey, "id", "left", require="m:1", best=best_nopay, n_out=n_out)
-        call report("  the same join carrying NO payload column", best_nopay, nleft)
+        call time_join_engines(a, bkey, "id", "left", "  the same, NO payload column", &
+            require="m:1", best_sort=nopay_sort, best_hash=nopay_hash, n_out=n_out)
+        ! The shares below decompose the SORT engine's join, whose phases the arms that follow
+        ! are; when only the hash engine was timed they are its figures, and read as a bound.
+        best_join = join_sort
+        best_nopay = nopay_sort
+        if (best_join <= 0.0_real64) best_join = join_hash
+        if (best_nopay <= 0.0_real64) best_nopay = nopay_hash
 
         ! Engine phase 1: the concatenated key column each join key needs. These are the two
         ! calls `join_build_keys` makes, on the same public bindings, so this is the engine's own
@@ -366,6 +488,7 @@ contains
         end do
         call report("  ALTERNATIVE: pf_index_map build(right)+get_many(left)", best_hash, nleft)
         write (output_unit, "(a)") ""
+        write (output_unit, "(a)") "   (shares are of the SORT engine's join, whose phases the arms above are)"
         write (output_unit, "(a,f8.3)") "   engine phases as a share of the join: ", &
             (best_key + best_sort) / best_join
         write (output_unit, "(a,f8.3)") "   the map alternative as a share of the sort: ", &
@@ -382,7 +505,7 @@ contains
     subroutine mode_size()
         type(parquet_table) :: a, b
         integer(int64), allocatable :: lk(:), rk(:)
-        real(real64) :: best
+        real(real64) :: best_sort, best_hash
         integer(int64) :: n, n_out
         integer :: s
         character(len=64) :: label
@@ -395,9 +518,9 @@ contains
             call fill_keys(20260907_int64, n, n, rk)
             call build_left(a, lk)
             call build_right(b, rk, 1)
-            call time_join(a, b, "id", "inner", best=best, n_out=n_out)
-            write (label, "(a,i0,a,i0,a)") "%join(inner) n=", n, "  (", n_out, " out)"
-            call report(trim(label), best, n_out)
+            write (label, "(a,i0)") "%join(inner) n=", n
+            call time_join_engines(a, b, "id", "inner", trim(label), best_sort=best_sort, &
+                best_hash=best_hash, n_out=n_out)
         end do
         write (output_unit, "(a)") ""
     end subroutine mode_size
@@ -406,7 +529,7 @@ contains
     subroutine mode_how()
         type(parquet_table) :: a, b
         integer(int64), allocatable :: lk(:), rk(:)
-        real(real64) :: best
+        real(real64) :: best_sort, best_hash
         integer(int64) :: n_out
         integer :: h
         character(len=16) :: hows(6)
@@ -424,9 +547,9 @@ contains
         call build_left(a, lk)
         call build_right(b, rk, 1)
         do h = 1, 6
-            call time_join(a, b, "id", trim(hows(h)), best=best, n_out=n_out)
-            write (label, "(a,a,a,i0,a)") "%join(", trim(hows(h)), ")  (", n_out, " out)"
-            call report(trim(label), best, n_out)
+            write (label, "(a,a,a)") "%join(", trim(hows(h)), ")"
+            call time_join_engines(a, b, "id", trim(hows(h)), trim(label), best_sort=best_sort, &
+                best_hash=best_hash, n_out=n_out)
         end do
         write (output_unit, "(a)") ""
     end subroutine mode_how
@@ -440,6 +563,7 @@ contains
         integer :: w, c, nc
         character(len=256) :: cols, more
         character(len=64) :: label
+        character(len=:), allocatable :: used
 
         write (output_unit, "(a)") "## payload -- an inner join carrying W columns, per OUTPUT row"
         write (output_unit, "(a,i0,a)") "   (", nsym, " rows each side; the SLOPE in W is the " // &
@@ -463,12 +587,12 @@ contains
                 cols = trim(cols) // trim(more)
             end do
             call time_join(a, b, "id", "inner", columns=trim(cols), best=best, n_out=n_out, &
-                ncols_out=nc)
+                ncols_out=nc, used=used)
             ! The result's column count is this mode's negative control: without it a `columns=`
             ! that silently carried one column would give four identical figures and a confident
             ! "the rewrite is free" verdict. It must read w + 2 (this table's key and payload).
-            write (label, "(a,i0,a,i0,a)") "%join(inner) carrying ", w, " column(s) -> ", nc, &
-                " cols"
+            write (label, "(a,i0,a,i0,a,a,a)") "%join(inner) ", w, " col(s) -> ", nc, " cols  [", &
+                used, "]"
             call report(trim(label), best, n_out)
             if (w == 1) first = best
             w = w * 2

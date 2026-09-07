@@ -102,6 +102,7 @@ something a reader is expected to have.
 | [Risk-215](#risk-215--the-sorted-backends-prefix-bucket-is-an-arithmetic-shift-and-a-subtraction-that-cannot-overflow-and-the-range-test-in-front-of-it-is-what-keeps-it-in-bounds) | The sorted backend's prefix bucket is an arithmetic shift and a subtraction that cannot overflow, and the range test in front of it is what keeps it in bounds | 4 — covered |
 | [Risk-216](#risk-216--the-joins-hash-engine-puts-the-null-keyed-right-rows-back-by-subtraction-and-a-union-over-groups-loses-them-silently) | The join's hash engine puts the null-keyed right rows back by SUBTRACTION, and a union over groups loses them silently | 4 — covered |
 | [Risk-217](#risk-217--two-join-engines-assert-require-and-count-the-output-and-only-the-suite-run-under-both-can-see-them-disagree) | Two join engines assert `require=` and count the output, and only the suite run under both can see them disagree | 4 — covered |
+| [Risk-218](#risk-218--the-joins-engine-choice-reads-the-key-kinds-and-order-alone-and-a-data-dependent-choice-would-hide-behind-the-floor) | The join's engine choice reads the key kinds and `order=` alone, and a data-dependent choice would hide behind the floor | 4 — covered |
 | [Risk-1](#risk-1--the-release-policy-regresses-silently) | The release policy regresses silently | 4 — covered |
 | [Risk-2](#risk-2--the-schema-less-write-rests-on-three-properties-that-look-incidental) | The schema-less write rests on three properties that look incidental | 4 — covered |
 | [Risk-3](#risk-3--the-screen-and-the-evaluator-can-drift-apart) | The screen and the evaluator can drift apart | 4 — covered |
@@ -8386,3 +8387,27 @@ message text on the hash engine's abort. Four mutations of the hash engine — t
 rows dropped from the count, the `"1:m"` mask test flipped to `"m:1"`, the probe's `valid=`
 dropped, the matches emitted in key order — each fail a named test under `table_join_hash` and
 pass under `table_join`, which is the shape this entry asks a future change to keep.
+
+### Risk-218 — The join's engine choice reads the key kinds and `order=` alone, and a data-dependent choice would hide behind the floor
+
+`join_choose_engine` (`src/parquet_tables_join.f90`) picks the hash engine for every eligible call
+and the sort engine otherwise, from `join_hash_eligible` — the key kinds and `order=` — and from
+nothing else: not the row counts, not a multiplicity, not a null count, not the thread count. Both
+engines answer identically, so a choice that read any of those would still be CORRECT on every
+input; what it would do is make one program's join take different paths on different inputs, or on
+different machines, and a defect of one engine would then appear and disappear with the data — a
+debugging trap that presents as run-to-run noise and hides behind the measurement floor. The
+temptation is real, because a size clause is the obvious "optimisation" once one shape measures
+close: the sweep recorded in feature_join.md (stage 3) found none, on either compiler, down to a
+thousand rows against ten.
+
+**Rule:** the selection is a function of the key kinds and `order=` alone. A future clause that
+needs anything else is a design change to be argued in a planning document, not an edit to the
+predicate; and the test-only hook stays the only override (no argument, no setting — section 9 of
+feature_join.md).
+
+**Covered by** `test_join_engine_rule_is_data_independent` (`test/test_table_join.f90`, the serial
+`table_join_hash` suite), which clears the hook and requires the same engine at `threads=1` and
+`threads=64`, on a fixture of distinct keys and on one where every key is one value, on five rows
+and on five thousand, under `how="anti"` with `require="m:1"` — and the sort engine for
+`order="key"` on the same fixture; and by `test_join_engine_hook_switches`' automatic arm.

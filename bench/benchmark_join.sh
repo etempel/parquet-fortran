@@ -19,6 +19,7 @@
 #   bench/benchmark_join.sh                       # every mode
 #   bench/benchmark_join.sh --mode=shape          # the lookup-table join alone
 #   bench/benchmark_join.sh --mode=nullfill       # the string null-fill and the fill verbs, per size
+#   bench/benchmark_join.sh --engine=hash         # one engine only, forced through the test hook
 #   NLEFT=20000000 NRIGHT=5000 bench/benchmark_join.sh --mode=shape
 #
 # Config (env-overridable, matching this repo's other bench/*.sh scripts):
@@ -41,6 +42,12 @@
 #                   Left row counts --mode=nullfill sweeps, comma-separated. Each doubling should
 #                   about double the time; a quadrupling is the quadratic string null-fill that
 #                   mode exists to keep out.
+#   ENGINE=both     both | auto | sort | hash. `both` (the default) times every join of --mode=shape,
+#                    size and how under the sort engine and then under the hash engine, each
+#                    forced through the test-only hook, and prints a row per engine plus their
+#                    ratio; `payload` and `nullfill` then run under the library's own choice.
+#                    `sort`/`hash` force one engine for every mode; `auto` forces nothing. Every
+#                    row is tagged with the engine that actually ran, read back after the join.
 #   MODE=all        shape | size | how | payload | nullfill | all.
 #   LTO=0           Set to 1 when you have appended LTO flags, so the build tree is named apart
 #                    from its non-LTO twin.
@@ -70,6 +77,7 @@ THREADS="${THREADS:-0}"
 NCOLS="${NCOLS:-8}"
 NULLFILL_ROWS="${NULLFILL_ROWS:-100000,200000,400000,800000}"
 MODE="${MODE:-all}"
+ENGINE="${ENGINE:-both}"
 LTO="${LTO:-0}"
 
 for arg in "$@"; do
@@ -82,7 +90,8 @@ for arg in "$@"; do
         --threads=*) THREADS="${arg#--threads=}" ;;
         --ncols=*) NCOLS="${arg#--ncols=}" ;;
         --nullfill-rows=*) NULLFILL_ROWS="${arg#--nullfill-rows=}" ;;
-        -h|--help) sed -n '2,58p' "$0"; finished=1; exit 0 ;;
+        --engine=*) ENGINE="${arg#--engine=}" ;;
+        -h|--help) sed -n '2,65p' "$0"; finished=1; exit 0 ;;
         *) echo "benchmark_join.sh: unknown argument '$arg'" >&2; exit 2 ;;
     esac
 done
@@ -144,6 +153,7 @@ echo "# $FLAGS_LINE"
 
 fpm run benchmark_join --profile release -- \
     --mode="$MODE" --nleft="$NLEFT" --nright="$NRIGHT" --nsym="$NSYM" \
-    --rounds="$ROUNDS" --threads="$THREADS" --ncols="$NCOLS" --nullfill-rows="$NULLFILL_ROWS"
+    --rounds="$ROUNDS" --threads="$THREADS" --ncols="$NCOLS" --nullfill-rows="$NULLFILL_ROWS" \
+    --engine="$ENGINE"
 
 finished=1

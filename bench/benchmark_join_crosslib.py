@@ -1,21 +1,27 @@
 #!/usr/bin/env python3
-"""Cross-library comparison of table joins: parquet-fortran against pandas, astropy and STILTS.
+"""Cross-library comparison of table joins: parquet-fortran against pandas, polars, astropy and STILTS.
 
 Driven by ``bench/benchmark_join_crosslib.sh``, which is where the build (``--profile release``),
 the environment variables and the ``--profile`` assertion live.  This script owns the fixtures, the
-four arms, the row-for-row comparison and the report.
+five arms, the row-for-row comparison and the report.
 
 WHAT IT ANSWERS
 ---------------
-1. **Correctness.**  Every join this library offers is run against whichever of the other three can
+1. **Correctness.**  Every join this library offers is run against whichever of the other four can
    express the same thing, over the SAME parquet files, and the results are compared as multisets of
    rows.  A difference is reported as a difference; whether it is a defect or a documented semantic
    divergence is decided by the ``SEMANTICS`` cases, which exist precisely to pin the places where
-   the four libraries are *entitled* to disagree (null keys are the big one).
+   the five libraries are *entitled* to disagree (null keys are the big one).
 2. **Speed.**  Read, join and write are timed separately, because a single end-to-end figure over a
    parquet pipeline mostly measures Arrow against pyarrow against parquet-mr rather than the join.
    STILTS is a subprocess and can only be timed whole, so it gets a control run -- the same pipeline
    with the join replaced by a concatenation -- and its join phase is reported as the difference.
+   polars is the reference a parallel hash join is measured against; its thread pool is capped at
+   ``--threads`` (``POLARS_MAX_THREADS``) when that is given, so the two are compared at one width.
+3. **Scale.**  Every perf fixture side carries a ROW-ID column (``lid`` on the left, ``rid`` on the
+   right), so a large result reduces to the multiset of ``(lid, rid)`` pairs, 0 for "no
+   counterpart", and the ``verify`` stage compares the arms exactly at any size -- beside the
+   row-hash comparison, which needs no row ids and is what the small correctness fixtures use.
 
 RULES FROM ``CLAUDE.md``'s BENCHMARKING SECTION THAT THIS SCRIPT FOLLOWS
 -----------------------------------------------------------------------
@@ -25,8 +31,9 @@ RULES FROM ``CLAUDE.md``'s BENCHMARKING SECTION THAT THIS SCRIPT FOLLOWS
 * A noise floor is measured with the same harness the campaign runs, not borrowed from another tool.
 * A library that cannot express a case is reported as ``n/a``, never silently skipped.
 
-Nothing here is run by ``fpm test`` or by CI: it needs pandas, astropy, pyarrow and a ``stilts`` on
-``PATH``, and the large shapes need several GB.  Maintainer-only.
+Nothing here is run by ``fpm test`` or by CI: it needs pandas, polars, astropy, pyarrow and a
+``stilts`` on ``PATH`` (an absent one is reported ``n/a``), and the large shapes need several GB.
+Maintainer-only.
 """
 
 from __future__ import annotations
@@ -58,12 +65,14 @@ def _rng(seed: int) -> np.random.Generator:
 
 
 def make_side(n, key_lo, key_hi, seed, prefix, ncols=4, key_dtype="int64",
-              unique=False, key_name="id", nulls=0.0, extra_key=False):
+              unique=False, key_name="id", nulls=0.0, extra_key=False, rowid=None):
     """Builds one side of a join as an Arrow table: a key column plus ``ncols`` float payloads.
 
     ``unique`` draws the key without replacement, which is what makes a lookup table a lookup table
     and what lets ``require="m:1"`` hold.  Payload names carry ``prefix`` so the two sides never
     clash -- a clash is its own correctness case rather than a thing every case has to cope with.
+    ``rowid`` names an int64 column holding ``1 .. n``, the row's own number, which is what lets a
+    large result be compared as a multiset of row PAIRS rather than of rendered rows.
     """
     r = _rng(seed)
     if unique:
@@ -94,6 +103,8 @@ def make_side(n, key_lo, key_hi, seed, prefix, ncols=4, key_dtype="int64",
 
     if extra_key:
         cols["band"] = pa.array((keys % 3).astype(np.int32), pa.int32())
+    if rowid:
+        cols[rowid] = pa.array(np.arange(1, n + 1, dtype=np.int64), pa.int64())
 
     for c in range(ncols):
         cols[f"{prefix}{c}"] = pa.array(r.normal(size=n) * 100.0 + c, pa.float64())
@@ -329,6 +340,55 @@ def run_pandas(left, right, out, how, on="id", other_on=None, columns=None,
                      write_s=write_s, canon=canon(pq.read_table(out)))
 
 
+# ---- polars ----
+
+def run_polars(left, right, out, how, on="id", other_on=None, columns=None,
+               other_suffix="_2", rounds=3):
+    """polars ``DataFrame.join``, eager, over frames read whole first.
+
+    polars implements every ``how`` this library has, including ``semi`` and ``anti``, and its
+    default null rule is SQL's -- a null key matches nothing, ``nulls_equal=False`` -- which is why
+    it agrees with parquet-fortran where pandas does not.  Key columns with the SAME name on both
+    sides are coalesced into one, as this library merges them (``coalesce=True``, which for a
+    ``full`` join is what fills the key from whichever side had the row); keys whose names differ
+    are both kept, as this library keeps them.
+    """
+    try:
+        import polars as pl
+    except ImportError:
+        return ArmResult(ok=False, reason="polars is not installed")
+
+    lon = on.split(",")
+    ron = other_on.split(",") if other_on else lon
+    t0 = time.perf_counter()
+    L = pl.read_parquet(left)
+    R = pl.read_parquet(right)
+    read_s = time.perf_counter() - t0
+    if columns is not None:
+        keep = [c.strip() for c in columns.split(",") if c.strip()]
+        R = R.select(ron + [c for c in keep if c not in ron])
+    phow = "full" if how == "outer" else how
+
+    def do():
+        return L.join(R, left_on=lon, right_on=ron, how=phow, suffix=other_suffix,
+                      coalesce=(other_on is None))
+
+    join_s, J = best_of(do, rounds)
+    t0 = time.perf_counter()
+    J.write_parquet(out)
+    write_s = time.perf_counter() - t0
+    res = ArmResult(ok=True, nrows=J.height, read_s=read_s, join_s=join_s, write_s=write_s,
+                    extra={"threads": pl.thread_pool_size()})
+    if J.height <= CANON_MAX_ROWS:
+        res.canon = canon(pq.read_table(out))
+    return res
+
+
+#: Above this many rows a result is not rendered for ``canon`` (the perf stage compares row ids
+#: and hashes instead); the correctness fixtures are hundreds of rows.
+CANON_MAX_ROWS = 200_000
+
+
 # ---- astropy ----
 
 def run_astropy(left, right, out, how, on="id", other_on=None, columns=None,
@@ -511,7 +571,7 @@ class Case:
     order: str | None = None
     other_suffix: str | None = None
     note: str = ""
-    arms: tuple = ("pandas", "astropy", "stilts")
+    arms: tuple = ("pandas", "polars", "astropy", "stilts")
 
 
 def build_correctness_fixtures(d):
@@ -595,7 +655,7 @@ def correctness_cases(p):
                       other_on="object_id", note="key columns named differently"))
     cases.append(Case("columns/left", p["lut_l"], p["lut_r"], "left", columns="rx0",
                       note="columns= carries one payload column only",
-                      arms=("pandas", "astropy")))
+                      arms=("pandas", "polars", "astropy")))
     cases.append(Case("orderkey/inner", p["dup_l"], p["dup_r"], "inner", order="key",
                       note="order=\"key\": same pairs, engine's grouping"))
     return cases
@@ -616,6 +676,10 @@ def run_correctness(cfg, out):
             try:
                 if arm == "pandas":
                     r = run_pandas(c.left, c.right, f"{cfg.work}/pd_{tag}.parquet", c.how,
+                                   on=c.on, other_on=c.other_on, columns=c.columns,
+                                   other_suffix=c.other_suffix or "_2", rounds=1)
+                elif arm == "polars":
+                    r = run_polars(c.left, c.right, f"{cfg.work}/po_{tag}.parquet", c.how,
                                    on=c.on, other_on=c.other_on, columns=c.columns,
                                    other_suffix=c.other_suffix or "_2", rounds=1)
                 elif arm == "astropy":
@@ -643,7 +707,7 @@ def run_correctness(cfg, out):
 def _print_case_line(e):
     """One line per case as it finishes, so a long run reports as it goes."""
     bits = []
-    for arm in ("pandas", "astropy", "stilts"):
+    for arm in ("pandas", "polars", "astropy", "stilts"):
         a = e["arms"].get(arm)
         bits.append(f"{arm}={a['verdict']}" if a else f"{arm}=-")
     print(f"  {e['case']:<20} pf_rows={e['pf_rows']:<8} " + "  ".join(bits))
@@ -666,27 +730,32 @@ def run_semantics(cfg, out):
     p = build_correctness_fixtures(cfg.fixture_dir)
     res = []
 
-    # (1) null keys.  parquet-fortran and SQL and STILTS: a null matches nothing, not even another
-    #     null.  pandas: NA matches NA.  astropy: refuses a masked key column outright.
+    # (1) null keys.  parquet-fortran, SQL, STILTS and polars: a null matches nothing, not even
+    #     another null.  pandas: NA matches NA.  astropy: refuses a masked key column outright.
     for how in ("inner", "left"):
         tag = f"null_{how}"
         pf = run_pf(cfg.binary, p["null_l"], p["null_r"], f"{cfg.work}/pf_{tag}.parquet", how,
                     rounds=1)
         pd_r = run_pandas(p["null_l"], p["null_r"], f"{cfg.work}/pd_{tag}.parquet", how, rounds=1)
+        po_r = run_polars(p["null_l"], p["null_r"], f"{cfg.work}/po_{tag}.parquet", how, rounds=1)
         ap_r = run_astropy(p["null_l"], p["null_r"], f"{cfg.work}/ap_{tag}.parquet", how, rounds=1)
         st_r = run_stilts(p["null_l"], p["null_r"], f"{cfg.work}/st_{tag}.parquet", how, rounds=1)
         res.append({
             "probe": f"null key, how={how}",
             "pf_rows": pf.nrows, "pandas_rows": pd_r.nrows if pd_r.ok else None,
+            "polars_rows": po_r.nrows if po_r.ok else None,
             "astropy": ap_r.reason if not ap_r.ok else f"{ap_r.nrows} rows",
             "stilts_rows": st_r.nrows if st_r.ok else None,
             "pf_vs_stilts": rows_equal(pf.canon, st_r.canon) if st_r.ok else None,
             "pf_vs_pandas": rows_equal(pf.canon, pd_r.canon) if pd_r.ok else None,
+            "pf_vs_polars": rows_equal(pf.canon, po_r.canon) if po_r.ok else None,
             "pf_vs_astropy": rows_equal(pf.canon, ap_r.canon) if ap_r.ok else None,
         })
         print(f"  null key how={how}: pf={pf.nrows} rows"
               f" | pandas={pd_r.nrows if pd_r.ok else 'err'} "
               f"(same rows as pf: {res[-1]['pf_vs_pandas']})"
+              f" | polars={po_r.nrows if po_r.ok else 'n/a'} "
+              f"(same: {res[-1]['pf_vs_polars']})"
               f" | stilts={st_r.nrows if st_r.ok else 'err'} "
               f"(same: {res[-1]['pf_vs_stilts']})"
               f" | astropy={ap_r.nrows if ap_r.ok else 'REFUSED'} "
@@ -838,26 +907,54 @@ def run_claims(cfg, out):
 # The performance suite
 # --------------------------------------------------------------------------------------------
 
+#: Rows a side of the heavy-duplication shape, whichever ``--nsym`` says: its inner join emits
+#: about ``n**2 / 10000`` rows, 1e8 at this size and 1e10 at ten million.
+DUP_ROWS = 1_000_000
+#: Distinct keys of that shape, so about ``DUP_ROWS / DUP_KEYS`` rows share each one on each side.
+DUP_KEYS = 10_000
+#: The ``max_rows=`` ceiling passed on the heavy-duplication join: above its output, so the
+#: counting pass runs in full and the join is not refused.
+DUP_MAX_ROWS = 200_000_000
+
+
 def build_perf_fixtures(d, nleft, nright, nsym, ncols):
-    """Writes the three performance shapes.  Payload names are disjoint, so nothing is suffixed."""
+    """Writes the performance shapes.  Payload names are disjoint, so nothing is suffixed.
+
+    Every side carries a row-id column, ``lid`` or ``rid``, so the ``verify`` stage can compare the
+    large outputs as multisets of row pairs.  The lookup fixtures serve two shapes: read the usual
+    way round they are the WAVES lookup; swapped, they are the RIGHT-larger shape the engine
+    selection rule needs.
+    """
     os.makedirs(d, exist_ok=True)
     p = {}
     # lookup: a large left table against a small unique-keyed right one, the WAVES shape
-    L = make_side(nleft, 0, max(nright * 4, 1000), 101, "lx", ncols=ncols)
-    R = make_side(nright, 0, max(nright * 4, 1000), 102, "rx", ncols=ncols, unique=True)
+    L = make_side(nleft, 0, max(nright * 4, 1000), 101, "lx", ncols=ncols, rowid="lid")
+    R = make_side(nright, 0, max(nright * 4, 1000), 102, "rx", ncols=ncols, unique=True,
+                  rowid="rid")
     p["lut_l"], p["lut_r"] = f"{d}/perf_lut_l.parquet", f"{d}/perf_lut_r.parquet"
     pq.write_table(L, p["lut_l"]); pq.write_table(R, p["lut_r"])
+    # the same two tables swapped, for the right-larger shape: row ids the other way round
+    Ls = make_side(nright, 0, max(nright * 4, 1000), 102, "lx", ncols=ncols, unique=True,
+                   rowid="lid")
+    Rs = make_side(nleft, 0, max(nright * 4, 1000), 101, "rx", ncols=ncols, rowid="rid")
+    p["rlut_l"], p["rlut_r"] = f"{d}/perf_rlut_l.parquet", f"{d}/perf_rlut_r.parquet"
+    pq.write_table(Ls, p["rlut_l"]); pq.write_table(Rs, p["rlut_r"])
     # symmetric: both sides the same size, keys drawn from a range equal to the row count, so an
     # inner join emits roughly nsym rows rather than nsym^2
-    L2 = make_side(nsym, 0, nsym, 103, "lx", ncols=ncols)
-    R2 = make_side(nsym, 0, nsym, 104, "rx", ncols=ncols)
+    L2 = make_side(nsym, 0, nsym, 103, "lx", ncols=ncols, rowid="lid")
+    R2 = make_side(nsym, 0, nsym, 104, "rx", ncols=ncols, rowid="rid")
     p["sym_l"], p["sym_r"] = f"{d}/perf_sym_l.parquet", f"{d}/perf_sym_r.parquet"
     pq.write_table(L2, p["sym_l"]); pq.write_table(R2, p["sym_r"])
     # 1:1: unique on both sides, half the keys shared
-    L3 = make_side(nsym, 0, nsym * 3, 105, "lx", ncols=ncols, unique=True)
-    R3 = make_side(nsym, 0, nsym * 3, 106, "rx", ncols=ncols, unique=True)
+    L3 = make_side(nsym, 0, nsym * 3, 105, "lx", ncols=ncols, unique=True, rowid="lid")
+    R3 = make_side(nsym, 0, nsym * 3, 106, "rx", ncols=ncols, unique=True, rowid="rid")
     p["one_l"], p["one_r"] = f"{d}/perf_one_l.parquet", f"{d}/perf_one_r.parquet"
     pq.write_table(L3, p["one_l"]); pq.write_table(R3, p["one_r"])
+    # heavy duplication: DUP_ROWS rows over DUP_KEYS keys on both sides, the pair count dominating
+    L4 = make_side(DUP_ROWS, 0, DUP_KEYS, 107, "lx", ncols=ncols, rowid="lid")
+    R4 = make_side(DUP_ROWS, 0, DUP_KEYS, 108, "rx", ncols=ncols, rowid="rid")
+    p["dup_l"], p["dup_r"] = f"{d}/perf_dup_l.parquet", f"{d}/perf_dup_r.parquet"
+    pq.write_table(L4, p["dup_l"]); pq.write_table(R4, p["dup_r"])
     return p
 
 
@@ -871,6 +968,11 @@ def run_perf(cfg, out):
          f"{cfg.nsym} x {cfg.nsym}, duplicate keys both sides"),
         ("one_to_one", p["one_l"], p["one_r"], ["inner", "outer"],
          f"{cfg.nsym} x {cfg.nsym}, unique keys both sides, ~1/3 overlap"),
+        ("right_larger", p["rlut_l"], p["rlut_r"], ["inner", "right"],
+         f"{cfg.nright} x {cfg.nleft}, unique LEFT key: the lookup shape the other way round"),
+        ("duplication", p["dup_l"], p["dup_r"], ["inner"],
+         f"{DUP_ROWS} x {DUP_ROWS} over {DUP_KEYS} keys, ~{DUP_ROWS * DUP_ROWS // DUP_KEYS} pairs, "
+         f"max_rows={DUP_MAX_ROWS}"),
     ]
     rows = []
     for shape, left, right, hows, desc in shapes:
@@ -878,11 +980,16 @@ def run_perf(cfg, out):
         for how in hows:
             tag = f"{shape}_{how}"
             rec = {"shape": shape, "how": how, "desc": desc, "arms": {}}
+            require = None
+            if shape == "lookup" and how in ("left", "inner"):
+                require = "m:1"
+            if shape == "right_larger":
+                require = "1:m"
             pf = run_pf(cfg.binary, left, right, f"{cfg.work}/pf_{tag}.parquet", how,
-                        require="m:1" if (shape == "lookup" and how in ("left", "inner")) else None,
-                        rounds=cfg.rounds, threads=cfg.threads)
+                        require=require, rounds=cfg.rounds, threads=cfg.threads,
+                        max_rows=DUP_MAX_ROWS if shape == "duplication" else None)
             rec["arms"]["parquet-fortran"] = _arm_rec(pf)
-            for arm, fn in (("pandas", run_pandas), ("astropy", run_astropy)):
+            for arm, fn in (("pandas", run_pandas), ("polars", run_polars), ("astropy", run_astropy)):
                 if arm == "astropy" and cfg.nsym > cfg.astropy_max and shape != "lookup":
                     rec["arms"][arm] = {"ok": False,
                                         "reason": f"skipped above --astropy-max={cfg.astropy_max}"}
@@ -928,7 +1035,7 @@ def _arm_rec(r: ArmResult):
 def _print_perf_line(rec):
     """One block per (shape, how) as it finishes."""
     print(f"    how={rec['how']:<6} pf_rows={rec['pf_rows']}")
-    for arm in ("parquet-fortran", "pandas", "astropy", "stilts"):
+    for arm in ("parquet-fortran", "pandas", "polars", "astropy", "stilts"):
         a = rec["arms"].get(arm)
         if a is None:
             continue
@@ -1020,31 +1127,77 @@ def row_fingerprints(path, lon=("id",), ron=("id",), other_on=None, keep=None):
     return tuple(names), np.sort(h)
 
 
+def pair_codes(path, nr, one_sided=False):
+    """The multiset of ``(lid, rid)`` row pairs a result holds, as one sorted int64 code each.
+
+    0 stands for "no counterpart on that side", which is what a missing ``lid``/``rid`` reads as
+    once the arm's own null representation (a null, a NaN in an upcast column, an astropy mask) is
+    folded away.  ``one_sided`` drops the right id, for a semi/anti result an arm may have kept
+    right-side columns in.  ``nr`` is the right table's row count, the pair code's radix.
+    """
+    import pandas as pd
+
+    t = pq.read_table(path)
+    cols = _normalize_cols(t, ["id"], ["id"], None)
+    if "lid" not in cols:
+        return None
+    lid = pd.Series(cols["lid"].to_pandas()).fillna(0).astype(np.int64).to_numpy()
+    if one_sided or "rid" not in cols:
+        rid = np.zeros(len(lid), np.int64)
+    else:
+        rid = pd.Series(cols["rid"].to_pandas()).fillna(0).astype(np.int64).to_numpy()
+    return np.sort(lid * (nr + 1) + rid)
+
+
 def run_verify(cfg, out):
     """Compares the LARGE join outputs the perf stage already wrote, row for row.
 
     The perf stage only checks that the row COUNTS agree, which a wrong answer can satisfy easily.
-    This re-reads the files it left behind -- so it costs no extra joins -- and compares the full
-    multiset of rows at 4M rows, which is the size at which a threading or chunking defect would
-    first appear.
+    This re-reads the files it left behind -- so it costs no extra joins -- and compares them at
+    the size at which a threading or chunking defect would first appear: as multisets of
+    ``(lid, rid)`` row pairs where both sides carry a row id (exact, and independent of column
+    naming and of each arm's null representation), and as multisets of row hashes otherwise.
     """
     import glob
     res = []
     groups = {}
     for f in sorted(glob.glob(f"{cfg.work}/pf_*.parquet")):
         tag = os.path.basename(f)[3:-8]
-        if not any(tag.startswith(s) for s in ("lookup", "symmetric", "one_to_one")):
+        if not any(tag.startswith(s) for s in ("lookup", "symmetric", "one_to_one",
+                                                "right_larger", "duplication")):
             continue
         groups[tag] = f
+    fixtures = build_perf_fixtures(cfg.fixture_dir, cfg.nleft, cfg.nright, cfg.nsym, cfg.ncols)
+    right_rows = {"lookup": fixtures["lut_r"], "symmetric": fixtures["sym_r"],
+                  "one_to_one": fixtures["one_r"], "right_larger": fixtures["rlut_r"],
+                  "duplication": fixtures["dup_r"]}
     for tag, pf_file in groups.items():
-        names_pf, h_pf = row_fingerprints(pf_file)
-        rec = {"case": tag, "rows": len(h_pf), "arms": {}}
-        for arm, pre in (("pandas", "pa"), ("astropy", "as"), ("stilts", "st")):
+        shape = next(s for s in right_rows if tag.startswith(s))
+        nr = pq.read_metadata(right_rows[shape]).num_rows
+        one_sided = tag.endswith(("_semi", "_anti"))
+        c_pf = pair_codes(pf_file, nr, one_sided)
+        rec = {"case": tag, "rows": int(len(c_pf)) if c_pf is not None else None,
+               "method": "pairs" if c_pf is not None else "hashes", "arms": {}}
+        names_pf = h_pf = None
+        if c_pf is None:
+            names_pf, h_pf = row_fingerprints(pf_file)
+            rec["rows"] = len(h_pf)
+        for arm, pre in (("pandas", "pa"), ("polars", "po"), ("astropy", "as"), ("stilts", "st")):
             other = f"{cfg.work}/{pre}_{tag}.parquet"
             if not os.path.exists(other):
                 rec["arms"][arm] = "n/a"
                 continue
-            keep = set(names_pf) if tag.endswith(("_semi", "_anti")) else None
+            if c_pf is not None:
+                c_o = pair_codes(other, nr, one_sided)
+                if c_o is None:
+                    rec["arms"][arm] = "n/a (no row ids)"
+                elif len(c_o) != len(c_pf):
+                    rec["arms"][arm] = f"DIFFER ({len(c_pf)} vs {len(c_o)} pairs)"
+                else:
+                    rec["arms"][arm] = "same" if np.array_equal(c_pf, c_o) else "DIFFER (pairs)"
+                del c_o
+                continue
+            keep = set(names_pf) if one_sided else None
             names_o, h_o = row_fingerprints(other, keep=keep)
             if names_o != names_pf:
                 rec["arms"][arm] = f"DIFFER (columns {names_pf} vs {names_o})"
@@ -1053,9 +1206,9 @@ def run_verify(cfg, out):
             else:
                 rec["arms"][arm] = "same" if np.array_equal(h_pf, h_o) else "DIFFER (rows)"
             del h_o
-        del h_pf
+        del c_pf, h_pf
         res.append(rec)
-        print(f"  {tag:<22} rows={rec['rows']:<9} " +
+        print(f"  {tag:<22} rows={rec['rows']:<9} [{rec['method']}] " +
               "  ".join(f"{a}={v}" for a, v in rec["arms"].items()))
         sys.stdout.flush()
     out["verify"] = res
@@ -1074,7 +1227,7 @@ def run_floor(cfg, out):
     """
     p = build_perf_fixtures(cfg.fixture_dir, cfg.nleft, cfg.nright, cfg.nsym, cfg.ncols)
     reps = 5
-    pf_t, pd_t = [], []
+    pf_t, pd_t, po_t = [], [], []
     for _ in range(reps):
         r = run_pf(cfg.binary, p["one_l"], p["one_r"], f"{cfg.work}/floor_pf.parquet", "inner",
                    rounds=cfg.rounds, threads=cfg.threads)
@@ -1082,12 +1235,18 @@ def run_floor(cfg, out):
         r2 = run_pandas(p["one_l"], p["one_r"], f"{cfg.work}/floor_pd.parquet", "inner",
                         rounds=cfg.rounds)
         pd_t.append(r2.join_s)
+        r3 = run_polars(p["one_l"], p["one_r"], f"{cfg.work}/floor_po.parquet", "inner",
+                        rounds=cfg.rounds)
+        if r3.ok:
+            po_t.append(r3.join_s)
     def spread(v):
-        return (max(v) - min(v)) / min(v) * 100.0
+        return (max(v) - min(v)) / min(v) * 100.0 if v else float("nan")
     out["floor"] = {"parquet_fortran_pct": spread(pf_t), "pandas_pct": spread(pd_t),
-                    "pf_times": pf_t, "pandas_times": pd_t, "reps": reps}
+                    "polars_pct": spread(po_t), "pf_times": pf_t, "pandas_times": pd_t,
+                    "polars_times": po_t, "reps": reps}
     print(f"  noise floor over {reps} repetitions of the same best-of-{cfg.rounds} figure: "
-          f"parquet-fortran {spread(pf_t):.1f}%, pandas {spread(pd_t):.1f}%")
+          f"parquet-fortran {spread(pf_t):.1f}%, pandas {spread(pd_t):.1f}%, "
+          f"polars {spread(po_t):.1f}%")
     return out["floor"]
 
 
@@ -1127,6 +1286,9 @@ def main(argv=None):
     ap.add_argument("--stages", default="correctness,semantics,claims,perf,verify,floor")
     ap.add_argument("--json", default="", help="write the whole run as JSON here")
     a = ap.parse_args(argv)
+    if a.threads > 0:
+        # Before polars is first imported anywhere below: its pool size is read once, at import.
+        os.environ.setdefault("POLARS_MAX_THREADS", str(a.threads))
 
     cfg = Config(binary=a.binary, work=a.work, fixture_dir=a.fixtures, nleft=a.nleft,
                  nright=a.nright, nsym=a.nsym, ncols=a.ncols, rounds=a.rounds,
@@ -1139,10 +1301,11 @@ def main(argv=None):
     import astropy
     out = {"versions": {
         "python": sys.version.split()[0], "pandas": pd_mod.__version__,
+        "polars": _polars_version(),
         "astropy": astropy.__version__, "pyarrow": pa.__version__, "numpy": np.__version__,
         "stilts": _stilts_version()}, "config": vars(a)}
     print("=" * 94)
-    print("cross-library join comparison -- parquet-fortran vs pandas vs astropy vs STILTS")
+    print("cross-library join comparison -- parquet-fortran vs pandas vs polars vs astropy vs STILTS")
     print("=" * 94)
     for k, v in out["versions"].items():
         print(f"  {k:<10} {v}")
@@ -1178,6 +1341,14 @@ def main(argv=None):
             json.dump(out, fh, indent=1, default=str)
         print(f"wrote {a.json}")
     return 0
+
+
+def _polars_version():
+    try:
+        import polars as pl
+    except ImportError:
+        return "absent"
+    return pl.__version__
 
 
 def _stilts_version():

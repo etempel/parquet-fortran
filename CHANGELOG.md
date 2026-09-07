@@ -120,6 +120,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **`parquet_table%join` builds its match on a hash engine.** A join over integer, real, date,
+  time or timestamp keys, or over one string key, under the default `order="left"` builds a
+  `pf_index_multimap` over the other table's keys and probes it once per row, in place of sorting
+  both key columns; `order="key"`, a logical key and a string key beside another key still take
+  the sort engine. The rows that come out, and their order, are unchanged. `threads=` now sizes
+  whichever engine builds the match, under `parquet_set_index_threads` for the hash engine. See
+  [How the match is built](doc/pages/tables/table-join.md#how-the-match-is-built).
 - **`pf_index_map%get_many` threads.** A bulk lookup now cuts its keys into one chunk per thread,
   by the rule a build follows (automatic, capped by `index_threads`, serial inside a parallel
   region), and takes `threads=` to say otherwise; it is no longer `pure`. See

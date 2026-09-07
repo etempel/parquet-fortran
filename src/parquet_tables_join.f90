@@ -28,9 +28,10 @@
 !!     comparator's by construction (feature_risks.md Risk-211), so it is not a second null
 !!     policy either.
 !!
-!! Which engine runs is `join_choose_engine`'s decision, from the key kinds and `order=` alone --
-!! never from the data's values -- and a test-only hook can force either; both engine bodies
-!! record which one ran, so a suite can be run twice and assert it rather than assume it.
+!! Which engine runs is `join_choose_engine`'s decision -- the hash engine whenever the call is
+!! eligible, from the key kinds and `order=` alone and never from the data's values -- and a
+!! test-only hook can force either; both engine bodies record which one ran, so a suite can be
+!! run twice and assert it rather than assume it.
 !!
 !! **Everything that can produce a silent WRONG ANSWER is decided here**, before a single value
 !! column is touched: which groups are null-bearing and so match nothing, how many rows the output
@@ -986,6 +987,15 @@ contains
     !
     !> Which engine builds this call's pair list.
     !!
+    !! **The rule: the hash engine whenever the call is eligible, the sort engine otherwise.** It
+    !! is a function of the key kinds and `order=` alone (`join_hash_eligible`) -- never of the
+    !! data's values, and not of the row counts either -- so the same call takes the same engine
+    !! on every run, on every input and at every thread count (feature_risks.md Risk-218). There
+    !! is deliberately no size clause: the sweep recorded in feature_join.md's stage 3 found the
+    !! hash engine ahead of the sort engine on both compilers at every size down to a thousand
+    !! rows against ten, so no shape exists at which a build plus a probe loses to the sort's
+    !! counting path, and a clause for one would be a second rule with nothing to select.
+    !!
     !! The test-only hook is read ONCE, here, and outranks nothing it should not: forcing the
     !! sort engine takes it whatever the call; forcing the hash engine takes it only where
     !! `join_hash_eligible` allows, and otherwise the sort engine runs and the observable says
@@ -994,22 +1004,14 @@ contains
     !! take. A forced engine that ABORTED on an ineligible call would instead make every such
     !! test fail under the second run, and one that BYPASSED the rule would run the multimap over
     !! a tuple it cannot represent.
-    !!
-    !! **The automatic answer is the sort engine for every call, at this stage.** The selection
-    !! rule -- a function of row counts, key kinds and `order=` alone, never of the data's values
-    !! -- is written here from the sweep feature_join.md's stage 3 runs; until then the hash
-    !! engine is reached through the hook only.
     integer function join_choose_engine(self, lslots, ord_id) result(engine)
         class(parquet_table), intent(in) :: self !! the left table, whose key kinds decide.
         integer, intent(in) :: lslots(:)         !! this table's key slots.
         integer, intent(in) :: ord_id            !! ORD_* token.
-        integer(int64) :: mode
         !
         engine = ENGINE_SORT
-        mode = join_engine_mode()
-        if (mode == int(ENGINE_SORT, int64)) return
-        if (.not. join_hash_eligible(self, lslots, ord_id)) return
-        if (mode == int(ENGINE_HASH, int64)) engine = ENGINE_HASH
+        if (join_engine_mode() == int(ENGINE_SORT, int64)) return
+        if (join_hash_eligible(self, lslots, ord_id)) engine = ENGINE_HASH
     end function join_choose_engine
     !
     !> Whether the hash engine can take this call: `order="left"`, and every key column of a

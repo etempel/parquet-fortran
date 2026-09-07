@@ -9358,11 +9358,14 @@ module parquet_tables
             !> per output row: the row of `other` that produced it, or 0 when there is none.
             !! `pairs`'s counterpart, and the same length.
             integer(int64), allocatable, intent(out), optional :: other_pairs(:)
-            !> team size for the sort that builds the pair list, and for nothing else -- the
+            !> team size for the ENGINE that builds the match, and for nothing else -- the
             !! column work that follows answers to `parquet_set_table_threads`, as every other
-            !! row-structural mutation does. Absent means the automatic rule (`omp_get_max_threads()`
-            !! capped by `parquet_set_sort_threads` and by the processors available); `threads=1`
-            !! forces that sort serial. It never changes which rows come out, or their order.
+            !! row-structural mutation does. The hash engine (the usual one) opens the team for its
+            !! multimap build and probe, and absent means its automatic rule, capped by
+            !! `parquet_set_index_threads`; the sort engine (`order="key"`, a logical key, a string
+            !! key beside another) opens it for its sort, capped by `parquet_set_sort_threads`.
+            !! `threads=1` forces either serial. It never changes which rows come out, or their
+            !! order, and never which engine runs.
             integer, intent(in), optional :: threads
         end subroutine table_join
         !> %join with an `integer(int32)` `max_rows=`; see `table_join` for everything else.
@@ -9389,11 +9392,14 @@ module parquet_tables
             integer(int64), allocatable, intent(out), optional :: pairs(:) !! see `table_join`.
             !> per output row: `other`'s row, or 0; see `table_join`.
             integer(int64), allocatable, intent(out), optional :: other_pairs(:)
-            !> team size for the sort that builds the pair list, and for nothing else -- the
+            !> team size for the ENGINE that builds the match, and for nothing else -- the
             !! column work that follows answers to `parquet_set_table_threads`, as every other
-            !! row-structural mutation does. Absent means the automatic rule (`omp_get_max_threads()`
-            !! capped by `parquet_set_sort_threads` and by the processors available); `threads=1`
-            !! forces that sort serial. It never changes which rows come out, or their order.
+            !! row-structural mutation does. The hash engine (the usual one) opens the team for its
+            !! multimap build and probe, and absent means its automatic rule, capped by
+            !! `parquet_set_index_threads`; the sort engine (`order="key"`, a logical key, a string
+            !! key beside another) opens it for its sort, capped by `parquet_set_sort_threads`.
+            !! `threads=1` forces either serial. It never changes which rows come out, or their
+            !! order, and never which engine runs.
             integer, intent(in), optional :: threads
         end subroutine table_join_max_i32
         !> %join with an `integer(int64)` `max_rows=`; see `table_join` for everything else.
@@ -9420,11 +9426,14 @@ module parquet_tables
             integer(int64), allocatable, intent(out), optional :: pairs(:) !! see `table_join`.
             !> per output row: `other`'s row, or 0; see `table_join`.
             integer(int64), allocatable, intent(out), optional :: other_pairs(:)
-            !> team size for the sort that builds the pair list, and for nothing else -- the
+            !> team size for the ENGINE that builds the match, and for nothing else -- the
             !! column work that follows answers to `parquet_set_table_threads`, as every other
-            !! row-structural mutation does. Absent means the automatic rule (`omp_get_max_threads()`
-            !! capped by `parquet_set_sort_threads` and by the processors available); `threads=1`
-            !! forces that sort serial. It never changes which rows come out, or their order.
+            !! row-structural mutation does. The hash engine (the usual one) opens the team for its
+            !! multimap build and probe, and absent means its automatic rule, capped by
+            !! `parquet_set_index_threads`; the sort engine (`order="key"`, a logical key, a string
+            !! key beside another) opens it for its sort, capped by `parquet_set_sort_threads`.
+            !! `threads=1` forces either serial. It never changes which rows come out, or their
+            !! order, and never which engine runs.
             integer, intent(in), optional :: threads
         end subroutine table_join_max_i64
         !> %join over a separated key string ("id" or "ra,dec"); see `table_join` for everything
@@ -9444,11 +9453,14 @@ module parquet_tables
             integer(int64), allocatable, intent(out), optional :: pairs(:) !! see `table_join`.
             !> per output row: `other`'s row, or 0; see `table_join`.
             integer(int64), allocatable, intent(out), optional :: other_pairs(:)
-            !> team size for the sort that builds the pair list, and for nothing else -- the
+            !> team size for the ENGINE that builds the match, and for nothing else -- the
             !! column work that follows answers to `parquet_set_table_threads`, as every other
-            !! row-structural mutation does. Absent means the automatic rule (`omp_get_max_threads()`
-            !! capped by `parquet_set_sort_threads` and by the processors available); `threads=1`
-            !! forces that sort serial. It never changes which rows come out, or their order.
+            !! row-structural mutation does. The hash engine (the usual one) opens the team for its
+            !! multimap build and probe, and absent means its automatic rule, capped by
+            !! `parquet_set_index_threads`; the sort engine (`order="key"`, a logical key, a string
+            !! key beside another) opens it for its sort, capped by `parquet_set_sort_threads`.
+            !! `threads=1` forces either serial. It never changes which rows come out, or their
+            !! order, and never which engine runs.
             integer, intent(in), optional :: threads
         end subroutine table_join_string
         !> %join over a separated key string with an `integer(int32)` `max_rows=`; see
@@ -9472,11 +9484,14 @@ module parquet_tables
             integer(int64), allocatable, intent(out), optional :: pairs(:) !! see `table_join`.
             !> per output row: `other`'s row, or 0; see `table_join`.
             integer(int64), allocatable, intent(out), optional :: other_pairs(:)
-            !> team size for the sort that builds the pair list, and for nothing else -- the
+            !> team size for the ENGINE that builds the match, and for nothing else -- the
             !! column work that follows answers to `parquet_set_table_threads`, as every other
-            !! row-structural mutation does. Absent means the automatic rule (`omp_get_max_threads()`
-            !! capped by `parquet_set_sort_threads` and by the processors available); `threads=1`
-            !! forces that sort serial. It never changes which rows come out, or their order.
+            !! row-structural mutation does. The hash engine (the usual one) opens the team for its
+            !! multimap build and probe, and absent means its automatic rule, capped by
+            !! `parquet_set_index_threads`; the sort engine (`order="key"`, a logical key, a string
+            !! key beside another) opens it for its sort, capped by `parquet_set_sort_threads`.
+            !! `threads=1` forces either serial. It never changes which rows come out, or their
+            !! order, and never which engine runs.
             integer, intent(in), optional :: threads
         end subroutine table_join_string_max_i32
         !> %join over a separated key string with an `integer(int64)` `max_rows=`; see
@@ -9500,11 +9515,14 @@ module parquet_tables
             integer(int64), allocatable, intent(out), optional :: pairs(:) !! see `table_join`.
             !> per output row: `other`'s row, or 0; see `table_join`.
             integer(int64), allocatable, intent(out), optional :: other_pairs(:)
-            !> team size for the sort that builds the pair list, and for nothing else -- the
+            !> team size for the ENGINE that builds the match, and for nothing else -- the
             !! column work that follows answers to `parquet_set_table_threads`, as every other
-            !! row-structural mutation does. Absent means the automatic rule (`omp_get_max_threads()`
-            !! capped by `parquet_set_sort_threads` and by the processors available); `threads=1`
-            !! forces that sort serial. It never changes which rows come out, or their order.
+            !! row-structural mutation does. The hash engine (the usual one) opens the team for its
+            !! multimap build and probe, and absent means its automatic rule, capped by
+            !! `parquet_set_index_threads`; the sort engine (`order="key"`, a logical key, a string
+            !! key beside another) opens it for its sort, capped by `parquet_set_sort_threads`.
+            !! `threads=1` forces either serial. It never changes which rows come out, or their
+            !! order, and never which engine runs.
             integer, intent(in), optional :: threads
         end subroutine table_join_string_max_i64
         !> Builds the join's PAIR LIST: which left row meets which right row, and how many rows

@@ -115,6 +115,11 @@ module test_table_parallel
             import :: c_int64_t
             integer(c_int64_t), value :: n !! new floor, or 0 to restore.
         end subroutine parquet_debug_set_colread_min_elements
+        !> Forces the join's pair-list engine: 0 automatic, 1 the sort engine, 2 the hash engine.
+        subroutine parquet_debug_set_join_engine(mode) bind(C, name="parquet_debug_set_join_engine")
+            import :: c_int64_t
+            integer(c_int64_t), value :: mode !! 0, 1 or 2.
+        end subroutine parquet_debug_set_join_engine
     end interface
     !
 contains
@@ -2097,14 +2102,19 @@ contains
             "parquet_set_table_threads(1) must cap the join's column rewrite")
         if (allocated(error)) return
         call check(error, tab_threads1 > 1, &
-            "threads=1 must NOT cap the column rewrite -- it sizes the pair-list sort, and the " // &
-            "two knobs are separate")
+            "threads=1 must NOT cap the column rewrite -- it sizes the engine that builds the " // &
+            "match, and the two knobs are separate")
         if (allocated(error)) return
         !
-        ! ---- Arm 4: the sort half, the mirror of arm 3. The engine floor is lowered around both
+        ! ---- Arm 4: the sort half, the mirror of arm 3. The join is forced onto the SORT engine
+        ! for this arm: an integer key under order="left" takes the hash engine by default, whose
+        ! multimap resolves its team through the index rule without recording it, so the sort's
+        ! `parquet_debug_sort_threads_used` is the one observation of `threads=` reaching the match
+        ! engine that exists. The engine hook and the engine floor are both set around the two
         ! calls and restored before the assertions, because every `check` can return early and a
-        ! leaked floor would rethread every later test in this suite.
+        ! leaked setting would change the engine, or rethread, every later test in this suite.
         call build_fixture(e)
+        call parquet_debug_set_join_engine(1_c_int64_t)
         call parquet_debug_set_sort_engine_min_rows(1_int64)
         call e%join(b, "k", how="left", threads=4)
         sort_asked = parquet_debug_sort_threads_used()
@@ -2114,6 +2124,7 @@ contains
         sort_under_cap = parquet_debug_sort_threads_used()
         call parquet_reset_settings()
         call parquet_debug_set_sort_engine_min_rows(-1_int64)
+        call parquet_debug_set_join_engine(0_c_int64_t)
         !
         call check(error, sort_asked == 4_int64, &
             "threads= must reach the pair-list sort: the join asks pf_argsort for group_offsets=, " // &

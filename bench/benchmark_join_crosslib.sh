@@ -1,25 +1,30 @@
 #!/usr/bin/env bash
-# Drives the cross-library join comparison: parquet_table%join against pandas, astropy and STILTS.
+# Drives the cross-library join comparison: parquet_table%join against pandas, polars, astropy
+# and STILTS.
 #
 # This script builds bench/benchmark_join_crosslib.f90 --profile release, then hands its path to
-# bench/benchmark_join_crosslib.py, which owns the fixtures, the other three arms, the row-for-row
+# bench/benchmark_join_crosslib.py, which owns the fixtures, the other four arms, the row-for-row
 # comparison and the report. Nothing here decides what is measured.
 #
 # WHAT THE RUN ANSWERS, in the order the report prints it:
 #
-#   correctness -- every join this library offers, run against whichever of the other three can
+#   correctness -- every join this library offers, run against whichever of the other four can
 #                  express the same thing, over the SAME parquet files, compared as multisets of
 #                  rows. This is the half that would find a defect.
-#   semantics   -- the places the four are ENTITLED to disagree, pinned so that neither reads as a
-#                  defect later. Null keys are the whole list: parquet-fortran, STILTS and astropy
-#                  treat a null as matching nothing, pandas matches NA to NA.
+#   semantics   -- the places the five are ENTITLED to disagree, pinned so that neither reads as a
+#                  defect later. Null keys are the whole list: parquet-fortran, polars, STILTS and
+#                  astropy treat a null as matching nothing, pandas matches NA to NA.
 #   claims      -- the properties only parquet-fortran promises, so no other library can
 #                  cross-check them: output row order under each order= value, whether the table
 #                  detaches, what matched= counts, the zero patterns pairs=/other_pairs= must show
 #                  under each how, and that require= and max_rows= refuse what they say they do
 #                  (each with a negative control). The order claim IS cross-checked, against
 #                  pandas, whose merge documents the same rule.
-#   perf        -- read, join and write timed SEPARATELY on three shapes. Separately because a
+#   perf        -- read, join and write timed SEPARATELY on five shapes -- the lookup, the
+#                  symmetric and the one-to-one shapes, the lookup the other way round (a small
+#                  unique-keyed left table against a large right one), and heavy duplication (a
+#                  million rows over ten thousand keys on both sides, the pair count dominating,
+#                  under a max_rows= ceiling above the output). Separately because a
 #                  single end-to-end figure over a parquet pipeline mostly measures Arrow against
 #                  pyarrow against parquet-mr rather than the join. STILTS is a subprocess and can
 #                  only be timed whole, so it gets a control run -- the same files read and one
@@ -45,14 +50,16 @@
 #   NCOLS=4          Payload columns per side. Names are disjoint across the two sides, so nothing
 #                     is suffixed except in the one correctness case that tests suffixing.
 #   ROUNDS=3         Rounds per figure; the best is kept, per this repo's benchmarking rules.
-#   THREADS=0        Forwarded to %join. 0 means "ask the library", which is what a caller gets.
+#   THREADS=0        Forwarded to %join, and to polars' thread pool (POLARS_MAX_THREADS) so the
+#                     two are compared at one width. 0 means "ask the library", which is what a
+#                     caller gets, and leaves polars' pool at its own default.
 #   ASTROPY_MAX=5000000  astropy's join is pure-python and roughly 20x the others; above this row
 #                     count it is skipped rather than allowed to dominate the run.
 #   STAGES=...       correctness,semantics,claims,perf,floor
 #   WORK=test_run/joinxlib   scratch directory; fixtures and every arm's output land under it.
 #
-# REQUIREMENTS beyond this repository: python3 with pandas, astropy, pyarrow and numpy, and a
-# `stilts` on PATH. Any arm that is missing is reported as n/a rather than silently skipped.
+# REQUIREMENTS beyond this repository: python3 with pandas, polars, astropy, pyarrow and numpy,
+# and a `stilts` on PATH. Any arm that is missing is reported as n/a rather than silently skipped.
 #
 # WHAT THIS MEASURES AND WHAT IT DOES NOT. Every arm reads real parquet files, so unlike
 # bench/benchmark_join.sh (which builds its tables in memory and asks where the time goes INSIDE
@@ -92,7 +99,7 @@ for arg in "$@"; do
         --stages=*) STAGES="${arg#--stages=}" ;;
         --work=*) WORK="${arg#--work=}" ;;
         --json=*) JSON="${arg#--json=}" ;;
-        -h|--help) sed -n '2,58p' "$0"; finished=1; exit 0 ;;
+        -h|--help) sed -n '2,70p' "$0"; finished=1; exit 0 ;;
         *) echo "benchmark_join_crosslib.sh: unknown argument '$arg'" >&2; exit 2 ;;
     esac
 done

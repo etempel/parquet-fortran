@@ -91,22 +91,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   positions. See
   [Counting how often each value occurs](doc/pages/tables/table-mutate.md#counting-how-often-each-value-occurs)
   and [Mapping values through a lookup table](doc/pages/utilities/sorting.md#mapping-values-through-a-lookup-table).
-- **`pf_index_map` gains bulk dictionary encoding and validity masks.** `m%get_or_add_many(keys,
-  codes)` is `%get_or_add` over a whole array under one lock, the way to factorise a key column;
-  `valid=` on `%build`, `%get_many` and `%get_or_add_many` skips the rows a mask marks `.false.`, so
-  a nullable key column can be indexed or probed without compacting it first. See
+- **`pf_index_map` gains string keys, bulk dictionary encoding and validity masks.** `%build`,
+  `%get`, `%get_many`, `%set`, `%get_or_add`, `%remove` and `%keys` take a string — a `character`
+  array, a `character` scalar or a `parquet_string_column` — keyed by its exact bytes and verified
+  on every hit. `m%get_or_add_many(keys, codes)` is `%get_or_add` over a whole array under one
+  lock, the way to factorise a key column; `valid=` on `%build`, `%get_many` and
+  `%get_or_add_many` skips the rows a mask marks `.false.`, so a nullable key column can be
+  indexed or probed without compacting it first. See
+  [String keys](doc/pages/utilities/index-maps.md#string-keys) and
   [Filling a map as you go](doc/pages/utilities/index-maps.md#filling-a-map-as-you-go).
 - **`pf_index_multimap`: a map from a key to every position that holds it.** Built from a key
   array in which keys repeat, it answers `%count`, `%get_first` and `%get_all` per key, and
   `%get_first_many` and `%probe_many` for a whole probe array at once — the latter as the CSR pair
-  `pf_match_all` returns, on a hash engine and on a team. Tuple keys, `values=`, `valid=` masks and
-  the three backends are the map's. See
+  `pf_match_all` returns, on a hash engine and on a team. Tuple keys, string keys, `values=`,
+  `valid=` masks and the three backends are the map's. See
   [A key that repeats](doc/pages/utilities/index-maps.md#a-key-that-repeats-pf_index_multimap).
 - **`parquet_table%build_index` and `parquet_table_index`: a lookup index over one column.**
   `call t%build_index("id", ix)` then `call ix%find(key, row)`, `%find_all`, `%find_many` and
   `%count` answer "which row holds this key?" in a few nanoseconds without reordering the table,
-  over an integer, real, date, time or timestamp column; `unique=.false.` indexes a key that
-  repeats. The index checks the table's `%generation()` on every query and refuses once the rows
+  over an integer, real, string, date, time or timestamp column; `unique=.false.` indexes a key
+  that repeats. The index checks the table's `%generation()` on every query and refuses once the rows
   have changed. See
   [Looking a value up](doc/pages/tables/table-mutate.md#looking-a-value-up-build_index).
 

@@ -37,6 +37,12 @@
 !!
 !! **Guards name this type.** The map's shared checks take an `owner` prefix for that reason; the
 !! guard-only subroutines here are impure, per CLAUDE.md's note on ifx deleting a `pure` one.
+!!
+!! **String keys are not here.** `parquet_index_str.f90` descends from THIS submodule and holds
+!! every string-keyed entry of the multimap beside the map's, so that one body can reach the
+!! map's string `%get_or_add_many` and this file's `mm_layout` alike. What this file adds for
+!! them is one guard: every integer-keyed entry below refuses a multimap whose distinct-key map
+!! holds strings, by name, before it could hash an integer against a string table.
 submodule (parquet_index:parquet_index_map) parquet_index_multi
     implicit none
 
@@ -1000,6 +1006,8 @@ contains
     module procedure mm_keys_r1
         integer(int64), allocatable :: pairs(:,:)
 
+        if (self%map%is_str) error stop MM // "keys: this multimap holds string keys; " // &
+            "ask for a parquet_string_column"
         if (self%map%ncomp > 1) error stop MM // "keys: this multimap has composite keys; " // &
             "ask for a rank-2 list"
         allocate(list(self%map%nk))
@@ -1012,6 +1020,8 @@ contains
     module procedure mm_keys_r2
         integer :: nc
 
+        if (self%map%is_str) error stop MM // "keys: this multimap holds string keys; " // &
+            "ask for a parquet_string_column"
         nc = self%map%ncomp
         if (nc < 1) nc = 1
         allocate(list(self%map%nk, nc))
@@ -1048,6 +1058,8 @@ contains
         character(len=*), intent(in) :: what        !! procedure name, for the message.
         integer(int64) :: g                         !! the group id, or 0.
 
+        if (self%map%is_str) error stop MM // what // &
+            ": this multimap holds string keys; look up with a string key"
         if (self%map%ncomp > 1) error stop MM // what // &
             ": this multimap has composite keys; pass the whole key tuple, not a scalar"
         g = ix_get_scalar(self%map, key)
@@ -1092,6 +1104,8 @@ contains
         character(len=*), intent(in) :: what        !! procedure name, for the message.
         integer :: nc                               !! `n`, once it is known to match.
 
+        if (self%map%is_str) error stop MM // what // &
+            ": this multimap holds string keys; look up with a string key"
         if (n /= self%map%ncomp) error stop MM // what // &
             ": the key tuple's length does not match this multimap's component count"
         nc = n
@@ -1108,6 +1122,8 @@ contains
 
         if (nrows /= nidx) error stop MM // what // &
             ": the keys and the answer array must have the same length"
+        if (self%map%is_str) error stop MM // what // &
+            ": this multimap holds string keys; look up with string keys"
         if (self%map%ncomp > 0 .and. nc /= self%map%ncomp) error stop MM // what // &
             ": the keys' component count does not match this multimap's"
         n = nrows
@@ -1119,6 +1135,8 @@ contains
         integer, intent(in) :: nc                   !! components presented per key.
         character(len=*), intent(in) :: what        !! procedure name, for the message.
 
+        if (self%map%is_str) error stop MM // what // &
+            ": this multimap holds string keys; probe with string keys"
         if (self%map%ncomp > 0 .and. nc /= self%map%ncomp) error stop MM // what // &
             ": the keys' component count does not match this multimap's"
     end subroutine mm_check_probe_shape

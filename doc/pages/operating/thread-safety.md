@@ -354,7 +354,9 @@ said about it.
   several threads streaming keys through one map's `%get_or_add` is a supported pattern, and each
   thread's returned index is unique and stable. `pf_index_multimap` follows the same rules: its
   bulk lookups thread internally and stand down inside your region, and a build or `%clear` is
-  serialised on a lock of its own. A `parquet_table_index` is one of those two engines behind a
+  serialised on a lock of its own. A string key changes none of this: it is hashed on the
+  calling thread and verified against the map's own copy of the strings, which nothing writes
+  outside a build or a mutation. A `parquet_table_index` is one of those two engines behind a
   staleness check, so its queries inherit the lock-free rule and `%build_index` the build's;
   the check reads the table's generation counter, which a row-structural change on another
   thread would be moving — and that is the shared-table rule above, not a new one. See

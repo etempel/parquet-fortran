@@ -38,6 +38,14 @@
 !! found, and two null rows are not a repeat under `unique=.true.`. A null temporal ELEMENT
 !! offered as a query key answers 0 for the same reason -- its raw storage is 0, which is
 !! 1970-01-01 or midnight to the engine, and a lookup must not find those by accident.
+!!
+!! **A string column is handed to the engine as it is.** Its `parquet_string_column` goes to the
+!! engine's own string `%build`, which reads the packed bytes in place, keys each element by its
+!! exact bytes and skips a null element itself -- so no key array is extracted here, no
+!! conversion is applied, and the equality is the sort engine's (`"ab"` and `"ab "` are two
+!! keys), which is what makes `%find_all` agree with `pf_match_all` over the same column. A
+!! `character` array offered to `%find_many` is trimmed per element, the library's rule for
+!! every character array argument; a scalar key is taken as written.
 submodule (parquet_tables) parquet_tables_index
     ! The key conversion and the column-acceptance rule, from parquet_core rather than repeated
     ! here: one helper per key kind for the filter, the index and (later) the join, or a table's
@@ -53,9 +61,9 @@ submodule (parquet_tables) parquet_tables_index
     !
     !> Which key KINDS may query an index over which column kinds: one class per family, so the
     !! check is one integer comparison. Both integer widths are one class (a key widens exactly
-    !! as a bound set's members do), both real widths are one class, and each temporal element
-    !! type is its own.
-    integer, parameter :: KC_INT = 1, KC_REAL = 2, KC_DATE = 3, KC_TIME = 4, KC_TS = 5
+    !! as a bound set's members do), both real widths are one class, each temporal element
+    !! type is its own, and a string is its own.
+    integer, parameter :: KC_INT = 1, KC_REAL = 2, KC_DATE = 3, KC_TIME = 4, KC_TS = 5, KC_STR = 6
     !
 contains
     !
@@ -68,7 +76,9 @@ contains
         character(len=:), allocatable :: ttok, stok, sfx
         integer(int64), allocatable :: keys(:), pairs(:, :)
         logical, allocatable :: valid(:)
+        type(parquet_string_column), pointer :: sc
         !
+        nullify(sc)
         call table_check_open(self, PROC)
         ! table_resolve is the ordinary lazy first touch every value accessor runs: the column is
         ! READ here if the table has not read it yet, and an unsupported type is refused with the
@@ -80,10 +90,7 @@ contains
             call parquet_filter_column_tokens(kind, slot%width, ttok, stok)
         end associate
         ! The acceptance rule is the filter's, through the same two helpers the `in` leaf runs,
-        ! so a column that can carry a set clause can be indexed and no other -- with one
-        ! exception this version adds on top: a string column, which the filter answers through
-        ! pf_in and the engines cannot hold yet. When the map gains its string forms this branch
-        ! goes, and the scenario that pins it becomes a control (test_errors.f90).
+        ! so exactly the columns that can carry a set clause can be indexed, and no other.
         call parquet_set_family_for_column(ttok, fam)
         if (fam == FSET_NONE) then
             call table_context_suffix(self%cache, name, sfx)
@@ -96,13 +103,6 @@ contains
                 " column, which cannot be indexed -- a boolean key is `==` with extra steps; " // &
                 "index an integer, real, date, time or timestamp column" // sfx
         end if
-        if (fam == FSET_STRING) then
-            call table_context_suffix(self%cache, name, sfx)
-            error stop EP // PROC // ": column '" // trim(name) // "' is a string column, and " // &
-                "string keys are not supported by the lookup index in this version -- index an " // &
-                "integer, real, date, time or timestamp column, or select string rows with " // &
-                "%filter_rows or the filter's `in` clause" // sfx
-        end if
         !
         ix%cache => self%cache
         ix%gen = self%cache%generation
@@ -110,10 +110,22 @@ contains
         ix%uniq = .true.
         if (present(unique)) ix%uniq = unique
         ix%colname = trim(name)
-        call index_extract_keys(self%cache%cols(idx)%values, kind, self%row_count, keys, pairs, valid)
         ! Values default to 1..n, the key's own position, which is exactly the table's row number
         ! in the full regime -- so nothing is passed as `values=`. The map's own duplicate
         ! refusal names a repeated key and both of its positions, which are table rows.
+        if (fam == FSET_STRING) then
+            ! The column's own string store, in place: the engine keys and null-masks it itself,
+            ! and the store is exactly `row_count` elements long, every column of a table being.
+            call parquet_column_string_column(self%cache%cols(idx)%values, sc)
+            if (ix%uniq) then
+                call ix%map%build(sc, threads=threads)
+            else
+                call ix%mmap%build(sc, threads=threads)
+            end if
+            ix%built = .true.
+            return
+        end if
+        call index_extract_keys(self%cache%cols(idx)%values, kind, self%row_count, keys, pairs, valid)
         if (kind == PK_TIMESTAMP) then
             if (ix%uniq) then
                 call ix%map%build(pairs, valid=valid, threads=threads)
@@ -235,6 +247,8 @@ contains
             have = KC_DATE
         case (PK_TIME)
             have = KC_TIME
+        case (PK_STRING)
+            have = KC_STR
         case default
             have = KC_TS
         end select
@@ -248,6 +262,8 @@ contains
             kword = "a parquet_date"
         case (KC_TIME)
             kword = "a parquet_time"
+        case (KC_STR)
+            kword = "a string"
         case default
             kword = "a parquet_timestamp"
         end select
@@ -449,6 +465,128 @@ contains
         end if
     end subroutine tix_many_pair_i32
     !
+    !> The first row holding a string key.
+    function tix_first_str(self, key) result(row)
+        class(parquet_table_index), intent(in) :: self !! the index.
+        character(len=*), intent(in) :: key           !! the key, as written.
+        integer(int64) :: row                         !! the lowest row holding it, or 0.
+        if (self%uniq) then
+            row = self%map%get(key)
+        else
+            row = self%mmap%get_first(key)
+        end if
+    end function tix_first_str
+    !
+    !> How many rows hold a string key.
+    function tix_count_str(self, key) result(n)
+        class(parquet_table_index), intent(in) :: self !! the index.
+        character(len=*), intent(in) :: key           !! the key, as written.
+        integer(int64) :: n                           !! rows holding it.
+        if (self%uniq) then
+            n = merge(1_int64, 0_int64, self%map%get(key) > 0_int64)
+        else
+            n = self%mmap%count(key)
+        end if
+    end function tix_count_str
+    !
+    !> Every row holding a string key, as int64 rows.
+    subroutine tix_all_str_i64(self, key, rows)
+        class(parquet_table_index), intent(in) :: self       !! the index.
+        character(len=*), intent(in) :: key                 !! the key, as written.
+        integer(int64), allocatable, intent(out) :: rows(:) !! the rows, ascending; zero-length when none.
+        integer(int64) :: r
+        if (self%uniq) then
+            r = self%map%get(key)
+            if (r > 0_int64) then
+                rows = [r]
+            else
+                allocate(rows(0))
+            end if
+        else
+            call self%mmap%get_all(key, rows)
+        end if
+    end subroutine tix_all_str_i64
+    !
+    !> Every row holding a string key, as int32 rows.
+    subroutine tix_all_str_i32(self, key, rows, proc)
+        class(parquet_table_index), intent(in) :: self       !! the index.
+        character(len=*), intent(in) :: key                 !! the key, as written.
+        integer(int32), allocatable, intent(out) :: rows(:) !! the rows, ascending; zero-length when none.
+        character(len=*), intent(in) :: proc                !! calling binding, for the message.
+        integer(int64) :: r
+        if (self%uniq) then
+            r = self%map%get(key)
+            if (r > 0_int64) then
+                rows = [tix_narrow(r, proc)]
+            else
+                allocate(rows(0))
+            end if
+        else
+            call self%mmap%get_all(key, rows)
+        end if
+    end subroutine tix_all_str_i32
+    !
+    !> Bulk first-row lookup over a character array (each element trimmed), int64 answers.
+    subroutine tix_many_of_chr_i64(self, keys, rows, threads, n_found)
+        class(parquet_table_index), intent(in) :: self !! the index.
+        character(len=*), intent(in) :: keys(:)       !! the keys, one per element.
+        integer(int64), intent(out) :: rows(:)        !! one per key, 0 where absent.
+        integer, intent(in), optional :: threads      !! forwarded to the engine.
+        integer(int64), intent(out), optional :: n_found !! non-zero answers.
+        if (self%uniq) then
+            call self%map%get_many(keys, rows, threads=threads)
+            if (present(n_found)) n_found = count(rows > 0_int64, kind=int64)
+        else
+            call self%mmap%get_first_many(keys, rows, threads=threads, n_found=n_found)
+        end if
+    end subroutine tix_many_of_chr_i64
+    !
+    !> Bulk first-row lookup over a character array, int32 answers.
+    subroutine tix_many_of_chr_i32(self, keys, rows, threads, n_found)
+        class(parquet_table_index), intent(in) :: self !! the index.
+        character(len=*), intent(in) :: keys(:)       !! the keys, one per element.
+        integer(int32), intent(out) :: rows(:)        !! one per key, 0 where absent.
+        integer, intent(in), optional :: threads      !! forwarded to the engine.
+        integer(int64), intent(out), optional :: n_found !! non-zero answers.
+        if (self%uniq) then
+            call self%map%get_many(keys, rows, threads=threads)
+            if (present(n_found)) n_found = count(rows > 0_int32, kind=int64)
+        else
+            call self%mmap%get_first_many(keys, rows, threads=threads, n_found=n_found)
+        end if
+    end subroutine tix_many_of_chr_i32
+    !
+    !> Bulk first-row lookup over a parquet_string_column (verbatim, a null element answering
+    !! 0), int64 answers.
+    subroutine tix_many_strcol_i64(self, keys, rows, threads, n_found)
+        class(parquet_table_index), intent(in) :: self         !! the index.
+        type(parquet_string_column), intent(in), target :: keys !! the keys, one per element.
+        integer(int64), intent(out) :: rows(:)                !! one per key, 0 where absent.
+        integer, intent(in), optional :: threads              !! forwarded to the engine.
+        integer(int64), intent(out), optional :: n_found      !! non-zero answers.
+        if (self%uniq) then
+            call self%map%get_many(keys, rows, threads=threads)
+            if (present(n_found)) n_found = count(rows > 0_int64, kind=int64)
+        else
+            call self%mmap%get_first_many(keys, rows, threads=threads, n_found=n_found)
+        end if
+    end subroutine tix_many_strcol_i64
+    !
+    !> Bulk first-row lookup over a parquet_string_column, int32 answers.
+    subroutine tix_many_strcol_i32(self, keys, rows, threads, n_found)
+        class(parquet_table_index), intent(in) :: self         !! the index.
+        type(parquet_string_column), intent(in), target :: keys !! the keys, one per element.
+        integer(int32), intent(out) :: rows(:)                !! one per key, 0 where absent.
+        integer, intent(in), optional :: threads              !! forwarded to the engine.
+        integer(int64), intent(out), optional :: n_found      !! non-zero answers.
+        if (self%uniq) then
+            call self%map%get_many(keys, rows, threads=threads)
+            if (present(n_found)) n_found = count(rows > 0_int32, kind=int64)
+        else
+            call self%mmap%get_first_many(keys, rows, threads=threads, n_found=n_found)
+        end if
+    end subroutine tix_many_strcol_i32
+    !
     !> One row number narrowed to int32, or an abort naming it: the engines refuse the same case
     !! on their own int32 forms, and a scalar `%find` into an int32 variable must not differ.
     function tix_narrow(row, proc) result(r32)
@@ -583,6 +721,18 @@ contains
         row = tix_first_pair(self, pair)
     end procedure tix_find_ts_i64
     !
+    module procedure tix_find_chr_i32
+        call tix_resolve(self, "find")
+        call tix_check_key(self, "find", KC_STR)
+        row = tix_narrow(tix_first_str(self, key), "find")
+    end procedure tix_find_chr_i32
+    !
+    module procedure tix_find_chr_i64
+        call tix_resolve(self, "find")
+        call tix_check_key(self, "find", KC_STR)
+        row = tix_first_str(self, key)
+    end procedure tix_find_chr_i64
+    !
     ! ---- %count --------------------------------------------------------------------------------
     !
     module procedure tix_count_i32
@@ -634,6 +784,12 @@ contains
         call parquet_timestamp_key(key, pair(1), pair(2))
         n = tix_count_pair(self, pair)
     end procedure tix_count_ts
+    !
+    module procedure tix_count_chr
+        call tix_resolve(self, "count")
+        call tix_check_key(self, "count", KC_STR)
+        n = tix_count_str(self, key)
+    end procedure tix_count_chr
     !
     ! ---- %find_all -----------------------------------------------------------------------------
     !
@@ -748,6 +904,18 @@ contains
         call parquet_timestamp_key(key, pair(1), pair(2))
         call tix_all_pair_i64(self, pair, rows)
     end procedure tix_all_ts_i64
+    !
+    module procedure tix_all_chr_i32
+        call tix_resolve(self, "find_all")
+        call tix_check_key(self, "find_all", KC_STR)
+        call tix_all_str_i32(self, key, rows, "find_all")
+    end procedure tix_all_chr_i32
+    !
+    module procedure tix_all_chr_i64
+        call tix_resolve(self, "find_all")
+        call tix_check_key(self, "find_all", KC_STR)
+        call tix_all_str_i64(self, key, rows)
+    end procedure tix_all_chr_i64
     !
     ! ---- %find_many ----------------------------------------------------------------------------
     !
@@ -878,6 +1046,34 @@ contains
         call parquet_timestamp_key(keys, pairs(:, 1), pairs(:, 2))
         call tix_many_pair_i64(self, pairs, rows, valid, threads, n_found)
     end procedure tix_many_ts_i64
+    !
+    module procedure tix_many_chr_i32
+        call tix_resolve(self, "find_many")
+        call tix_check_key(self, "find_many", KC_STR)
+        call tix_check_many_len(size(keys, kind=int64), size(rows, kind=int64), "find_many")
+        call tix_many_of_chr_i32(self, keys, rows, threads, n_found)
+    end procedure tix_many_chr_i32
+    !
+    module procedure tix_many_chr_i64
+        call tix_resolve(self, "find_many")
+        call tix_check_key(self, "find_many", KC_STR)
+        call tix_check_many_len(size(keys, kind=int64), size(rows, kind=int64), "find_many")
+        call tix_many_of_chr_i64(self, keys, rows, threads, n_found)
+    end procedure tix_many_chr_i64
+    !
+    module procedure tix_many_str_i32
+        call tix_resolve(self, "find_many")
+        call tix_check_key(self, "find_many", KC_STR)
+        call tix_check_many_len(keys%size(), size(rows, kind=int64), "find_many")
+        call tix_many_strcol_i32(self, keys, rows, threads, n_found)
+    end procedure tix_many_str_i32
+    !
+    module procedure tix_many_str_i64
+        call tix_resolve(self, "find_many")
+        call tix_check_key(self, "find_many", KC_STR)
+        call tix_check_many_len(keys%size(), size(rows, kind=int64), "find_many")
+        call tix_many_strcol_i64(self, keys, rows, threads, n_found)
+    end procedure tix_many_str_i64
     !
     ! ---- introspection and release -------------------------------------------------------------
     !

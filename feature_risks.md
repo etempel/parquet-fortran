@@ -96,6 +96,7 @@ something a reader is expected to have.
 | [Risk-209](#risk-209--a-multimaps-rows-must-stay-ascending-by-position-within-a-group-and-only-that-order-is-a-contract) | A multimap's rows must stay ascending by POSITION within a group, and only that order is a contract | 4 — covered |
 | [Risk-210](#risk-210--a-parquet_table_index-checks-generation-on-every-query-and-never-caches-the-answer) | A `parquet_table_index` checks `%generation()` on EVERY query, and never caches the answer | 4 — covered |
 | [Risk-211](#risk-211--build_index-and-the-filters-in-leaf-convert-a-key-through-one-helper-and-the-nan-split-is-the-one-deliberate-difference) | `%build_index` and the filter's `in` leaf convert a key through ONE helper, and the NaN split is the one deliberate difference | 4 — covered |
+| [Risk-212](#risk-212--a-string-maps-occurrence-chain-must-stay-dense-and-a-hit-must-be-verified-against-the-stored-bytes) | A string map's occurrence chain must stay DENSE, and a hit must be verified against the stored bytes | 4 — covered |
 | [Risk-1](#risk-1--the-release-policy-regresses-silently) | The release policy regresses silently | 4 — covered |
 | [Risk-2](#risk-2--the-schema-less-write-rests-on-three-properties-that-look-incidental) | The schema-less write rests on three properties that look incidental | 4 — covered |
 | [Risk-3](#risk-3--the-screen-and-the-evaluator-can-drift-apart) | The screen and the evaluator can drift apart | 4 — covered |
@@ -8180,3 +8181,47 @@ different payload, and that the temporal helpers are the elements' raw storage; 
 by `test_in_timestamp_set_across_units` (`test/test_filter.f90`) and `test_timestamp_across_units`
 (`test/test_table_index.f90`), which hold the unit-free timestamp key on both paths; and by
 `test_in_temporal_row_mask_agrees`, the two-engine A/B over temporal sets.
+
+**A string column has no helper at all, and that is the same rule from the other side.** The
+filter's `%bind`, both `in` engines and `%build_index` hand a string column, or a character array,
+straight to `pf_index_map`'s own string forms, which key each value by its exact bytes (an element
+of a `character` array trimmed first, per the library's array rule). There is nothing to convert
+and therefore nothing to disagree about — as long as no caller introduces a conversion of its own
+(a `trim` on a scalar, a case fold, a `%strip_all` on the way in). `test_in_string_set_exact_bytes`
+(`test/test_filter.f90`) pins the two engines and both `%bind` forms on a fixture holding `"ab"`
+beside `"ab "`, and `test_string_column` (`test/test_table_index.f90`) pins `%find_all` against
+`pf_match_all` over the same column.
+
+### Risk-212 — A string map's occurrence chain must stay DENSE, and a hit must be verified against the stored bytes
+
+A string-keyed `pf_index_map` (`src/parquet_index_str.f90`) is the composite hash table over
+`(hash, occurrence)` tuples with the strings kept beside it. A lookup probes `(hash, 0)`, compares
+the stored bytes with the query, and on a mismatch moves to `(hash, 1)`, `(hash, 2)`, … **until the
+first miss**. Two invariants make that correct, and both fail silently:
+
+- **Every hit is verified byte for byte** (`ix_str_equal`). Drop the comparison — "the hash
+  matched, the length matches, it must be the key" — and two distinct strings that share a 64-bit
+  hash answer each other's value: a wrong row from `%build_index`, a wrong membership from the
+  filter's `in`, with nothing in range to notice. At 64 bits that is a once-in-2**64 event per
+  probe, which is exactly why no ordinary fixture can see the defect and why the length check alone
+  looks sufficient in every test that does not force it.
+- **The chain has no gaps.** Removing occurrence `k` of a hash while occurrences above `k` exist
+  must move the chain's LAST entry into slot `k` and delete the last tuple (`ix_str_remove`),
+  because a lookup stops at the first miss: leaving `(hash, k)` empty hides every later occurrence
+  of that hash, and they stay stored, counted by `%nkeys` and listed by `%keys` while `%get`
+  answers 0 for them.
+
+**The debug hook is what makes either testable at all.** `parquet_debug_set_index_string_hash_bits`
+narrows every string hash to a few bits, so a few dozen keys collide many deep and the chain is
+exercised end to end; without it the second occurrence of a hash is a branch no test ever runs.
+Because it is process-global and read on every hash, the suite that uses it (`index_strings`) runs
+serially, and every test that sets it restores it on every exit path. A test at full width that
+asserts the same properties is not evidence about them.
+
+**Covered by** `test_str_collision_chain` (`test/test_index_strings.f90`): sixty keys at two hash
+bits, every key found with its own value and every miss a miss (the verification), then every
+third key removed — first, interior and last occurrences among them — with every survivor still
+found, every removed key absent, `%keys` listing the survivors only and a removed key re-inserted
+(the compaction); and a vacuity guard that the hook narrowed the hash, by showing the narrow-built
+map misses at full width. The `%build`-from-column and `%get_many` forms share `ix_str_find` and
+`ix_str_insert` with the scalar ones, so the same test covers them.

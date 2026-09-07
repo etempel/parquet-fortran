@@ -22,7 +22,6 @@ module parquet_core
     ! parquet_core -- a user reaches them through the `parquet` facade's own `use parquet_settings`.
     ! What this import is for is the limit aliases a few lines below.
     use parquet_index, only: pf_index_map
-    use parquet_sorting, only: pf_unique
     use parquet_settings, only: parquet_max_filter_rule_len, parquet_max_filter_depth, parquet_max_filter_nodes, &
         parquet_max_sort_keys, parquet_max_sort_key_len, parquet_max_filter_sets
     use parquet_maml_base, only: parquet_maml_file
@@ -841,7 +840,7 @@ module parquet_core
         !> unit is refused on this engine exactly as it is on the reader's.
         !>
         !> `in`/`not_in` are answered here too, from the filter's own stored keys, through the same
-        !> pf_index_map (and, for strings, the same pf_in) the read-side pre-evaluator uses -- so
+        !> pf_index_map (string-keyed for a string set) the read-side pre-evaluator uses -- so
         !> the NaN rule holds on both engines for the same reason, by no NaN ever being a key.
         !>
         !> Reports every failure through ok/errmsg and never aborts, so the caller supplies the
@@ -5021,7 +5020,8 @@ contains
     end subroutine parquet_filter_store_keys
 
     !> Appends `distinct`'s strings to this filter's concatenated string store, recording the new
-    !> set's slice. The caller has already deduplicated and dropped nulls with pf_unique.
+    !> set's slice. The caller has already deduplicated and dropped nulls through the map's own
+    !> string `%get_or_add_many`, the same primitive every other family deduplicates with.
     subroutine parquet_filter_store_text(this, name, distinct)
         class(parquet_filter), intent(inout) :: this !! the filter gaining a set.
         character(len=*), intent(in) :: name !! the set's name, without the '@'.
@@ -5095,51 +5095,50 @@ contains
     !> rule every character ARRAY argument in this library follows: an array's elements share one
     !> declared length, so the blank padding a shorter value carries cannot be what the caller
     !> meant. A parquet_string_column set (bind_str) is not trimmed, for the same reason.
+    !>
+    !> The members are deduplicated through the map's own string `%get_or_add_many` -- the
+    !> primitive every other family's %bind runs (parquet_filter_store_keys) -- rather than by a
+    !> sort, so a string set is keyed at %bind exactly as the leaf keys the column at read time:
+    !> by its exact bytes, under one equality (feature_risks.md Risk-211).
     subroutine bind_chr(this, name, values, is_valid)
         class(parquet_filter), intent(inout) :: this !! filter gaining the set.
         character(len=*), intent(in) :: name !! the set's name, without the '@'.
         character(len=*), intent(in) :: values(:) !! the set's members; repeats are collapsed, each trimmed.
         logical, intent(in), optional :: is_valid(:) !! per-element mask; a .false. element is not in the set.
-        type(parquet_string_column) :: given, distinct
-        integer(int64) :: i
+        type(pf_index_map) :: seen
+        type(parquet_string_column) :: distinct
+        integer(int64), allocatable :: codes(:)
 
         call parquet_filter_check_bind(this, name, "parquet_filter%bind")
         call parquet_filter_check_mask(size(values, kind=int64), is_valid, "parquet_filter%bind")
-        call given%clear()
-        do i = 1_int64, size(values, kind=int64)
-            if (present(is_valid)) then
-                if (.not. is_valid(i)) cycle
-            end if
-            call given%append_string(trim(values(i)))
-        end do
-        call pf_unique(given, distinct)
+        call seen%init(strings=.true.)
+        allocate(codes(size(values, kind=int64)))
+        call seen%get_or_add_many(values, codes, valid=is_valid)
+        call seen%keys(distinct)
         call parquet_filter_store_text(this, name, distinct)
     end subroutine bind_chr
 
     !> %bind specific taking a parquet_string_column; see the %bind generic. Bytes are taken
     !> verbatim (no trimming -- the column stores exactly what was appended to it), and a NULL
-    !> element is simply not in the set.
+    !> element is simply not in the set: the map's string `%get_or_add_many` neither looks one up
+    !> nor adds it, exactly as it treats a masked-off element.
     subroutine bind_str(this, name, values, is_valid)
         class(parquet_filter), intent(inout) :: this !! filter gaining the set.
         character(len=*), intent(in) :: name !! the set's name, without the '@'.
         type(parquet_string_column), intent(in) :: values !! the set's members; repeats and nulls are dropped.
         logical, intent(in), optional :: is_valid(:) !! per-element mask; a .false. element is not in the set.
-        type(parquet_string_column) :: given, distinct
-        integer(int64) :: i
+        type(pf_index_map) :: seen
+        type(parquet_string_column) :: distinct
+        integer(int64), allocatable :: codes(:)
+        integer(int64) :: n
 
+        n = values%size()
         call parquet_filter_check_bind(this, name, "parquet_filter%bind")
-        call parquet_filter_check_mask(values%size(), is_valid, "parquet_filter%bind")
-        call given%clear()
-        do i = 1_int64, values%size()
-            if (present(is_valid)) then
-                if (.not. is_valid(i)) cycle
-            end if
-            if (values%is_null(i)) cycle
-            ! %append_from copies the element's bytes straight across; %get would build a
-            ! deferred-length string for every member of the set (feature_risks.md Risk-60).
-            call given%append_from(values, i)
-        end do
-        call pf_unique(given, distinct)
+        call parquet_filter_check_mask(n, is_valid, "parquet_filter%bind")
+        call seen%init(strings=.true.)
+        allocate(codes(n))
+        call seen%get_or_add_many(values, codes, valid=is_valid)
+        call seen%keys(distinct)
         call parquet_filter_store_text(this, name, distinct)
     end subroutine bind_str
 

@@ -37,6 +37,10 @@
 !! thread rule, the mask and value checks, the automatic choice -- rather than each being
 !! re-declared in the spec as a cross-submodule interface. Anything here that a message names
 !! the type in takes an optional `owner` prefix for that reason (`ix_owner_of`).
+!! `parquet_index_str.f90`, the string keys of both types, descends from THAT one in turn and
+!! reaches both sets of helpers the same way; the string store's lifecycle (`ix_str_start` and
+!! the two growth helpers) lives here beside the other storage lifecycle because `%init`,
+!! `%reserve`, `%reset` and `%clear` need it and are implemented here.
 submodule (parquet_index) parquet_index_map
     use parquet_utils, only: pf_to_lower
     use parquet_settings_base, only: parquet_auto_thread_count, parquet_clamp_to_affinity, &
@@ -45,6 +49,15 @@ submodule (parquet_index) parquet_index_map
 
     !> `method="auto"`: let `ix_choose_direct` decide. Never stored in `self%backend`.
     integer, parameter :: IX_WANT_AUTO = -1
+
+    !> Rows and payload bytes a string store is allocated for at the least, so that a map filled
+    !! one string at a time does not reallocate on each of its first few keys.
+    integer(int64), parameter :: IX_STR_MIN_ROWS = 16_int64
+    integer(int64), parameter :: IX_STR_MIN_BYTES = 256_int64 !! see `IX_STR_MIN_ROWS`.
+    !> Payload bytes reserved per key when a string store is sized for a key count alone, i.e.
+    !! before any string has been seen. A guess, corrected by doubling; it only decides how
+    !! many reallocations a build of average-length keys pays.
+    integer(int64), parameter :: IX_STR_BYTES_PER_KEY = 16_int64
 
 contains
 
@@ -158,7 +171,7 @@ contains
 
     module procedure map_init
         !$omp critical (pf_index_map_guard)
-        call ix_do_init(self, capacity, method, ncomp)
+        call ix_do_init(self, capacity, method, ncomp, strings)
         !$omp end critical (pf_index_map_guard)
     end procedure map_init
 
@@ -625,6 +638,9 @@ contains
 
     module procedure map_ncomponents
         n = self%ncomp
+        ! A string map is a two-component tuple map underneath, which is not what a caller asking
+        ! about ITS keys means: from the outside, one string is one key.
+        if (self%is_str) n = 1
     end procedure map_ncomponents
 
     module procedure map_get_method
@@ -656,6 +672,9 @@ contains
         if (allocated(self%hvals)) b = b + 8_int64 * size(self%hvals, kind=int64)
         if (allocated(self%skeys)) b = b + 8_int64 * size(self%skeys, kind=int64)
         if (allocated(self%svals)) b = b + 8_int64 * size(self%svals, kind=int64)
+        if (allocated(self%soff)) b = b + 8_int64 * size(self%soff, kind=int64)
+        if (allocated(self%sdat)) b = b + size(self%sdat, kind=int64)
+        if (allocated(self%sval)) b = b + 8_int64 * size(self%sval, kind=int64)
     end procedure map_memory_bytes
 
     module procedure map_probe_stats
@@ -693,6 +712,8 @@ contains
     module procedure map_keys_r1
         integer(int64), allocatable :: pairs(:,:)
 
+        if (self%is_str) error stop "pf_index_map%keys: this map holds string keys; " // &
+            "ask for a parquet_string_column"
         if (self%ncomp > 1) error stop "pf_index_map%keys: this map has composite keys; " // &
             "ask for a rank-2 list"
         allocate(list(self%nk))
@@ -705,6 +726,8 @@ contains
     module procedure map_keys_r2
         integer :: nc
 
+        if (self%is_str) error stop "pf_index_map%keys: this map holds string keys; " // &
+            "ask for a parquet_string_column"
         nc = self%ncomp
         if (nc < 1) nc = 1
         allocate(list(self%nk, nc))
@@ -753,6 +776,10 @@ contains
         type(pf_index_map), intent(in) :: self !! the map.
         character(len=*), intent(in) :: what   !! procedure name, for the message.
 
+        ! The string test comes first: a string map IS a two-component map underneath, and the
+        ! composite message would send the caller off to build a tuple.
+        if (self%is_str) error stop "pf_index_map%" // what // &
+            ": this map holds string keys; look up with a string key"
         if (self%ncomp > 1) error stop "pf_index_map%" // what // &
             ": this map has composite keys; pass the whole key tuple, not a scalar"
     end subroutine ix_check_scalar_shape
@@ -764,6 +791,8 @@ contains
         character(len=*), intent(in) :: what   !! procedure name, for the message.
         integer :: nc                          !! `n`, once it is known to match.
 
+        if (self%is_str) error stop "pf_index_map%" // what // &
+            ": this map holds string keys; look up with a string key"
         if (n /= self%ncomp) error stop "pf_index_map%" // what // &
             ": the key tuple's length does not match this map's component count"
         nc = n
@@ -784,6 +813,8 @@ contains
 
         if (nrows /= nidx) error stop "pf_index_map%" // what // &
             ": the keys and the answer array must have the same length"
+        if (self%is_str) error stop "pf_index_map%" // what // &
+            ": this map holds string keys; look up with string keys"
         if (self%ncomp > 0 .and. nc /= self%ncomp) error stop "pf_index_map%" // what // &
             ": the keys' component count does not match this map's"
         n = nrows
@@ -908,6 +939,9 @@ contains
         if (allocated(self%hvals)) deallocate(self%hvals)
         if (allocated(self%skeys)) deallocate(self%skeys)
         if (allocated(self%svals)) deallocate(self%svals)
+        if (allocated(self%soff)) deallocate(self%soff)
+        if (allocated(self%sdat)) deallocate(self%sdat)
+        if (allocated(self%sval)) deallocate(self%sval)
         self%backend = IX_DIRECT
         self%ncomp = 0
         self%nk = 0_int64
@@ -915,6 +949,10 @@ contains
         self%kmin1 = 0_int64
         self%kmax1 = -1_int64
         self%hcap = 0_int64
+        self%is_str = .false.
+        self%nstr = 0_int64
+        self%nchr = 0_int64
+        self%snext = 0_int64
     end subroutine ix_reset_storage
 
     !> Empties the map without releasing anything.
@@ -935,28 +973,105 @@ contains
         end select
         self%nk = 0_int64
         self%next_auto = 0_int64
+        ! A string map's table is the `IX_HASH` arm above (its slots hold string positions);
+        ! the store beside it is emptied by its two counters, its arrays kept for the refill.
+        if (self%is_str) then
+            self%nstr = 0_int64
+            self%nchr = 0_int64
+            self%snext = 0_int64
+            self%soff(1) = 0_int64
+        end if
     end subroutine ix_do_reset
 
-    !> `%init`: an empty map ready for incremental insertion.
-    subroutine ix_do_init(self, capacity, method, ncomp)
+    !> Turns a freshly reset map into an empty STRING-keyed one: the composite hash table over
+    !! `(hash, occurrence)` tuples, and the string store beside it, both sized for `capacity`
+    !! keys. Every string-keyed path starts a map through here, whether `%init(strings=)`, a
+    !! string `%build`, or the first string `%set`/`%get_or_add` on a fresh object.
+    subroutine ix_str_start(self, capacity)
+        type(pf_index_map), intent(inout) :: self !! the map, already reset.
+        integer(int64), intent(in) :: capacity    !! keys to make room for; 0 for the minimum.
+
+        self%is_str = .true.
+        self%ncomp = 2
+        self%backend = IX_HASH
+        call ix_hash_reserve(self, capacity)
+        call ix_str_grow_rows(self, capacity)
+        call ix_str_grow_bytes(self, capacity * IX_STR_BYTES_PER_KEY)
+        self%soff(1) = 0_int64
+    end subroutine ix_str_start
+
+    !> Makes the string store's row arrays hold at least `need` strings, doubling when it grows
+    !! so that a run of appends is amortised O(1). `soff` has one entry more than `sval`.
+    subroutine ix_str_grow_rows(self, need)
+        type(pf_index_map), intent(inout) :: self !! the map.
+        integer(int64), intent(in) :: need        !! strings the store must be able to hold.
+        integer(int64), allocatable :: noff(:), nval(:)
+        integer(int64) :: have, want
+
+        have = 0_int64
+        if (allocated(self%sval)) have = size(self%sval, kind=int64)
+        if (have >= need .and. have > 0_int64) return
+        want = max(need, IX_STR_MIN_ROWS, 2_int64 * have)
+        allocate(noff(want + 1_int64), nval(want))
+        if (have > 0_int64) then
+            noff(1:self%nstr + 1_int64) = self%soff(1:self%nstr + 1_int64)
+            nval(1:self%nstr) = self%sval(1:self%nstr)
+        else
+            noff(1) = 0_int64
+        end if
+        call move_alloc(noff, self%soff)
+        call move_alloc(nval, self%sval)
+    end subroutine ix_str_grow_rows
+
+    !> Makes the string store's payload hold at least `need` bytes, doubling when it grows.
+    subroutine ix_str_grow_bytes(self, need)
+        type(pf_index_map), intent(inout) :: self !! the map.
+        integer(int64), intent(in) :: need        !! bytes the payload must be able to hold.
+        character(len=1), allocatable :: ndat(:)
+        integer(int64) :: have, want
+
+        have = 0_int64
+        if (allocated(self%sdat)) have = size(self%sdat, kind=int64)
+        if (have >= need .and. have > 0_int64) return
+        want = max(need, IX_STR_MIN_BYTES, 2_int64 * have)
+        allocate(ndat(want))
+        if (self%nchr > 0_int64) ndat(1:self%nchr) = self%sdat(1:self%nchr)
+        call move_alloc(ndat, self%sdat)
+    end subroutine ix_str_grow_bytes
+
+    !> `%init`: an empty map ready for incremental insertion, integer- or string-keyed.
+    subroutine ix_do_init(self, capacity, method, ncomp, strings)
         type(pf_index_map), intent(inout) :: self       !! the map.
         integer, intent(in), optional :: capacity       !! keys to pre-size for.
         character(len=*), intent(in), optional :: method !! backend token; hash or auto only.
         integer, intent(in), optional :: ncomp          !! components per key; 1 by default.
+        logical, intent(in), optional :: strings        !! `.true.` for a string-keyed map.
         integer :: want, nc
+        integer(int64) :: cap
+        logical :: str
 
         call ix_resolve_method(method, want, .false., "init")
+        str = .false.
+        if (present(strings)) str = strings
         nc = 1
         if (present(ncomp)) nc = ncomp
+        ! A string key has exactly one component from the caller's side, whatever the tuple
+        ! underneath is, so the two arguments cannot both be meant.
+        if (str .and. nc /= 1) error stop "pf_index_map%init: a string key has one component; " // &
+            "leave ncomp= absent (or 1) with strings=.true."
         call ix_check_ncomp(nc, "init")
-        call ix_reset_storage(self)
-        self%ncomp = nc
-        self%backend = IX_HASH
+        cap = 0_int64
         if (present(capacity)) then
             if (capacity < 0) error stop "pf_index_map%init: capacity must be >= 0"
-            call ix_hash_reserve(self, int(capacity, int64))
+            cap = int(capacity, int64)
+        end if
+        call ix_reset_storage(self)
+        if (str) then
+            call ix_str_start(self, cap)
         else
-            call ix_hash_reserve(self, 0_int64)
+            self%ncomp = nc
+            self%backend = IX_HASH
+            call ix_hash_reserve(self, cap)
         end if
     end subroutine ix_do_init
 
@@ -969,6 +1084,9 @@ contains
         if (self%ncomp == 0) call ix_do_init(self, ncomp=1)
         if (self%backend /= IX_HASH) return
         call ix_hash_reserve(self, n)
+        ! The store's row arrays follow the table; its payload cannot, since nothing is known
+        ! about the strings' lengths yet, so that side keeps growing by doubling as they arrive.
+        if (self%is_str) call ix_str_grow_rows(self, n)
     end subroutine ix_do_reserve
 
     !> Validates a component count against the module's fixed maximum.

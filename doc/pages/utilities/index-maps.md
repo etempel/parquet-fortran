@@ -5,10 +5,10 @@ title: Key-to-index lookup with parquet_index
 `parquet_index` answers the two halves of "where does this thing live in my arrays?".
 
 `pf_index_map` answers it for a key you already have: give it the key column of a table and it
-tells you, in a few nanoseconds, which row a key sits in. `pf_index_multimap` answers it when the
-key repeats: every row a key sits in, as a range. `pf_index_pool` answers it when nothing has a
-key yet: it issues 1, 2, 3, … on request and takes them back, so a program managing slots in its
-own arrays never has to track which are in use.
+tells you, in a few nanoseconds, which row a key sits in — an integer key, a tuple of them, or a
+string. `pf_index_multimap` answers it when the key repeats: every row a key sits in, as a range.
+`pf_index_pool` answers it when nothing has a key yet: it issues 1, 2, 3, … on request and takes
+them back, so a program managing slots in its own arrays never has to track which are in use.
 
 All three are ordinary Fortran containers over plain integer arrays. Nothing here reads or writes a
 Parquet file, and `use parquet_index` never reaches the C++ bindings — see
@@ -18,7 +18,8 @@ Two things in the library are built on them, and use nothing else to answer a lo
 [`%build_index`](../tables/table-mutate.html#looking-a-value-up-build_index), which wraps a map or
 a multimap over one column's keys with a staleness check, and the row filter's
 [`in`/`not_in` clause](../io/filter-sort-sample.html#membership-in-a-set-in-and-not_in), which
-holds a bound set in a map and probes each row group through `%get_many`.
+holds a bound set in a map — a string set in a string-keyed one — and probes each row group
+through `%get_many`.
 
 ## Stored values are index values, and 0 means "not found"
 
@@ -55,10 +56,10 @@ call m%build(keys, method="hash")        ! or force a backend; see below
 call m%build(keys, valid=ok)            ! skip every row ok(:) marks .false.
 ```
 
-Keys and values may be `integer(int32)` or `integer(int64)`, in any combination. **Every key must
-be unique**; a duplicate aborts and names the offender. There is no "first wins" or "last wins"
-option, because a map that silently answered for one of two rows would give you no way to find out
-which.
+Keys and values may be `integer(int32)` or `integer(int64)`, in any combination, and a key may
+also be a string — see [String keys](#string-keys) below. **Every key must be unique**; a
+duplicate aborts and names the offender. There is no "first wins" or "last wins" option, because a
+map that silently answered for one of two rows would give you no way to find out which.
 
 `valid=` takes one logical per key and is the mask a nullable key column already carries. A
 `.false.` row is neither stored nor counted — its key may even repeat a stored one — and the
@@ -178,6 +179,58 @@ Four things to know:
 The most components a key may have is `pf_index_max_components` (32), a published read-only
 constant. The sorted backend does not accept composite keys and says so.
 
+## String keys
+
+A map's keys can be strings, and the map is then built, probed and filled with the same calls as
+an integer one:
+
+```fortran
+type(pf_index_map) :: m
+type(parquet_string_column) :: names, probes, list
+integer(int64), allocatable :: rows(:)
+
+call m%build(ids)                       ! ids(:) is a character array: each element trimmed
+call m%build(names)                     ! or a parquet_string_column: each element verbatim
+j = m%get("obj_4711")                   ! 0 when absent; the key is taken exactly as written
+call m%get_many(probes, rows)           ! one answer per element of a column, in place
+call m%get_many(ids, rows)              ! or per element of a character array, each trimmed
+call m%get_or_add("obj_4711", idx)      ! the dictionary-encoding primitive, over strings
+call m%set("obj_4711", 9_int64)         ! insert or replace
+call m%remove("obj_4711")               ! forget one key
+call m%keys(list)                       ! the stored keys, as a parquet_string_column
+```
+
+**A key is its exact bytes.** `"ab"` and `"ab "` are two keys, `"AB"` a third, and the empty
+string an ordinary fourth — the equality `pf_in`, `pf_match` and every sort in this library use
+for strings. Two rules follow from how Fortran strings are declared. An element of a `character`
+**array** is trimmed of trailing blanks on the way in, whether it is being stored or looked up,
+because an array's elements share one declared length and the padding a shorter value carries
+cannot be what you meant — the rule every character array argument of this library follows. A
+`character` **scalar** is taken as written, so pass `trim(name)` for a blank-padded variable. A
+`parquet_string_column`'s elements are taken verbatim, since the column holds exactly the bytes
+that were appended to it, and a **null** element is never a key: a build skips it (the other rows
+keep their row numbers, exactly as `valid=` does), a bulk lookup answers 0 for it, and
+`%get_or_add_many` neither looks it up nor adds it.
+
+**Underneath, every string map is the hash backend**, with the strings kept beside the table:
+a key is hashed to 64 bits by the module's own mixer, stored under the tuple `(hash, occurrence)`,
+and verified byte for byte on every hit, so no lookup ever answers on a hash match alone and no
+key set is refused however the hashes fall — two strings sharing a hash simply take occurrences 0
+and 1. `method=` therefore accepts only `"auto"` and `"hash"`; asking for `"direct"` or
+`"sorted"` aborts, naming the rule. `%ncomponents()` reports 1 (one string is one key), and
+`%memory_bytes()` counts the table and the strings, a removed key's bytes included until the map is
+rebuilt or cleared.
+
+**A map holds one kind of key for its whole life.** An integer lookup on a string map, or a string
+lookup on an integer map, aborts naming which kind the map holds, and so does `%keys` asked for
+the wrong shape; the only exception is a map that was never built, which answers 0 to everything.
+A fresh map becomes a string map at its first string `%build`, `%set` or `%get_or_add`, and
+`%init(strings=.true.)` starts one empty when you want `capacity=` first.
+
+The multimap takes string keys the same way — `mm%build(names)`, `mm%count("obj_4711")`,
+`mm%get_all("obj_4711", rows)`, `mm%probe_many(probes, offsets, matches)` and `mm%keys(list)`
+— see [A key that repeats](#a-key-that-repeats-pf_index_multimap).
+
 ## Filling a map as you go
 
 ```fortran
@@ -241,11 +294,12 @@ call m%keys(list)                    ! every stored key
 call m%probe_stats(max_probe)        ! mean_probe is an optional second answer
 ```
 
-`%keys` gives a rank-1 list for a single-component map and a rank-2 `(nkeys, ncomp)` array for a
-composite one — asking a composite map for a rank-1 list aborts and says which rank to ask for,
-since the generic can only dispatch on the array you supply. It is allocated zero-length for an
-empty map, never left unallocated. Order is ascending for the direct and sorted backends and
-unspecified for hash; ask for the matching values with `%get_many(list, vals)`.
+`%keys` gives a rank-1 list for a single-component map, a rank-2 `(nkeys, ncomp)` array for a
+composite one, and a `parquet_string_column` for a string-keyed one — asking for the wrong shape
+aborts and says which to ask for, since the generic can only dispatch on the argument you supply.
+It is allocated zero-length (or an empty column) for an empty map, never left unallocated. Order
+is ascending for the direct and sorted backends and unspecified for hash; ask for the matching
+values with `%get_many(list, vals)`.
 
 `%probe_stats` reports how far lookups have to walk: 1 for the direct backend, the binary search's
 depth for sorted, and the real probe lengths for hash. On the hash backend it scans the whole
@@ -273,8 +327,9 @@ call mm%get_all(42_int64, rows)          ! all of them, ascending; zero-length w
 Underneath it is a `pf_index_map` over the *distinct* keys, each mapped to a group id in
 `1 .. ngroups`, and a CSR pair beside it — `offsets(ngroups + 1)` and `rows(nkeys)` — with group
 `g`'s values at `rows(offsets(g) : offsets(g+1) - 1)`. So everything the map accepts, the multimap
-accepts too: `int32` or `int64` keys, scalar or a tuple per row, `values=`, `valid=`, `method=`
-and `threads=`; and the same "0 means not found" protocol on every lookup.
+accepts too: `int32` or `int64` keys, scalar or a tuple per row, string keys from a character array
+or a `parquet_string_column` (under the map's own [rules](#string-keys)), `values=`, `valid=`,
+`method=` and `threads=`; and the same "0 means not found" protocol on every lookup.
 
 ### Building a multimap
 
@@ -577,6 +632,12 @@ your own hardware.
   cache miss, so the speed-up tracks the thread count until memory bandwidth saturates.
 - **`%get_or_add_many` beats a loop of `%get_or_add`** by the lock it does not take per key;
   the hashing and the inserts cost the same either way.
+- **A string probe is a hash over the key's bytes, one table probe and one byte compare on a
+  hit**, so it costs about a nanosecond per byte of key on top of an integer probe, and a build
+  copies the key strings once. `%get_many` over a `parquet_string_column` reads the column's own
+  buffers in place and threads like every other bulk form; `--mode=strings` of
+  `bench/benchmark_index.sh` prints it beside `pf_in` over the same two columns, the sort-merge
+  it replaces in the row filter's string clause.
 - **A multimap probe costs one map lookup per key plus one copy per pair.** `%get_first_many` is
   the map's `%get_many` and one gather; `%probe_many` is that plus a copy of every matched range,
   so its time is proportional to the pair count, and `--mode=multimap` prints it beside the

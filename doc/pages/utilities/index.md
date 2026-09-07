@@ -52,8 +52,8 @@ the two generators meant to be copied into your own project.
   rings of constant latitude, both integer kinds, and no floating-point exception raised — so a
   program running under `-ffpe-trap` needs no guard around a disc query.
 - [Key-to-index lookup with `parquet_index`](index-maps.html) — `pf_index_map`: which row holds
-  this key, in a few nanoseconds, over a single integer key or a tuple of them when no one column
-  is unique. Three storage backends behind one API — an array indexed by the key, an open-addressing
+  this key, in a few nanoseconds, over a single integer key, a tuple of them when no one column
+  is unique, or a string. Three storage backends behind one API — an array indexed by the key, an open-addressing
   hash table, and sorted keys plus a binary search — the first two chosen from the keys themselves,
   the third opt-in. `pf_index_multimap` is the same over a key that repeats: every row holding it,
   as a range, and every match for a whole probe array at once as a CSR pair. Then `pf_index_pool`,

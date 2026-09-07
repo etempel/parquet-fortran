@@ -2297,6 +2297,48 @@ contains
                 test_multimap_probe_shape_mismatch_aborts), &
             new_unittest("every legal pf_index_multimap path completes", &
                 test_multimap_control_completes), &
+            new_unittest("a string lookup on an integer map aborts", &
+                test_index_string_on_integer_map_aborts), &
+            new_unittest("an integer lookup on a string map aborts", &
+                test_index_integer_on_string_map_aborts), &
+            new_unittest("a tuple lookup on a string map aborts", &
+                test_index_tuple_on_string_map_aborts), &
+            new_unittest("a string get_many on an integer map aborts", &
+                test_index_string_get_many_on_integer_map_aborts), &
+            new_unittest("a string build with method=direct aborts", &
+                test_index_string_method_direct_aborts), &
+            new_unittest("a string build with method=sorted aborts", &
+                test_index_string_method_sorted_aborts), &
+            new_unittest("a duplicate string key aborts, named and trimmed", &
+                test_index_string_build_duplicate_aborts), &
+            new_unittest("an integer key list from a string map aborts", &
+                test_index_string_keys_rank1_aborts), &
+            new_unittest("a string key column from an integer map aborts", &
+                test_index_string_keys_column_on_integer_aborts), &
+            new_unittest("init(strings=.true.) with ncomp=2 aborts", &
+                test_index_string_init_ncomp_aborts), &
+            new_unittest("a string set on an integer map aborts", &
+                test_index_string_set_on_integer_map_aborts), &
+            new_unittest("removing an absent string key without found= aborts", &
+                test_index_string_remove_absent_aborts), &
+            new_unittest("a string get_many length mismatch aborts", &
+                test_index_string_get_many_length_aborts), &
+            new_unittest("a string lookup on an integer multimap aborts", &
+                test_multimap_string_on_integer_aborts), &
+            new_unittest("an integer lookup on a string multimap aborts", &
+                test_multimap_integer_on_string_aborts), &
+            new_unittest("a string multimap build with method=sorted aborts", &
+                test_multimap_string_method_sorted_aborts), &
+            new_unittest("a string probe_many on an integer multimap aborts", &
+                test_multimap_string_probe_on_integer_aborts), &
+            new_unittest("an integer key list from a string multimap aborts", &
+                test_multimap_string_keys_rank1_aborts), &
+            new_unittest("every legal string-key path of both types completes", &
+                test_index_string_control_completes), &
+            new_unittest("a string key on an integer index aborts", &
+                test_table_index_string_key_on_int_aborts), &
+            new_unittest("an integer key on a string index aborts", &
+                test_table_index_int_key_on_string_aborts), &
             new_unittest("a pool double free aborts", &
                 test_pool_double_free_aborts), &
             new_unittest("freeing a never-issued index aborts", &
@@ -2318,8 +2360,8 @@ contains
                 test_bounded_qc_hard_at_first_touch), &
             new_unittest("a bounded soft qc violation warns and returns every row", &
                 test_bounded_qc_soft_warns), &
-            new_unittest("build_index on a string column aborts", &
-                test_table_index_string_column_aborts), &
+            new_unittest("build_index on a string column completes and answers", &
+                test_table_index_string_column_completes), &
             new_unittest("build_index on a boolean column aborts", &
                 test_table_index_bool_column_aborts), &
             new_unittest("build_index on a vector column aborts", &
@@ -3119,6 +3161,174 @@ contains
             failure_message="every legal pf_index_multimap call was expected to complete", &
             required_stderr="multimap control finished")
     end subroutine test_multimap_control_completes
+    !
+    !> See `scenario_index_string_on_integer_map` (test/error_scenarios.f90).
+    subroutine test_index_string_on_integer_map_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_string_on_integer_map", expect_abort=.true., &
+            failure_message="a string key on an integer map was expected to abort", &
+            required_stderr="this map holds integer keys; look up with an integer key")
+    end subroutine test_index_string_on_integer_map_aborts
+    !
+    !> See `scenario_index_integer_on_string_map` (test/error_scenarios.f90).
+    subroutine test_index_integer_on_string_map_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_integer_on_string_map", expect_abort=.true., &
+            failure_message="an integer key on a string map was expected to abort", &
+            required_stderr="this map holds string keys; look up with a string key")
+    end subroutine test_index_integer_on_string_map_aborts
+    !
+    !> See `scenario_index_tuple_on_string_map` (test/error_scenarios.f90).
+    subroutine test_index_tuple_on_string_map_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_tuple_on_string_map", expect_abort=.true., &
+            failure_message="a key tuple on a string map was expected to abort", &
+            required_stderr="this map holds string keys; look up with a string key")
+    end subroutine test_index_tuple_on_string_map_aborts
+    !
+    !> See `scenario_index_string_get_many_on_integer_map` (test/error_scenarios.f90).
+    subroutine test_index_string_get_many_on_integer_map_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_string_get_many_on_integer_map", expect_abort=.true., &
+            failure_message="string keys in get_many on an integer map were expected to abort", &
+            required_stderr="this map holds integer keys; look up with integer keys")
+    end subroutine test_index_string_get_many_on_integer_map_aborts
+    !
+    !> See `scenario_index_string_method_direct` (test/error_scenarios.f90).
+    subroutine test_index_string_method_direct_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_string_method_direct", expect_abort=.true., &
+            failure_message="method=direct on a string build was expected to abort", &
+            required_stderr="a string-keyed map is always hashed")
+    end subroutine test_index_string_method_direct_aborts
+    !
+    !> See `scenario_index_string_method_sorted` (test/error_scenarios.f90).
+    subroutine test_index_string_method_sorted_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_string_method_sorted", expect_abort=.true., &
+            failure_message="method=sorted on a string build was expected to abort", &
+            required_stderr="a string-keyed map is always hashed")
+    end subroutine test_index_string_method_sorted_aborts
+    !
+    !> See `scenario_index_string_build_duplicate` (test/error_scenarios.f90).
+    subroutine test_index_string_build_duplicate_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_string_build_duplicate", expect_abort=.true., &
+            failure_message="a duplicate string key was expected to abort", &
+            required_stderr="duplicate key ""aa"" at position 3")
+    end subroutine test_index_string_build_duplicate_aborts
+    !
+    !> See `scenario_index_string_keys_rank1` (test/error_scenarios.f90).
+    subroutine test_index_string_keys_rank1_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_string_keys_rank1", expect_abort=.true., &
+            failure_message="keys() into an integer list on a string map was expected to abort", &
+            required_stderr="this map holds string keys; ask for a parquet_string_column")
+    end subroutine test_index_string_keys_rank1_aborts
+    !
+    !> See `scenario_index_string_keys_column_on_integer` (test/error_scenarios.f90).
+    subroutine test_index_string_keys_column_on_integer_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_string_keys_column_on_integer", expect_abort=.true., &
+            failure_message="keys() into a string column on an integer map was expected to abort", &
+            required_stderr="this map holds integer keys; ask for an integer list")
+    end subroutine test_index_string_keys_column_on_integer_aborts
+    !
+    !> See `scenario_index_string_init_ncomp` (test/error_scenarios.f90).
+    subroutine test_index_string_init_ncomp_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_string_init_ncomp", expect_abort=.true., &
+            failure_message="a string init with two components was expected to abort", &
+            required_stderr="a string key has one component")
+    end subroutine test_index_string_init_ncomp_aborts
+    !
+    !> See `scenario_index_string_set_on_integer_map` (test/error_scenarios.f90).
+    subroutine test_index_string_set_on_integer_map_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_string_set_on_integer_map", expect_abort=.true., &
+            failure_message="set with a string key on an integer map was expected to abort", &
+            required_stderr="this map holds integer keys; use an integer key")
+    end subroutine test_index_string_set_on_integer_map_aborts
+    !
+    !> See `scenario_index_string_remove_absent` (test/error_scenarios.f90).
+    subroutine test_index_string_remove_absent_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_string_remove_absent", expect_abort=.true., &
+            failure_message="removing an absent string key was expected to abort", &
+            required_stderr="this key is not in the map; pass found=")
+    end subroutine test_index_string_remove_absent_aborts
+    !
+    !> See `scenario_index_string_get_many_length` (test/error_scenarios.f90).
+    subroutine test_index_string_get_many_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_string_get_many_length", expect_abort=.true., &
+            failure_message="a string get_many with a short answer array was expected to abort", &
+            required_stderr="the keys and the answer array must have the same length")
+    end subroutine test_index_string_get_many_length_aborts
+    !
+    !> See `scenario_multimap_string_on_integer` (test/error_scenarios.f90).
+    subroutine test_multimap_string_on_integer_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_string_on_integer", expect_abort=.true., &
+            failure_message="a string key on an integer multimap was expected to abort", &
+            required_stderr="this multimap holds integer keys; look up with an integer key")
+    end subroutine test_multimap_string_on_integer_aborts
+    !
+    !> See `scenario_multimap_integer_on_string` (test/error_scenarios.f90).
+    subroutine test_multimap_integer_on_string_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_integer_on_string", expect_abort=.true., &
+            failure_message="an integer key on a string multimap was expected to abort", &
+            required_stderr="this multimap holds string keys; look up with a string key")
+    end subroutine test_multimap_integer_on_string_aborts
+    !
+    !> See `scenario_multimap_string_method_sorted` (test/error_scenarios.f90).
+    subroutine test_multimap_string_method_sorted_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_string_method_sorted", expect_abort=.true., &
+            failure_message="method=sorted on a string multimap build was expected to abort", &
+            required_stderr="pf_index_multimap%build: a string-keyed map is always hashed")
+    end subroutine test_multimap_string_method_sorted_aborts
+    !
+    !> See `scenario_multimap_string_probe_on_integer` (test/error_scenarios.f90).
+    subroutine test_multimap_string_probe_on_integer_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_string_probe_on_integer", expect_abort=.true., &
+            failure_message="string probes on an integer multimap were expected to abort", &
+            required_stderr="this multimap holds integer keys; probe with integer keys")
+    end subroutine test_multimap_string_probe_on_integer_aborts
+    !
+    !> See `scenario_multimap_string_keys_rank1` (test/error_scenarios.f90).
+    subroutine test_multimap_string_keys_rank1_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "multimap_string_keys_rank1", expect_abort=.true., &
+            failure_message="keys() into an integer list on a string multimap was expected to abort", &
+            required_stderr="this multimap holds string keys; ask for a parquet_string_column")
+    end subroutine test_multimap_string_keys_rank1_aborts
+    !
+    !> See `scenario_index_string_control` (test/error_scenarios.f90).
+    subroutine test_index_string_control_completes(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_string_control", expect_abort=.false., &
+            failure_message="every legal string-key call was expected to complete", &
+            required_stderr="string index control finished")
+    end subroutine test_index_string_control_completes
+    !
+    !> See `scenario_table_index_string_key_on_int` (test/error_scenarios.f90).
+    subroutine test_table_index_string_key_on_int_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_index_string_key_on_int", expect_abort=.true., &
+            failure_message="a string key on an integer index was expected to abort", &
+            required_stderr="was asked for a string key")
+    end subroutine test_table_index_string_key_on_int_aborts
+    !
+    !> See `scenario_table_index_int_key_on_string` (test/error_scenarios.f90).
+    subroutine test_table_index_int_key_on_string_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_index_int_key_on_string", expect_abort=.true., &
+            failure_message="an integer key on a string index was expected to abort", &
+            required_stderr="this index is over string column 's', and was asked for an integer key")
+    end subroutine test_table_index_int_key_on_string_aborts
     !
     !> See `scenario_pool_double_free` (test/error_scenarios.f90) for why this is refused.
     subroutine test_pool_double_free_aborts(error)
@@ -14289,14 +14499,14 @@ contains
 
     ! ---- %build_index and parquet_table_index ---------------------------------------------------
     !
-    !> See `scenario_table_index_string_column` (test/error_scenarios.f90), which also says what
-    !! to assert once string keys ship and this refusal lifts.
-    subroutine test_table_index_string_column_aborts(error)
+    !> See `scenario_table_index_string_column` (test/error_scenarios.f90): the refusal this once
+    !! asserted lifted with the map's string keys, and the scenario is now a control.
+    subroutine test_table_index_string_column_completes(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
-        call check_scenario_exit_status_and_stderr(error, "table_index_string_column", expect_abort=.true., &
-            failure_message="build_index over a string column was expected to abort", &
-            required_stderr="string keys are not supported by the lookup index in this version")
-    end subroutine test_table_index_string_column_aborts
+        call check_scenario_exit_status_and_stderr(error, "table_index_string_column", expect_abort=.false., &
+            failure_message="build_index over a string column was expected to complete and answer", &
+            required_stderr="a string column was indexed and answered")
+    end subroutine test_table_index_string_column_completes
     !
     !> See `scenario_table_index_bool_column` (test/error_scenarios.f90).
     subroutine test_table_index_bool_column_aborts(error)

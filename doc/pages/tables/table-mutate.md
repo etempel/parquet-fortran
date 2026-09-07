@@ -902,16 +902,23 @@ call t%build_index("id", ix)              ! reads "id" if needed; the table is N
 call ix%find(4711_int64, row)             ! the row holding 4711, or 0 when no row does
 call ix%find_many(wanted, rows_of_wanted) ! one row per key, 0 where absent, threaded
 n = ix%count(4711_int64)                  ! 0 or 1 on a unique index
+call t%build_index("name", nx)            ! a string column, keyed by each value's exact bytes
+call nx%find("obj_4711", row)             ! a string key, taken as written
+call nx%find_many(names, rows)            ! a parquet_string_column, or a character array
 ```
 
 Underneath is [`parquet_index`](../utilities/index-maps.html)'s own engine — a `pf_index_map` by
 default, holding the table's row numbers — so a lookup costs a few nanoseconds and `%find_many`
 over a large key array threads internally. The key is an `integer` (either width), a `real`
-(either width), or a `parquet_date`, `parquet_time` or `parquet_timestamp` element, and it must be
-of the column's own family: an integer key on an integer column, a real key on a real column, a
-temporal element on a column of exactly that type. A string or boolean column cannot be indexed in
-this version (string keys arrive with the map's own string forms); a vector or container column
-never can, having no single value per row.
+(either width), a `character` string, or a `parquet_date`, `parquet_time` or `parquet_timestamp`
+element, and it must be of the column's own family: an integer key on an integer column, a real
+key on a real column, a string on a string column, a temporal element on a column of exactly that
+type. A string column is keyed by each value's exact bytes (`"ab"` and `"ab "` are two keys, as
+they are to `pf_match` and to a sort); a scalar key is taken as written, a `character` array
+handed to `%find_many` is trimmed per element, and a `parquet_string_column` is taken verbatim,
+with a null element answering 0 — the engine's own [string rules](../utilities/index-maps.html#string-keys).
+A boolean column cannot be indexed; a vector or container column never can, having no single
+value per row.
 
 **A key that repeats needs `unique=.false.`.** The default builds a unique index and refuses a
 repeated key at build time, naming it — the engine's own duplicate rule, which is what makes a

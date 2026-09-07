@@ -1480,7 +1480,9 @@ def gen_row_type():
 #: One per column family `%build_index` accepts -- both integer kinds and both real kinds are
 #: taken because a caller's key variable is whichever the caller declared, widened exactly as a
 #: bound set's members are; the three temporal element types because a temporal column is
-#: keyed by its element's raw storage (parquet_date_key and friends in parquet_core).
+#: keyed by its element's raw storage (parquet_date_key and friends in parquet_core); and a
+#: `character(len=*)` key for a string column, taken as written by the scalar forms and trimmed
+#: per element by `%find_many` over a character array (the engine's own string rules).
 INDEX_KEYS = [
     ("i32", "integer(int32)", "int32"),
     ("i64", "integer(int64)", "int64"),
@@ -1489,9 +1491,21 @@ INDEX_KEYS = [
     ("date", "type(parquet_date)", "parquet_date"),
     ("time", "type(parquet_time)", "parquet_time"),
     ("ts", "type(parquet_timestamp)", "parquet_timestamp"),
+    ("chr", "character(len=*)", "string"),
 ]
+#: `%find_many` alone also takes the keys as a parquet_string_column (one scalar argument, the
+#: elements verbatim, a null element answering 0) -- the form the filter's string leaf and a
+#: string-keyed join probe with. The scalar forms have no such twin: a scalar key is a string.
+INDEX_MANY_EXTRA = [("str", "type(parquet_string_column)", "parquet_string_column")]
 #: The row-index kinds every answer comes in, per the library's two-kind rule.
 INDEX_ROWS = [("i32", "integer(int32)", "int32"), ("i64", "integer(int64)", "int64")]
+
+
+def index_keys_decl(kt, kdecl):
+    """The `keys` dummy of a `%find_many` specific: an array of the key type, or the one column."""
+    if kt == "str":
+        return f"{kdecl}, intent(in), target :: keys !! the keys to look up, one per element, verbatim."
+    return f"{kdecl}, intent(in) :: keys(:) !! the keys to look up, one per element."
 
 
 def gen_index_type():
@@ -1509,9 +1523,10 @@ def gen_index_type():
     !! it (parquet_core's key helpers, feature_risks.md Risk-211): an integer column as it is, a
     !! real column by its normalised bit pattern with EVERY NaN one key and -0.0 equal to +0.0, a
     !! date or time column by its raw storage, a timestamp column by its unit-free (seconds,
-    !! nanoseconds) pair. A NULL row is never indexed, so no key finds it and two null rows are
-    !! not a repeat. String and boolean columns are refused (string keys arrive with the map's own
-    !! string forms in a later release).
+    !! nanoseconds) pair, a string column by its exact bytes (the engine's string keys, so
+    !! `"ab"` and `"ab "` are two keys, and a `character` array's elements are trimmed on the way
+    !! in as everywhere in this library). A NULL row is never indexed, so no key finds it and two
+    !! null rows are not a repeat. A boolean column is refused, as is a vector or container one.
     !!
     !! **It goes stale LOUDLY.** The index stamps the table's `%generation()` when it is built and
     !! re-checks it on EVERY query -- never a cached "still valid" flag (Risk-210) -- so after any
@@ -1556,13 +1571,14 @@ def gen_index_type():
     w("        generic :: find_all => " + wrap_list(
         [f"tix_all_{k[0]}_{r[0]}" for k in INDEX_KEYS for r in INDEX_ROWS], 12,
         first_prefix=len("        generic :: find_all => ")))
-    for kt, _, kd in INDEX_KEYS:
+    for kt, _, kd in INDEX_KEYS + INDEX_MANY_EXTRA:
         for rk, _, rd in INDEX_ROWS:
             w(f"        procedure, private :: tix_many_{kt}_{rk} !! %find_many specific, {kd} keys, {rd} rows.")
     w("        !> `%find` for a whole array of keys in one call: one row per key, 0 where absent, into")
     w("        !! an array the caller sized. Threads internally; `n_found=` counts the non-zero answers.")
+    w("        !! Over a string column the keys may also be one parquet_string_column, verbatim.")
     w("        generic :: find_many => " + wrap_list(
-        [f"tix_many_{k[0]}_{r[0]}" for k in INDEX_KEYS for r in INDEX_ROWS], 12,
+        [f"tix_many_{k[0]}_{r[0]}" for k in INDEX_KEYS + INDEX_MANY_EXTRA for r in INDEX_ROWS], 12,
         first_prefix=len("        generic :: find_many => ")))
     for kt, _, kd in INDEX_KEYS:
         w(f"        procedure, private :: tix_count_{kt} !! %count specific, {kd} key.")
@@ -1802,7 +1818,7 @@ def index_interfaces():
         !! default) builds a `pf_index_map`, whose own duplicate refusal aborts naming a key that
         !! repeats; `unique=.false.` builds a `pf_index_multimap` and `%find_all` then lists every
         !! row of a key. The stored values are the table's row numbers. A null row is skipped. An
-        !! integer, real, date, time or timestamp column may be indexed; a string, boolean, vector
+        !! integer, real, date, time, timestamp or string column may be indexed; a boolean, vector
         !! or container column is refused naming the column. `ix` is `intent(out)`, so building
         !! into an object that already holds an index replaces it. `threads=` reaches the engine's
         !! build exactly as `pf_index_map%build`'s does; absent means automatic.
@@ -1829,12 +1845,12 @@ def index_interfaces():
             {kdecl}, intent(in) :: key !! the key to look up.
             {rdecl}, allocatable, intent(out) :: rows(:) !! every table row holding `key`, ascending; zero-length when none.
         end subroutine tix_all_{kt}_{rk}""")
-    for kt, kdecl, kd in INDEX_KEYS:
+    for kt, kdecl, kd in INDEX_KEYS + INDEX_MANY_EXTRA:
         for rk, rdecl, rd in INDEX_ROWS:
             w(f"""        !> %find_many specific, {kd} keys, {rd} rows; see the generic.
         module subroutine tix_many_{kt}_{rk}(self, keys, rows, threads, n_found)
             class(parquet_table_index), intent(in) :: self !! the index.
-            {kdecl}, intent(in) :: keys(:) !! the keys to look up, one per element.
+            {index_keys_decl(kt, kdecl)}
             {rdecl}, intent(out) :: rows(:) !! one per key: the first row holding it, or 0. As long as `keys`.
             integer, intent(in), optional :: threads !! threads the lookup may use; absent = automatic.
             integer(int64), intent(out), optional :: n_found !! how many keys were found (non-zero answers).

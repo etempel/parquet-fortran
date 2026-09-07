@@ -17,21 +17,12 @@ submodule (parquet_core) parquet_read
     ! iso_c_binding is NOT imported here: parquet_core does an unrestricted `use iso_c_binding`,
     ! so c_loc/c_null_ptr/c_int/c_int8_t all arrive by host association, and naming them again is
     ! a symbol conflict rather than a clarification.
-    ! pf_in evaluates a STRING bound set against one row group's chunk (an `in`/`not_in` leaf):
-    ! S6's sort-merge membership test, correct and duplicate-tolerant on the set side. Every other
-    ! element family answers through a pf_index_map instead, which is one %get_many per row group
-    ! rather than a re-sort of the set per row group; strings join them at P8b, when
-    ! parquet_index gains string keys.
-    use parquet_sorting, only: pf_sort_keys, pf_argsort, pf_in
-    ! pf_unique is RENAMED on import, and both halves of that are load-bearing. parquet_core
-    ! imports it too (for %bind's string dedup), so importing it under its own name here is a
-    ! symbol conflict with the host-associated one -- gfortran says so, nagfor does not. Importing
-    ! it DIRECTLY rather than reaching the host's copy is what the note above requires: this is an
-    ! intermediate submodule, and referencing a name it reaches by host association from
-    ! parquet_core breaks nagfor's compilation of every child of this file.
-    use parquet_sorting, only: read_unique => pf_unique
+    use parquet_sorting, only: pf_sort_keys, pf_argsort
     ! The bound sets an `in`/`not_in` leaf is evaluated against are answered by the library's own
     ! key index rather than by a second lookup engine in C++ -- see parquet_evaluate_set_leaf.
+    ! Every element family, the string family included since the map gained string keys (S7's
+    ! P8b): a string set is one %get_many over the row group's string column, in place, where it
+    ! used to be a `pf_in` sort-merge that re-sorted the set once per row group.
     ! pf_index_map is host-associated from parquet_core, which imports it; naming it AGAIN here is
     ! not redundancy but a requirement of nagfor 7.2, which cannot compile any child of an
     ! INTERMEDIATE submodule that references a name it reaches by host association from the module
@@ -631,7 +622,6 @@ contains
         integer(int8), allocatable, intent(out) :: flags(:) !! n_pre * pre_groups * 3 screen flags, leaf-major.
         type(parquet_reader) :: rdr
         type(pf_index_map) :: keys
-        type(parquet_string_column) :: str_set
         character(len=:), allocatable :: op_low, col_type, col_shape, errmsg, name_suffix, set_text
         integer(int8) :: fam
         integer :: i, set_index
@@ -682,7 +672,7 @@ contains
             call parquet_get_column_shape(rdr, trim(leaf_name(i)), col_shape)
             call parquet_get_column_type(rdr, trim(leaf_name(i)), col_type)
             call parquet_resolve_set_payload(filter, trim(leaf_name(i)), leaf_value(i), col_type, &
-                col_shape, fam, keys, str_set, ok, errmsg)
+                col_shape, fam, keys, ok, errmsg)
             if (.not. ok) then
                 call reader_filename_suffix(reader, name_suffix)
                 error stop trim(context) // ": " // errmsg // name_suffix
@@ -690,7 +680,7 @@ contains
             call parquet_lower_op(leaf_op(i), op_low)
             negate = (op_low == "not_in")
             base = (p - 1_int64) * pre_rows
-            call parquet_evaluate_set_leaf(rdr, context, trim(leaf_name(i)), fam, keys, str_set, negate, &
+            call parquet_evaluate_set_leaf(rdr, context, trim(leaf_name(i)), fam, keys, negate, &
                 pre_rows, pre_groups, verdicts(base + 1_int64:base + pre_rows), &
                 flags((p - 1_int64) * pre_groups * 3_int64 + 1_int64:p * pre_groups * 3_int64))
         end do
@@ -803,17 +793,17 @@ contains
     !> reader's caller appends its file name and the table's appends its own context, and the two
     !> messages are otherwise identical because they are the same string.
     subroutine parquet_resolve_set_payload(filter, column, value, col_type, col_shape, fam, keys, &
-            str_set, ok, errmsg)
+            ok, errmsg)
         type(parquet_filter), intent(in) :: filter !! the filter whose bound sets a `@name` refers to.
         character(len=*), intent(in) :: column !! the column the clause tests.
         character(len=*), intent(in) :: value !! the leaf's value text: `@name` or `(...)`.
         character(len=*), intent(in) :: col_type !! parquet_get_column_type's token for that column.
         character(len=*), intent(in) :: col_shape !! parquet_get_column_shape's token for that column.
         integer(int8), intent(out) :: fam !! the resolved FSET_* element family.
-        type(pf_index_map), intent(out) :: keys !! the built key index; left empty for a string set.
-        type(parquet_string_column), intent(out) :: str_set !! the string members; left empty for another family.
+        type(pf_index_map), intent(out) :: keys !! the built key index, string-keyed for a string set.
         logical, intent(out) :: ok !! .false. on any resolution failure.
         character(len=:), allocatable, intent(out) :: errmsg !! that failure's message; "" when ok.
+        type(parquet_string_column) :: members
         character(len=:), allocatable :: text
         integer :: set_index
         integer(int64) :: i, lo, hi
@@ -821,7 +811,6 @@ contains
 
         ok = .false.
         errmsg = ""
-        call str_set%clear()
         set_index = 0
         text = trim(adjustl(value))
         ! A leading '(' is what distinguishes the two spellings. The tokenizer refuses an empty
@@ -842,7 +831,7 @@ contains
         call parquet_check_set_column_shape(column, col_shape, errmsg)
         if (len(errmsg) > 0) return
         if (is_literal) then
-            call parquet_parse_literal_set(column, text, col_type, fam, keys, str_set, ok, errmsg)
+            call parquet_parse_literal_set(column, text, col_type, fam, keys, ok, errmsg)
             return
         end if
 
@@ -870,12 +859,15 @@ contains
         else if (fam /= FSET_STRING) then
             call keys%build(filter%set_keys(lo:hi))
         else
-            ! The string set's own column, built ONCE for the whole leaf rather than per row group.
-            ! %append_from copies each member's bytes across without materialising a deferred-length
-            ! string for it (feature_risks.md Risk-60).
+            ! The string set's members, gathered ONCE for the whole leaf into the map's own string
+            ! build, which keys each by its exact bytes -- the same rule %bind deduplicated them
+            ! under, so the strict `%build` contract holds here as it does for every other family.
+            ! %append_from copies each member's bytes across without materialising a deferred-
+            ! length string for it (feature_risks.md Risk-60).
             do i = lo, hi
-                call str_set%append_from(filter%set_text, i)
+                call members%append_from(filter%set_text, i)
             end do
+            call keys%build(members)
         end if
         ok = .true.
     end subroutine parquet_resolve_set_payload
@@ -896,16 +888,14 @@ contains
     !> accepts a C99 hex float (`0x1p3`), which this does not. Narrower in the safe direction: a
     !> spelling this refuses is a clean parse error naming the element, never a different value.
     !> `nan` is refused for the reason `x == nan` is -- it could only ever match nothing.
-    subroutine parquet_parse_literal_set(column, text, col_type, fam, keys, str_set, ok, errmsg)
+    subroutine parquet_parse_literal_set(column, text, col_type, fam, keys, ok, errmsg)
         character(len=*), intent(in) :: column !! the column the clause tests.
         character(len=*), intent(in) :: text !! the list as written, parentheses included.
         character(len=*), intent(in) :: col_type !! parquet_get_column_type's token for that column.
         integer(int8), intent(out) :: fam !! the resolved FSET_* element family.
-        type(pf_index_map), intent(out) :: keys !! the built key index; left empty for a string set.
-        type(parquet_string_column), intent(out) :: str_set !! the string members; left empty otherwise.
+        type(pf_index_map), intent(out) :: keys !! the built key index, string-keyed for a string list.
         logical, intent(out) :: ok !! .false. on any parse or type failure.
         character(len=:), allocatable, intent(out) :: errmsg !! that failure's message; "" when ok.
-        type(parquet_string_column) :: given
         character(len=:), allocatable :: inner, elem
         character(len=32) :: pos_str
         integer :: lo, hi, nelem, depth, k
@@ -933,9 +923,14 @@ contains
                 trim(column) // " in @name' instead"
             return
         end if
-        call keys%init()
-        call given%clear()
-        call str_set%clear()
+        ! A string list starts a STRING-keyed map: %get_or_add over a string is the same
+        ! dictionary-encoding primitive as over an integer, so every family below deduplicates
+        ! the same way and leaves behind the map the evaluator looks up in.
+        if (fam == FSET_STRING) then
+            call keys%init(strings=.true.)
+        else
+            call keys%init()
+        end if
 
         inner = text(2:len(text) - 1)
         if (len_trim(inner) == 0) then
@@ -1002,24 +997,19 @@ contains
                 end if
                 call keys%get_or_add(parquet_filter_real_key(rval), idx)
             case default
-                ! The quotes are stripped here and nowhere else, so an element is stored exactly as
+                ! The quotes are stripped here and nowhere else, so an element is keyed exactly as
                 ! the caller wrote it between them -- spaces included, and with no trimming, which
-                ! is what makes a quoted member comparable against a string column's own bytes.
+                ! is what makes a quoted member comparable against a string column's own bytes
+                ! (the map's scalar string forms take a key as written).
                 if (len(elem) < 2 .or. elem(len(elem):len(elem)) /= '"') then
                     errmsg = "element " // trim(pos_str) // " of the list in the " // &
                         "filter clause on column '" // trim(column) // "' is missing its closing quote"
                     return
                 end if
-                call given%append_string(elem(2:len(elem) - 1))
+                call keys%get_or_add(elem(2:len(elem) - 1), idx)
             end select
             lo = k + 1
         end do
-
-        ! The string family deduplicates with pf_unique, which is what %bind does for the same
-        ! reason: pf_in is duplicate-tolerant, but a set carrying repeats costs a longer merge for
-        ! no answer of its own. The numeric families needed no separate step -- %get_or_add IS the
-        ! deduplication, and the map it leaves behind is the one the evaluator looks up in.
-        if (fam == FSET_STRING) call read_unique(given, str_set)
         ok = .true.
     end subroutine parquet_parse_literal_set
 
@@ -1160,14 +1150,13 @@ contains
     !> fall in the gaps between row groups' ranges -- none of which a bound-based leaf can do. See
     !> feature_risks.md R-a: a MIS-SLICED segment here prunes a row group that holds members, and
     !> the answer stays a perfectly valid row set with nothing to report it.
-    subroutine parquet_evaluate_set_leaf(rdr, context, column, fam, keys, str_set, negate, &
+    subroutine parquet_evaluate_set_leaf(rdr, context, column, fam, keys, negate, &
             total_nrows, num_row_groups, verdicts, flags)
         type(parquet_reader), intent(in) :: rdr !! the private, transform-free reader over the file.
         character(len=*), intent(in) :: context !! calling procedure's name, used in every error-stop message.
         character(len=*), intent(in) :: column !! the column the clause tests.
         integer(int8), intent(in) :: fam !! the set's FSET_* element family.
-        type(pf_index_map), intent(in) :: keys !! the built key index; unused for a string set.
-        type(parquet_string_column), intent(in) :: str_set !! the string set's members; empty for another family.
+        type(pf_index_map), intent(in) :: keys !! the built key index, string-keyed for a string set.
         logical, intent(in) :: negate !! .true. for a `not_in` leaf: true and false are exchanged.
         integer(int64), intent(in) :: total_nrows !! the file's physical row count.
         integer(int64), intent(in) :: num_row_groups !! the file's row-group count.
@@ -1180,7 +1169,7 @@ contains
         do rg = 1_int64, num_row_groups
             call parquet_get_chunk_size(rdr, rows, rg)
             if (rows > 0_int64) then
-                call parquet_answer_set_chunk(rdr, column, rg, rows, fam, keys, str_set, &
+                call parquet_answer_set_chunk(rdr, column, rg, rows, fam, keys, &
                     negate, verdicts(base + 1_int64:base + rows))
             end if
             ! This row group's three screen flags, read off the segment just written. A row group
@@ -1331,15 +1320,14 @@ contains
     !> answers KL_FALSE with no special case at all, because no NaN pattern is ever a key (%bind
     !> refuses one), so its lookup finds nothing: the filter's NaN rule holding by construction
     !> rather than by a check that could be forgotten on one engine. See feature_risks.md R-j.
-    subroutine parquet_answer_set_chunk(rdr, column, row_group, rows, fam, keys, str_set, &
+    subroutine parquet_answer_set_chunk(rdr, column, row_group, rows, fam, keys, &
             negate, out)
         type(parquet_reader), intent(in) :: rdr !! the private reader over the file.
         character(len=*), intent(in) :: column !! the column the clause tests.
         integer(int64), intent(in) :: row_group !! 1-based row group to answer.
         integer(int64), intent(in) :: rows !! that row group's row count.
         integer(int8), intent(in) :: fam !! the set's FSET_* element family.
-        type(pf_index_map), intent(in) :: keys !! the built key index; unused for a string set.
-        type(parquet_string_column), intent(in) :: str_set !! the string set's members; empty for another family.
+        type(pf_index_map), intent(in) :: keys !! the built key index, string-keyed for a string set.
         logical, intent(in) :: negate !! .true. for a `not_in` leaf: true and false are exchanged.
         integer(int8), intent(out) :: out(:) !! this row group's Kleene verdicts, one per row.
         integer(int64), allocatable :: ivals(:), found(:), pairs(:, :)
@@ -1348,7 +1336,7 @@ contains
         type(parquet_date), allocatable :: dvals(:)
         type(parquet_time), allocatable :: tvals(:)
         type(parquet_timestamp), allocatable :: tsvals(:)
-        logical, allocatable :: valid(:), hit(:)
+        logical, allocatable :: valid(:)
         integer(int64) :: i
 
         select case (fam)
@@ -1398,14 +1386,15 @@ contains
                 out(i) = parquet_set_verdict(valid(i), found(i) > 0_int64, negate)
             end do
         case default
-            ! The string family, on pf_in until parquet_index gains string keys at P8b. The set is
-            ! rebuilt into its own column per row group, which is the cost that switch removes;
-            ! correctness is unaffected, since pf_in is duplicate-tolerant on the set side and the
-            ! set carries no nulls at all (%bind dropped them).
+            ! The string family: one %get_many over the row group's string column, read in place
+            ! by the map's own string form, which keys each element by its exact bytes and answers
+            ! 0 for a null one -- the same call every other family makes, where this used to be a
+            ! pf_in sort-merge that re-sorted the set once per row group.
+            allocate(found(rows))
             call parquet_read_column_chunk(rdr, column, row_group, svals)
-            call pf_in(svals, str_set, hit)
+            call keys%get_many(svals, found)
             do i = 1_int64, rows
-                out(i) = parquet_set_verdict(.not. svals%is_null(i), hit(i), negate)
+                out(i) = parquet_set_verdict(.not. svals%is_null(i), found(i) > 0_int64, negate)
             end do
         end select
     end subroutine parquet_answer_set_chunk

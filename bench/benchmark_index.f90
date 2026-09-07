@@ -19,6 +19,11 @@
 !!                 `REPEAT` times on average, `%get_first_many` and `%probe_many` serial and on a
 !!                 team, and `pf_match_all` over the same arrays as the sort-engine baseline the
 !!                 hash engine is read against.
+!! * `strings`  -- string keys: the build of a string map from a `parquet_string_column` of
+!!                 `NKEYS` distinct identifiers, `%get` per key, `%get_many` over a probe column
+!!                 (half hits, half misses) serial and on a team, and `pf_in` over the same two
+!!                 columns -- the sort-merge the filter's string leaf used to run once per row
+!!                 group, and the baseline the map's figure is read against.
 !!
 !! **Rules this program follows, from CLAUDE.md's benchmarking section.** Every array is written
 !! once before any timed loop, so no figure pays first-touch page faults; the row walk uses a
@@ -28,7 +33,8 @@
 !! accumulated and printed so no arm can be optimised away, computed outside every timed region.
 program benchmark_index
     use parquet_index
-    use parquet_sorting, only: pf_match_all
+    use parquet_sorting, only: pf_match_all, pf_in
+    use parquet_strings, only: parquet_string_column
     use iso_fortran_env, only: int32, int64, real64, output_unit
 #ifdef _OPENMP
     use omp_lib, only: omp_get_wtime, omp_get_max_threads, omp_get_thread_num
@@ -62,6 +68,8 @@ program benchmark_index
         call mode_pool()
     case ("multimap")
         call mode_multimap()
+    case ("strings")
+        call mode_strings()
     case ("all")
         call mode_lookup()
         call mode_build()
@@ -69,6 +77,7 @@ program benchmark_index
         call mode_mutate()
         call mode_pool()
         call mode_multimap()
+        call mode_strings()
     case default
         write (output_unit, "(a)") "unknown mode: " // mode
         stop 2
@@ -729,5 +738,123 @@ contains
         idx = p%get_index()
         call p%free_index(idx)
     end function pool_cycle
+
+
+    ! ---- strings ----
+
+    !> String keys against the sort-merge they replace in the filter's string leaf.
+    !!
+    !! The keys are `NKEYS` distinct identifiers of the shape `obj_<n>` over a sparse walk, so
+    !! no two share a prefix pattern the hash could exploit; the probes are `NACCESS` of them,
+    !! every second one altered so that half miss. `pf_in` over the same two columns is the
+    !! baseline: it sorts the concatenation of both, which is what the filter's string leaf
+    !! paid once per row group before the map gained string keys, and what a join's string
+    !! path pays today.
+    subroutine mode_strings()
+        type(pf_index_map) :: m
+        type(parquet_string_column) :: keys, probes
+        integer(int64), allocatable :: answers(:), ids(:)
+        logical, allocatable :: hit(:)
+        integer(int64) :: i, j, v, nchar
+        integer :: r, nt
+        real(real64) :: t0, best
+        character(len=64) :: tag
+        character(len=24) :: txt
+
+        write (output_unit, "(a)") "## strings"
+        allocate(ids(nkeys), answers(naccess))
+        ids = 0_int64
+        answers = 0_int64
+        call fill_keys("sparse", ids)
+        call keys%clear()
+        call keys%reserve(nkeys, nkeys * 16_int64)
+        do i = 1_int64, nkeys
+            write (txt, "(a,i0)") "obj_", ids(i)
+            call keys%append_string(trim(txt))
+        end do
+        call probes%clear()
+        call probes%reserve(naccess, naccess * 16_int64)
+        do i = 1_int64, naccess
+            j = 1_int64 + mod_wrap(i * 104729_int64, nkeys)
+            if (mod(i, 2_int64) == 0_int64) then
+                write (txt, "(a,i0,a)") "obj_", ids(j), "x"
+            else
+                write (txt, "(a,i0)") "obj_", ids(j)
+            end if
+            call probes%append_string(trim(txt))
+        end do
+        nchar = keys%character_size()
+        nt = threads_req
+        if (nt < 1) nt = pf_index_threads(naccess)
+        write (output_unit, "(a,i0,a,i0,a,f6.2)") "# keys=", nkeys, " probes=", naccess, &
+            " mean key bytes=", real(nchar, real64) / real(nkeys, real64)
+        ! The build: the hash of every key plus one copy of its bytes.
+        best = huge(1.0_real64)
+        do r = 1, rounds
+            t0 = now()
+            call m%build(keys)
+            best = min(best, now() - t0)
+            checksum = checksum + m%nkeys()
+        end do
+        call report("strings: build from a string column", best, nkeys)
+        write (output_unit, "(a,i0,a)") "# string map memory: ", m%memory_bytes(), " bytes"
+        ! The scalar lookup, one key at a time, through the map's own stored keys.
+        best = huge(1.0_real64)
+        do r = 1, rounds
+            t0 = now()
+            v = 0_int64
+            do i = 1_int64, naccess
+                j = 1_int64 + mod_wrap(i * 104729_int64, nkeys)
+                write (txt, "(a,i0)") "obj_", ids(j)
+                v = v + m%get(trim(txt))
+            end do
+            best = min(best, now() - t0)
+            checksum = checksum + v
+        end do
+        call report("strings: get, one key at a time (incl. formatting)", best, naccess)
+        ! The bulk lookup over the probe column, in place, serial and on the team.
+        best = huge(1.0_real64)
+        do r = 1, rounds
+            t0 = now()
+            call m%get_many(probes, answers, threads=1)
+            best = min(best, now() - t0)
+            checksum = checksum + answers(1) + answers(naccess)
+        end do
+        call report("strings: get_many over a string column, threads=1", best, naccess)
+        if (nt > 1) then
+            best = huge(1.0_real64)
+            do r = 1, rounds
+                t0 = now()
+                call m%get_many(probes, answers, threads=nt)
+                best = min(best, now() - t0)
+                checksum = checksum + answers(1) + answers(naccess)
+            end do
+            write (tag, "(a,i0)") "strings: get_many over a string column, threads=", nt
+            call report(trim(tag), best, naccess)
+        end if
+        write (output_unit, "(a,i0)") "# probes found=", count(answers > 0_int64)
+        ! The baseline: pf_in over the same two columns, which sorts both.
+        call pf_in(probes, keys, hit, threads=nt)
+        if (count(hit) /= count(answers > 0_int64)) then
+            write (output_unit, "(a)") "# ERROR: pf_in and get_many disagree on the hit count"
+            stop 3
+        end if
+        do i = 1_int64, naccess
+            if (hit(i) .neqv. (answers(i) > 0_int64)) then
+                write (output_unit, "(a)") "# ERROR: pf_in and get_many disagree on a probe"
+                stop 3
+            end if
+        end do
+        best = huge(1.0_real64)
+        do r = 1, rounds
+            t0 = now()
+            call pf_in(probes, keys, hit, threads=nt)
+            best = min(best, now() - t0)
+            checksum = checksum + count(hit, kind=int64)
+        end do
+        write (tag, "(a,i0)") "baseline: pf_in over the same columns, threads=", nt
+        call report(trim(tag), best, naccess)
+        write (output_unit, "(a)") ""
+    end subroutine mode_strings
 
 end program benchmark_index

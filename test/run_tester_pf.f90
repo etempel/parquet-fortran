@@ -26,6 +26,7 @@ program run_tester_pf
     use test_index, only : collect_tests_index
     use test_index_omp, only : collect_tests_index_omp
     use test_index_multimap, only : collect_tests_index_multimap
+    use test_index_strings, only : collect_tests_index_strings
     use test_healpix_grid, only : collect_tests_healpix_grid
     use test_healpix_reference, only : collect_tests_healpix_reference
     use test_healpix_tier_b, only : collect_tests_healpix_tier_b
@@ -49,6 +50,7 @@ program run_tester_pf
         new_testsuite("index", collect_tests_index), &
         new_testsuite("index_omp", collect_tests_index_omp), &
         new_testsuite("index_multimap", collect_tests_index_multimap), &
+        new_testsuite("index_strings", collect_tests_index_strings), &
         new_testsuite("logging", collect_tests_logging), &
         new_testsuite("toml", collect_tests_toml), &
         new_testsuite("toml_serial", collect_tests_toml_serial), &

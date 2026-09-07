@@ -69,6 +69,11 @@ module parquet_index
         parquet_set_sort_radix_path, parquet_get_sort_radix_path, &
         parquet_set_sort_counting_path, parquet_get_sort_counting_path, &
         parquet_set_sort_counting_bucket_limit, parquet_get_sort_counting_bucket_limit
+    ! String keys (answer F3 of feature_pandas_S7.md): the string forms of both types take and
+    ! return a parquet_string_column. parquet_strings is a leaf beneath this tier that reaches no
+    ! C++, so `use parquet_index` still compiles no Arrow, and this module's row in
+    ! tools/module_footprints.txt grows by exactly parquet_strings.f90 (and parquet_index_str.f90).
+    use parquet_strings, only: parquet_string_column
     implicit none
     private
 
@@ -80,6 +85,7 @@ module parquet_index
     public :: parquet_debug_index_threads_used
     public :: parquet_debug_index_get_many_threads_used
     public :: parquet_debug_set_index_pair_limit
+    public :: parquet_debug_set_index_string_hash_bits
     !
     ! ---- Settings this module's own code reads, re-exported so a narrow import can configure it ----
     !
@@ -209,6 +215,18 @@ module parquet_index
     !! while another thread is inside a probe is a race the scenario harness never runs.
     integer(int64), save :: dbg_index_pair_limit = huge(0_int64)
 
+    !> Low bits every string hash is narrowed to: 0, the default, means the full 64 bits; a
+    !! value in `1 .. 62` is what `parquet_debug_set_index_string_hash_bits` sets.
+    !!
+    !! Test-only, and the way the `(hash, occurrence)` chain of a string map is reached at all.
+    !! Two distinct strings share a 64-bit hash about once in 2**64 probes, so the code that
+    !! handles the collision -- the second and later occurrences, their lookup, their removal and
+    !! the chain compaction removal must keep -- would otherwise be a branch no test ever runs
+    !! (the `parquet_debug_set_affinity_procs` pattern). Read on every hash, on the calling
+    !! thread, so it is set from a serial test only and never beside a running build or lookup: a
+    !! map built narrow and probed wide finds nothing, since the two hash differently.
+    integer, save :: dbg_index_string_hash_bits = 0
+
     !> Most components one key may have, and the reason the tuple paths allocate nothing.
     !!
     !! A tuple lookup has to present its key as `integer(int64)` whatever kind the caller holds, so
@@ -319,6 +337,26 @@ module parquet_index
         !> Sorted backend: ascending keys and their values, exact-fit, no slack.
         integer(int64), allocatable :: skeys(:)
         integer(int64), allocatable :: svals(:) !! see `skeys`.
+        !> `.true.` once this map holds STRING keys (`%build`, `%set` or `%get_or_add` over
+        !! strings). The engine underneath is then the composite hash table over
+        !! `(hash, occurrence)` tuples -- `ncomp` is 2 and `backend` is `IX_HASH` for the map's
+        !! whole life -- and the three arrays below hold the strings themselves, which is what a
+        !! hit is verified against; see `parquet_index_str.f90`. Every integer-keyed entry refuses
+        !! such a map by name, and every string-keyed entry refuses an integer one.
+        logical :: is_str = .false.
+        !> String store: strings appended so far, removed ones included (a removed string keeps
+        !! its bytes and has `sval == 0`); bytes of `sdat` in use; and the `%get_or_add` watermark
+        !! for the caller's VALUES, kept apart from `next_auto` because the tuple table's own
+        !! values are string POSITIONS in this store, never the caller's values.
+        integer(int64) :: nstr = 0_int64
+        integer(int64) :: nchr = 0_int64 !! see `nstr`.
+        integer(int64) :: snext = 0_int64 !! see `nstr`.
+        !> String store: string `p` is `sdat(soff(p) + 1 : soff(p + 1))`, with `soff(1) = 0`, and
+        !! the caller's value for it is `sval(p)`, 0 once it has been removed. Sized with slack and
+        !! grown by doubling; the tuple table maps `(hash, occurrence)` to `p`.
+        integer(int64), allocatable :: soff(:)
+        character(len=1), allocatable :: sdat(:) !! see `soff`.
+        integer(int64), allocatable :: sval(:) !! see `soff`.
     contains
         !
         ! ---- Lifecycle ----
@@ -328,11 +366,14 @@ module parquet_index
             build_r1_k32_nov, build_r1_k32_v32, build_r1_k32_v64, &
             build_r1_k64_nov, build_r1_k64_v32, build_r1_k64_v64, &
             build_r2_k32_nov, build_r2_k32_v32, build_r2_k32_v64, &
-            build_r2_k64_nov, build_r2_k64_v32, build_r2_k64_v64
+            build_r2_k64_nov, build_r2_k64_v32, build_r2_k64_v64, &
+            build_s1_nov, build_s1_v32, build_s1_v64, build_sc_nov, build_sc_v32, build_sc_v64
         procedure, private :: build_r1_k32_nov, build_r1_k32_v32, build_r1_k32_v64
         procedure, private :: build_r1_k64_nov, build_r1_k64_v32, build_r1_k64_v64
         procedure, private :: build_r2_k32_nov, build_r2_k32_v32, build_r2_k32_v64
         procedure, private :: build_r2_k64_nov, build_r2_k64_v32, build_r2_k64_v64
+        procedure, private :: build_s1_nov, build_s1_v32, build_s1_v64 !! String keys from a character array.
+        procedure, private :: build_sc_nov, build_sc_v32, build_sc_v64 !! String keys from a parquet_string_column.
         procedure :: init => map_init                   !! Start an empty map for incremental use.
         !> Pre-size for a known number of keys, so a bulk of inserts causes no rehash.
         generic :: reserve => map_reserve_i32, map_reserve_i64
@@ -343,41 +384,52 @@ module parquet_index
         ! ---- Lookup (the hot path; lock-free) ----
         !
         !> The index stored for a key, or 0 if there is none.
-        generic :: get => get_k32, get_k64, get_t32, get_t64
+        generic :: get => get_k32, get_k64, get_t32, get_t64, get_s
         procedure, private :: get_k32, get_k64, get_t32, get_t64
+        procedure, private :: get_s !! %get specific taking a string key.
         !> Whether a key is present. Sugar over `%get(...) > 0`.
-        generic :: contains => has_k32, has_k64, has_t32, has_t64
+        generic :: contains => has_k32, has_k64, has_t32, has_t64, has_s
         procedure, private :: has_k32, has_k64, has_t32, has_t64
+        procedure, private :: has_s !! %contains specific taking a string key.
         !> Look up a whole array of keys at once, on a team. The form to prefer in a hot loop.
         generic :: get_many => &
             many_r1_k32_i32, many_r1_k32_i64, many_r1_k64_i32, many_r1_k64_i64, &
-            many_r2_k32_i32, many_r2_k32_i64, many_r2_k64_i32, many_r2_k64_i64
+            many_r2_k32_i32, many_r2_k32_i64, many_r2_k64_i32, many_r2_k64_i64, &
+            many_s1_i32, many_s1_i64, many_sc_i32, many_sc_i64
         procedure, private :: many_r1_k32_i32, many_r1_k32_i64, many_r1_k64_i32, many_r1_k64_i64
         procedure, private :: many_r2_k32_i32, many_r2_k32_i64, many_r2_k64_i32, many_r2_k64_i64
+        procedure, private :: many_s1_i32, many_s1_i64 !! %get_many specifics over a character array.
+        procedure, private :: many_sc_i32, many_sc_i64 !! %get_many specifics over a parquet_string_column.
         !
         ! ---- Mutation (internally serialized) ----
         !
         !> Store a value for a key, inserting or replacing.
         generic :: set => &
             set_k32_v32, set_k32_v64, set_k64_v32, set_k64_v64, &
-            set_t32_v32, set_t32_v64, set_t64_v32, set_t64_v64
+            set_t32_v32, set_t32_v64, set_t64_v32, set_t64_v64, set_s_v32, set_s_v64
         procedure, private :: set_k32_v32, set_k32_v64, set_k64_v32, set_k64_v64
         procedure, private :: set_t32_v32, set_t32_v64, set_t64_v32, set_t64_v64
+        procedure, private :: set_s_v32, set_s_v64 !! %set specifics taking a string key.
         !> The key's index, assigning it the next unused one if the key is new.
         generic :: get_or_add => &
             goa_k32_i32, goa_k32_i64, goa_k64_i32, goa_k64_i64, &
-            goa_t32_i32, goa_t32_i64, goa_t64_i32, goa_t64_i64
+            goa_t32_i32, goa_t32_i64, goa_t64_i32, goa_t64_i64, goa_s_i32, goa_s_i64
         procedure, private :: goa_k32_i32, goa_k32_i64, goa_k64_i32, goa_k64_i64
         procedure, private :: goa_t32_i32, goa_t32_i64, goa_t64_i32, goa_t64_i64
+        procedure, private :: goa_s_i32, goa_s_i64 !! %get_or_add specifics taking a string key.
         !> The index of every key in one call, assigning the next unused one to each new key.
         generic :: get_or_add_many => &
             goam_r1_k32_i32, goam_r1_k32_i64, goam_r1_k64_i32, goam_r1_k64_i64, &
-            goam_r2_k32_i32, goam_r2_k32_i64, goam_r2_k64_i32, goam_r2_k64_i64
+            goam_r2_k32_i32, goam_r2_k32_i64, goam_r2_k64_i32, goam_r2_k64_i64, &
+            goam_s1_i32, goam_s1_i64, goam_sc_i32, goam_sc_i64
         procedure, private :: goam_r1_k32_i32, goam_r1_k32_i64, goam_r1_k64_i32, goam_r1_k64_i64
         procedure, private :: goam_r2_k32_i32, goam_r2_k32_i64, goam_r2_k64_i32, goam_r2_k64_i64
+        procedure, private :: goam_s1_i32, goam_s1_i64 !! %get_or_add_many specifics over a character array.
+        procedure, private :: goam_sc_i32, goam_sc_i64 !! %get_or_add_many specifics over a parquet_string_column.
         !> Forget one key.
-        generic :: remove => rm_k32, rm_k64, rm_t32, rm_t64
+        generic :: remove => rm_k32, rm_k64, rm_t32, rm_t64, rm_s
         procedure, private :: rm_k32, rm_k64, rm_t32, rm_t64
+        procedure, private :: rm_s !! %remove specific taking a string key.
         !
         ! ---- Introspection ----
         !
@@ -386,9 +438,11 @@ module parquet_index
         procedure :: get_method => map_get_method       !! The resolved backend, as a token.
         procedure :: memory_bytes => map_memory_bytes   !! Heap this map holds, in bytes.
         procedure :: probe_stats => map_probe_stats     !! Hash probe lengths, for tuning and tests.
-        !> The stored keys: rank 1 for a single-component map, rank 2 for a composite one.
-        generic :: keys => map_keys_r1, map_keys_r2
+        !> The stored keys: rank 1 for a single-component map, rank 2 for a composite one, a
+        !! parquet_string_column for a string-keyed one.
+        generic :: keys => map_keys_r1, map_keys_r2, map_keys_s
         procedure, private :: map_keys_r1, map_keys_r2
+        procedure, private :: map_keys_s !! %keys specific receiving a parquet_string_column.
     end type pf_index_map
 
     ! ---- pf_index_pool ----
@@ -507,60 +561,78 @@ module parquet_index
             mm_build_r1_k32_nov, mm_build_r1_k32_v32, mm_build_r1_k32_v64, &
             mm_build_r1_k64_nov, mm_build_r1_k64_v32, mm_build_r1_k64_v64, &
             mm_build_r2_k32_nov, mm_build_r2_k32_v32, mm_build_r2_k32_v64, &
-            mm_build_r2_k64_nov, mm_build_r2_k64_v32, mm_build_r2_k64_v64
+            mm_build_r2_k64_nov, mm_build_r2_k64_v32, mm_build_r2_k64_v64, &
+            mm_build_s1_nov, mm_build_s1_v32, mm_build_s1_v64, &
+            mm_build_sc_nov, mm_build_sc_v32, mm_build_sc_v64
         procedure, private :: mm_build_r1_k32_nov, mm_build_r1_k32_v32, mm_build_r1_k32_v64
         procedure, private :: mm_build_r1_k64_nov, mm_build_r1_k64_v32, mm_build_r1_k64_v64
         procedure, private :: mm_build_r2_k32_nov, mm_build_r2_k32_v32, mm_build_r2_k32_v64
         procedure, private :: mm_build_r2_k64_nov, mm_build_r2_k64_v32, mm_build_r2_k64_v64
+        procedure, private :: mm_build_s1_nov, mm_build_s1_v32, mm_build_s1_v64 !! String keys from a character array.
+        procedure, private :: mm_build_sc_nov, mm_build_sc_v32, mm_build_sc_v64 !! String keys from a string column.
         procedure :: clear => mm_clear                    !! Forget every key and release all storage.
         !
         ! ---- Scalar lookup (lock-free; `pure`) ----
         !
         !> The group id of a key, in `1 .. ngroups`; 0 when absent.
-        generic :: get => mm_get_k32, mm_get_k64, mm_get_t32, mm_get_t64
+        generic :: get => mm_get_k32, mm_get_k64, mm_get_t32, mm_get_t64, mm_get_s
         procedure, private :: mm_get_k32, mm_get_k64, mm_get_t32, mm_get_t64
+        procedure, private :: mm_get_s !! %get specific taking a string key.
         !> How many stored rows hold a key; 0 when absent.
-        generic :: count => mm_count_k32, mm_count_k64, mm_count_t32, mm_count_t64
+        generic :: count => mm_count_k32, mm_count_k64, mm_count_t32, mm_count_t64, mm_count_s
         procedure, private :: mm_count_k32, mm_count_k64, mm_count_t32, mm_count_t64
+        procedure, private :: mm_count_s !! %count specific taking a string key.
         !> The value at the lowest position holding a key; 0 when absent. The m:1 answer.
-        generic :: get_first => mm_first_k32, mm_first_k64, mm_first_t32, mm_first_t64
+        generic :: get_first => mm_first_k32, mm_first_k64, mm_first_t32, mm_first_t64, mm_first_s
         procedure, private :: mm_first_k32, mm_first_k64, mm_first_t32, mm_first_t64
+        procedure, private :: mm_first_s !! %get_first specific taking a string key.
         !> Every value stored for a key, ascending by position; zero-length when absent.
         generic :: get_all => &
             mm_all_k32_i32, mm_all_k32_i64, mm_all_k64_i32, mm_all_k64_i64, &
-            mm_all_t32_i32, mm_all_t32_i64, mm_all_t64_i32, mm_all_t64_i64
+            mm_all_t32_i32, mm_all_t32_i64, mm_all_t64_i32, mm_all_t64_i64, mm_all_s_i32, mm_all_s_i64
         procedure, private :: mm_all_k32_i32, mm_all_k32_i64, mm_all_k64_i32, mm_all_k64_i64
         procedure, private :: mm_all_t32_i32, mm_all_t32_i64, mm_all_t64_i32, mm_all_t64_i64
+        procedure, private :: mm_all_s_i32, mm_all_s_i64 !! %get_all specifics taking a string key.
         !> The range of `%csr`'s `rows` that holds a key; `lo > hi` when absent.
-        generic :: get_range => mm_range_k32, mm_range_k64, mm_range_t32, mm_range_t64
+        generic :: get_range => mm_range_k32, mm_range_k64, mm_range_t32, mm_range_t64, mm_range_s
         procedure, private :: mm_range_k32, mm_range_k64, mm_range_t32, mm_range_t64
+        procedure, private :: mm_range_s !! %get_range specific taking a string key.
         !
         ! ---- Bulk lookup (lock-free; on a team of their own) ----
         !
         !> `%get_first` over a whole array of keys, on a team. The m:1 form for a hot loop.
         generic :: get_first_many => &
             mm_fmany_r1_k32_i32, mm_fmany_r1_k32_i64, mm_fmany_r1_k64_i32, mm_fmany_r1_k64_i64, &
-            mm_fmany_r2_k32_i32, mm_fmany_r2_k32_i64, mm_fmany_r2_k64_i32, mm_fmany_r2_k64_i64
+            mm_fmany_r2_k32_i32, mm_fmany_r2_k32_i64, mm_fmany_r2_k64_i32, mm_fmany_r2_k64_i64, &
+            mm_fmany_s1_i32, mm_fmany_s1_i64, mm_fmany_sc_i32, mm_fmany_sc_i64
         procedure, private :: mm_fmany_r1_k32_i32, mm_fmany_r1_k32_i64
         procedure, private :: mm_fmany_r1_k64_i32, mm_fmany_r1_k64_i64
         procedure, private :: mm_fmany_r2_k32_i32, mm_fmany_r2_k32_i64
         procedure, private :: mm_fmany_r2_k64_i32, mm_fmany_r2_k64_i64
+        procedure, private :: mm_fmany_s1_i32, mm_fmany_s1_i64 !! %get_first_many over a character array.
+        procedure, private :: mm_fmany_sc_i32, mm_fmany_sc_i64 !! %get_first_many over a string column.
         !> `%get` over a whole array of keys, on a team: the group id per key.
         generic :: get_many => &
             mm_many_r1_k32_i32, mm_many_r1_k32_i64, mm_many_r1_k64_i32, mm_many_r1_k64_i64, &
-            mm_many_r2_k32_i32, mm_many_r2_k32_i64, mm_many_r2_k64_i32, mm_many_r2_k64_i64
+            mm_many_r2_k32_i32, mm_many_r2_k32_i64, mm_many_r2_k64_i32, mm_many_r2_k64_i64, &
+            mm_many_s1_i32, mm_many_s1_i64, mm_many_sc_i32, mm_many_sc_i64
         procedure, private :: mm_many_r1_k32_i32, mm_many_r1_k32_i64
         procedure, private :: mm_many_r1_k64_i32, mm_many_r1_k64_i64
         procedure, private :: mm_many_r2_k32_i32, mm_many_r2_k32_i64
         procedure, private :: mm_many_r2_k64_i32, mm_many_r2_k64_i64
+        procedure, private :: mm_many_s1_i32, mm_many_s1_i64 !! %get_many over a character array.
+        procedure, private :: mm_many_sc_i32, mm_many_sc_i64 !! %get_many over a string column.
         !> EVERY match between an array of probe keys and the stored keys, as a CSR pair.
         generic :: probe_many => &
             mm_probe_r1_k32_i32, mm_probe_r1_k32_i64, mm_probe_r1_k64_i32, mm_probe_r1_k64_i64, &
-            mm_probe_r2_k32_i32, mm_probe_r2_k32_i64, mm_probe_r2_k64_i32, mm_probe_r2_k64_i64
+            mm_probe_r2_k32_i32, mm_probe_r2_k32_i64, mm_probe_r2_k64_i32, mm_probe_r2_k64_i64, &
+            mm_probe_s1_i32, mm_probe_s1_i64, mm_probe_sc_i32, mm_probe_sc_i64
         procedure, private :: mm_probe_r1_k32_i32, mm_probe_r1_k32_i64
         procedure, private :: mm_probe_r1_k64_i32, mm_probe_r1_k64_i64
         procedure, private :: mm_probe_r2_k32_i32, mm_probe_r2_k32_i64
         procedure, private :: mm_probe_r2_k64_i32, mm_probe_r2_k64_i64
+        procedure, private :: mm_probe_s1_i32, mm_probe_s1_i64 !! %probe_many over a character array.
+        procedure, private :: mm_probe_sc_i32, mm_probe_sc_i64 !! %probe_many over a string column.
         !
         ! ---- Introspection ----
         !
@@ -571,9 +643,11 @@ module parquet_index
         procedure :: max_multiplicity => mm_max_multiplicity !! Rows in the largest group.
         procedure :: memory_bytes => mm_memory_bytes      !! Heap this multimap holds, in bytes.
         procedure :: get_method => mm_get_method          !! The distinct-key map's backend, as a token.
-        !> The distinct keys: rank 1 for a single-component multimap, rank 2 for a composite one.
-        generic :: keys => mm_keys_r1, mm_keys_r2
+        !> The distinct keys: rank 1 for a single-component multimap, rank 2 for a composite one,
+        !! a parquet_string_column for a string-keyed one.
+        generic :: keys => mm_keys_r1, mm_keys_r2, mm_keys_s
         procedure, private :: mm_keys_r1, mm_keys_r2
+        procedure, private :: mm_keys_s !! %keys specific receiving a parquet_string_column.
     end type pf_index_multimap
 
     ! ============================================================================================
@@ -902,7 +976,7 @@ module parquet_index
         !! Only `"hash"` (and `"auto"`, which resolves to it) is accepted: the direct backend needs
         !! the key range up front and the sorted backend is frozen once built, so both are
         !! build-only.
-        module subroutine map_init(self, capacity, method, ncomp)
+        module subroutine map_init(self, capacity, method, ncomp, strings)
         class(pf_index_map), intent(inout) :: self !! the map; reset to empty.
             integer, intent(in), optional :: capacity
             !! keys to pre-size for. A hint, so deliberately a single default-kind `integer` rather
@@ -913,6 +987,11 @@ module parquet_index
             integer, intent(in), optional :: ncomp
             !! components per key, 1 by default, at most `pf_index_max_components`. Fixed for the
             !! map's lifetime: every later call must present a key of exactly this width.
+            logical, intent(in), optional :: strings
+            !! `.true.` starts a STRING-keyed map, to be filled through the string forms of
+            !! `%set`/`%get_or_add`; `ncomp=` must then be absent or 1. Default `.false.`. Not
+            !! needed before a string `%build`, `%set` or `%get_or_add` on a fresh map, which
+            !! start one themselves -- it is for the caller who wants `capacity=` first.
         end subroutine map_init
     end interface
     interface
@@ -1711,6 +1790,301 @@ module parquet_index
         class(pf_index_map), intent(in) :: self !! the map.
             integer(int64), allocatable, intent(out) :: list(:,:) !! the key tuples, one per row.
         end subroutine map_keys_r2
+    end interface
+
+    ! ---- pf_index_map: string keys (parquet_index_str). A string key is its exact bytes: an
+    ! element of a `character` ARRAY is trimmed of trailing blanks first (the rule every character
+    ! array argument in this library follows -- its elements share one declared length, so the
+    ! padding a shorter value carries cannot be what the caller meant), a scalar `character` key
+    ! is taken as written, and a parquet_string_column's element is taken verbatim. A NULL element
+    ! is never a key: skipped by a build, neither looked up nor added by a bulk form, and never
+    ! found. Underneath, every string map is the composite hash table over `(hash, occurrence)`
+    ! tuples with the bytes kept beside it for exact verification on a hit, so `method=` accepts
+    ! only "auto" and "hash" and the direct and sorted backends are refused by name. ----
+
+    interface
+        !> Builds the map from string `keys`, one per element, each trimmed of trailing blanks.
+        !!
+        !! The string twin of the integer `%build`: replaces whatever the map held, refuses a
+        !! duplicate naming it and its position, and takes `values=` and `valid=` exactly as the
+        !! integer forms do. `threads=` is checked and recorded as the integer build's is; the
+        !! insert loop itself is serial in this version.
+        module subroutine build_s1_nov(self, keys, method, threads, valid)
+        class(pf_index_map), intent(inout) :: self !! the map.
+        character(len=*), intent(in) :: keys(:)
+            !! one key per element, trimmed of trailing blanks; every unmasked key must be unique.
+        character(len=*), intent(in), optional :: method !! backend token: "auto" (default) or "hash".
+        integer, intent(in), optional :: threads
+            !! threads the build may use; absent means automatic, `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry skips that row, which is then neither stored
+            !! nor counted, and whose key may repeat one that is stored.
+        end subroutine build_s1_nov
+    end interface
+    interface
+        !> Builds the map from string `keys` with explicit `int32` values. See `build_s1_nov`.
+        module subroutine build_s1_v32(self, keys, values, method, threads, valid)
+        class(pf_index_map), intent(inout) :: self !! the map.
+        character(len=*), intent(in) :: keys(:)
+            !! one key per element, trimmed of trailing blanks; every unmasked key must be unique.
+        integer(int32), intent(in) :: values(:) !! index value per key, each >= 1.
+        character(len=*), intent(in), optional :: method !! backend token: "auto" (default) or "hash".
+        integer, intent(in), optional :: threads
+            !! threads the build may use; absent means automatic, `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry skips that row, which is then neither stored
+            !! nor counted, and whose key may repeat one that is stored.
+        end subroutine build_s1_v32
+    end interface
+    interface
+        !> Builds the map from string `keys` with explicit `int64` values. See `build_s1_nov`.
+        module subroutine build_s1_v64(self, keys, values, method, threads, valid)
+        class(pf_index_map), intent(inout) :: self !! the map.
+        character(len=*), intent(in) :: keys(:)
+            !! one key per element, trimmed of trailing blanks; every unmasked key must be unique.
+        integer(int64), intent(in) :: values(:) !! index value per key, each >= 1.
+        character(len=*), intent(in), optional :: method !! backend token: "auto" (default) or "hash".
+        integer, intent(in), optional :: threads
+            !! threads the build may use; absent means automatic, `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry skips that row, which is then neither stored
+            !! nor counted, and whose key may repeat one that is stored.
+        end subroutine build_s1_v64
+    end interface
+    interface
+        !> Builds the map from the elements of a parquet_string_column, taken verbatim.
+        !!
+        !! A null element is skipped exactly as a row `valid=` masks off is -- neither stored nor
+        !! counted, the row numbers of the others unchanged -- so a nullable string column is
+        !! indexed as it is. Otherwise `build_s1_nov`.
+        module subroutine build_sc_nov(self, keys, method, threads, valid)
+        class(pf_index_map), intent(inout) :: self !! the map.
+        type(parquet_string_column), intent(in), target :: keys
+            !! one key per element, verbatim; every unmasked non-null key must be unique.
+        character(len=*), intent(in), optional :: method !! backend token: "auto" (default) or "hash".
+        integer, intent(in), optional :: threads
+            !! threads the build may use; absent means automatic, `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per element; a `.false.` entry skips that row, as a null element is.
+        end subroutine build_sc_nov
+    end interface
+    interface
+        !> Builds the map from a parquet_string_column with explicit `int32` values. See
+        !! `build_sc_nov`.
+        module subroutine build_sc_v32(self, keys, values, method, threads, valid)
+        class(pf_index_map), intent(inout) :: self !! the map.
+        type(parquet_string_column), intent(in), target :: keys
+            !! one key per element, verbatim; every unmasked non-null key must be unique.
+        integer(int32), intent(in) :: values(:) !! index value per element, each >= 1 where stored.
+        character(len=*), intent(in), optional :: method !! backend token: "auto" (default) or "hash".
+        integer, intent(in), optional :: threads
+            !! threads the build may use; absent means automatic, `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per element; a `.false.` entry skips that row, as a null element is.
+        end subroutine build_sc_v32
+    end interface
+    interface
+        !> Builds the map from a parquet_string_column with explicit `int64` values. See
+        !! `build_sc_nov`.
+        module subroutine build_sc_v64(self, keys, values, method, threads, valid)
+        class(pf_index_map), intent(inout) :: self !! the map.
+        type(parquet_string_column), intent(in), target :: keys
+            !! one key per element, verbatim; every unmasked non-null key must be unique.
+        integer(int64), intent(in) :: values(:) !! index value per element, each >= 1 where stored.
+        character(len=*), intent(in), optional :: method !! backend token: "auto" (default) or "hash".
+        integer, intent(in), optional :: threads
+            !! threads the build may use; absent means automatic, `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per element; a `.false.` entry skips that row, as a null element is.
+        end subroutine build_sc_v64
+    end interface
+    interface
+        !> The index stored for the string `key`, or **0 when it is absent** -- on a map that was
+        !! never built too. Exact bytes: pass `trim(name)` for a blank-padded variable. Aborts on a
+        !! map holding integer keys.
+        pure module function get_s(self, key) result(idx)
+        class(pf_index_map), intent(in) :: self !! the map.
+        character(len=*), intent(in) :: key !! the key to look up, as written.
+            integer(int64) :: idx !! the stored value, >= 1, or 0 when not found.
+        end function get_s
+        !> Whether the string `key` is present. Exactly `%get(key) > 0`.
+        pure module function has_s(self, key) result(ok)
+        class(pf_index_map), intent(in) :: self !! the map.
+        character(len=*), intent(in) :: key !! the key to test, as written.
+            logical :: ok !! `.true.` when the key is stored.
+        end function has_s
+    end interface
+    interface
+        !> Looks up a whole array of string keys, writing 0 for each one absent.
+        !!
+        !! `many_r1_k32_i32`'s shape: one answer per key, one contiguous chunk of the keys per
+        !! thread of a team resolved by the build's rule, `valid=` masking a row unprobed. Each
+        !! element is trimmed of trailing blanks before it is hashed.
+        module subroutine many_s1_i32(self, keys, indexes, threads, valid)
+        class(pf_index_map), intent(in) :: self !! the map.
+        character(len=*), intent(in) :: keys(:) !! the keys to look up, one per element, each trimmed.
+            integer(int32), intent(out) :: indexes(:)
+            !! one answer per key, 0 where absent. Must be exactly as long as `keys`. A stored
+            !! value above `huge(int32)` aborts rather than truncating; take them as `int64` then.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use. ABSENT means automatic: bounded by the rows, by
+            !! `index_threads`, by this process's CPU affinity, and serial when the caller is
+            !! already inside an OpenMP parallel region. `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry answers 0 without the key being looked up.
+        end subroutine many_s1_i32
+    end interface
+    interface
+        !> Looks up a whole array of string keys, `int64` answers. See `many_s1_i32`.
+        module subroutine many_s1_i64(self, keys, indexes, threads, valid)
+        class(pf_index_map), intent(in) :: self !! the map.
+        character(len=*), intent(in) :: keys(:) !! the keys to look up, one per element, each trimmed.
+            integer(int64), intent(out) :: indexes(:)
+            !! one answer per key, 0 where absent. Must be exactly as long as `keys`.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use; absent means automatic, `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry answers 0 without the key being looked up.
+        end subroutine many_s1_i64
+    end interface
+    interface
+        !> Looks up every element of a parquet_string_column, writing 0 for each one absent and
+        !! for each null element, which is neither hashed nor looked up. See `many_s1_i32`.
+        !! Reads the column's own buffers in place: nothing is copied.
+        module subroutine many_sc_i32(self, keys, indexes, threads, valid)
+        class(pf_index_map), intent(in) :: self !! the map.
+        type(parquet_string_column), intent(in), target :: keys !! the keys to look up, verbatim.
+            integer(int32), intent(out) :: indexes(:)
+            !! one answer per element, 0 where absent or null. Must be exactly as long as `keys`.
+            !! A stored value above `huge(int32)` aborts rather than truncating.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use; absent means automatic, `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per element; a `.false.` entry answers 0 without being looked up.
+        end subroutine many_sc_i32
+    end interface
+    interface
+        !> Looks up every element of a parquet_string_column, `int64` answers. See `many_sc_i32`.
+        module subroutine many_sc_i64(self, keys, indexes, threads, valid)
+        class(pf_index_map), intent(in) :: self !! the map.
+        type(parquet_string_column), intent(in), target :: keys !! the keys to look up, verbatim.
+            integer(int64), intent(out) :: indexes(:)
+            !! one answer per element, 0 where absent or null. Must be exactly as long as `keys`.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use; absent means automatic, `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per element; a `.false.` entry answers 0 without being looked up.
+        end subroutine many_sc_i64
+    end interface
+    interface
+        !> Stores `value` for the string `key`, inserting it or replacing what was there.
+        !!
+        !! On a map that was never built this starts a string-keyed hash map, as `%set` with an
+        !! integer key starts an integer one; on a map holding integer keys it aborts. Raises the
+        !! `%get_or_add` watermark to `value` when that is larger, as the integer form does.
+        module subroutine set_s_v32(self, key, value)
+        class(pf_index_map), intent(inout) :: self !! the map.
+        character(len=*), intent(in) :: key !! the key to store under, as written.
+            integer(int32), intent(in) :: value !! the index value to store; must be >= 1.
+        end subroutine set_s_v32
+        !> Stores an `int64` value for the string `key`. See `set_s_v32`.
+        module subroutine set_s_v64(self, key, value)
+        class(pf_index_map), intent(inout) :: self !! the map.
+        character(len=*), intent(in) :: key !! the key to store under, as written.
+            integer(int64), intent(in) :: value !! the index value to store; must be >= 1.
+        end subroutine set_s_v64
+    end interface
+    interface
+        !> The index for the string `key`, assigning and storing the next unused one if it is new.
+        !!
+        !! The string form of `goa_k32_i32`: the same dictionary-encoding contract, the same
+        !! watermark, the same serialisation, so several threads may stream strings through one
+        !! shared map. Starts a string-keyed map on a fresh object; aborts on an integer one.
+        module subroutine goa_s_i32(self, key, idx)
+        class(pf_index_map), intent(inout) :: self !! the map.
+        character(len=*), intent(in) :: key !! the key to look up or add, as written.
+            integer(int32), intent(out) :: idx !! the key's index; >= 1 always.
+        end subroutine goa_s_i32
+        !> The `int64` form of `goa_s_i32`.
+        module subroutine goa_s_i64(self, key, idx)
+        class(pf_index_map), intent(inout) :: self !! the map.
+        character(len=*), intent(in) :: key !! the key to look up or add, as written.
+            integer(int64), intent(out) :: idx !! the key's index; >= 1 always.
+        end subroutine goa_s_i64
+    end interface
+    interface
+        !> The index of every string key in one call, assigning and storing the next unused one
+        !> for each key that is new.
+        !!
+        !! `goam_r1_k32_i32` over strings: `%get_or_add` per element under the map's guard once,
+        !! each element trimmed of trailing blanks, the codes of one call dense and in
+        !! first-appearance order on this serial path. A row masked off by `valid` gets the code
+        !! 0 and is neither looked up nor added.
+        module subroutine goam_s1_i32(self, keys, codes, valid)
+        class(pf_index_map), intent(inout) :: self !! the map.
+        character(len=*), intent(in) :: keys(:) !! the keys to look up or add, one per element, each trimmed.
+            integer(int32), intent(out) :: codes(:)
+            !! one index per key, >= 1, or 0 for a masked row. Must be exactly as long as `keys`.
+            !! A code above `huge(int32)` aborts rather than truncating.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry is neither looked up nor added.
+        end subroutine goam_s1_i32
+        !> The `int64` form of `goam_s1_i32`.
+        module subroutine goam_s1_i64(self, keys, codes, valid)
+        class(pf_index_map), intent(inout) :: self !! the map.
+        character(len=*), intent(in) :: keys(:) !! the keys to look up or add, one per element, each trimmed.
+            integer(int64), intent(out) :: codes(:)
+            !! one index per key, >= 1, or 0 for a masked row. Must be exactly as long as `keys`.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry is neither looked up nor added.
+        end subroutine goam_s1_i64
+    end interface
+    interface
+        !> `goam_s1_i32` over the elements of a parquet_string_column, taken verbatim: a null
+        !! element gets the code 0 and is neither looked up nor added, exactly as a masked row.
+        module subroutine goam_sc_i32(self, keys, codes, valid)
+        class(pf_index_map), intent(inout) :: self !! the map.
+        type(parquet_string_column), intent(in), target :: keys !! the keys to look up or add, verbatim.
+            integer(int32), intent(out) :: codes(:)
+            !! one index per element, >= 1, or 0 for a masked or null one. Must be exactly as long
+            !! as `keys`. A code above `huge(int32)` aborts rather than truncating.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per element; a `.false.` entry is neither looked up nor added.
+        end subroutine goam_sc_i32
+        !> The `int64` form of `goam_sc_i32`.
+        module subroutine goam_sc_i64(self, keys, codes, valid)
+        class(pf_index_map), intent(inout) :: self !! the map.
+        type(parquet_string_column), intent(in), target :: keys !! the keys to look up or add, verbatim.
+            integer(int64), intent(out) :: codes(:)
+            !! one index per element, >= 1, or 0 for a masked or null one. Must be exactly as long
+            !! as `keys`.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per element; a `.false.` entry is neither looked up nor added.
+        end subroutine goam_sc_i64
+    end interface
+    interface
+        !> Forgets one string key. `rm_k32`'s contract: without `found`, an absent key aborts.
+        !!
+        !! The key's bytes stay in the store until the map is rebuilt or cleared -- `%memory_bytes`
+        !! keeps counting them -- while its slot leaves the table at once, so `%nkeys`, `%keys`
+        !! and every lookup see it gone.
+        module subroutine rm_s(self, key, found)
+        class(pf_index_map), intent(inout) :: self !! the map.
+        character(len=*), intent(in) :: key !! the key to remove, as written.
+            logical, intent(out), optional :: found
+            !! `.true.` when the key was present. When absent from the call, an absent key aborts.
+        end subroutine rm_s
+    end interface
+    interface
+        !> The stored string keys, as a parquet_string_column, in unspecified order.
+        !!
+        !! Allocated empty for an empty or unbuilt map, never left unset. Pair each key with its
+        !! value through `%get_many(list, vals)`. Aborts on a map holding integer keys, as the
+        !! integer forms abort on a string-keyed one.
+        module subroutine map_keys_s(self, list)
+        class(pf_index_map), intent(in) :: self !! the map.
+            type(parquet_string_column), intent(out) :: list !! receives the keys, one per element.
+        end subroutine map_keys_s
     end interface
 
     ! ---- pf_index_pool. Every procedure takes the pool's guard, queries included, because they
@@ -2914,6 +3288,346 @@ module parquet_index
         end subroutine mm_keys_r2
     end interface
 
+    ! ---- pf_index_multimap: string keys (parquet_index_str). The map's string rules, inherited:
+    ! an element of a `character` array is trimmed, a parquet_string_column's is verbatim, a null
+    ! element is never a key, and the distinct-key map underneath is always hashed. ----
+
+    interface
+        !> Builds the multimap from string `keys`, one per element, each trimmed of trailing
+        !! blanks; keys may repeat. `mm_build_r1_k32_nov`'s contract otherwise, with `method=`
+        !! restricted to "auto" and "hash".
+        module subroutine mm_build_s1_nov(self, keys, method, threads, valid)
+        class(pf_index_multimap), intent(inout) :: self !! the multimap.
+        character(len=*), intent(in) :: keys(:) !! one key per element, trimmed; may repeat.
+        character(len=*), intent(in), optional :: method !! backend token: "auto" (default) or "hash".
+        integer, intent(in), optional :: threads
+            !! threads the build may use; absent means automatic, `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry skips that row.
+        end subroutine mm_build_s1_nov
+    end interface
+    interface
+        !> Builds the multimap from string `keys` with explicit `int32` values. See
+        !! `mm_build_s1_nov`.
+        module subroutine mm_build_s1_v32(self, keys, values, method, threads, valid)
+        class(pf_index_multimap), intent(inout) :: self !! the multimap.
+        character(len=*), intent(in) :: keys(:) !! one key per element, trimmed; may repeat.
+        integer(int32), intent(in) :: values(:) !! value per key, each >= 1.
+        character(len=*), intent(in), optional :: method !! backend token: "auto" (default) or "hash".
+        integer, intent(in), optional :: threads
+            !! threads the build may use; absent means automatic, `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry skips that row.
+        end subroutine mm_build_s1_v32
+    end interface
+    interface
+        !> Builds the multimap from string `keys` with explicit `int64` values. See
+        !! `mm_build_s1_nov`.
+        module subroutine mm_build_s1_v64(self, keys, values, method, threads, valid)
+        class(pf_index_multimap), intent(inout) :: self !! the multimap.
+        character(len=*), intent(in) :: keys(:) !! one key per element, trimmed; may repeat.
+        integer(int64), intent(in) :: values(:) !! value per key, each >= 1.
+        character(len=*), intent(in), optional :: method !! backend token: "auto" (default) or "hash".
+        integer, intent(in), optional :: threads
+            !! threads the build may use; absent means automatic, `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry skips that row.
+        end subroutine mm_build_s1_v64
+    end interface
+    interface
+        !> Builds the multimap from the elements of a parquet_string_column, verbatim; a null
+        !! element is skipped as a masked row is. See `mm_build_s1_nov`.
+        module subroutine mm_build_sc_nov(self, keys, method, threads, valid)
+        class(pf_index_multimap), intent(inout) :: self !! the multimap.
+        type(parquet_string_column), intent(in), target :: keys !! one key per element, verbatim; may repeat.
+        character(len=*), intent(in), optional :: method !! backend token: "auto" (default) or "hash".
+        integer, intent(in), optional :: threads
+            !! threads the build may use; absent means automatic, `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per element; a `.false.` entry skips that row, as a null element is.
+        end subroutine mm_build_sc_nov
+    end interface
+    interface
+        !> Builds the multimap from a parquet_string_column with explicit `int32` values. See
+        !! `mm_build_sc_nov`.
+        module subroutine mm_build_sc_v32(self, keys, values, method, threads, valid)
+        class(pf_index_multimap), intent(inout) :: self !! the multimap.
+        type(parquet_string_column), intent(in), target :: keys !! one key per element, verbatim; may repeat.
+        integer(int32), intent(in) :: values(:) !! value per element, each >= 1 where stored.
+        character(len=*), intent(in), optional :: method !! backend token: "auto" (default) or "hash".
+        integer, intent(in), optional :: threads
+            !! threads the build may use; absent means automatic, `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per element; a `.false.` entry skips that row, as a null element is.
+        end subroutine mm_build_sc_v32
+    end interface
+    interface
+        !> Builds the multimap from a parquet_string_column with explicit `int64` values. See
+        !! `mm_build_sc_nov`.
+        module subroutine mm_build_sc_v64(self, keys, values, method, threads, valid)
+        class(pf_index_multimap), intent(inout) :: self !! the multimap.
+        type(parquet_string_column), intent(in), target :: keys !! one key per element, verbatim; may repeat.
+        integer(int64), intent(in) :: values(:) !! value per element, each >= 1 where stored.
+        character(len=*), intent(in), optional :: method !! backend token: "auto" (default) or "hash".
+        integer, intent(in), optional :: threads
+            !! threads the build may use; absent means automatic, `threads=1` forces serial.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per element; a `.false.` entry skips that row, as a null element is.
+        end subroutine mm_build_sc_v64
+    end interface
+    interface
+        !> The group id of the string `key`, in `1 .. ngroups`; 0 when absent. Exact bytes.
+        pure module function mm_get_s(self, key) result(g)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        character(len=*), intent(in) :: key !! the key to look up, as written.
+            integer(int64) :: g !! the group id, or 0.
+        end function mm_get_s
+        !> How many stored rows hold the string `key`; 0 when absent.
+        pure module function mm_count_s(self, key) result(n)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        character(len=*), intent(in) :: key !! the key to look up, as written.
+            integer(int64) :: n !! rows holding the key; 0 when none does.
+        end function mm_count_s
+        !> The value at the lowest position holding the string `key`; 0 when absent.
+        pure module function mm_first_s(self, key) result(v)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        character(len=*), intent(in) :: key !! the key to look up, as written.
+            integer(int64) :: v !! the first value, or 0.
+        end function mm_first_s
+        !> Every value stored for the string `key`, ascending by position, as `int32`.
+        pure module subroutine mm_all_s_i32(self, key, rows)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        character(len=*), intent(in) :: key !! the key to look up, as written.
+            integer(int32), allocatable, intent(out) :: rows(:)
+            !! the values, one per stored row holding the key, ascending by position; zero-length
+            !! when absent. A stored value above `huge(int32)` aborts rather than truncating.
+        end subroutine mm_all_s_i32
+        !> Every value stored for the string `key`, ascending by position, as `int64`.
+        pure module subroutine mm_all_s_i64(self, key, rows)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        character(len=*), intent(in) :: key !! the key to look up, as written.
+            integer(int64), allocatable, intent(out) :: rows(:)
+            !! the values, one per stored row holding the key, ascending by position; zero-length
+            !! when absent.
+        end subroutine mm_all_s_i64
+        !> The range of `%csr`'s `rows` holding the string `key`; `lo > hi` when absent.
+        pure module subroutine mm_range_s(self, key, lo, hi)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        character(len=*), intent(in) :: key !! the key to look up, as written.
+            integer(int64), intent(out) :: lo !! first position in `rows`; 1 when the key is absent.
+            integer(int64), intent(out) :: hi !! last position in `rows`; 0 when the key is absent.
+        end subroutine mm_range_s
+    end interface
+    interface
+        !> `%get_first` over a whole array of string keys, each trimmed, on a team. See
+        !! `mm_fmany_r1_k32_i32`.
+        module subroutine mm_fmany_s1_i32(self, keys, rows, valid, threads, n_found)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        character(len=*), intent(in) :: keys(:) !! the keys to look up, one per element, each trimmed.
+            integer(int32), intent(out) :: rows(:)
+            !! one answer per key, 0 where absent. Must be exactly as long as `keys`. A stored
+            !! value above `huge(int32)` aborts rather than truncating.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry answers 0 without the key being looked up.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use; absent means automatic, `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_found !! how many keys answered other than 0.
+        end subroutine mm_fmany_s1_i32
+        !> The `int64` form of `mm_fmany_s1_i32`.
+        module subroutine mm_fmany_s1_i64(self, keys, rows, valid, threads, n_found)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        character(len=*), intent(in) :: keys(:) !! the keys to look up, one per element, each trimmed.
+            integer(int64), intent(out) :: rows(:)
+            !! one answer per key, 0 where absent. Must be exactly as long as `keys`.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry answers 0 without the key being looked up.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use; absent means automatic, `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_found !! how many keys answered other than 0.
+        end subroutine mm_fmany_s1_i64
+    end interface
+    interface
+        !> `%get_first` over every element of a parquet_string_column, verbatim, on a team; a null
+        !! element answers 0 unprobed. See `mm_fmany_r1_k32_i32`.
+        module subroutine mm_fmany_sc_i32(self, keys, rows, valid, threads, n_found)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        type(parquet_string_column), intent(in), target :: keys !! the keys to look up, verbatim.
+            integer(int32), intent(out) :: rows(:)
+            !! one answer per element, 0 where absent or null. Must be exactly as long as `keys`.
+            !! A stored value above `huge(int32)` aborts rather than truncating.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per element; a `.false.` entry answers 0 without being looked up.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use; absent means automatic, `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_found !! how many keys answered other than 0.
+        end subroutine mm_fmany_sc_i32
+        !> The `int64` form of `mm_fmany_sc_i32`.
+        module subroutine mm_fmany_sc_i64(self, keys, rows, valid, threads, n_found)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        type(parquet_string_column), intent(in), target :: keys !! the keys to look up, verbatim.
+            integer(int64), intent(out) :: rows(:)
+            !! one answer per element, 0 where absent or null. Must be exactly as long as `keys`.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per element; a `.false.` entry answers 0 without being looked up.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use; absent means automatic, `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_found !! how many keys answered other than 0.
+        end subroutine mm_fmany_sc_i64
+    end interface
+    interface
+        !> The group id of every string key in one call, each trimmed, on a team. See
+        !! `mm_many_r1_k32_i32`.
+        module subroutine mm_many_s1_i32(self, keys, groups, valid, threads, n_found)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        character(len=*), intent(in) :: keys(:) !! the keys to look up, one per element, each trimmed.
+            integer(int32), intent(out) :: groups(:)
+            !! one group id per key, 0 where absent. Must be exactly as long as `keys`. A group id
+            !! above `huge(int32)` aborts rather than truncating.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry answers 0 without the key being looked up.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use; absent means automatic, `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_found !! how many keys answered other than 0.
+        end subroutine mm_many_s1_i32
+        !> The `int64` form of `mm_many_s1_i32`.
+        module subroutine mm_many_s1_i64(self, keys, groups, valid, threads, n_found)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        character(len=*), intent(in) :: keys(:) !! the keys to look up, one per element, each trimmed.
+            integer(int64), intent(out) :: groups(:)
+            !! one group id per key, 0 where absent. Must be exactly as long as `keys`.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per key; a `.false.` entry answers 0 without the key being looked up.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use; absent means automatic, `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_found !! how many keys answered other than 0.
+        end subroutine mm_many_s1_i64
+    end interface
+    interface
+        !> The group id of every element of a parquet_string_column, verbatim, on a team; a null
+        !! element answers 0 unprobed. See `mm_many_r1_k32_i32`.
+        module subroutine mm_many_sc_i32(self, keys, groups, valid, threads, n_found)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        type(parquet_string_column), intent(in), target :: keys !! the keys to look up, verbatim.
+            integer(int32), intent(out) :: groups(:)
+            !! one group id per element, 0 where absent or null. Must be exactly as long as
+            !! `keys`. A group id above `huge(int32)` aborts rather than truncating.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per element; a `.false.` entry answers 0 without being looked up.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use; absent means automatic, `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_found !! how many keys answered other than 0.
+        end subroutine mm_many_sc_i32
+        !> The `int64` form of `mm_many_sc_i32`.
+        module subroutine mm_many_sc_i64(self, keys, groups, valid, threads, n_found)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        type(parquet_string_column), intent(in), target :: keys !! the keys to look up, verbatim.
+            integer(int64), intent(out) :: groups(:)
+            !! one group id per element, 0 where absent or null. Must be exactly as long as `keys`.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per element; a `.false.` entry answers 0 without being looked up.
+            integer, intent(in), optional :: threads
+            !! threads the lookup may use; absent means automatic, `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_found !! how many keys answered other than 0.
+        end subroutine mm_many_sc_i64
+    end interface
+    interface
+        !> EVERY match between an array of string probe keys, each trimmed, and the stored keys,
+        !! as a CSR pair. See `mm_probe_r1_k32_i32` for the contract.
+        module subroutine mm_probe_s1_i32(self, keys, offsets, matches, valid, threads, &
+                n_matched, group_hit)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        character(len=*), intent(in) :: keys(:) !! the keys to probe with, one per element, each trimmed.
+            integer(int64), allocatable, intent(out) :: offsets(:)
+            !! length `size(keys) + 1`, starting at 1: probe `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1) - 1)`.
+            integer(int32), allocatable, intent(out) :: matches(:)
+            !! every matching stored value, grouped by probe and ascending by position within each
+            !! group. A stored value above `huge(int32)` aborts rather than truncating; take the
+            !! matches as `int64` if the stored values can exceed it.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per probe; a `.false.` entry matches nothing, and is not looked up.
+            integer, intent(in), optional :: threads
+            !! threads the probe may use; absent means automatic, `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many probes matched at least one stored row.
+            logical, allocatable, intent(out), optional :: group_hit(:)
+            !! one entry per group, `.true.` for every group some unmasked probe reached.
+        end subroutine mm_probe_s1_i32
+        !> The `int64` form of `mm_probe_s1_i32`.
+        module subroutine mm_probe_s1_i64(self, keys, offsets, matches, valid, threads, &
+                n_matched, group_hit)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        character(len=*), intent(in) :: keys(:) !! the keys to probe with, one per element, each trimmed.
+            integer(int64), allocatable, intent(out) :: offsets(:)
+            !! length `size(keys) + 1`, starting at 1: probe `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1) - 1)`.
+            integer(int64), allocatable, intent(out) :: matches(:)
+            !! every matching stored value, grouped by probe and ascending by position within each
+            !! group. Its length is the PAIR count.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per probe; a `.false.` entry matches nothing, and is not looked up.
+            integer, intent(in), optional :: threads
+            !! threads the probe may use; absent means automatic, `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many probes matched at least one stored row.
+            logical, allocatable, intent(out), optional :: group_hit(:)
+            !! one entry per group, `.true.` for every group some unmasked probe reached.
+        end subroutine mm_probe_s1_i64
+    end interface
+    interface
+        !> EVERY match between the elements of a parquet_string_column, verbatim, and the stored
+        !! keys, as a CSR pair; a null element matches nothing. See `mm_probe_r1_k32_i32`.
+        module subroutine mm_probe_sc_i32(self, keys, offsets, matches, valid, threads, &
+                n_matched, group_hit)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        type(parquet_string_column), intent(in), target :: keys !! the keys to probe with, verbatim.
+            integer(int64), allocatable, intent(out) :: offsets(:)
+            !! length `size(keys) + 1`, starting at 1: probe `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1) - 1)`.
+            integer(int32), allocatable, intent(out) :: matches(:)
+            !! every matching stored value, grouped by probe and ascending by position within each
+            !! group. A stored value above `huge(int32)` aborts rather than truncating; take the
+            !! matches as `int64` if the stored values can exceed it.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per probe; a `.false.` entry matches nothing, and is not looked up.
+            integer, intent(in), optional :: threads
+            !! threads the probe may use; absent means automatic, `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many probes matched at least one stored row.
+            logical, allocatable, intent(out), optional :: group_hit(:)
+            !! one entry per group, `.true.` for every group some unmasked probe reached.
+        end subroutine mm_probe_sc_i32
+        !> The `int64` form of `mm_probe_sc_i32`.
+        module subroutine mm_probe_sc_i64(self, keys, offsets, matches, valid, threads, &
+                n_matched, group_hit)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+        type(parquet_string_column), intent(in), target :: keys !! the keys to probe with, verbatim.
+            integer(int64), allocatable, intent(out) :: offsets(:)
+            !! length `size(keys) + 1`, starting at 1: probe `i`'s matches are
+            !! `matches(offsets(i) : offsets(i+1) - 1)`.
+            integer(int64), allocatable, intent(out) :: matches(:)
+            !! every matching stored value, grouped by probe and ascending by position within each
+            !! group. Its length is the PAIR count.
+            logical, intent(in), optional :: valid(:)
+            !! one entry per probe; a `.false.` entry matches nothing, and is not looked up.
+            integer, intent(in), optional :: threads
+            !! threads the probe may use; absent means automatic, `threads=1` forces serial.
+            integer(int64), intent(out), optional :: n_matched
+            !! how many probes matched at least one stored row.
+            logical, allocatable, intent(out), optional :: group_hit(:)
+            !! one entry per group, `.true.` for every group some unmasked probe reached.
+        end subroutine mm_probe_sc_i64
+    end interface
+    interface
+        !> The distinct string keys, as a parquet_string_column, in unspecified order; empty for
+        !! an empty or unbuilt multimap. Pair each key with its group through
+        !! `%get_many(list, groups)`. Aborts on a multimap holding integer keys.
+        module subroutine mm_keys_s(self, list)
+        class(pf_index_multimap), intent(in) :: self !! the multimap.
+            type(parquet_string_column), intent(out) :: list !! receives the distinct keys.
+        end subroutine mm_keys_s
+    end interface
+
     ! ---- The build's thread rule, reported ----
 
     !> The team an automatic `%build` over `n` keys, or an automatic `%get_many` over `n` rows,
@@ -2985,6 +3699,20 @@ module parquet_index
         module subroutine parquet_debug_set_index_pair_limit(limit)
             integer(int64), intent(in) :: limit !! the new ceiling; a value below 1 restores the default.
         end subroutine parquet_debug_set_index_pair_limit
+    end interface
+
+    interface
+        !> Test-only. Narrows every STRING hash to its low `nbits` bits, so that a set of a few
+        !! dozen strings collides heavily and the `(hash, occurrence)` chain of a string map --
+        !! otherwise reached about once in 2**64 probes -- is exercised end to end: the second
+        !! and later occurrences, their lookup, their removal and the compaction removal must
+        !! keep. 0 (or any value below 1) restores the full 64 bits; a value above 62 is read as
+        !! 62. Process-global and read on every hash, so set it from a serial test only, never
+        !! beside a running build or lookup, and restore it before the test ends: a map built
+        !! narrow and probed wide finds nothing.
+        module subroutine parquet_debug_set_index_string_hash_bits(nbits)
+            integer, intent(in) :: nbits !! low bits to keep, `1 .. 62`; below 1 restores the default.
+        end subroutine parquet_debug_set_index_string_hash_bits
     end interface
 
     ! ---- Cross-submodule private helpers ----
@@ -3059,6 +3787,21 @@ module parquet_index
             type(pf_index_map), intent(in) :: self !! a map whose backend is `IX_HASH`.
             integer(int64), intent(out) :: out(:,:) !! shaped `(nkeys, ncomp)`; filled in slot order.
         end subroutine ix_hash_collect
+        !> The hash of a string's bytes: the module's own mixer chained over 8-byte words, with
+        !! the length mixed in first, so that no second hash family enters the module and the
+        !! clustering tests hold it to the integer mixer's standard. Narrowed by the debug hook
+        !! `parquet_debug_set_index_string_hash_bits`, which is read here and nowhere else.
+        !!
+        !! **`b` is an EXPLICIT-SHAPE dummy on purpose.** A scalar `character` actual associates
+        !! with an explicit-shape `character(len=1)` array dummy by character sequence
+        !! association (F2018 15.5.2.11), so this one function hashes a scalar key, an element of
+        !! a `character` array and a slice of a packed payload alike, with no copy and no
+        !! `transfer`. An assumed-shape dummy would refuse the scalar.
+        pure module function ix_hash_str(b, n) result(h)
+            integer(int64), intent(in) :: n !! bytes to hash; may be 0.
+            character(len=1), intent(in) :: b(n) !! the bytes.
+            integer(int64) :: h !! a mixed bit pattern; only its low bits are used.
+        end function ix_hash_str
         !> The index stored for a key in the sorted backend, or 0. Binary search.
         pure module function ix_sorted_find(self, key) result(v)
             type(pf_index_map), intent(in) :: self !! a map whose backend is `IX_SORTED`.

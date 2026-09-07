@@ -65,7 +65,9 @@ parquet_index_map.f90
 parquet_index_multi.f90
 parquet_index_pool.f90
 parquet_index_sorted.f90
+parquet_index_str.f90
 parquet_settings_base.f90
+parquet_strings.f90
 parquet_utils.f90
 parquet_wrapper.cpp
 
@@ -254,6 +256,7 @@ parquet_index_map.f90
 parquet_index_multi.f90
 parquet_index_pool.f90
 parquet_index_sorted.f90
+parquet_index_str.f90
 parquet_io.f90
 parquet_list.f90
 parquet_maml_base.f90
@@ -319,6 +322,7 @@ parquet_index_map.f90
 parquet_index_multi.f90
 parquet_index_pool.f90
 parquet_index_sorted.f90
+parquet_index_str.f90
 parquet_list.f90
 parquet_maml_base.f90
 parquet_maml_base_add_col_qc.f90
@@ -417,6 +421,7 @@ parquet_index_map.f90
 parquet_index_multi.f90
 parquet_index_pool.f90
 parquet_index_sorted.f90
+parquet_index_str.f90
 parquet_io.f90
 parquet_list.f90
 parquet_logging.f90

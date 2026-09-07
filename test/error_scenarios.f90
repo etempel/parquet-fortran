@@ -2803,6 +2803,48 @@ program error_scenarios
         call scenario_multimap_probe_shape_mismatch()
     case ("multimap_control")
         call scenario_multimap_control()
+    case ("index_string_on_integer_map")
+        call scenario_index_string_on_integer_map()
+    case ("index_integer_on_string_map")
+        call scenario_index_integer_on_string_map()
+    case ("index_tuple_on_string_map")
+        call scenario_index_tuple_on_string_map()
+    case ("index_string_get_many_on_integer_map")
+        call scenario_index_string_get_many_on_integer_map()
+    case ("index_string_method_direct")
+        call scenario_index_string_method_direct()
+    case ("index_string_method_sorted")
+        call scenario_index_string_method_sorted()
+    case ("index_string_build_duplicate")
+        call scenario_index_string_build_duplicate()
+    case ("index_string_keys_rank1")
+        call scenario_index_string_keys_rank1()
+    case ("index_string_keys_column_on_integer")
+        call scenario_index_string_keys_column_on_integer()
+    case ("index_string_init_ncomp")
+        call scenario_index_string_init_ncomp()
+    case ("index_string_set_on_integer_map")
+        call scenario_index_string_set_on_integer_map()
+    case ("index_string_remove_absent")
+        call scenario_index_string_remove_absent()
+    case ("index_string_get_many_length")
+        call scenario_index_string_get_many_length()
+    case ("multimap_string_on_integer")
+        call scenario_multimap_string_on_integer()
+    case ("multimap_integer_on_string")
+        call scenario_multimap_integer_on_string()
+    case ("multimap_string_method_sorted")
+        call scenario_multimap_string_method_sorted()
+    case ("multimap_string_probe_on_integer")
+        call scenario_multimap_string_probe_on_integer()
+    case ("multimap_string_keys_rank1")
+        call scenario_multimap_string_keys_rank1()
+    case ("index_string_control")
+        call scenario_index_string_control()
+    case ("table_index_string_key_on_int")
+        call scenario_table_index_string_key_on_int()
+    case ("table_index_int_key_on_string")
+        call scenario_table_index_int_key_on_string()
     case ("table_index_string_column")
         call scenario_table_index_string_column()
     case ("table_index_bool_column")
@@ -24188,6 +24230,237 @@ contains
         print '(a)', "multimap control finished"
     end subroutine scenario_multimap_control
 
+    ! ---- parquet_index: string keys (both types) ----
+    !
+    !> A string key presented to a map holding integer keys is refused by name, before the key
+    !> could be hashed against a table whose slots hold integers: the two are different maps
+    !> underneath, and a silent 0 would read as "absent".
+    subroutine scenario_index_string_on_integer_map()
+        type(pf_index_map) :: m
+        integer(int64) :: v
+
+        call m%build([1_int64, 2_int64, 3_int64])
+        v = m%get("a")
+        print '(a,i0)', "a string key on an integer map was accepted, got=", v
+    end subroutine scenario_index_string_on_integer_map
+    !
+    !> The reverse: an integer key on a string map. A string map IS a two-component tuple map
+    !> underneath, so this guard runs before the composite-key one, or the message would send
+    !> the caller off to build a tuple.
+    subroutine scenario_index_integer_on_string_map()
+        type(pf_index_map) :: m
+        integer(int64) :: v
+
+        call m%build(["a", "b"])
+        v = m%get(1_int64)
+        print '(a,i0)', "an integer key on a string map was accepted, got=", v
+    end subroutine scenario_index_integer_on_string_map
+    !
+    !> And a tuple, which would otherwise match the internal `(hash, occurrence)` width exactly
+    !> and probe the table as if it were an ordinary composite map.
+    subroutine scenario_index_tuple_on_string_map()
+        type(pf_index_map) :: m
+        integer(int64) :: v
+
+        call m%build(["a", "b"])
+        v = m%get([1_int64, 0_int64])
+        print '(a,i0)', "a key tuple on a string map was accepted, got=", v
+    end subroutine scenario_index_tuple_on_string_map
+    !
+    !> The bulk form's guard, which is a separate check from the scalar one.
+    subroutine scenario_index_string_get_many_on_integer_map()
+        type(pf_index_map) :: m
+        integer(int64) :: out(2)
+
+        call m%build([1_int64, 2_int64])
+        call m%get_many(["a", "b"], out)
+        print '(a,i0)', "string keys in get_many on an integer map were accepted, got=", out(1)
+    end subroutine scenario_index_string_get_many_on_integer_map
+    !
+    !> A string map is the hash table with the strings beside it; the direct and sorted
+    !> backends have no meaning for a key that is hashed before it is stored, and are refused
+    !> by name rather than silently ignored.
+    subroutine scenario_index_string_method_direct()
+        type(pf_index_map) :: m
+
+        call m%build(["a", "b"], method="direct")
+        print '(a)', "method=direct on a string build was accepted"
+    end subroutine scenario_index_string_method_direct
+    !
+    !> See `scenario_index_string_method_direct`.
+    subroutine scenario_index_string_method_sorted()
+        type(pf_index_map) :: m
+
+        call m%build(["a", "b"], method="sorted")
+        print '(a)', "method=sorted on a string build was accepted"
+    end subroutine scenario_index_string_method_sorted
+    !
+    !> A repeated string key under `%build` is refused, naming the key TRIMMED (the array's
+    !> elements are trimmed on the way in, so "aa " and "aa" are one key) and its position.
+    subroutine scenario_index_string_build_duplicate()
+        type(pf_index_map) :: m
+
+        call m%build(["aa ", "bb ", "aa "])
+        print '(a)', "a duplicate string key was accepted"
+    end subroutine scenario_index_string_build_duplicate
+    !
+    !> `%keys` into an integer list on a string map is refused naming the form to ask for: the
+    !> internal tuples would otherwise come back as if they were the caller's keys.
+    subroutine scenario_index_string_keys_rank1()
+        type(pf_index_map) :: m
+        integer(int64), allocatable :: list(:)
+
+        call m%build(["a", "b"])
+        call m%keys(list)
+        print '(a,i0)', "an integer key list from a string map was accepted, n=", size(list)
+    end subroutine scenario_index_string_keys_rank1
+    !
+    !> And the reverse, a string column asked of an integer map.
+    subroutine scenario_index_string_keys_column_on_integer()
+        type(pf_index_map) :: m
+        type(parquet_string_column) :: list
+
+        call m%build([1_int64, 2_int64])
+        call m%keys(list)
+        print '(a,i0)', "a string key column from an integer map was accepted, n=", list%size()
+    end subroutine scenario_index_string_keys_column_on_integer
+    !
+    !> A string key has exactly one component from the caller's side, whatever the tuple
+    !> underneath is, so `ncomp=` and `strings=.true.` cannot both be meant.
+    subroutine scenario_index_string_init_ncomp()
+        type(pf_index_map) :: m
+
+        call m%init(strings=.true., ncomp=2)
+        print '(a)', "init(strings=.true., ncomp=2) was accepted"
+    end subroutine scenario_index_string_init_ncomp
+    !
+    !> A string `%set` on a map holding integer keys is refused; on a FRESH map it would have
+    !> started a string map, which is the control's business.
+    subroutine scenario_index_string_set_on_integer_map()
+        type(pf_index_map) :: m
+
+        call m%build([1_int64, 2_int64])
+        call m%set("a", 3_int64)
+        print '(a)', "a string set on an integer map was accepted"
+    end subroutine scenario_index_string_set_on_integer_map
+    !
+    !> Removing an absent string key without `found=` aborts, as the integer form does.
+    subroutine scenario_index_string_remove_absent()
+        type(pf_index_map) :: m
+
+        call m%build(["a", "b"])
+        call m%remove("zz")
+        print '(a)', "removing an absent string key was accepted"
+    end subroutine scenario_index_string_remove_absent
+    !
+    !> The string bulk lookup checks its answer array's length, as the integer one does.
+    subroutine scenario_index_string_get_many_length()
+        type(pf_index_map) :: m
+        integer(int64) :: out(1)
+
+        call m%build(["a", "b"])
+        call m%get_many(["a", "b"], out)
+        print '(a,i0)', "a string get_many with a short answer array was accepted, got=", out(1)
+    end subroutine scenario_index_string_get_many_length
+    !
+    !> The multimap's guards name the multimap, as its integer guards do.
+    subroutine scenario_multimap_string_on_integer()
+        type(pf_index_multimap) :: mm
+        integer(int64) :: n
+
+        call mm%build([1_int64, 2_int64, 2_int64])
+        n = mm%count("a")
+        print '(a,i0)', "a string key on an integer multimap was accepted, got=", n
+    end subroutine scenario_multimap_string_on_integer
+    !
+    !> See `scenario_multimap_string_on_integer`.
+    subroutine scenario_multimap_integer_on_string()
+        type(pf_index_multimap) :: mm
+        integer(int64) :: n
+
+        call mm%build(["a", "b", "a"])
+        n = mm%count(1_int64)
+        print '(a,i0)', "an integer key on a string multimap was accepted, got=", n
+    end subroutine scenario_multimap_integer_on_string
+    !
+    !> The map's method refusal, handed the multimap's prefix.
+    subroutine scenario_multimap_string_method_sorted()
+        type(pf_index_multimap) :: mm
+
+        call mm%build(["a", "b", "a"], method="sorted")
+        print '(a)', "method=sorted on a string multimap build was accepted"
+    end subroutine scenario_multimap_string_method_sorted
+    !
+    !> The probe's own guard, which is a separate check from the scalar one.
+    subroutine scenario_multimap_string_probe_on_integer()
+        type(pf_index_multimap) :: mm
+        integer(int64), allocatable :: off(:), m(:)
+
+        call mm%build([1_int64, 2_int64, 2_int64])
+        call mm%probe_many(["a", "b"], off, m)
+        print '(a,i0)', "string probes on an integer multimap were accepted, pairs=", size(m)
+    end subroutine scenario_multimap_string_probe_on_integer
+    !
+    !> `%keys` into an integer list on a string multimap is refused naming the form to ask for.
+    subroutine scenario_multimap_string_keys_rank1()
+        type(pf_index_multimap) :: mm
+        integer(int64), allocatable :: list(:)
+
+        call mm%build(["a", "b", "a"])
+        call mm%keys(list)
+        print '(a,i0)', "an integer key list from a string multimap was accepted, n=", size(list)
+    end subroutine scenario_multimap_string_keys_rank1
+    !
+    !> Every legal string-key path of both types, in one process: proves the guards above do not
+    !> fire on the forms they must not, on every entry the scenarios refuse one shape of.
+    subroutine scenario_index_string_control()
+        type(pf_index_map) :: m
+        type(pf_index_multimap) :: mm
+        type(parquet_string_column) :: sc, list
+        integer(int64) :: out(3), idx
+        integer(int32) :: out32(3)
+        integer(int64), allocatable :: off(:), pairs(:), rows(:)
+        logical :: found
+
+        call sc%clear()
+        call sc%append_string("a")
+        call sc%append_null()
+        call sc%append_string("bb")
+        call m%build(["a ", "bb", "c "], method="hash", threads=1)
+        call m%build(sc)
+        if (m%get("a") /= 1_int64 .or. m%get("bb") /= 3_int64 .or. m%nkeys() /= 2_int64) &
+            error stop "control: string build from a column"
+        call m%get_many(["a ", "zz", "bb"], out, threads=1)
+        call m%get_many(sc, out32, valid=[.true., .true., .false.])
+        if (out(1) /= 1_int64 .or. out(2) /= 0_int64 .or. out32(3) /= 0_int32) error stop "control: string get_many"
+        call m%set("d", 9_int64)
+        call m%get_or_add("e", idx)
+        if (idx /= 10_int64) error stop "control: string get_or_add"
+        call m%get_or_add_many(["a", "f", "a"], out, valid=[.true., .true., .false.])
+        if (out(1) /= 1_int64 .or. out(2) /= 11_int64 .or. out(3) /= 0_int64) error stop "control: string goam"
+        call m%remove("d")
+        call m%remove("d", found)
+        call m%keys(list)
+        if (found .or. list%size() /= m%nkeys()) error stop "control: string remove or keys"
+        call m%init(strings=.true., capacity=4)
+        call m%reserve(8_int64)
+        call m%set("x", 1_int32)
+        call m%reset()
+        call m%clear()
+        call mm%build(["a", "b", "a"], [1_int64, 2_int64, 3_int64], method="hash", threads=1)
+        call mm%build(sc, valid=[.true., .true., .true.])
+        if (mm%count("a") /= 1_int64 .or. mm%get_first("bb") /= 3_int64 .or. mm%ngroups() /= 2_int64) &
+            error stop "control: string multimap build"
+        call mm%get_all("a", rows)
+        call mm%get_first_many([character(len=2) :: "a", "zz", "bb"], out, threads=1)
+        call mm%get_many(sc, out32)
+        call mm%probe_many(sc, off, pairs, threads=1)
+        call mm%keys(list)
+        if (size(rows) /= 1 .or. out(2) /= 0_int64 .or. size(pairs) /= 2 .or. list%size() /= 2_int64) &
+            error stop "control: string multimap lookups"
+        print '(a)', "string index control finished"
+    end subroutine scenario_index_string_control
+
     ! ---- parquet_index: pf_index_pool ----
     !
     !> Freeing an index twice is refused. Accepting it silently would put the same index on the
@@ -24555,18 +24828,62 @@ contains
         call t%add_column("v", v)
     end subroutine table_index_scenario_fixture
     !
-    !> String keys are not held by the index yet, so a string column is refused naming the route
-    !! that does work. **When the map gains its string forms this scenario becomes a control**:
-    !! flip its expectation to a clean completion asserting `ix%count("cc") == 1`, rather than
-    !! deleting it (CLAUDE.md, "A test that asserts a REFUSAL must say what to assert when the
-    !! refusal lifts").
+    !> A string column indexes through the map's own string keys: this was the refusal scenario
+    !! until the map gained them, and is now the CONTROL it said it would become -- every string
+    !! query form over both engines, in one process.
     subroutine scenario_table_index_string_column()
         type(parquet_table) :: t
         type(parquet_table_index) :: ix
+        type(parquet_string_column) :: probes
+        integer(int64) :: row, rows(3), nf
+        integer(int32) :: row32, rows32(2)
+        integer(int64), allocatable :: all64(:)
+        integer(int32), allocatable :: all32(:)
+        call table_index_scenario_fixture(t)
+        call probes%clear()
+        call probes%append_string("dd")
+        call probes%append_null()
+        call t%build_index("s", ix)
+        call ix%find("cc", row)
+        call ix%find("dd", row32)
+        call ix%find_all("cc", all64)
+        call ix%find_all("zz", all32)
+        call ix%find_many(["aa ", "zz ", "ee "], rows, n_found=nf)
+        call ix%find_many(probes, rows32, threads=1)
+        if (row /= 3_int64 .or. row32 /= 4 .or. size(all64) /= 1 .or. size(all32) /= 0 .or. nf /= 2_int64) &
+            error stop "string index: wrong answers"
+        if (rows32(1) /= 4 .or. rows32(2) /= 0 .or. ix%count("cc") /= 1_int64 .or. ix%count("cc ") /= 0_int64) &
+            error stop "string index: wrong bulk or count answers"
+        if (ix%kind() /= PK_STRING .or. ix%nkeys() /= 5_int64) error stop "string index: introspection"
+        call t%build_index("s", ix, unique=.false., threads=1)
+        call ix%find_all("bb", all64)
+        if (size(all64) /= 1 .or. all64(1) /= 2_int64 .or. ix%count("bb") /= 1_int64) &
+            error stop "string multimap index: wrong answers"
+        print '(a)', "a string column was indexed and answered"
+    end subroutine scenario_table_index_string_column
+    !
+    !> A string key on an index over an integer column is refused naming both, exactly as a real
+    !> key is: a string could only ever match nothing there.
+    subroutine scenario_table_index_string_key_on_int()
+        type(parquet_table) :: t
+        type(parquet_table_index) :: ix
+        integer(int64) :: row
+        call table_index_scenario_fixture(t)
+        call t%build_index("id", ix)
+        call ix%find("30", row)
+        print '(a,i0)', "a string key on an integer index was accepted, row=", row
+    end subroutine scenario_table_index_string_key_on_int
+    !
+    !> And the reverse: an integer key on a string index.
+    subroutine scenario_table_index_int_key_on_string()
+        type(parquet_table) :: t
+        type(parquet_table_index) :: ix
+        integer(int64) :: row
         call table_index_scenario_fixture(t)
         call t%build_index("s", ix)
-        print '(a,i0)', "a string column was indexed, nkeys=", ix%nkeys()
-    end subroutine scenario_table_index_string_column
+        call ix%find(3_int32, row)
+        print '(a,i0)', "an integer key on a string index was accepted, row=", row
+    end subroutine scenario_table_index_int_key_on_string
     !
     !> A boolean key is `==` with extra steps, the filter's rule for a boolean set, applied here.
     subroutine scenario_table_index_bool_column()

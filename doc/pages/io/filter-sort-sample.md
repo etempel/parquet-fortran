@@ -143,7 +143,10 @@ keyed by the day, a time set by the nanoseconds since midnight.
 afterwards. Repeats are collapsed rather than rejected, which matters because an identifier list
 produced by a join or a group-by very often carries some. A `character` array's elements are
 trimmed on the way in; a `parquet_string_column`'s are taken verbatim, and a Null element of one is
-simply not in the set.
+simply not in the set. A string member is compared by its exact bytes — `"ab"` and `"ab "` are two
+members, and the empty string is an ordinary one — through the same string-keyed
+[`pf_index_map`](../utilities/index-maps.html#string-keys) every other family's set is held in, so
+a string clause prunes and probes exactly as an integer one does.
 
 **Nulls and NaNs follow the filter's own rules**, not those of the in-memory `pf_in`:
 
@@ -172,7 +175,8 @@ between row groups' ranges. On a file clustered or sorted by the key, most of it
 being read.
 
 **What it costs.** The distinct keys, once per copy of the filter (about 8 bytes each for a numeric,
-date or time set, 16 for a timestamp set), plus one byte per row of the file per `in` clause while
+date or time set, 16 for a timestamp set, a string set's own bytes for a string set), plus one byte
+per row of the file per `in` clause while
 the filter is being installed — the
 same shape and size as the mask `sample_fraction=` already builds. Under `bounded=.true.` that array
 is, like the filter's own row mask, one of the things that still scale with the file's row count.

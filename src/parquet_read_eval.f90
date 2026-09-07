@@ -80,7 +80,6 @@ contains
         integer :: cmp, use_unit
         integer(int8) :: fam
         type(pf_index_map) :: keys
-        type(parquet_string_column) :: str_set
 
         ok = .false.
         errmsg = ""
@@ -118,10 +117,10 @@ contains
         ! ---- The set-valued operators, over the filter's own bound set or literal list -----------
         if (low == "in" .or. low == "not_in") then
             call parquet_resolve_set_payload(filter, column, value, type_token, shape_token, fam, &
-                keys, str_set, ok, errmsg)
+                keys, ok, errmsg)
             if (.not. ok) return
             negate = (low == "not_in")
-            call parquet_eval_set_leaf_column(col, kind, nrows, fam, keys, str_set, negate, out)
+            call parquet_eval_set_leaf_column(col, kind, nrows, fam, keys, negate, out)
             ok = .true.
             return
         end if
@@ -713,13 +712,12 @@ contains
     !> The read-side twin is parquet_answer_set_chunk, which does the identical thing one row group
     !> at a time; both end at parquet_set_verdict, so the null rule, the membership answer and the
     !> negation are decided in ONE place for both engines.
-    subroutine parquet_eval_set_leaf_column(col, kind, nrows, fam, keys, str_set, negate, out)
+    subroutine parquet_eval_set_leaf_column(col, kind, nrows, fam, keys, negate, out)
         type(parquet_column), intent(in), target :: col !! the resident column.
         integer, intent(in) :: kind !! its PK_* kind.
         integer(int64), intent(in) :: nrows !! rows to answer.
         integer(int8), intent(in) :: fam !! the set's FSET_* element family.
-        type(pf_index_map), intent(in) :: keys !! the built key index; unused for a string set.
-        type(parquet_string_column), intent(in) :: str_set !! the string members; empty otherwise.
+        type(pf_index_map), intent(in) :: keys !! the built key index, string-keyed for a string set.
         logical, intent(in) :: negate !! .true. for `not_in`.
         integer(int8), intent(out) :: out(:) !! one KL_* verdict per row.
         integer(int32), pointer :: p32(:)
@@ -731,7 +729,6 @@ contains
         type(parquet_timestamp), pointer :: pts(:)
         type(parquet_string_column), pointer :: sc
         integer(int64), allocatable :: lookup(:), found(:), pairs(:, :)
-        logical, allocatable :: hit(:)
         integer(int64) :: i
 
         nullify(p32)
@@ -743,10 +740,15 @@ contains
         nullify(pts)
         nullify(sc)
         if (fam == FSET_STRING) then
+            ! The column's own string store, read in place by the map's string %get_many, which
+            ! keys each element by its exact bytes and answers 0 for a null one -- the same call
+            ! the read-side engine makes per row group, and every other family makes here.
             call parquet_column_string_column(col, sc)
-            call pf_in(sc, str_set, hit)
+            allocate(found(nrows))
+            call keys%get_many(sc, found)
             do i = 1_int64, nrows
-                out(i) = parquet_set_verdict(.not. parquet_string_column_is_null(sc, i), hit(i), negate)
+                out(i) = parquet_set_verdict(.not. parquet_string_column_is_null(sc, i), found(i) > 0_int64, &
+                    negate)
             end do
             return
         end if

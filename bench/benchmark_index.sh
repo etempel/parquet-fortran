@@ -31,7 +31,7 @@
 #   REPEAT=1        --mode=multimap only: how many times each key repeats on average. The build
 #                    side is NKEYS rows over NKEYS/REPEAT distinct keys, so REPEAT=1 is the
 #                    distinct-key join shape and REPEAT=1000 the lookup-table one.
-#   MODE=all        lookup | build | tuple | mutate | pool | multimap | all.
+#   MODE=all        lookup | build | tuple | mutate | pool | multimap | strings | all.
 #   LTO=0           Set to 1 when you have appended LTO flags, so the build tree is named apart
 #                    from its non-LTO twin.
 #
@@ -44,6 +44,11 @@
 # --mode=multimap ENDS WITH A pf_match_all ARM over the same arrays, which is the sort engine the
 # join runs today and the contract %probe_many reproduces; the two answers are compared row for
 # row before either is timed, so a figure there is for an answer known to be the same one.
+#
+# --mode=strings ENDS WITH A pf_in ARM over the same two string columns: the sort-merge the
+# filter's string leaf ran once per row group before the map gained string keys, and what a
+# join's string path still runs. The map's get_many figure is read against it; the answers are
+# compared probe for probe before either is timed.
 #
 # THE THREADED get_many ARM is read against the `threads=1` arm printed just above it: the pair is
 # the speed-up a bulk probe gains from the team, which is what the filter's per-row-group probe

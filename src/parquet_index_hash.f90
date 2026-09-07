@@ -51,6 +51,10 @@ submodule (parquet_index) parquet_index_hash
     !! per-half mixing and the per-component chaining are not the same transformation applied
     !! twice. `0x9E3779B97F4A7C15`'s low 62 bits; XOR-ed only, never multiplied.
     integer(int64), parameter :: IX_SEED_T = 2135587861_int64
+    !> Seed the STRING hash starts its chain from, distinct from both above so that a string's
+    !! word chain and a tuple's component chain are not one transformation. `0x61C88647`, the
+    !! negated golden-ratio constant; XOR-ed only, never multiplied.
+    integer(int64), parameter :: IX_SEED_S = 1640531527_int64
 
 contains
 
@@ -127,6 +131,41 @@ contains
             h = ix_hash_bits(ieor(h, key(j)))
         end do
     end function ix_hash_chain
+
+    ! The string hash: the same chain as a tuple's, over the string's 8-byte words, with the
+    ! length mixed in as the first component so that a string and its own zero-padded extension
+    ! never share a hash. Each word is assembled little-endian from the bytes, read as unsigned,
+    ! so the result is the same on every platform. The chain is what makes the string hash
+    ! position-sensitive for free; the clustering test over near-identical strings holds it to
+    ! the integer mixer's standard.
+    module procedure ix_hash_str
+        integer(int64) :: w, i, nb
+        integer :: k
+
+        h = ix_hash_bits(ieor(IX_SEED_S, n))
+        do i = 0_int64, n - 1_int64, 8_int64
+            nb = min(8_int64, n - i)
+            w = 0_int64
+            do k = 1, int(nb)
+                w = ior(w, ishft(int(iand(iachar(b(i + k)), 255), int64), 8 * (k - 1)))
+            end do
+            h = ix_hash_bits(ieor(h, w))
+        end do
+        ! The hook narrows the RESULT rather than the mixer's input, so the narrowed hashes are
+        ! as evenly spread over their few bits as the full ones are over 64 -- which is what
+        ! makes a test at 2 bits a test of the collision chain and not of a degenerate mixer.
+        if (dbg_index_string_hash_bits > 0) then
+            h = iand(h, ishft(1_int64, dbg_index_string_hash_bits) - 1_int64)
+        end if
+    end procedure ix_hash_str
+
+    module procedure parquet_debug_set_index_string_hash_bits
+        if (nbits < 1) then
+            dbg_index_string_hash_bits = 0
+        else
+            dbg_index_string_hash_bits = min(nbits, 62)
+        end if
+    end procedure parquet_debug_set_index_string_hash_bits
 
     ! ---- Lookup ----
 

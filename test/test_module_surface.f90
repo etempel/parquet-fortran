@@ -134,6 +134,12 @@ contains
         call mm%build([10_int64, 11_int64, 10_int64])
         if (what == "" .and. mm%count(10_int64) /= 2_int64) what = "pf_index_multimap%count"
         call parquet_debug_set_index_pair_limit(0_int64)
+        ! String keys reach this tier through parquet_strings, which this import must carry.
+        call m%build(["k1", "k2"])
+        if (what == "" .and. m%get("k2") /= 2_int64) what = "pf_index_map%get(string)"
+        call mm%build(["a", "b", "a"])
+        if (what == "" .and. mm%count("a") /= 2_int64) what = "pf_index_multimap%count(string)"
+        call parquet_debug_set_index_string_hash_bits(0)
         if (what == "" .and. pf_index_max_components < 1) what = "pf_index_max_components"
 
         call parquet_set_index_threads(n_index)

@@ -50,7 +50,9 @@ contains
             new_unittest("an empty table indexes, and every query answers absent", test_empty_table), &
             new_unittest("build_index reads a column the table has not read yet", test_lazy_column_is_read), &
             new_unittest("queries are reads: no detach, no generation bump", test_query_is_a_read), &
-            new_unittest("lookups from several threads agree with the serial ones", test_lookups_in_parallel) &
+            new_unittest("lookups from several threads agree with the serial ones", test_lookups_in_parallel), &
+            new_unittest("a string column: find_all equals pf_match_all, find_many equals pf_match", &
+                test_string_column) &
             ]
     end subroutine collect_tests_table_index
 
@@ -603,4 +605,83 @@ contains
         call check(error, count(want_counts == 3_int64) == 32 .and. count(want_counts == 0_int64) == 16, &
             "the probes cover a repeated key and an absent one (vacuity guard)")
     end subroutine test_lookups_in_parallel
+
+    !> A string column, unique and not: `%find_all` equals `pf_match_all` over a mirror of the
+    !! column (the sort engine's exact-bytes equality), `%find_many` equals `pf_match` from a
+    !! trimmed character array and from a verbatim string column alike, a null row is never
+    !! found, and a scalar key is taken as written.
+    subroutine test_string_column(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, u
+        type(parquet_table_index) :: ix
+        type(parquet_string_column) :: mirror, probes
+        character(len=3) :: s(6), pchr(5)
+        integer(int64), allocatable :: rows(:), oracle(:), off(:), m(:)
+        integer(int64) :: many(5), row
+        integer(int32) :: many32(5)
+        integer(int64) :: nf
+        integer :: i
+        !
+        ! Row 6 is null; "a" repeats at rows 2 and 4, "bb" at 1 and 5; the first element is not
+        ! the shortest, so a scan sized from it would be wrong here.
+        s = [character(len=3) :: "bb", "a", "ccc", "a", "bb", "q"]
+        call parquet_new_table(t)
+        call t%add_column("s", s)
+        call t%set_null("s", 6_int64)
+        call mirror%clear()
+        do i = 1, 5
+            call mirror%append_string(trim(s(i)))
+        end do
+        call mirror%append_null()
+        pchr = [character(len=3) :: "a", "bb", "zz", "ccc", "q"]
+        call probes%clear()
+        do i = 1, 5
+            call probes%append_string(trim(pchr(i)))
+        end do
+        !
+        call t%build_index("s", ix, unique=.false.)
+        call check(error, ix%kind() == PK_STRING .and. ix%nkeys() == 3_int64, &
+            "a string multimap index over three distinct non-null keys")
+        if (allocated(error)) return
+        call pf_match_all(probes, mirror, off, m)
+        do i = 1, 5
+            call ix%find_all(trim(pchr(i)), rows)
+            call check(error, size(rows, kind=int64) == off(i + 1) - off(i), &
+                "find_all has pf_match_all's count at probe " // trim(pchr(i)))
+            if (allocated(error)) return
+            if (size(rows) > 0) then
+                call check(error, all(rows == m(off(i):off(i + 1) - 1)), &
+                    "find_all lists pf_match_all's rows at probe " // trim(pchr(i)))
+                if (allocated(error)) return
+            end if
+        end do
+        call check(error, off(6) - 1 == 5_int64, "the probes match five rows in all (vacuity guard)")
+        if (allocated(error)) return
+        call check(error, ix%count("q") == 0_int64, "the null row's former value is never found")
+        if (allocated(error)) return
+        call pf_match(probes, mirror, oracle)
+        call ix%find_many(pchr, many, n_found=nf)
+        call check(error, all(many == oracle) .and. nf == 3_int64, "find_many over a character array equals pf_match")
+        if (allocated(error)) return
+        call ix%find_many(probes, many32)
+        call check(error, all(int(many32, int64) == oracle), "find_many over a string column equals pf_match")
+        if (allocated(error)) return
+        call ix%find("a", row)
+        call check(error, row == 2_int64 .and. ix%count("a") == 2_int64 .and. ix%count("bb") == 2_int64, &
+            "find is the first row, count the group size")
+        if (allocated(error)) return
+        call check(error, ix%count("a ") == 0_int64 .and. ix%count("A") == 0_int64, &
+            "a scalar key is taken as written: 'a ' and 'A' are not 'a'")
+        if (allocated(error)) return
+        ! A unique index over a distinct column.
+        call parquet_new_table(u)
+        call u%add_column("name", [character(len=5) :: "x", "yy", "zzz"])
+        call u%build_index("name", ix)
+        call ix%find("yy", row)
+        call check(error, ix%is_unique() .and. row == 2_int64 .and. ix%count("zzz") == 1_int64 .and. ix%nkeys() == 3_int64, &
+            "a unique string index finds each key at its row")
+        if (allocated(error)) return
+        call ix%find_all("x", rows)
+        call check(error, size(rows) == 1 .and. rows(1) == 1_int64, "find_all on a unique string index is one row")
+    end subroutine test_string_column
 end module test_table_index

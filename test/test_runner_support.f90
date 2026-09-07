@@ -246,6 +246,13 @@ contains
     !> parquet_set_string_threads and the payload-floor override, both process-global, which is the
     !> second and independent reason.
     !>
+    !> "index_strings" is excluded because one of its tests sets
+    !> parquet_debug_set_index_string_hash_bits, the process-global hook that narrows every
+    !> string hash so that the map's collision chain can be reached at all. A sibling test
+    !> building a string map while it is set would probe at full width a map built narrow, and
+    !> find nothing -- the hook is read on every hash, on the calling thread. The suite is pure
+    !> in-memory work over small fixtures and costs a fraction of a second serially.
+    !>
     !> "parquet_string" no longer needs an entry here: it used to, because of a
     !> gfortran/OpenMP runtime bug (not a bug in parquet_strings.f90's own
     !> logic) that silently corrupted memory when multiple threads
@@ -287,7 +294,7 @@ contains
             .or. name == "table_parallel" .or. name == "string_parallel" .or. name == "diagnostics" &
             .or. name == "random_omp" .or. name == "random_perm" .or. name == "module_surface" &
             .or. name == "spatial" .or. name == "logging" .or. name == "logging_env" &
-            .or. name == "toml_serial" .or. name == "index_omp" &
+            .or. name == "toml_serial" .or. name == "index_omp" .or. name == "index_strings" &
             .or. name == "stats")
     end function suite_is_safe_to_parallelize
 

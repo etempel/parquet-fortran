@@ -133,6 +133,10 @@ contains
             new_unittest("in: a NaN row matches nothing and survives not_in", &
                 test_in_nan_row_matches_nothing), &
             new_unittest("in: a string set, from an array and from a string column", test_in_string_set), &
+            new_unittest("in: a string set is exact bytes on both engines, nulls excluded", &
+                test_in_string_set_exact_bytes), &
+            new_unittest("in: a literal string list equals the bound set, repeats collapsed", &
+                test_in_string_literal_equals_bound), &
             new_unittest("bind: is_valid= drops the masked-off members", test_bind_mask_drops_elements), &
             new_unittest("in: a set clause survives remap_column_names", test_in_survives_remap), &
             new_unittest("remap_column_names cannot rewrite a set NAME", &
@@ -2204,6 +2208,126 @@ contains
         call check(error, n_col == n_arr, &
             "a string set: the character-array and parquet_string_column forms disagree")
     end subroutine test_in_string_set
+    !
+    !> A string set is keyed by its exact bytes, on the reader's engine and on the in-memory one
+    !> alike: a character array's members are trimmed (so `"ab "` selects the row holding `"ab"`),
+    !> a parquet_string_column's are verbatim (so `"ab "` selects the row holding `"ab "` and no
+    !> other), the empty string is an ordinary member, and a null row is in no set and survives
+    !> no `not_in`. The file column is written from a parquet_string_column so that a value with
+    !> a trailing blank, and a null, reach the file as they are.
+    subroutine test_in_string_set_exact_bytes(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_table) :: t
+        type(parquet_filter) :: f_arr, f_col, f_empty, f_not
+        type(parquet_string_column) :: col, set_col, set_empty
+        integer(int64) :: n
+        logical, allocatable :: keep(:)
+        character(len=*), parameter :: file = "test_run/filter_in_strings_exact.parquet"
+
+        call col%clear()
+        call col%append_string("ab")
+        call col%append_string("ab ")
+        call col%append_string("")
+        call col%append_null()
+        call col%append_string("cd")
+        call parquet_open_writer(writer, file)
+        call parquet_write_column(writer, "name", col)
+        call parquet_close_writer(writer)
+
+        ! A character array: trimmed members, so "ab " means "ab" and selects row 1 only.
+        call f_arr%add_in("name", ["ab ", "cd "])
+        call parquet_open_reader(reader, file, filter=f_arr)
+        call parquet_get_nrows(reader, n)
+        call parquet_close_reader(reader)
+        call check(error, n == 2_int64, "a trimmed array set selects the rows holding 'ab' and 'cd' (2)")
+        if (allocated(error)) return
+        call parquet_open_table(t, file)
+        allocate(keep(t%nrows()))
+        call t%row_mask(f_arr, keep)
+        call check(error, count(keep) == 2 .and. keep(1) .and. keep(5), &
+            "the in-memory engine selects rows 1 and 5 for the trimmed array set")
+        if (allocated(error)) return
+
+        ! A string column: verbatim members, so "ab " selects row 2 and NOT row 1.
+        call set_col%append_string("ab ")
+        call f_col%add_in("name", set_col)
+        call parquet_open_reader(reader, file, filter=f_col)
+        call parquet_get_nrows(reader, n)
+        call parquet_close_reader(reader)
+        call check(error, n == 1_int64, "a verbatim member 'ab ' selects exactly the row holding 'ab '")
+        if (allocated(error)) return
+        call t%row_mask(f_col, keep)
+        call check(error, count(keep) == 1 .and. keep(2), "the in-memory engine agrees: row 2 alone")
+        if (allocated(error)) return
+
+        ! The empty string is an ordinary member, and never matches the null row.
+        call set_empty%append_string("")
+        call f_empty%add_in("name", set_empty)
+        call t%row_mask(f_empty, keep)
+        call check(error, count(keep) == 1 .and. keep(3), "the empty string selects the empty row and not the null")
+        if (allocated(error)) return
+        call parquet_open_reader(reader, file, filter=f_empty)
+        call parquet_get_nrows(reader, n)
+        call parquet_close_reader(reader)
+        call check(error, n == 1_int64, "the reader agrees on the empty-string member")
+        if (allocated(error)) return
+
+        ! not_in: every non-null row that is not a member -- the null row stays out.
+        call f_not%bind("s", ["ab"])
+        call f_not%add("name not_in @s")
+        call t%row_mask(f_not, keep)
+        call check(error, count(keep) == 3 .and. keep(2) .and. keep(3) .and. keep(5) .and. .not. keep(4), &
+            "not_in keeps rows 2, 3 and 5 and drops the null row")
+        if (allocated(error)) return
+        call parquet_open_reader(reader, file, filter=f_not)
+        call parquet_get_nrows(reader, n)
+        call parquet_close_reader(reader)
+        call check(error, n == 3_int64, "the reader agrees on not_in")
+    end subroutine test_in_string_set_exact_bytes
+    !
+    !> A literal string list means what the same members bound with %bind mean, with a repeat
+    !> collapsed and a member's interior blank kept, on both engines.
+    subroutine test_in_string_literal_equals_bound(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_table) :: t
+        type(parquet_filter) :: f_lit, f_bound
+        character(len=6) :: names(5)
+        character(len=6), allocatable :: got(:)
+        integer(int64) :: n_lit, n_bound
+        logical, allocatable :: k_lit(:), k_bound(:)
+        character(len=*), parameter :: file = "test_run/filter_in_strings_literal.parquet"
+
+        names = [character(len=6) :: "a b", "ab", "c", "a b", "dd"]
+        call parquet_open_writer(writer, file)
+        call parquet_write_column(writer, "name", names)
+        call parquet_close_writer(writer)
+
+        call f_lit%add('name in ("a b", "dd", "a b")')
+        call f_bound%add_in("name", ["a b", "dd ", "a b"])
+        call parquet_open_reader(reader, file, filter=f_lit)
+        call parquet_get_nrows(reader, n_lit)
+        allocate(got(n_lit))
+        if (n_lit > 0_int64) call parquet_read_column(reader, "name", got)
+        call parquet_close_reader(reader)
+        call parquet_open_reader(reader, file, filter=f_bound)
+        call parquet_get_nrows(reader, n_bound)
+        call parquet_close_reader(reader)
+        call check(error, n_lit == 3_int64 .and. n_bound == 3_int64, "the literal list and the bound set select 3 rows")
+        if (allocated(error)) return
+        call check(error, got(1) == "a b" .and. got(2) == "a b" .and. got(3) == "dd", &
+            "the literal list keeps a member's interior blank")
+        if (allocated(error)) return
+        call parquet_open_table(t, file)
+        allocate(k_lit(t%nrows()), k_bound(t%nrows()))
+        call t%row_mask(f_lit, k_lit)
+        call t%row_mask(f_bound, k_bound)
+        call check(error, all(k_lit .eqv. k_bound) .and. count(k_lit) == 3, &
+            "the in-memory engine agrees with itself and with the reader")
+    end subroutine test_in_string_literal_equals_bound
     !
     !> An `is_valid=` mask drops the elements it marks, and a NULL element of a bound
     !> parquet_string_column is likewise not in the set.
